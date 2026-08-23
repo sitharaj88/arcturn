@@ -251,7 +251,6 @@ export default function HomePage() {
         </Container>
       </section>
 
-
       {/* ── The gap ──────────────────────────────────────────────────── */}
       <Section
         eyebrow="The problem"
