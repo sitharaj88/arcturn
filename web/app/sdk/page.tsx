@@ -218,10 +218,16 @@ export default function SdkPage() {
         lede="Subscribe once and you have what the TUI renders, what the server forwards, and what the CLI prints as NDJSON — the same union, in the same order."
       >
         <div className="grid gap-5 lg:grid-cols-2 lg:gap-6">
-          <Reveal>
+          {/* `min-w-0` is load-bearing: a grid item's automatic minimum size is
+              its content's min-content, and a code sample's longest line is
+              wider than a phone. Without it these two items grew to the NDJSON
+              sample's 832px and dragged the whole page to 852px at 360 —
+              every paragraph on the page clipped mid-word. The hero grid and
+              SplitSection already carry it; this grid just never did. */}
+          <Reveal className="min-w-0">
             <CodeBlock code={SUBSCRIBE_SAMPLE} language="ts" />
           </Reveal>
-          <Reveal delay={0.06}>
+          <Reveal delay={0.06} className="min-w-0">
             <CodeBlock
               code={NDJSON_SAMPLE}
               language="json"
