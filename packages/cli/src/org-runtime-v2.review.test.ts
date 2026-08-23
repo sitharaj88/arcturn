@@ -395,7 +395,12 @@ describe("REFUTED: seeding does not double-count an untracked file a role's patc
     await writeFile(join(repo, "data.txt"), "line1\nline2\n"); // untracked before the run
     const lane = createRuntimeWriteLane(seedHost(repo, home), "run-dc");
     const wt1 = await lane.createWorktree("s1", { patches: [] });
-    expect(readFileSync(join(wt1.dir, "data.txt"), "utf8")).toBe("line1\nline2\n");
+    // Read through a newline normalizer: on a Windows runner git's autocrlf
+    // hands the seeded file back CRLF, and the property this refutation pins
+    // is single-occurrence CONTENT — the line-ending bytes are git's business,
+    // proved symmetric by the write lane's own round-trip test.
+    const seedText = (file: string): string => readFileSync(file, "utf8").replaceAll("\r\n", "\n");
+    expect(seedText(join(wt1.dir, "data.txt"))).toBe("line1\nline2\n");
     await writeFile(join(wt1.dir, "data.txt"), "line1\nLINE2\n"); // the role's edit
     const diff = (await run("git", ["diff", wt1.baseRef as string], { cwd: wt1.dir })).stdout;
     const patchDir = join(home, "workflow-runs", "run-dc");
@@ -405,7 +410,7 @@ describe("REFUTED: seeding does not double-count an untracked file a role's patc
     await wt1.remove();
     const wt2 = await lane.createWorktree("s2", { patches: [patchPath] });
     try {
-      expect(readFileSync(join(wt2.dir, "data.txt"), "utf8")).toBe("line1\nLINE2\n");
+      expect(seedText(join(wt2.dir, "data.txt"))).toBe("line1\nLINE2\n");
     } finally {
       await wt2.remove();
     }

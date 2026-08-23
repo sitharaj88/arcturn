@@ -36,6 +36,29 @@ describe("verify command shell resolution", () => {
     await rm(dir, { recursive: true, force: true });
   });
 
+  /**
+   * Run the verifier, absorbing Linux's fork/exec race on the recording shell.
+   *
+   * `beforeEach` writes the script and the test execs it immediately; a
+   * concurrently forked child (another spawn anywhere in the process) can
+   * inherit the still-open write descriptor for a moment, and exec of a file
+   * someone holds open for writing fails ETXTBSY. It clears within
+   * milliseconds — the inheritor closes on its own exec — so a bounded retry
+   * is the honest fix, and anything else that goes wrong is thrown unchanged.
+   */
+  async function runAbsorbingEtxtbsy(
+    verifier: ReturnType<typeof createVerifier>,
+  ): Promise<Awaited<ReturnType<ReturnType<typeof createVerifier>["runNow"]>>> {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await verifier.runNow();
+      } catch (error) {
+        if (attempt >= 5 || !/ETXTBSY/.test(String(error))) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    }
+  }
+
   async function recordedArgv(): Promise<string[] | undefined> {
     let text: string;
     try {
@@ -52,7 +75,7 @@ describe("verify command shell resolution", () => {
       { cwd: dir, env: { ...process.env, ComSpec: recordingShell }, platform: "win32" },
     );
 
-    const result = await verifier.runNow();
+    const result = await runAbsorbingEtxtbsy(verifier);
 
     expect(result.ok).toBe(true);
     expect(await recordedArgv()).toEqual(["/d", "/s", "/c", '"pnpm test"']);
@@ -64,7 +87,7 @@ describe("verify command shell resolution", () => {
       { cwd: dir, env: {}, platform: "win32" },
     );
 
-    const result = await verifier.runNow();
+    const result = await runAbsorbingEtxtbsy(verifier);
 
     expect(result.ok).toBe(false);
     expect(result.output).toContain("cmd.exe");
@@ -77,7 +100,7 @@ describe("verify command shell resolution", () => {
       { cwd: dir, env: { ...process.env, SHELL: recordingShell }, platform: "linux" },
     );
 
-    const result = await verifier.runNow();
+    const result = await runAbsorbingEtxtbsy(verifier);
 
     expect(result.ok).toBe(true);
     expect(await readFile(marker, "utf8")).toBe("ran");
