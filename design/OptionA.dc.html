@@ -1,0 +1,42 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@500;600&display=swap">
+  <style>
+    body { margin: 0; font-family: Inter, system-ui, sans-serif; }
+    a { color: #f2af48; } a:hover { color: #fad185; }
+  </style>
+</helmet>
+<div style="width: 480px; height: 440px; background: #0c0a07; display: flex; flex-direction: column;">
+  <div style="flex-grow: 1; display: flex; align-items: center; justify-content: center;">
+    <svg width="220" height="220" viewBox="-50 -50 100 100" fill="none">
+      <defs>
+        <linearGradient id="rampA" x1="-30" y1="30" x2="30" y2="-30" gradientUnits="userSpaceOnUse">
+          <stop stop-color="#b87436"/>
+          <stop offset="1" stop-color="#f2af48"/>
+        </linearGradient>
+      </defs>
+      <path d="M 31.51 -5.56 A 32 32 0 1 1 5.56 -31.51" stroke="url(#rampA)" stroke-width="7.5" stroke-linecap="round"/>
+      <path transform="translate(22.63,-22.63) scale(0.34)" d="M0 -40C3 -11 11 -3 40 0C11 3 3 11 0 40C-3 11 -11 3 -40 0C-11 -3 -3 -11 0 -40Z" fill="url(#rampA)"/>
+    </svg>
+  </div>
+  <div style="padding: 20px 24px 24px; display: flex; flex-direction: column; gap: 6px; border-top: 1px solid #26201a;">
+    <div style="font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace; font-weight: 600; font-size: 13px; color: #e8e3da; letter-spacing: 0.04em;">A — Orbit</div>
+    <div style="font-size: 12px; line-height: 1.5; color: #96918a;">The star rides the head of an open turn — the product drawn literally: every agent turn, guided. Kinetic, one continuous gesture.</div>
+    <div style="font-size: 11px; line-height: 1.5; color: #6d675f;">Tradeoff: two weights (stroke + solid) to keep balanced at small sizes.</div>
+  </div>
+</div>
+</x-dc>
+<script data-dc-script data-props='{}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

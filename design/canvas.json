@@ -1,0 +1,80 @@
+{
+  "artboards": [
+    {
+      "file": "OptionA.dc.html",
+      "x": 0,
+      "y": 0,
+      "w": 480,
+      "h": 440,
+      "title": "A \u2014 Orbit"
+    },
+    {
+      "file": "OptionB.dc.html",
+      "x": 520,
+      "y": 0,
+      "w": 480,
+      "h": 440,
+      "title": "B \u2014 Ascent"
+    },
+    {
+      "file": "OptionC.dc.html",
+      "x": 1040,
+      "y": 0,
+      "w": 480,
+      "h": 440,
+      "title": "C \u2014 Beacon"
+    },
+    {
+      "file": "Main.dc.html",
+      "x": 0,
+      "y": 520,
+      "w": 1000,
+      "h": 560,
+      "title": "Brand sheet"
+    },
+    {
+      "file": "AppIcon.dc.html",
+      "x": 1040,
+      "y": 520,
+      "w": 480,
+      "h": 560,
+      "title": "App icon"
+    },
+    {
+      "file": "Favicon.dc.html",
+      "x": 0,
+      "y": 1160,
+      "w": 740,
+      "h": 360,
+      "title": "Favicon fidelity"
+    },
+    {
+      "file": "Lockup.dc.html",
+      "x": 780,
+      "y": 1160,
+      "w": 740,
+      "h": 520,
+      "title": "Lockups & mono"
+    },
+    {
+      "file": "Color.dc.html",
+      "x": 1560,
+      "y": 520,
+      "w": 480,
+      "h": 560,
+      "title": "Color system"
+    }
+  ],
+  "annotations": [
+    {
+      "id": "pick-note",
+      "x": 1560,
+      "y": 40,
+      "w": 260,
+      "text": "Round 2: the violet-cyan ramp is retired \u2014 it was the stock AI gradient.\n\nNew system: Arcturus's real starlight. Ember \u2192 gold along the turn, warm ink sky, bone text. See the Color system board for the story and the alternates that lost.\n\nConstructions A / B / C are unchanged; pick one and the applications rebuild on it."
+    }
+  ],
+  "launch": {
+    "view": "canvas"
+  }
+}

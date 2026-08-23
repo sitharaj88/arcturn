@@ -1,0 +1,85 @@
+/*
+ * Documentation-only styling: the chrome that `rehype-pretty-code` figures
+ * need, on top of the shared `.prose-arc` scope in `globals.css`.
+ *
+ * Token switching for Shiki itself already lives in `globals.css` (both
+ * palettes are emitted as `--shiki-light` / `--shiki-dark` custom properties
+ * at build time), so nothing here has to know which theme is active.
+ */
+
+.code-figure {
+  position: relative;
+  margin: 0;
+}
+
+/* The pipeline emits the figure with the <pre> inside it; the <pre> keeps the
+   ground and the hairline from `.prose-arc pre`, so the figure adds none. */
+.prose-arc .code-figure pre {
+  margin: 0;
+  /* Room for the language chip and the copy button on the first line. */
+  padding-right: 5.5rem;
+}
+
+.code-figure .code-lang {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.6rem;
+  z-index: 1;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background-color: var(--surface-card);
+  padding: 0.1rem 0.5rem;
+  font-size: var(--text-caption);
+  line-height: 1.4;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-faint);
+  pointer-events: none;
+}
+
+.code-figure .code-copy {
+  position: absolute;
+  top: 0.4rem;
+  right: 0.45rem;
+  z-index: 2;
+}
+
+/* When both are present the chip steps aside for the button. */
+.code-figure:has(.code-copy) .code-lang {
+  right: 3.1rem;
+}
+
+/* Pointer devices reveal the button on hover or focus; touch devices, which
+   have neither, always show it. */
+@media (hover: hover) and (pointer: fine) {
+  .code-figure .code-copy {
+    opacity: 0;
+    transition: opacity var(--duration-fast) var(--ease-out);
+  }
+
+  .code-figure:hover .code-copy,
+  .code-figure:focus-within .code-copy {
+    opacity: 1;
+  }
+}
+
+/* `title="…"` on a fence renders a filename bar above the block. */
+.prose-arc .code-figure [data-rehype-pretty-code-title] {
+  border: 1px solid var(--border);
+  border-bottom: 0;
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+  background-color: var(--surface-card);
+  padding: 0.5rem 1.15rem;
+  font-family: var(--font-mono);
+  font-size: var(--text-caption);
+  color: var(--text-faint);
+}
+
+.prose-arc .code-figure [data-rehype-pretty-code-title] + pre {
+  border-radius: 0 0 var(--radius-md) var(--radius-md);
+}
+
+/* Long shell invocations and config paths must not widen the page. */
+.docs-article {
+  min-width: 0;
+}

@@ -1,0 +1,46 @@
+{
+  "name": "@arcturn/evals",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Task-level eval harness for the Arcturn agent: real coding tasks, programmatic assertions",
+  "license": "Apache-2.0",
+  "author": "Sitharaj Seenivasan",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sitharaj88/arcturn.git",
+    "directory": "packages/evals"
+  },
+  "bugs": {
+    "url": "https://github.com/sitharaj88/arcturn/issues"
+  },
+  "homepage": "https://arcturn.dev",
+  "type": "module",
+  "bin": {
+    "arcturn-evals": "./dist/main.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && chmod +x dist/main.js",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "@arcturn/ai": "workspace:*",
+    "@arcturn/core": "workspace:*",
+    "@arcturn/types": "workspace:*",
+    "arcturn": "workspace:*"
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "name": "@arcturn/tui",
+  "version": "0.1.0",
+  "description": "Terminal UI library with differential rendering",
+  "license": "Apache-2.0",
+  "publishConfig": {
+    "access": "public"
+  },
+  "author": "Sitharaj Seenivasan",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sitharaj88/arcturn.git",
+    "directory": "packages/tui"
+  },
+  "bugs": {
+    "url": "https://github.com/sitharaj88/arcturn/issues"
+  },
+  "homepage": "https://arcturn.dev",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "get-east-asian-width": "^1.6.0",
+    "marked": "^18.0.10"
+  }
+}

@@ -1,0 +1,60 @@
+{
+  "name": "arcturn",
+  "version": "0.1.0",
+  "description": "Arcturn (\u2726) \u2014 the interactive coding agent where every turn counts",
+  "license": "Apache-2.0",
+  "publishConfig": {
+    "access": "public"
+  },
+  "author": "Sitharaj Seenivasan",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sitharaj88/arcturn.git",
+    "directory": "packages/cli"
+  },
+  "bugs": {
+    "url": "https://github.com/sitharaj88/arcturn/issues"
+  },
+  "homepage": "https://arcturn.dev",
+  "type": "module",
+  "bin": {
+    "arcturn": "./dist/main.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && chmod +x dist/main.js",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "@arcturn/ai": "workspace:*",
+    "@arcturn/core": "workspace:*",
+    "@arcturn/index": "workspace:*",
+    "@arcturn/mcp": "workspace:*",
+    "@arcturn/protocol": "workspace:*",
+    "@arcturn/server": "workspace:*",
+    "@arcturn/tools": "workspace:*",
+    "@arcturn/tui": "workspace:*",
+    "@arcturn/types": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "jiti": "^2.7.0",
+    "ws": "^8.21.3"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.5.14"
+  }
+}

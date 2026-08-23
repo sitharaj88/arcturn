@@ -1,0 +1,73 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@500;600;700&display=swap">
+  <style>
+    body { margin: 0; font-family: Inter, system-ui, sans-serif; }
+    a { color: #f2af48; } a:hover { color: #fad185; }
+  </style>
+</helmet>
+<div style="width: 740px; height: 520px; display: flex; flex-direction: column;">
+  <div style="flex-grow: 1; background: #0c0a07; display: flex; align-items: center; justify-content: center; gap: 22px;">
+    <svg width="72" height="72" viewBox="-50 -50 100 100" fill="none">
+      <defs>
+        <linearGradient id="rampL1" x1="-30" y1="30" x2="30" y2="-30" gradientUnits="userSpaceOnUse">
+          <stop stop-color="#b87436"/>
+          <stop offset="1" stop-color="#f2af48"/>
+        </linearGradient>
+      </defs>
+      <path d="M 31.51 -5.56 A 32 32 0 1 1 5.56 -31.51" stroke="url(#rampL1)" stroke-width="7.5" stroke-linecap="round"/>
+      <path transform="translate(22.63,-22.63) scale(0.34)" d="M0 -40C3 -11 11 -3 40 0C11 3 3 11 0 40C-3 11 -11 3 -40 0C-11 -3 -3 -11 0 -40Z" fill="url(#rampL1)"/>
+    </svg>
+    <div style="display: flex; align-items: center;">
+      <span style="font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace; font-weight: 700; font-size: 40px; letter-spacing: -0.02em; color: #f0ece5;">arcturn</span>
+      <span style="display: inline-block; width: 12px; height: 30px; margin-left: 6px; border-radius: 2.5px; background: #f2af48;"></span>
+    </div>
+  </div>
+  <div style="flex-grow: 1; background: #f0ece5; display: flex; align-items: center; justify-content: center; gap: 22px;">
+    <svg width="72" height="72" viewBox="-50 -50 100 100" fill="none">
+      <defs>
+        <linearGradient id="rampL2" x1="-34" y1="-34" x2="34" y2="34" gradientUnits="userSpaceOnUse">
+          <stop stop-color="#8f5a28"/>
+          <stop offset="1" stop-color="#c9861f"/>
+        </linearGradient>
+      </defs>
+      <path d="M 31.51 -5.56 A 32 32 0 1 1 5.56 -31.51" stroke="url(#rampL2)" stroke-width="7.5" stroke-linecap="round"/>
+      <path transform="translate(22.63,-22.63) scale(0.34)" d="M0 -40C3 -11 11 -3 40 0C11 3 3 11 0 40C-3 11 -11 3 -40 0C-11 -3 -3 -11 0 -40Z" fill="url(#rampL2)"/>
+    </svg>
+    <div style="display: flex; align-items: center;">
+      <span style="font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace; font-weight: 700; font-size: 40px; letter-spacing: -0.02em; color: #13100c;">arcturn</span>
+      <span style="display: inline-block; width: 12px; height: 30px; margin-left: 6px; border-radius: 2.5px; background: #b87436;"></span>
+    </div>
+  </div>
+  <div style="flex-grow: 1; background: #1f1b16; display: flex; align-items: center; justify-content: center; gap: 56px;">
+    <div style="display: flex; align-items: center; gap: 14px;">
+      <svg width="44" height="44" viewBox="-50 -50 100 100" fill="none">
+        <path d="M 31.51 -5.56 A 32 32 0 1 1 5.56 -31.51" stroke="#f0ece5" stroke-width="8.5" stroke-linecap="round"/>
+        <path transform="translate(22.63,-22.63) scale(0.36)" d="M0 -40C3 -11 11 -3 40 0C11 3 3 11 0 40C-3 11 -11 3 -40 0C-11 -3 -3 -11 0 -40Z" fill="#f0ece5"/>
+      </svg>
+      <span style="font-family: 'JetBrains Mono', ui-monospace, monospace; font-weight: 600; font-size: 22px; color: #f0ece5;">arcturn</span>
+    </div>
+    <div style="display: flex; align-items: center; gap: 14px;">
+      <svg width="44" height="44" viewBox="-50 -50 100 100" fill="none">
+        <path d="M 31.51 -5.56 A 32 32 0 1 1 5.56 -31.51" stroke="#f2af48" stroke-width="8.5" stroke-linecap="round"/>
+        <path transform="translate(22.63,-22.63) scale(0.36)" d="M0 -40C3 -11 11 -3 40 0C11 3 3 11 0 40C-3 11 -11 3 -40 0C-11 -3 -3 -11 0 -40Z" fill="#f2af48"/>
+      </svg>
+      <span style="font-family: 'JetBrains Mono', ui-monospace, monospace; font-weight: 600; font-size: 22px; color: #e8e3da;">arcturn</span>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script data-dc-script data-props='{}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

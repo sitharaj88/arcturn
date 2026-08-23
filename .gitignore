@@ -1,0 +1,16 @@
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Next.js (web/) build output — regenerate with `pnpm --filter arcturn-web build`
+web/.next/
+web/out/
+next-env.d.ts
+.DS_Store
+.env
+.env.*
+coverage/
+.pnpm-store/
+
+# Eval run artifacts (real API runs; regenerate with `arcturn-evals run`)
+runs/

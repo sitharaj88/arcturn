@@ -1,0 +1,72 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@500;600&display=swap">
+  <style>
+    body { margin: 0; font-family: Inter, system-ui, sans-serif; }
+    a { color: #f2af48; } a:hover { color: #fad185; }
+  </style>
+</helmet>
+<div style="width: 480px; height: 560px; background: #0c0a07; display: flex; flex-direction: column; padding: 28px 28px 22px; box-sizing: border-box; gap: 18px;">
+  <div style="display: flex; flex-direction: column; gap: 6px;">
+    <div style="font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace; font-weight: 600; font-size: 13px; color: #e8e3da; letter-spacing: 0.04em;">Why gold</div>
+    <div style="font-size: 12px; line-height: 1.6; color: #96918a;">Arcturus is a K1.5-type giant: its actual starlight is warm gold, visible to the naked eye. The brand simply wears the color of the star it is named after — a story no violet-cyan gradient can tell, and a color no other agent CLI owns.</div>
+  </div>
+  <div style="display: flex; flex-direction: column; gap: 8px;">
+    <div style="height: 40px; border-radius: 10px; background: linear-gradient(90deg, #b87436 0%, #f2af48 62%, #fad185 100%);"></div>
+    <div style="display: flex; justify-content: space-between; font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 10px; color: #6d675f;">
+      <span>ember #b87436</span><span>gold #f2af48</span><span>starlight #fad185</span>
+    </div>
+  </div>
+  <div style="display: flex; flex-direction: column; gap: 8px;">
+    <div style="font-size: 11px; color: #96918a;">Warm ink ramp — the sky the star sits in, no blue cast:</div>
+    <div style="display: flex; gap: 8px;">
+      <div style="flex-grow: 1; height: 34px; border-radius: 8px; background: #0c0a07; border: 1px solid #332c24;"></div>
+      <div style="flex-grow: 1; height: 34px; border-radius: 8px; background: #13100c;"></div>
+      <div style="flex-grow: 1; height: 34px; border-radius: 8px; background: #1f1b16;"></div>
+      <div style="flex-grow: 1; height: 34px; border-radius: 8px; background: #47413a;"></div>
+      <div style="flex-grow: 1; height: 34px; border-radius: 8px; background: #96918a;"></div>
+      <div style="flex-grow: 1; height: 34px; border-radius: 8px; background: #f0ece5;"></div>
+    </div>
+  </div>
+  <div style="display: flex; flex-direction: column; gap: 10px; border-top: 1px solid #26201a; padding-top: 16px;">
+    <div style="font-size: 11px; color: #96918a;">Alternates considered, same lightness and chroma, different hue:</div>
+    <div style="display: flex; gap: 14px;">
+      <div style="flex-grow: 1; display: flex; align-items: center; gap: 10px; background: #13100c; border-radius: 10px; padding: 12px;">
+        <svg width="34" height="34" viewBox="-50 -50 100 100" fill="none">
+          <path d="M 31.51 -5.56 A 32 32 0 1 1 5.56 -31.51" stroke="#51daa7" stroke-width="8.5" stroke-linecap="round"/>
+          <path transform="translate(22.63,-22.63) scale(0.36)" d="M0 -40C3 -11 11 -3 40 0C11 3 3 11 0 40C-3 11 -11 3 -40 0C-11 -3 -3 -11 0 -40Z" fill="#51daa7"/>
+        </svg>
+        <div style="display: flex; flex-direction: column; gap: 2px;">
+          <span style="font-size: 11px; color: #e8e3da;">Spruce</span>
+          <span style="font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 9px; color: #6d675f;">#51daa7 — calm, but reads fintech</span>
+        </div>
+      </div>
+      <div style="flex-grow: 1; display: flex; align-items: center; gap: 10px; background: #13100c; border-radius: 10px; padding: 12px;">
+        <svg width="34" height="34" viewBox="-50 -50 100 100" fill="none">
+          <path d="M 31.51 -5.56 A 32 32 0 1 1 5.56 -31.51" stroke="#f0ece5" stroke-width="8.5" stroke-linecap="round"/>
+          <path transform="translate(22.63,-22.63) scale(0.36)" d="M0 -40C3 -11 11 -3 40 0C11 3 3 11 0 40C-3 11 -11 3 -40 0C-11 -3 -3 -11 0 -40Z" fill="#f2af48"/>
+        </svg>
+        <div style="display: flex; flex-direction: column; gap: 2px;">
+          <span style="font-size: 11px; color: #e8e3da;">Bone + gold point</span>
+          <span style="font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 9px; color: #6d675f;">color only where the star is</span>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div style="font-size: 11px; line-height: 1.5; color: #6d675f; margin-top: auto;">Distance check: hue 75 (yellow-gold) sits well clear of Anthropic's terracotta (~hue 35) and every violet/cyan AI ramp. Terminal-safe: gold survives 256-color fallback cleanly.</div>
+</div>
+</x-dc>
+<script data-dc-script data-props='{}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

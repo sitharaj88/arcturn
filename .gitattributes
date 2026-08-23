@@ -1,0 +1,11 @@
+# Normalize every text file to LF in the working tree, on every platform,
+# regardless of the checking-out machine's `core.autocrlf`. Without this,
+# a Windows checkout (Git for Windows defaults `core.autocrlf=true`) rewrites
+# every source, config, and doc file to CRLF, and:
+#   - `biome check` (formatter default: lineEnding "lf") flags nearly every
+#     file in the repo as needing reformatting, unrelated to any real change;
+#   - scripts/check-sdk-docs.mjs matches ```ts blocks with a literal `\n`
+#     immediately after the fence, which a `\r\n` line ending breaks.
+# This is CI infrastructure, not a matter of taste: it's what makes the
+# windows-latest job in .github/workflows/ci.yml comparable to the other two.
+* text=auto eol=lf

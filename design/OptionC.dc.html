@@ -1,0 +1,43 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@500;600&display=swap">
+  <style>
+    body { margin: 0; font-family: Inter, system-ui, sans-serif; }
+    a { color: #f2af48; } a:hover { color: #fad185; }
+  </style>
+</helmet>
+<div style="width: 480px; height: 440px; background: #0c0a07; display: flex; flex-direction: column;">
+  <div style="flex-grow: 1; display: flex; align-items: center; justify-content: center;">
+    <svg width="220" height="220" viewBox="-50 -50 100 100" fill="none">
+      <defs>
+        <linearGradient id="rampC" x1="-30" y1="-30" x2="30" y2="34" gradientUnits="userSpaceOnUse">
+          <stop stop-color="#fad185"/>
+          <stop offset="1" stop-color="#e69b38"/>
+        </linearGradient>
+      </defs>
+      <circle cx="0" cy="0" r="40" fill="url(#rampC)"/>
+      <path transform="translate(0,-9) scale(0.5)" d="M0 -40C3 -11 11 -3 40 0C11 3 3 11 0 40C-3 11 -11 3 -40 0C-11 -3 -3 -11 0 -40Z" fill="#0c0a07"/>
+      <path d="M -24 20 C -12 28 12 27 24 15" stroke="#0c0a07" stroke-width="6.5" stroke-linecap="round"/>
+    </svg>
+  </div>
+  <div style="padding: 20px 24px 24px; display: flex; flex-direction: column; gap: 6px; border-top: 1px solid #26201a;">
+    <div style="font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace; font-weight: 600; font-size: 13px; color: #e8e3da; letter-spacing: 0.04em;">C — Beacon</div>
+    <div style="font-size: 12px; line-height: 1.5; color: #96918a;">Negative space: the star and its turn cut out of a solid gradient disc. One shape, maximum presence — reads at any size, works as an avatar as-is.</div>
+    <div style="font-size: 11px; line-height: 1.5; color: #6d675f;">Tradeoff: heaviest of the three; the gradient carries the brand more than the silhouette does.</div>
+  </div>
+</div>
+</x-dc>
+<script data-dc-script data-props='{}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

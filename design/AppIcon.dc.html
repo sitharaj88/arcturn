@@ -1,0 +1,74 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@500;600&display=swap">
+  <style>
+    body { margin: 0; font-family: Inter, system-ui, sans-serif; }
+    a { color: #f2af48; } a:hover { color: #fad185; }
+  </style>
+</helmet>
+<div style="width: 480px; height: 560px; background: #13100c; display: flex; flex-direction: column; align-items: center; padding: 44px 0 0; box-sizing: border-box; gap: 40px;">
+  <svg width="256" height="256" viewBox="0 0 512 512" fill="none">
+    <defs>
+      <linearGradient id="rampIcon" x1="130" y1="400" x2="390" y2="120" gradientUnits="userSpaceOnUse">
+        <stop stop-color="#b87436"/>
+        <stop offset="1" stop-color="#f2af48"/>
+      </linearGradient>
+      <radialGradient id="glowIcon" cx="0.66" cy="0.3" r="0.75">
+        <stop stop-color="#26201a"/>
+        <stop offset="1" stop-color="#0c0a07"/>
+      </radialGradient>
+    </defs>
+    <rect width="512" height="512" rx="116" fill="url(#glowIcon)"/>
+    <g transform="translate(256,266)">
+      <path d="M 157.5 -27.8 A 160 160 0 1 1 27.8 -157.5" stroke="url(#rampIcon)" stroke-width="37" stroke-linecap="round"/>
+      <path transform="translate(113.1,-113.1) scale(1.7)" d="M0 -40C3 -11 11 -3 40 0C11 3 3 11 0 40C-3 11 -11 3 -40 0C-11 -3 -3 -11 0 -40Z" fill="url(#rampIcon)"/>
+    </g>
+  </svg>
+  <div style="display: flex; align-items: flex-end; gap: 28px;">
+    <svg width="96" height="96" viewBox="0 0 512 512" fill="none">
+      <defs>
+        <linearGradient id="rampIcon2" x1="130" y1="400" x2="390" y2="120" gradientUnits="userSpaceOnUse">
+          <stop stop-color="#b87436"/>
+          <stop offset="1" stop-color="#f2af48"/>
+        </linearGradient>
+      </defs>
+      <rect width="512" height="512" rx="116" fill="#0c0a07"/>
+      <g transform="translate(256,266)">
+        <path d="M 157.5 -27.8 A 160 160 0 1 1 27.8 -157.5" stroke="url(#rampIcon2)" stroke-width="37" stroke-linecap="round"/>
+        <path transform="translate(113.1,-113.1) scale(1.7)" d="M0 -40C3 -11 11 -3 40 0C11 3 3 11 0 40C-3 11 -11 3 -40 0C-11 -3 -3 -11 0 -40Z" fill="url(#rampIcon2)"/>
+      </g>
+    </svg>
+    <svg width="56" height="56" viewBox="0 0 512 512" fill="none">
+      <defs>
+        <linearGradient id="rampIcon3" x1="130" y1="400" x2="390" y2="120" gradientUnits="userSpaceOnUse">
+          <stop stop-color="#b87436"/>
+          <stop offset="1" stop-color="#f2af48"/>
+        </linearGradient>
+      </defs>
+      <rect width="512" height="512" rx="116" fill="#0c0a07"/>
+      <g transform="translate(256,266)">
+        <path d="M 157.5 -27.8 A 160 160 0 1 1 27.8 -157.5" stroke="url(#rampIcon3)" stroke-width="42" stroke-linecap="round"/>
+        <path transform="translate(113.1,-113.1) scale(1.8)" d="M0 -40C3 -11 11 -3 40 0C11 3 3 11 0 40C-3 11 -11 3 -40 0C-11 -3 -3 -11 0 -40Z" fill="url(#rampIcon3)"/>
+      </g>
+    </svg>
+  </div>
+  <div style="padding: 0 24px 24px; text-align: center;">
+    <div style="font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace; font-weight: 600; font-size: 13px; color: #e8e3da; letter-spacing: 0.04em;">App icon</div>
+    <div style="margin-top: 6px; font-size: 12px; line-height: 1.5; color: #96918a;">256 / 96 / 56 — subtle ink glow behind the mark at large sizes, flat ink below 128.</div>
+  </div>
+</div>
+</x-dc>
+<script data-dc-script data-props='{}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>
