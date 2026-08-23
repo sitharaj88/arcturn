@@ -43,9 +43,11 @@ the one unrecoverable failure mode for this site.
    "as of" framing — see §3.10.
 3. **Every capability claim must trace to** `README.md`, `web/content/docs/*.md`, or
    `web/content/blog/why-arcturn.md`. If you cannot point at the sentence, cut the claim.
-4. **Limitations are content, not fine print.** The honesty band in the hero, the
-   `/security` limits table, and the `/open-source` status table are required sections and
-   must not be softened, collapsed behind a toggle, or moved below the fold of their page.
+4. **Limitations are content, not fine print.** The `/security` limits table and the
+   `/open-source` status table are required sections and must not be softened, collapsed
+   behind a toggle, or moved below the fold of their page. The hero honesty band was
+   removed by the owner's decision (2026-08-23) — the landing page's Receipts section
+   carries the proven/unreached ledger at full weight instead. Do not re-add the band.
 5. **The prose in `content/**` is source of truth and is never rewritten.** Docs and blog
    pages render the markdown as-is. Marketing copy in this spec is new and is what you type.
 6. Install copy: the install is **`npm install -g arcturn`**, written down once in
@@ -859,9 +861,8 @@ footnote.
 | # | Beat | Tier | Ground | What breaks it from the beat above |
 |---|---|---|---|---|
 | 1 | Hero | — | page | — |
-| 2 | Honesty band | `py-5` | band | its own `border-y` |
-| 3 | The gap | `default` | page | the band's `border-y` |
-| 4 | Four pillars | `default` | page | `<ArcRule />` |
+| 2 | The gap | `default` | page | — |
+| 3 | Four pillars | `default` | page | `<ArcRule />` |
 | 5 | Control | `default` | **one shared band** | the band's `border-y` |
 | 6 | Accountability | `default` | *the same band* | **nothing — deliberate** |
 | 7 | Extensibility | `tight` | page | the band's `border-y` |
@@ -930,12 +931,6 @@ page except the primary CTA.
 This is not decoration and may not be swapped back for a still. A screenshot of a
 permission gate and an enforced permission gate are the same picture, and that picture is
 the entire claim of the page — so the gate has to be answerable.
-
-**§ Honesty band.** Full-width strip, `--surface-raised`, hairline top and bottom,
-`py-5`, `caption` size, `--text-muted`, an `info` icon in `--accent`:
-*Arcturn is pre-1.0, built by one person, with no users yet. What's proven, what isn't,
-and every known limit of every safety feature are written down —* [see the status page](/open-source)
-*and* [the security limits](/security). **Required. Do not remove or collapse.**
 
 **§ The gap.** Eyebrow `The problem`. `h2`: **Capability raced ahead of accountability.**
 Lede: *The models write the code — that question is settled. The one I actually have is
@@ -1511,7 +1506,7 @@ URL in §5.4.
    at `opacity: 0`.
 6. No `any`, no default exports outside `app/**` route files, no `tailwind.config.js`, no
    new dependencies, no edits outside `web/`.
-7. Every factual claim traces to `README.md` or `content/**`. The honesty band, the
-   `/security` limits table, the `/features/models` provider footnote, and the
-   `/open-source` status table are present and unsoftened.
+7. Every factual claim traces to `README.md` or `content/**`. The `/security` limits
+   table, the landing Receipts ledger, and the `/open-source` status table are present
+   and unsoftened.
 8. The four Author & Support links resolve, in the footer, on every page.

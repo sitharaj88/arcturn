@@ -1,7 +1,7 @@
 import { ArrowRight } from "lucide-react";
 import type { Metadata } from "next";
 import Link from "next/link";
-import { Code, HonestyBand, PILLARS, SectionLink, SplitSection } from "@/components/marketing";
+import { Code, PILLARS, SectionLink, SplitSection } from "@/components/marketing";
 import { CTASection } from "@/components/site/CTASection";
 import { ArcHalo } from "@/components/ui/ArcHalo";
 import { ArcRule } from "@/components/ui/ArcRule";
@@ -251,7 +251,6 @@ export default function HomePage() {
         </Container>
       </section>
 
-      <HonestyBand />
 
       {/* ── The gap ──────────────────────────────────────────────────── */}
       <Section
