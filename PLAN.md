@@ -249,11 +249,14 @@ on SessionHost so long-lived servers release agents (packages/server); serialize
 construction, so `/model` keeps the previous budget until `/clear`; surface MCP
 resources and prompts as CLI @-mentions; stdin input for `-p`.
 
-Not yet done: npm publish (package name `arcturn` unclaimed) and standalone
-binaries. The release path itself is in place — `.github/workflows/release.yml`
-is tag-triggered, re-runs the full cross-platform matrix on the exact commit,
-refuses a tag that disagrees with the manifest version, and publishes with npm
-provenance attestation. It has never been run.
+**Published (2026-08-23).** arcturn@0.1.0 and its nine workspace packages are
+live on npm under the `arcturn` org, shipped by the manual-dispatch release
+workflow with provenance attestation after a six-leg green matrix. npm's
+automated review held `@arcturn/ai` and `@arcturn/core` for roughly forty
+minutes after the upload — the other eight served immediately — and a
+clean-prefix install test (`npm install -g arcturn`, then a real tool-calling
+session through the published binary) passed once the hold cleared. Still not
+done: standalone binaries.
 
 **First live-provider run: done (2026-08-18).** Arcturn completed real multi-turn sessions
 against Z.AI's GLM-4.6 through the `zai-api` preset — including a tool-calling run where

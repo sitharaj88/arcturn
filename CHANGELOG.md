@@ -12,7 +12,7 @@ CLI, the SDK, or the wire protocol.
 
 Nothing yet.
 
-## [0.1.0] — unreleased
+## [0.1.0] — 2026-08-23
 
 The first public release. Arcturn is a coding agent you run in a terminal and
 the TypeScript harness it is built on, and both are in this release: everything
