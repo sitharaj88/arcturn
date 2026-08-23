@@ -101,14 +101,41 @@
   --text-eyebrow--letter-spacing: 0.13em;
   --text-eyebrow--font-weight: 600;
 
+  /* An `em`, not a `rem`: inline code has to shrink with whatever text it sits
+     inside, so a `<code>` in a caption is not the same size as one in an h2. */
+  --text-code-inline: 0.875em;
+
   --text-code-block: 0.8125rem;
   --text-code-block--line-height: 1.65;
 
-  /* §2.3.2 — measures */
+  /* The one step up, for terminal art shown at hero scale where the 13px
+     block size stops reading as a real terminal. */
+  --text-code-block-lg: 0.875rem;
+  --text-code-block-lg--line-height: 1.65;
+
+  /* §2.3.2 — container widths. These bound a *column* (a section, an article,
+     the docs shell); the text measure inside one is separate, below. */
   --width-prose: 44rem;
   --width-content: 72rem;
   --width-wide: 82rem;
   --width-shell: 90rem;
+
+  /* §2.3.2 — text measures. In `ch` because a measure is a count of
+     characters, not a distance: these track the font, the containers do not.
+     Two tiers and no third — every column on the site is body copy or a lede,
+     and the seven hand-typed `max-w-[NNch]` values this replaced differed by
+     amounts no reader could see. */
+  --measure-body: 68ch;
+  --measure-lede: 60ch;
+
+  /* §2.3.6 — the z-layer scale. Named layers, ten apart, so a new one can be
+     slotted between two without renumbering the site. Anything that stacks
+     writes `z-(--z-header)`, never a bare number. */
+  --z-sticky: 60;
+  --z-header: 70;
+  --z-drawer: 80;
+  --z-modal: 90;
+  --z-skip: 100;
 
   /* §2.3.3 — radii */
   --radius-xs: 0.25rem;
@@ -146,6 +173,7 @@
   --color-surface-hover: var(--surface-hover);
   --color-default: var(--border);
   --color-strong: var(--border-strong);
+  --color-control: var(--border-control);
   --color-accent-edge: var(--border-accent);
   --color-text: var(--text);
   --color-muted: var(--text-muted);
@@ -154,6 +182,10 @@
   --color-accent: var(--accent);
   --color-accent-hover: var(--accent-hover);
   --color-accent-quiet: var(--accent-quiet);
+  --color-accent-tint-card: var(--accent-tint-card);
+  --color-accent-tint-chip: var(--accent-tint-chip);
+  --color-accent-tint-icon: var(--accent-tint-icon);
+  --color-accent-tint-badge: var(--accent-tint-badge);
   --color-on-accent: var(--on-accent);
   --color-good: var(--good);
   --color-warn: var(--warn);
@@ -176,16 +208,21 @@
 
   --border: #26201a;
   --border-strong: #3a3128;
+  --border-control: #726a5f;
   --border-accent: #6b4a1c;
 
   --text: #f0ece5;
   --text-muted: #a8a29a;
-  --text-faint: #857e74;
+  --text-faint: #918a80;
   --text-inverse: #0c0a07;
 
   --accent: #f2af48;
   --accent-hover: #fad185;
   --accent-quiet: #b87436;
+  --accent-tint-card: color-mix(in oklab, var(--accent) 7%, var(--surface-card));
+  --accent-tint-chip: color-mix(in oklab, var(--accent) 8%, var(--surface-card));
+  --accent-tint-icon: color-mix(in oklab, var(--accent) 10%, transparent);
+  --accent-tint-badge: color-mix(in oklab, var(--accent) 12%, transparent);
   --on-accent: #241a0a;
 
   --good: #5fd39b;
@@ -196,7 +233,6 @@
   --selection: rgb(242 175 72 / 0.32);
   --glow: rgb(242 175 72 / 0.22);
   --code-bg: #080705;
-  --shiki-theme-name: "github-dark-default";
 
   /* Elevation is theme-dependent, so it is a semantic token too: dark
      elevates with surface + hairline, light with warm shadow. */
@@ -219,6 +255,7 @@
 
     --border: #e3ddd2;
     --border-strong: #cec6b8;
+    --border-control: #8a8377;
     --border-accent: #e3b877;
 
     --text: #1a150f;
@@ -229,6 +266,10 @@
     --accent: #8a5216;
     --accent-hover: #6f4110;
     --accent-quiet: #b87436;
+    --accent-tint-card: color-mix(in oklab, var(--accent) 7%, var(--surface-card));
+    --accent-tint-chip: color-mix(in oklab, var(--accent) 8%, var(--surface-card));
+    --accent-tint-icon: color-mix(in oklab, var(--accent) 10%, transparent);
+    --accent-tint-badge: color-mix(in oklab, var(--accent) 12%, transparent);
     --on-accent: #241a0a;
 
     --good: #0f7040;
@@ -239,7 +280,6 @@
     --selection: rgb(242 175 72 / 0.38);
     --glow: rgb(242 175 72 / 0.16);
     --code-bg: #f3efe8;
-    --shiki-theme-name: "github-light";
 
     --elev-sm: 0 1px 2px rgb(36 26 10 / 0.06);
     --elev-md: 0 4px 16px -4px rgb(36 26 10 / 0.1), 0 1px 2px rgb(36 26 10 / 0.05);
@@ -260,6 +300,7 @@
 
   --border: #e3ddd2;
   --border-strong: #cec6b8;
+  --border-control: #8a8377;
   --border-accent: #e3b877;
 
   --text: #1a150f;
@@ -270,6 +311,10 @@
   --accent: #8a5216;
   --accent-hover: #6f4110;
   --accent-quiet: #b87436;
+  --accent-tint-card: color-mix(in oklab, var(--accent) 7%, var(--surface-card));
+  --accent-tint-chip: color-mix(in oklab, var(--accent) 8%, var(--surface-card));
+  --accent-tint-icon: color-mix(in oklab, var(--accent) 10%, transparent);
+  --accent-tint-badge: color-mix(in oklab, var(--accent) 12%, transparent);
   --on-accent: #241a0a;
 
   --good: #0f7040;
@@ -280,7 +325,6 @@
   --selection: rgb(242 175 72 / 0.38);
   --glow: rgb(242 175 72 / 0.16);
   --code-bg: #f3efe8;
-  --shiki-theme-name: "github-light";
 
   --elev-sm: 0 1px 2px rgb(36 26 10 / 0.06);
   --elev-md: 0 4px 16px -4px rgb(36 26 10 / 0.1), 0 1px 2px rgb(36 26 10 / 0.05);
@@ -301,16 +345,21 @@
 
   --border: #26201a;
   --border-strong: #3a3128;
+  --border-control: #726a5f;
   --border-accent: #6b4a1c;
 
   --text: #f0ece5;
   --text-muted: #a8a29a;
-  --text-faint: #857e74;
+  --text-faint: #918a80;
   --text-inverse: #0c0a07;
 
   --accent: #f2af48;
   --accent-hover: #fad185;
   --accent-quiet: #b87436;
+  --accent-tint-card: color-mix(in oklab, var(--accent) 7%, var(--surface-card));
+  --accent-tint-chip: color-mix(in oklab, var(--accent) 8%, var(--surface-card));
+  --accent-tint-icon: color-mix(in oklab, var(--accent) 10%, transparent);
+  --accent-tint-badge: color-mix(in oklab, var(--accent) 12%, transparent);
   --on-accent: #241a0a;
 
   --good: #5fd39b;
@@ -325,6 +374,10 @@
   --elev-sm: none;
   --elev-md: none;
   --elev-lg: none;
+  /* Without this the glow inside a `.force-dark` block resolves to whatever
+     the *page* theme set, and the hero terminal on light lost its halo. Every
+     token a theme block declares has to be declared by all four of them. */
+  --elev-glow: 0 0 40px -6px rgb(242 175 72 / 0.35);
 }
 
 /* ------------------------------------------------------------------ *
@@ -576,6 +629,25 @@
   overflow-wrap: break-word;
 }
 
+/*
+ * §2.2.3 — the column and the measure are two different numbers, and the spec
+ * used to conflate them. `--width-prose` (44rem) is the *column*: at Inter's
+ * 16px digit advance that is ≈79ch, far past the readable ceiling, but code
+ * blocks, tables and images want every pixel of it. Running text does not, so
+ * it gets `--measure-body` (68ch) and the figures keep the full column.
+ * Direct children only — a list nested inside an `li` is already inside a
+ * constrained parent, and constraining it again would step-indent the measure.
+ */
+.prose-arc > p,
+.prose-arc > ul,
+.prose-arc > ol,
+.prose-arc > blockquote,
+.prose-arc > h2,
+.prose-arc > h3,
+.prose-arc > h4 {
+  max-width: var(--measure-body);
+}
+
 .prose-arc > * + * {
   margin-top: 1.25em;
 }
@@ -730,7 +802,7 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-xs);
   padding: 0.12em 0.36em;
-  font-size: 0.875em;
+  font-size: var(--text-code-inline);
   font-weight: 500;
   color: var(--text);
   overflow-wrap: anywhere;
@@ -809,12 +881,17 @@ code[data-theme] span {
   }
 }
 
+/* `.force-dark` gets the `[data-theme]` shapes too: a docs-pipeline block
+   dropped inside always-dark terminal art was rendering light tokens on the
+   near-black ground because only the `.shiki` shape was listed here. */
 :root[data-theme="dark"] .shiki,
 :root[data-theme="dark"] .shiki span,
 :root[data-theme="dark"] pre[data-theme] span,
 :root[data-theme="dark"] code[data-theme] span,
 .force-dark .shiki,
-.force-dark .shiki span {
+.force-dark .shiki span,
+.force-dark pre[data-theme] span,
+.force-dark code[data-theme] span {
   color: var(--shiki-dark);
   font-style: var(--shiki-dark-font-style);
   font-weight: var(--shiki-dark-font-weight);
@@ -880,6 +957,20 @@ pre[data-theme] {
     /* biome-ignore-start lint/complexity/noImportantStyles: same kill switch — it has to beat the Tailwind hover utility. */
     translate: none !important;
     /* biome-ignore-end lint/complexity/noImportantStyles: end of the hover-lift drop. */
+  }
+
+  /* `*:hover` misses the other half of the lifts. `:hover` matches the element
+     under the pointer and its *ancestors*, never its descendants — so the
+     arrow that `group-hover:translate-x-0.5` nudges inside a hovered card was
+     never matched, and kept jumping 2px with the duration zeroed. Matching the
+     utility class itself is the narrow fix: these elements carry no translate
+     at rest, so the reset can be unconditional and cannot touch the layout
+     transforms that `:hover *` would have flattened. */
+  [class*="group-hover:translate"],
+  [class*="group-hover:-translate"] {
+    /* biome-ignore-start lint/complexity/noImportantStyles: same kill switch — it has to beat the Tailwind group-hover utility. */
+    translate: none !important;
+    /* biome-ignore-end lint/complexity/noImportantStyles: end of the group-hover nudge drop. */
   }
 }
 

@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { ArcEyebrow } from "@/components/ui/ArcEyebrow";
 import { Container } from "@/components/ui/Container";
 import { Reveal } from "@/components/ui/Reveal";
+import { SECTION_BAND, SECTION_RHYTHM } from "@/components/ui/Section";
 import { cn } from "@/lib/cn";
 
 /**
@@ -15,6 +16,8 @@ export interface SplitSectionProps {
   title: ReactNode;
   media: ReactNode;
   reverse?: boolean;
+  /** Raised ground + hairlines, for alternating bands down a long page. */
+  band?: boolean;
   className?: string;
   children: ReactNode;
 }
@@ -25,11 +28,13 @@ export function SplitSection({
   title,
   media,
   reverse = false,
+  band = false,
   className,
   children,
 }: SplitSectionProps) {
   return (
-    <section id={id} className={cn("py-20 md:py-28 lg:py-32", className)}>
+    // One rhythm for every landing beat, owned by <Section> (DESIGN.md §2.3.1).
+    <section id={id} className={cn(SECTION_RHYTHM.default, band && SECTION_BAND, className)}>
       <Container>
         <div className="grid items-center gap-10 lg:grid-cols-2 lg:gap-14">
           <Reveal className={cn("min-w-0", reverse && "lg:order-2")}>
@@ -38,7 +43,9 @@ export function SplitSection({
               <span>{eyebrow}</span>
             </p>
             <h2 className="mt-3 text-h2 text-balance text-text">{title}</h2>
-            <div className="mt-5 flex max-w-[68ch] flex-col gap-5 lg:max-w-none">{children}</div>
+            <div className="mt-5 flex max-w-(--measure-body) flex-col gap-5 lg:max-w-none">
+              {children}
+            </div>
           </Reveal>
           <Reveal delay={0.06} className={cn("min-w-0", reverse && "lg:order-1")}>
             {media}

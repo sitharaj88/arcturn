@@ -40,7 +40,7 @@ takes precedence when both are set, so most code only ever sets `onPermissionAsk
 | `requester` | `PermissionPrompt` | none | `(request: PermissionRequest) => Promise<PermissionDecision>`. With none configured, anything not settled by a rule or mode is **denied**, not assumed safe. |
 | `onPersistRule` | `(rule: PermissionRule) => void \| Promise<void>` | none | Called whenever a decision carries a `persistRule`, so a host can write it to durable storage (e.g. the project's config file). |
 | `readOnlyTools` | `string[]` | `["read", "grep", "glob", "ls"]` | Overrides `DEFAULT_READ_ONLY_TOOLS` — tools allowed to run in `plan` mode and without prompting in `default` mode. |
-| `editTools` | `string[]` | `["write", "edit", "multiedit"]` | Overrides `DEFAULT_EDIT_TOOLS` — tools `acceptEdits` mode auto-approves. |
+| `editTools` | `string[]` | `["write", "edit", "multiedit"]` | Overrides `DEFAULT_EDIT_TOOLS` — tools `acceptEdits` mode auto-approves. The default's third entry is a [reserved name no package registers](/docs/tools#multiedit-reserved-and-currently-inert), so only `write` and `edit` are reachable through it today. |
 | `alwaysAllowTools` | `string[]` | `["todo", "plan"]` | Overrides `DEFAULT_ALWAYS_ALLOW_TOOLS` — pure state tools that pass silently, with no event emitted at all. |
 
 `fetch` is deliberately **not** in the read-only default: it reads nothing local but can

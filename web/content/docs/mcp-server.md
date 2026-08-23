@@ -64,7 +64,7 @@ Three tools are always present. A fourth appears only when you ask for it.
 ### `search_code` — read-only, always on
 
 This is the reason to connect Arcturn to another agent at all. It queries the same offline
-[code index](/docs/tools) an interactive session uses: source chunked on *declaration
+[code index](/docs/code-search) an interactive session uses: source chunked on *declaration
 boundaries* — functions, classes, methods, types, constants, Markdown sections — across
 TypeScript, JavaScript, Python, Go, Rust, Java, Kotlin, Ruby, PHP, C/C++, C#, Swift, shell
 and Markdown, with identifiers indexed split as well as whole, so `getUserById` is found
@@ -193,7 +193,7 @@ kind of call is allowed inside the workspace:
 | *(absent)*          | No agent exists. Only `search_code` / `list_sessions` / `read_session`. | Never returned by any query    | — |
 | `plan`              | `read`, `grep`, `glob`, `ls`. Every mutating tool is denied before the rules are even consulted. | Denied | Denied |
 | `default`           | The same reads. A write has nobody to ask, so it is denied. | Denied | Denied |
-| `acceptEdits`       | The same reads, plus `write` / `edit` / `multiedit`.     | Denied | Denied |
+| `acceptEdits`       | The same reads, plus `write` / `edit`.                   | Denied | Denied |
 | `yolo`              | Refused outright; the server does not start.             | —                      | — |
 
 Two consequences worth stating plainly, because both are narrower than a local Arcturn

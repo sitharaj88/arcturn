@@ -86,6 +86,20 @@ continueOnError: false
    - Write a regression test that fails before the patch. Repro: {{prev}}
 3. Review the patch and the test for correctness. Work so far: {{prev}}`;
 
+/**
+ * The exec lane, readable off the frontmatter: `bash` with no write tool. The
+ * guarantee this page claims for reviewers is derived from exactly these two
+ * lines, which is why the role file is the right artefact to show.
+ */
+const ROLE_FILE = `---
+name: security-reviewer
+description: Audits a diff for injection and unvalidated input reaching a sink.
+model: anthropic/claude-opus-5
+tools: [read, grep, glob, ls, bash]
+maxTurns: 50
+---
+You audit changes. You do not fix them.`;
+
 const TOOL_INTERFACE = `interface Tool {
   definition: ToolDefinition;
   execute(input: Record<string, unknown>, ctx: ToolExecutionContext): Promise<ToolResult>;
@@ -260,6 +274,46 @@ export default function ExtensibilityPage() {
 
         <Reveal>
           <ProseSection
+            id="agent-organizations"
+            title="Agent organizations"
+            media={
+              <CodeBlock
+                code={ROLE_FILE}
+                language="markdown"
+                filename=".arcturn/agents/security-reviewer.md"
+              />
+            }
+          >
+            <p>
+              Put a named role behind each step — an architect, a developer, two kinds of QA, a
+              security reviewer — and its declared <Code>tools:</Code> decide its <em>lane</em>, not
+              its prompt and not the session&rsquo;s permission mode. No <Code>bash</Code> and no
+              write tool is the read lane: fresh context, no worktree, nothing to apply.{" "}
+              <Code>bash</Code> without <Code>write</Code> or <Code>edit</Code> is the exec lane.
+              Either write tool is the write lane, whose patch is replayed into your checkout with a
+              plain <Code>git apply</Code> — no <Code>--3way</Code>, no <Code>--force</Code>.
+            </p>
+            <p>
+              The exec lane is the one that earns the whole design. A reviewer usually needs to{" "}
+              <em>run</em> things, and <Code>bash</Code> is a write primitive wearing a read costume
+              — so it gets a real isolated worktree and that worktree&rsquo;s diff is discarded on
+              every path, success and failure alike. A reviewer that cannot land a change has
+              nowhere to put a finding except the report you read. A role declaring no{" "}
+              <Code>tools:</Code> at all is refused at dispatch rather than defaulted to anything.
+            </p>
+            <p>
+              For the questions a model should not answer alone — single-tenant or multi-tenant,
+              whether a breaking change is acceptable — a role writes <Code>ORG-ASK:</Code> and the
+              run pauses. <Code>/workflow status</Code> prints the question and the exact command to
+              answer it; your reply becomes that step&rsquo;s output and the run continues. Nothing
+              that already completed is re-executed, and no patch that already landed is applied a
+              second time.
+            </p>
+          </ProseSection>
+        </Reveal>
+
+        <Reveal>
+          <ProseSection
             id="custom-tools"
             title="Custom tools and extensions"
             media={<CodeBlock code={TOOL_INTERFACE} language="ts" />}
@@ -288,6 +342,7 @@ export default function ExtensibilityPage() {
             { href: "/docs/sub-agents", title: "Sub-agents, plan mode & todos" },
             { href: "/docs/teams", title: "Agent teams & background agents" },
             { href: "/docs/workflows", title: "Workflows" },
+            { href: "/docs/agent-organizations", title: "Agent organizations" },
             { href: "/docs/sdk-tools", title: "Custom tools" },
           ]}
         />

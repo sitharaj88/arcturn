@@ -7,6 +7,7 @@ import { Container } from "@/components/ui/Container";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { Reveal } from "@/components/ui/Reveal";
 import { type TerminalLine, TerminalMock } from "@/components/ui/TerminalMock";
+import { TerminalPlayer } from "@/components/ui/TerminalPlayer";
 
 const LEDE =
   "Differential rendering, a composed frame, and a prompt that stays responsive while the model " +
@@ -37,16 +38,6 @@ interface Moment {
  * Every line below is transcribed from `content/docs/*.md`. The rule for this
  * page (DESIGN.md §3.9): illustrate real output, never invent it.
  */
-const HERO_LINES: TerminalLine[] = [
-  { text: "✦ arcturn · claude-sonnet-4-5 · ~/projects/api", tone: "accent" },
-  { text: "› add input validation to the /signup handler", tone: "prompt" },
-  { text: "" },
-  { text: "⚠ Permission required — edit src/routes/signup.ts", tone: "warn" },
-  { text: "  a  allow    d  deny    A  always allow src/**.ts", tone: "muted" },
-  { text: "" },
-  { text: "  ▸ ", tone: "muted", cursor: true },
-];
-
 const MOMENTS: Moment[] = [
   {
     id: "prompt",
@@ -277,13 +268,15 @@ export default function TerminalPage() {
         <PageHeader eyebrow="Project" title="The terminal" lede={LEDE} />
       </Container>
 
+      {/*
+        The hero plays rather than poses: it stops at the permission gate and
+        waits for the reader to answer. §2.3.4 gives `--shadow-glow` to the hero
+        terminal, so it lands here and on nothing else below — the moments are
+        stills, and a page of glowing stills would say nothing about which one
+        is the subject.
+      */}
       <Container size="wide" className="pb-4">
-        <TerminalMock
-          size="lg"
-          title="arcturn — ~/projects/api"
-          lines={HERO_LINES}
-          description="An arcturn session: the header names the model and working directory, a prompt asks for input validation, and a permission prompt asks before editing src/routes/signup.ts."
-        />
+        <TerminalPlayer size="lg" glow title="arcturn — ~/projects/api" />
       </Container>
 
       <Container className="flex flex-col gap-20 py-16 md:gap-28 md:py-20">

@@ -20,13 +20,39 @@ export interface CardProps {
   children: ReactNode;
 }
 
-const VARIANTS: Record<CardVariant, string> = {
-  default: "bg-surface-card border-default elev-sm",
+/** Ground + hairline per variant. Geometry (radius, padding) is the caller's. */
+const SURFACE: Record<CardVariant, string> = {
+  default: "bg-surface-card border-default",
   quiet: "bg-transparent border-default",
-  accent:
-    "bg-[color-mix(in_oklab,var(--accent)_7%,var(--surface-card))] border-accent-edge elev-sm",
-  limit: "bg-surface-card border-default border-l-2 border-l-warn elev-sm",
+  accent: "bg-[color-mix(in_oklab,var(--accent)_7%,var(--surface-card))] border-accent-edge",
+  limit: "bg-surface-card border-default border-l-2 border-l-warn",
 };
+
+/** The light theme's warm shadow. `quiet` is a hairline on the page ground. */
+const ELEVATION: Record<CardVariant, string> = {
+  default: "elev-sm",
+  quiet: "",
+  accent: "elev-sm",
+  limit: "elev-sm",
+};
+
+export interface CardSurfaceOptions {
+  variant?: CardVariant;
+  /** §2.3.4 lifts cards off the page; blocks *inside* a section stay flat. */
+  elevated?: boolean;
+}
+
+/**
+ * The surface recipe without Card's geometry.
+ *
+ * Blocks that are card-shaped but not cards — a `<nav>`, an `<li>`, a `<ul>`
+ * of hairline rules — compose this instead of retyping `border-default
+ * bg-surface-card`, so a palette change to Card reaches them too. `<Card>` is
+ * exactly this plus its own radius, padding and transition.
+ */
+export function cardSurface({ variant = "default", elevated = true }: CardSurfaceOptions = {}) {
+  return cn(SURFACE[variant], elevated && ELEVATION[variant]);
+}
 
 const INTERACTIVE =
   "hover:bg-surface-hover hover:border-strong lg:hover:-translate-y-0.5 lg:hover:elev-md";
@@ -41,7 +67,7 @@ export function Card({
 }: CardProps) {
   const classes = cn(
     "relative rounded-lg border p-5 sm:p-6 transition-[background-color,border-color,box-shadow,transform] dur-fast ease-out",
-    VARIANTS[variant],
+    cardSurface({ variant }),
     corner && "arc-corner",
     href && INTERACTIVE,
     className,

@@ -138,7 +138,7 @@ edits a file:
    `alwaysAllowTools` (`todo`, `plan`) pass silently; `plan` mode denies anything outside
    the read-only tools (`read`, `grep`, `glob`, `ls`); stored rules are matched
    session > project > user, most-specific first; read-only tools are allowed outright;
-   `yolo` allows everything and `acceptEdits` auto-allows `write`/`edit`/`multiedit`;
+   `yolo` allows everything and `acceptEdits` auto-allows `write`/`edit`;
    anything still unresolved is asked via the injected `PermissionPrompt` — which is what
    actually shows the TUI's permission prompt, or auto-denies in `-p` mode. See
    [Permissions](/docs/permissions) for the full rule schema and mode table.

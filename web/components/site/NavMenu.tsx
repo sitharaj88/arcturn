@@ -11,6 +11,11 @@ import { FEATURE_GROUPS, isActiveRoute, PRIMARY_NAV } from "./nav-data";
  * Desktop navigation including the Features dropdown. The panel closes on
  * Escape, on outside click and on route change, and returns focus to its
  * trigger (DESIGN.md §2.6).
+ *
+ * It is a disclosure over two lists of links, not a menu, and says so: no
+ * `aria-haspopup`, which would promise the APG menu keyboard contract that
+ * link lists neither have nor need. `aria-expanded` + `aria-controls` is the
+ * whole contract, and Tab is the whole interaction.
  */
 export function NavMenu({ className }: { className?: string }) {
   const pathname = usePathname() ?? "/";
@@ -72,7 +77,6 @@ export function NavMenu({ className }: { className?: string }) {
           type="button"
           aria-expanded={open}
           aria-controls="features-panel"
-          aria-haspopup="true"
           onClick={() => setOpen((value) => !value)}
           onMouseEnter={() => setOpen(true)}
           className={cn(linkBase, "gap-1", featuresActive ? "text-text" : "text-muted")}
@@ -84,13 +88,22 @@ export function NavMenu({ className }: { className?: string }) {
           />
         </button>
 
+        {/*
+          Hidden with `visibility`, not with `hidden`: `display: none` gave the
+          entrance transition no start value to leave, so the panel snapped in.
+          Hidden visibility keeps the links out of the tab order and the a11y
+          tree just as thoroughly, and reduced motion collapses the durations
+          through the kill switch in `globals.css` onto the same end states.
+        */}
         <div
           id="features-panel"
-          hidden={!open}
           className={cn(
             "absolute left-0 top-full z-50 w-[34rem] pt-2",
-            open ? "opacity-100 translate-y-0" : "opacity-0 -translate-y-1",
-            "transition-[opacity,transform] dur-slow ease-out",
+            open ? "visible opacity-100 translate-y-0" : "invisible opacity-0 -translate-y-1",
+            // `translate`, not `transform`: Tailwind v4 compiles
+            // `-translate-y-*` to the individual property, so naming
+            // `transform` here transitioned nothing.
+            "transition-[opacity,translate] dur-slow ease-out",
           )}
         >
           <div className="grid grid-cols-2 gap-6 rounded-lg border border-default bg-surface-raised p-5 elev-lg">

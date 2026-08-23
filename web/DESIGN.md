@@ -190,8 +190,19 @@ just work.
 
 #### 2.1.2 Semantic tokens, both themes
 
-Dark is the default. Contrast ratios below are computed against that theme's `--surface`
-and are the value each token was **designed** to hit; do not substitute other values.
+Dark is the default. Light is applied two ways — by `prefers-color-scheme` when the reader
+has made no choice, and by an explicit `[data-theme="light"]` — and **the two blocks must
+stay byte-identical**, or a system-light visitor and a toggled-light visitor see two
+different sites. That is asserted, not trusted.
+
+The token *values* live here. The contrast ratios do not. They used to be hand-typed into
+the comments below, and most of them disagreed with the hexes shipping beside them —
+`--accent` on dark was published as 11.1:1 against a real 10.35:1, `--accent-quiet` on
+light as 4.3:1 against a real 3.54:1, `--on-accent` on the gold fill as 9.6:1 against a
+real 8.96:1. Overstated accessibility numbers are the one kind of marketing inflation this
+site cannot afford, so they are computed now: `scripts/contrast.test.ts` parses these
+blocks, computes every pairing the components produce, fails under the floor, and writes
+the generated table below.
 
 ```css
 :root {
@@ -203,32 +214,36 @@ and are the value each token was **designed** to hit; do not substitute other va
   --surface-inset:  #080705; /* code blocks, terminal body, inputs */
   --surface-hover:  #1f1b16;
 
-  --border:         #26201a; /* hairlines, card borders            (1.4:1 vs surface) */
-  --border-strong:  #3a3128; /* inputs, ghost buttons, dividers    (2.0:1 vs surface) */
-  --border-accent:  #6b4a1c; /* accent-tinted edges                             */
+  --border:         #26201a; /* hairlines, card borders  — decorative */
+  --border-strong:  #3a3128; /* dividers, table rules    — decorative */
+  --border-control: #726a5f; /* ghost buttons, inputs    — the ≥3:1 boundary */
+  --border-accent:  #6b4a1c; /* accent-tinted edges      — decorative */
 
-  --text:           #f0ece5; /* 16.8:1 — body + headings */
-  --text-muted:     #a8a29a; /*  7.8:1 — secondary prose, lede */
-  --text-faint:     #857e74; /*  4.9:1 — captions, metadata (AA small text) */
+  --text:           #f0ece5; /* body + headings */
+  --text-muted:     #a8a29a; /* secondary prose, lede */
+  --text-faint:     #918a80; /* captions, metadata — the floor */
   --text-inverse:   #0c0a07;
 
-  --accent:         #f2af48; /* 11.1:1 — links, accent text, graphic fill */
-  --accent-hover:   #fad185; /* 13.7:1 */
-  --accent-quiet:   #b87436; /*  4.7:1 — decorative strokes, low-emphasis marks */
-  --on-accent:      #241a0a; /*  9.6:1 on --accent — text on gold fills */
+  --accent:         #f2af48; /* links, accent text, graphic fill */
+  --accent-hover:   #fad185;
+  --accent-quiet:   #b87436; /* decorative strokes and marks — never text */
+  --accent-tint-card:  color-mix(in oklab, var(--accent) 7%,  var(--surface-card));
+  --accent-tint-chip:  color-mix(in oklab, var(--accent) 8%,  var(--surface-card));
+  --accent-tint-icon:  color-mix(in oklab, var(--accent) 10%, transparent);
+  --accent-tint-badge: color-mix(in oklab, var(--accent) 12%, transparent);
+  --on-accent:      #241a0a; /* text on gold fills */
 
-  --good: #5fd39b;  /* 10.6:1 */
-  --warn: #e8b53a;  /*  9.7:1 */
-  --bad:  #f2726b;  /*  6.5:1 */
+  --good: #5fd39b;
+  --warn: #e8b53a;
+  --bad:  #f2726b;
 
-  --focus-ring: #fad185;                     /* 13.7:1 vs surface, ≥3:1 vs any surface */
+  --focus-ring: #fad185;
   --selection:  rgb(242 175 72 / 0.32);
   --glow:       rgb(242 175 72 / 0.22);
   --code-bg:    #080705;
-  --shiki-theme-name: "github-dark-default"; /* see §2.2.4 */
 }
 
-/* Light: applied for system preference when the user has made no choice … */
+/* Light: applied for system preference when the reader has made no choice … */
 @media (prefers-color-scheme: light) {
   :root:not([data-theme="dark"]) { /* …identical block to :root[data-theme="light"] */ }
 }
@@ -242,31 +257,107 @@ and are the value each token was **designed** to hit; do not substitute other va
   --surface-inset:  #f3efe8;
   --surface-hover:  #f3efe8;
 
-  --border:         #e3ddd2; /* 1.3:1 vs surface */
-  --border-strong:  #cec6b8; /* 1.7:1 */
+  --border:         #e3ddd2;
+  --border-strong:  #cec6b8;
+  --border-control: #8a8377;
   --border-accent:  #e3b877;
 
-  --text:           #1a150f; /* 17.2:1 */
-  --text-muted:     #575046; /*  7.6:1 */
-  --text-faint:     #6f675c; /*  5.3:1 */
+  --text:           #1a150f;
+  --text-muted:     #575046;
+  --text-faint:     #6f675c;
   --text-inverse:   #faf8f4;
 
-  --accent:         #8a5216; /*  6.1:1 — the READABLE accent on light */
-  --accent-hover:   #6f4110; /*  8.4:1 */
-  --accent-quiet:   #b87436; /*  4.3:1 — decorative only, never body text */
-  --on-accent:      #241a0a; /*  9.6:1 on #f2af48 */
+  --accent:         #8a5216; /* the READABLE accent on light */
+  --accent-hover:   #6f4110;
+  --accent-quiet:   #b87436; /* decorative only, never body text */
+  --accent-tint-card:  color-mix(in oklab, var(--accent) 7%,  var(--surface-card));
+  --accent-tint-chip:  color-mix(in oklab, var(--accent) 8%,  var(--surface-card));
+  --accent-tint-icon:  color-mix(in oklab, var(--accent) 10%, transparent);
+  --accent-tint-badge: color-mix(in oklab, var(--accent) 12%, transparent);
+  --on-accent:      #241a0a;
 
-  --good: #0f7040;  /* 5.9:1 */
-  --warn: #8a5a06;  /* 5.7:1 */
-  --bad:  #b3253c;  /* 5.6:1 */
+  --good: #0f7040;
+  --warn: #8a5a06;
+  --bad:  #b3253c;
 
-  --focus-ring: #b87436; /* 3.6:1 vs surface — meets the 3:1 non-text minimum */
+  --focus-ring: #b87436;
   --selection:  rgb(242 175 72 / 0.38);
   --glow:       rgb(242 175 72 / 0.16);
   --code-bg:    #f3efe8;
-  --shiki-theme-name: "github-light";
 }
 ```
+
+**Borders have two jobs and two floors.** `--border`, `--border-strong` and
+`--border-accent` are hairlines: they separate things that are already legible, so they sit
+below 3:1 on purpose and never carry information on their own. `--border-control` is the
+*boundary of an interactive control* — a ghost button, an input, a segmented control —
+which WCAG 1.4.11 puts at ≥3:1 because it is the only thing telling the reader where the
+target is. Never let a decorative hairline be the only edge of a control.
+
+**The four accent tints** replace four ad-hoc `color-mix()` strengths that used to be typed
+inline in `Card`, `CommandChip`, `Badge` and the feature-icon tiles. Two are opaque mixes
+over `--surface-card`; two carry alpha and composite over whatever surface they land on.
+All four are declared inside **every** theme block, `.force-dark` included — a `color-mix()`
+stored in a custom property substitutes its `var()`s where it is *declared*, so a single
+declaration on `:root` would paint the page theme's tint inside always-dark terminal art.
+
+*Known limit:* Lightning CSS wraps every `color-mix()` in an `@supports` guard and
+down-levels the fallback to the mix's **first** colour, so a browser without `color-mix`
+(pre-2023 — Chrome <111, Safari <16.2, Firefox <113) paints a badge solid accent under
+accent text. The contrast test computes the supported path, which is the one every browser
+in the support matrix takes. This is not new to the tints: the four inline `color-mix()`
+utilities they replaced down-levelled identically, and the site already depends on
+`color-mix` for the header ground and prose link underlines.
+
+<!-- BEGIN GENERATED: contrast — do not hand-edit, see scripts/contrast.test.ts -->
+
+Computed from the token hexes in `app/globals.css` by
+`scripts/contrast.test.ts`, which fails the build if any pair drops below its
+floor. **Do not hand-edit these numbers** — regenerate them with
+`UPDATE_CONTRAST_TABLE=1 npx vitest run scripts/contrast.test.ts` from `web/`.
+
+*Worst ground* is the lowest-contrast surface the token can legally land on,
+across `--surface`, `--surface-raised`, `--surface-card`, `--surface-inset` and
+`--surface-hover`. The floor is the one that has to hold.
+
+**Dark**
+
+| Token | Value | vs `--surface` | Worst ground | Worst | Floor | Used for |
+|---|---|---|---|---|---|---|
+| `--text` | `#f0ece5` | 16.79:1 | `--surface-hover` | 14.53:1 | 4.5:1 | body + headings |
+| `--text-muted` | `#a8a29a` | 7.81:1 | `--surface-hover` | 6.76:1 | 4.5:1 | secondary prose, lede |
+| `--text-faint` | `#918a80` | 5.79:1 | `--surface-hover` | 5.01:1 | 4.5:1 | captions, metadata |
+| `--accent` | `#f2af48` | 10.35:1 | `--surface-hover` | 8.96:1 | 4.5:1 | links, accent text |
+| `--accent-hover` | `#fad185` | 13.67:1 | `--surface-hover` | 11.84:1 | 4.5:1 | link hover |
+| `--accent-quiet` | `#b87436` | 5.26:1 | `--surface-hover` | 4.55:1 | 3:1 | decoration only — never text |
+| `--good` | `#5fd39b` | 10.61:1 | `--surface-hover` | 9.19:1 | 4.5:1 | status |
+| `--warn` | `#e8b53a` | 10.45:1 | `--surface-hover` | 9.05:1 | 4.5:1 | status |
+| `--bad` | `#f2726b` | 6.96:1 | `--surface-hover` | 6.02:1 | 4.5:1 | status |
+| `--focus-ring` | `#fad185` | 13.67:1 | `--surface-hover` | 11.84:1 | 3:1 | focus outline |
+| `--border-control` | `#726a5f` | 3.71:1 | `--surface-hover` | 3.21:1 | 3:1 | ghost button + input boundary |
+
+**Light**
+
+| Token | Value | vs `--surface` | Worst ground | Worst | Floor | Used for |
+|---|---|---|---|---|---|---|
+| `--text` | `#1a150f` | 17.09:1 | `--surface-inset` | 15.82:1 | 4.5:1 | body + headings |
+| `--text-muted` | `#575046` | 7.49:1 | `--surface-inset` | 6.93:1 | 4.5:1 | secondary prose, lede |
+| `--text-faint` | `#6f675c` | 5.25:1 | `--surface-inset` | 4.85:1 | 4.5:1 | captions, metadata |
+| `--accent` | `#8a5216` | 6.00:1 | `--surface-inset` | 5.55:1 | 4.5:1 | links, accent text |
+| `--accent-hover` | `#6f4110` | 8.11:1 | `--surface-inset` | 7.51:1 | 4.5:1 | link hover |
+| `--accent-quiet` | `#b87436` | 3.54:1 | `--surface-inset` | 3.27:1 | 3:1 | decoration only — never text |
+| `--good` | `#0f7040` | 5.80:1 | `--surface-inset` | 5.37:1 | 4.5:1 | status |
+| `--warn` | `#8a5a06` | 5.58:1 | `--surface-inset` | 5.16:1 | 4.5:1 | status |
+| `--bad` | `#b3253c` | 6.09:1 | `--surface-inset` | 5.64:1 | 4.5:1 | status |
+| `--focus-ring` | `#b87436` | 3.54:1 | `--surface-inset` | 3.27:1 | 3:1 | focus outline |
+| `--border-control` | `#8a8377` | 3.53:1 | `--surface-inset` | 3.27:1 | 3:1 | ghost button + input boundary |
+
+The gold fill is the same in both themes, so `--on-accent` on it is one number: 8.96:1 at rest, 10.50:1 on hover.
+
+`.force-dark` resolves every one of these to its dark value — the always-dark
+scope redeclares the full block, which is asserted rather than assumed.
+
+<!-- END GENERATED: contrast -->
 
 **Critical distinction.** `--accent` is the *readable* accent and changes per theme
 (`#f2af48` dark → `#8a5216` light). The raw brand golds `--color-gold` / `--color-star` /
@@ -274,8 +365,9 @@ and are the value each token was **designed** to hit; do not substitute other va
 the always-dark terminal art, where darkening them would destroy the brand. Rule of thumb:
 **text and icons use `--accent`; pixels use `--color-gold`.**
 
-**Gold fill buttons** are `#f2af48` in both themes with `--on-accent` text (9.6:1), so the
-primary CTA is identical everywhere. Do not darken the gold button on light.
+**Gold fill buttons** are `#f2af48` in both themes with `--on-accent` text, so the primary
+CTA is identical everywhere; the ratio is in the table above. Do not darken the gold button
+on light.
 
 #### 2.1.3 Tailwind aliases (also inside `@theme`)
 
@@ -289,19 +381,34 @@ So page agents write `bg-surface-card text-muted border-default` and never touch
   --color-surface-card: var(--surface-card);
   --color-surface-inset: var(--surface-inset);
   --color-surface-hover: var(--surface-hover);
-  --color-default: var(--border);        /* border-default */
-  --color-strong: var(--border-strong);  /* border-strong  */
+  --color-default: var(--border);          /* border-default */
+  --color-strong: var(--border-strong);    /* border-strong  */
+  --color-control: var(--border-control);  /* border-control — the >=3:1 one */
+  --color-accent-edge: var(--border-accent);
   --color-text: var(--text);
   --color-muted: var(--text-muted);
   --color-faint: var(--text-faint);
+  --color-inverse: var(--text-inverse);
   --color-accent: var(--accent);
   --color-accent-hover: var(--accent-hover);
+  --color-accent-quiet: var(--accent-quiet);
+  --color-accent-tint-card: var(--accent-tint-card);      /* bg-accent-tint-card  */
+  --color-accent-tint-chip: var(--accent-tint-chip);      /* bg-accent-tint-chip  */
+  --color-accent-tint-icon: var(--accent-tint-icon);      /* bg-accent-tint-icon  */
+  --color-accent-tint-badge: var(--accent-tint-badge);    /* bg-accent-tint-badge */
   --color-on-accent: var(--on-accent);
   --color-good: var(--good);
   --color-warn: var(--warn);
   --color-bad: var(--bad);
+  --color-focus: var(--focus-ring);
 }
 ```
+
+The four accent tints have aliases so no component has to write a `color-mix()` inline: an
+accent-toned card is `bg-accent-tint-card`, a badge is `bg-accent-tint-badge`. `Card`,
+`Badge`, `CommandChip`, `FeatureCard` and `/sdk` still carry the inline literals they were
+built with and should take the utilities as those files are next touched — the values are
+identical, so the swap is not a visual change.
 
 #### 2.1.4 The always-dark scope
 
@@ -310,12 +417,31 @@ class re-declares the full dark semantic block plus `color-scheme: dark`, exactl
 old site did. Any component rendering terminal art wraps itself in `.force-dark`. This is
 the only place a theme is pinned.
 
+**Full means full.** `.force-dark` is a descendant scope, so any token it leaves out
+inherits from whichever root is active — that is, the *light* value, inside dark terminal
+art. `--elev-glow` was missing exactly that way and the hero terminal lost its halo on
+light. `scripts/contrast.test.ts` now asserts that `.force-dark` declares every token
+`:root` does, with the same value; add a token to one and you must add it to the other.
+
 #### 2.1.5 Contrast rules
+
+These are floors, not aspirations: `scripts/contrast.test.ts` computes every pairing the
+components actually produce, in both themes and inside `.force-dark`, and fails under them.
+Run it before shipping a token edit.
 
 - Body and UI text: **≥ 4.5:1**. Large text (≥ 24px, or ≥ 19px bold): ≥ 3:1 but prefer 4.5.
 - Non-text (focus rings, control borders, icon-only affordances): **≥ 3:1**.
-- `--text-faint` is the floor. Nothing lighter than it may carry text.
-- `--accent-quiet` on light is 4.3:1 — **decoration only**, never text.
+- `--text-faint` is the floor. Nothing lighter than it may carry text. It is measured
+  against `--surface-hover` (dark) and `--surface-inset` (light), not against the page
+  ground — the worst legal ground is the one that has to clear 4.5:1, which is why dark
+  `--text-faint` is `#918a80` and not the `#857e74` that cleared only the easy surface.
+- A control's boundary is `--border-control`, never `--border-strong`. The decorative
+  hairlines sit near 1.5:1 by design; a ghost button edged with one is a control the reader
+  cannot find. See the border note in §2.1.2. **Outstanding:** `Button`'s `ghost` variant
+  still reads `border-strong` (1.55:1 dark, 1.60:1 light) and needs `border-control` — one
+  token swap, no other change.
+- `--accent-quiet` is **decoration only**, never text — it clears the 3:1 non-text floor and
+  nothing more. Every element that paints it must be `aria-hidden`, and that is asserted.
 - Never place text on a gradient without a solid fallback colour underneath.
 - The gradient headline treatment (§2.4) must keep a solid `color` fallback so a failed
   `background-clip` still renders readable text.
@@ -367,13 +493,26 @@ display sizes with no breakpoint variants needed.
 | `eyebrow` | `0.75rem` | 1.2 | 0.13em | 600 | Section eyebrows, uppercase |
 | `code-inline` | `0.875em` | inherit | 0 | 500 | Inline `<code>` |
 | `code-block` | `0.8125rem` | 1.65 | 0 | 400 | `<pre>`, terminal art |
+| `code-block-lg` | `0.875rem` | 1.65 | 0 | 400 | Terminal art at hero scale |
 
 Weights loaded: 400, 500, 600, 700. **700 is reserved for the wordmark and `<strong>`.**
 Headings are 600 — Inter 700 at display sizes reads shouty.
 
+All twelve are real `--text-*` entries in `@theme`, `code-inline` and `code-block-lg`
+included. A component that needs a size writes the utility (`text-code-block-lg`) and never
+`text-[0.875rem]`: a hard-coded size is a value the scale cannot be changed from. The two
+that predate the tokens — `TerminalMock`'s `text-[0.875rem]` and `Code`'s `text-[0.875em]`
+— should take `text-code-block-lg` and `text-code-inline`; the values are identical.
+
 #### 2.2.3 Prose rules
 
-- Measure: body prose maxes at **68ch** (`--width-prose: 44rem`). Lede paragraphs 60ch.
+- Measure: **the column and the measure are two different numbers.** `--width-prose`
+  (44rem / 704px) is the *column* — at Inter's 16px digit advance that is ≈79ch, well past
+  the readable ceiling, but code blocks, tables and images want every pixel of it. Running
+  text inside the column is capped separately at `--measure-body` (68ch); ledes get
+  `--measure-lede` (60ch). The old spec claimed 44rem *was* 68ch, which it never was, and
+  the pages hand-typed seven different `max-w-[NNch]` values on top of it. Both are gone:
+  §2.3.2 owns the two tokens and nothing else sets a text measure.
 - Paragraph spacing 1.25em; `h2` gets `margin-top: 2.5em`, `h3` `2em`; first heading in a
   flow has no top margin.
 - Links in prose: `color: var(--accent)`, `text-decoration: underline`,
@@ -389,15 +528,19 @@ Headings are 600 — Inter 700 at display sizes reads shouty.
 #### 2.2.4 Code
 
 - Inline `code`: `--surface-inset` background, `1px solid var(--border)`,
-  `border-radius: var(--radius-xs)`, `padding: 0.12em 0.36em`, `font-size: 0.875em`,
-  colour `--text` (**not** accent — accent is for links, and coloured inline code next to
+  `border-radius: var(--radius-xs)`, `padding: 0.12em 0.36em`,
+  `font-size: var(--text-code-inline)`, colour `--text` (**not** accent — accent is for links, and coloured inline code next to
   coloured links is unreadable).
 - Block: `rehype-pretty-code` + Shiki, **dual theme**
   `{ light: "github-light", dark: "github-dark-default" }`. Shiki emits both palettes as
   CSS variables on the token spans; select them with
   `:root[data-theme="dark"] [data-theme] span { color: var(--shiki-dark) !important; }`
   and the matching `prefers-color-scheme` guard, mirroring §2.1.2's two-block pattern.
-  Highlighting happens at build time — **zero client JS**.
+  Highlighting happens at build time — **zero client JS**. Two markup shapes reach the
+  stylesheet — `.shiki > span.line` from `<CodeBlock>` and `pre[data-theme] > span` from the
+  docs pipeline — so every dark selector list must carry **both**, `.force-dark` included,
+  or a docs-shaped block dropped into always-dark terminal art renders light tokens on a
+  near-black ground.
 - `pre` chrome: `--surface-inset` ground, `1px solid var(--border)`,
   `border-radius: var(--radius-md)`, `padding: 1rem 1.15rem`, `overflow-x: auto`,
   `tab-size: 2`. A language chip (`caption`, `--text-faint`, uppercase) sits top-right,
@@ -409,8 +552,27 @@ Headings are 600 — Inter 700 at display sizes reads shouty.
 
 #### 2.3.1 Rhythm
 
-4px base. Vertical rhythm between landing sections:
-`py-20` (80px) < 640px · `py-28` (112px) ≥ 768px · `py-32` (128px) ≥ 1024px.
+4px base. **Two vertical tiers between landing sections, and no third.** They live in
+`components/ui/Section.tsx` as `SECTION_RHYTHM`, and `<Section>`, `<SplitSection>` and
+`<CTASection>` all consume that constant, so a page cannot invent a fourth spacing.
+
+| Tier | Class | <640px | ≥768px | ≥1024px | For |
+|---|---|---|---|---|---|
+| `default` | `py-16 md:py-20 lg:py-24` | 64px | 80px | 96px | A full beat: eyebrow, heading, lede, body |
+| `tight` | `py-10 md:py-14 lg:py-16` | 40px | 56px | 64px | An inventory grid or table continuing the beat above it |
+
+The tiers replaced a single `py-20 md:py-28 lg:py-32`. That was not too *much* space, it
+was too *uniform*: eight consecutive sections at 128px read as one grey ribbon, because
+identical spacing carries no information. Rhythm is the contrast between the tiers, plus
+the band below — never the padding alone.
+
+**The band.** `SECTION_BAND` = `bg-surface-raised border-y border-default`, exposed as
+`band` on all three section components. One step of surface, with the two hairlines that
+make the step read as deliberate rather than as a rendering seam. Apply it to *chosen*
+beats down a long page; never to two touching sections, which doubles the hairline and
+cancels the alternation that gives a band its meaning. A band's own `border-y` is the
+break at its edges, so do not also put an `<ArcRule />` there.
+
 Inside a section: eyebrow → heading `0.75rem`; heading → lede `1rem`; lede → content
 `3rem` (mobile `2rem`). Card grid gap `1.25rem` mobile, `1.5rem` ≥ 768px.
 
@@ -418,12 +580,28 @@ Inside a section: eyebrow → heading `0.75rem`; heading → lede `1rem`; lede �
 
 ```css
 @theme {
-  --width-prose:   44rem;  /*  704px — article/body measure           */
-  --width-content: 72rem;  /* 1152px — marketing sections             */
-  --width-wide:    82rem;  /* 1312px — hero, full-bleed feature grids */
-  --width-shell:   90rem;  /* 1440px — docs three-column shell        */
+  /* Columns — a distance. */
+  --width-prose:   44rem;  /*  704px — article column: prose + its figures */
+  --width-content: 72rem;  /* 1152px — marketing sections                  */
+  --width-wide:    82rem;  /* 1312px — hero, full-bleed feature grids      */
+  --width-shell:   90rem;  /* 1440px — docs three-column shell             */
+
+  /* Measures — a count of characters, so they track the font, not the viewport. */
+  --measure-body: 68ch;    /* running body copy inside any column */
+  --measure-lede: 60ch;    /* ledes, section intros, CTA subheads */
 }
 ```
+
+**Never hand-type a measure.** `max-w-(--measure-body)` and `max-w-(--measure-lede)` are the
+only two allowed. The pages had scattered six of them — `48ch`, `52ch`, `56ch`, `60ch`,
+`62ch`, `68ch` — which is six numbers for two ideas, and no reader has ever seen the
+difference between 60ch and 62ch. `<Section>`, `<SplitSection>` and `<CTASection>` are
+converted; the remaining call sites in `app/**` and in `PageHeader` / `ProseSection` still
+carry the literals and should take the tokens as those files are next touched.
+
+Inside `.prose-arc` the split is automatic: the block keeps the full column so code and
+tables get their width, and the running text (`p`, `ul`, `ol`, `blockquote`, `h2`–`h4`) is
+capped at `--measure-body`.
 
 `.container` = `width:100%; margin-inline:auto; max-width: var(--width-content);` with
 padding-inline `1.25rem` (<640px), `1.5rem` (≥640px), `2rem` (≥1024px). Variants
@@ -467,6 +645,37 @@ focus ring and the docs sidebar active indicator.
 `body` must never scroll horizontally at 360px. Every wide child owns its own scroll
 container: `pre`, prose `table`, the docs breadcrumb, the terminal body, any horizontal
 card rail. Long unbroken tokens in prose get `overflow-wrap: anywhere`.
+
+#### 2.3.6 The z-layer scale
+
+```css
+@theme {
+  --z-sticky:  60;  /* in-page sticky chrome: the docs nav bar          */
+  --z-header:  70;  /* the site header                                  */
+  --z-drawer:  80;  /* mobile nav, docs nav drawer, and their scrims    */
+  --z-modal:   90;  /* anything that must cover a drawer                */
+  --z-skip:   100;  /* the skip link — above everything, always         */
+}
+```
+
+Written as `z-(--z-header)`. Ten apart so a new layer can be slotted between two without
+renumbering the site. **Never a bare number.** The six arbitrary values in the tree today
+— `z-50`, `z-[60]`, `z-[70]`, `z-[78]`, `z-[80]`, `z-[100]` — encode their stacking order
+nowhere but in the gaps between them, and `z-[78]` exists only because it had to be under
+`80` and someone guessed. They map onto the scale exactly:
+
+| Today | Component | Becomes |
+|---|---|---|
+| `z-[60]` | `DocsNavDrawer` sticky bar | `z-(--z-sticky)` |
+| `z-[70]` | `SiteHeader` | `z-(--z-header)` |
+| `z-[78]` | `DocsNavDrawer` overlay | `z-(--z-drawer)` |
+| `z-[80]` | `MobileNav` overlay | `z-(--z-drawer)` |
+| `z-[100]` | `SkipLink` | `z-(--z-skip)` |
+| `z-50` | `NavMenu`, `ThemeToggle` popovers | unchanged |
+
+The popovers are the one exception: they live *inside* the header's stacking context, so
+they only have to beat their siblings and a local `z-50` is the honest value. Nothing yet
+needs `--z-modal`; it exists so the next thing that must cover a drawer does not guess.
 
 ### 2.4 The signature device: **the Turn Arc**
 
@@ -554,16 +763,36 @@ anything triggered by mouse position.
   *, *::before, *::after {
     animation-duration: 0.001ms !important;
     animation-iteration-count: 1 !important;
+    animation-delay: 0.001ms !important;   /* a delay is motion too */
     transition-duration: 0.001ms !important;
+    transition-delay: 0s !important;
     scroll-behavior: auto !important;
   }
+  /* Lifts are dropped, not merely instant. */
+  *:hover { translate: none !important; }
+  [class*="group-hover:translate"],
+  [class*="group-hover:-translate"] { translate: none !important; }
 }
 ```
 
+Two things about that kill switch are load-bearing and easy to undo by accident.
+
+**`translate`, not `transform`.** Tailwind v4 compiles `-translate-y-*` to the individual
+`translate` property, so that is what has to be reset. Declaring `transform: none`
+alongside it is actively worse: the minifier folds the neighbouring `transform` over the
+`translate` reset and the lift comes back. If a component ever animates the `transform`
+shorthand, reset it in its own rule, not in this one.
+
+**Both halves of the lift.** `:hover` matches the element under the pointer and its
+*ancestors*, never its descendants — so `*:hover` reaches a card that lifts itself but not
+the arrow that `group-hover:translate-x-0.5` nudges inside it. The second rule matches the
+utility class instead. It is unconditional because those elements carry no translate at
+rest, which is also why it cannot flatten a layout transform the way `:hover *` would.
+
 Plus: `<Reveal>` reads `useReducedMotion()` and renders children with no initial state at
 all (content is visible immediately, never a stuck `opacity: 0`); `<ArcHalo />` renders
-static; hover `translateY` is dropped. **Everything must be fully readable with all
-animation disabled** — that is the acceptance test.
+static. **Everything must be fully readable with all animation disabled** — that is the
+acceptance test.
 
 ### 2.6 Accessibility baseline (every agent, every page)
 
@@ -619,26 +848,88 @@ the page's own lede.
 
 ### 3.1 `/` — Home
 
-Sequence: Hero → Honesty band → The gap → Four pillars → Control → Accountability →
-Extensibility → Models → SDK → Open source → Final CTA. `<ArcRule />` between sections
-from "The gap" onwards.
+The page has one job the interior pages do not: it has to *show* the thing it claims,
+because a description of an accountable agent reads exactly like a description of an
+unaccountable one. So the hero plays a real session and stops at the permission gate, and
+the provider ledger sits at body size in a beat of its own instead of shrinking into a
+footnote.
 
-**§ Hero.** Desktop ≥1024px: two columns inside `.container-wide`, `grid-cols-[minmax(0,1fr)_minmax(0,1.05fr)]`,
-`gap-16`, `items-center`, copy left / `<TerminalMock>` right, `<ArcHalo>` absolutely
-positioned behind the terminal, `pt-24 pb-20`. <1024px: single column, copy first,
-terminal below at full width, `pt-16 pb-14`; halo shrinks per §2.4.
+**Sequence and rhythm** (tiers and the band rule are §2.3.1; `default` unless marked):
+
+| # | Beat | Tier | Ground | What breaks it from the beat above |
+|---|---|---|---|---|
+| 1 | Hero | — | page | — |
+| 2 | Honesty band | `py-5` | band | its own `border-y` |
+| 3 | The gap | `default` | page | the band's `border-y` |
+| 4 | Four pillars | `default` | page | `<ArcRule />` |
+| 5 | Control | `default` | **one shared band** | the band's `border-y` |
+| 6 | Accountability | `default` | *the same band* | **nothing — deliberate** |
+| 7 | Extensibility | `tight` | page | the band's `border-y` |
+| 8 | Models | `default` | page | `<ArcRule />` |
+| 9 | Receipts | `default` | band | the band's `border-y` |
+| 10 | SDK | `default` | page | the band's `border-y` |
+| 11 | Open source | `tight` | page | `<ArcRule />` |
+| 12 | Final CTA | `default` | page | — |
+
+**Three `<ArcRule />` on this page, not eight.** A band's own hairlines are the break at
+its edges, so a rule beside one draws a second line 1px away from the first. The rules
+survive only where two page-ground sections meet: pillars → Control's band is a band edge,
+Models → Receipts is a band edge, and so on. The alternation — page, band, page, band —
+is what carries the rhythm now; the padding alone never did.
+
+**§ Hero.** Desktop ≥1024px: two columns inside `.container-wide`,
+`grid-cols-[minmax(0,0.92fr)_minmax(0,1.08fr)]`, `gap-16`, `items-center`, copy left /
+`<TerminalPlayer>` right, `<ArcHalo>` absolutely positioned behind the player,
+`pt-24 pb-20`. <1024px: single column, copy first, player below at full width,
+`pt-16 pb-14`; halo shrinks per §2.4.
+
+The player takes the wider track because it is the evidence. `items-center` and not
+`items-start`: the player's height is fixed and self-reserving (491px at `lg`, 519px at
+360px) while the copy column runs roughly 700px, so aligning to the start hangs ~200px of
+void under the terminal. If the copy column ever shortens past ~550px, revisit this.
 
 - Eyebrow (`<Badge variant="accent">`): `Open source · Apache-2.0 · TypeScript`
-- `h1` (display-1): **The coding agent you can hold accountable.**
-- Lede: *Arcturn is an open-source terminal coding agent and the TypeScript harness
-  underneath it. Every tool call clears a permission engine before it runs. Every edit is
-  snapshotted before it lands. Every session is a file on disk you can replay, bisect and
-  blame.*
-- Buttons: primary `Get started` → `/docs/getting-started`; secondary (`ghost`)
-  `Why I built it` → `/blog/why-arcturn`.
-- Below buttons, `<CommandChip>`: `INSTALL_COMMAND` (`npm install -g arcturn`) with a
+- `h1` (display-1): **The coding agent you can hold accountable.** Exact. `hold accountable`
+  carries `.text-gradient`; nothing else on the page does.
+- Lede — **one** sentence: *Arcturn is an open-source terminal coding agent and the
+  TypeScript harness underneath it.*
+- **The guarantee triad.** Sentences two to four of the old lede, promoted out of the
+  paragraph: three hairline-separated rows, each row a whole link ≥44px tall, the leading
+  term in `--text` and the rest in `--text-muted`, with an `ArrowRight` that slides on
+  hover. Nobody reads the fourth sentence of a hero paragraph, and each of these is a
+  claim with a page that proves it.
+
+  | Row | Links to |
+  |---|---|
+  | **Every tool call** clears a permission engine before it runs. | `/docs/permissions` |
+  | **Every edit** is snapshotted before it lands. | `/docs/checkpoints` |
+  | **Every session** is a file on disk you can replay, bisect and blame. | `/docs/sessions` |
+
+  The page `description` is **composed** from the lede sentence plus these three rows
+  (`HERO_LEDE = [HERO_INTRO, ...HERO_GUARANTEES]`), never retyped, so the summary in a
+  search result cannot drift from the one on the screen.
+- Buttons: primary `Get started` → `/docs/getting-started`, carrying `elev-glow` (§2.3.4 —
+  the one glowing CTA); ghost `Why I built it` → `/blog/why-arcturn`.
+- Below the buttons, `<CommandChip>`: `INSTALL_COMMAND` (`npm install -g arcturn`) with a
   copy button and the caption *Node 20 or newer. See*
   [Getting started](/docs/getting-started).
+
+**§ The hero terminal plays.** `<TerminalPlayer size="lg" glow className="relative" />` —
+the interactive session player (§3.9), not a `<TerminalMock>`. It types the prompt,
+streams the read and the grep, **stops at `⚠ Permission required — edit
+src/routes/signup.ts`**, and waits for the reader to press allow or deny; six seconds of
+no answer takes allow and the caption says so, so the page never claims the reader chose.
+Deny is the branch that proves the gate: no edit, no cost line, and the verbatim message
+the model receives.
+
+It takes **no** `description` prop, by design — the transcript is built in and switches
+with the branch, so a caller cannot narrate something other than what is on screen. It
+needs no width or height from the page. `glow` lands here and on nothing else on this
+page except the primary CTA.
+
+This is not decoration and may not be swapped back for a still. A screenshot of a
+permission gate and an enforced permission gate are the same picture, and that picture is
+the entire claim of the page — so the gate has to be answerable.
 
 **§ Honesty band.** Full-width strip, `--surface-raised`, hairline top and bottom,
 `py-5`, `caption` size, `--text-muted`, an `info` icon in `--accent`:
@@ -660,82 +951,107 @@ Then three `<Card variant="quiet">` in a `md:grid-cols-3`:
 
 **§ Four pillars.** Eyebrow `What's different`. `h2`: **Four things Arcturn does that a
 capable agent still doesn't.** `md:grid-cols-2` of `<FeatureCard>` (icon, title, body,
-"Explore →"), each linking to its feature page:
+"Explore →"), each linking to its feature page. The four rows live in
+`components/marketing/pillars.tsx` and are shared with `/features`; never retype them here.
 
-| Icon | Title | Body | Href |
-|---|---|---|---|
-| `ShieldCheck` | Control before the fact | A rule-based permission engine at a single choke point in the tool dispatcher. Allow, deny, ask — scoped session over project over user, with `plan`, `acceptEdits` and `yolo` modes when you want a different posture. | `/features/control` |
-| `History` | Accountability after it | The session is an append-only tree on disk, so `replay`, `bisect` and `blame` are ordinary operations — and `/rewind` restores files by forking the conversation instead of deleting it. | `/features/accountability` |
-| `Puzzle` | Extensible without a build step | MCP servers, markdown skills, shell hooks with veto power, sub-agents, file-defined workflows — and TypeScript custom tools when you need real code. | `/features/extensibility` |
-| `Network` | Every provider, one interface | Anthropic, OpenAI and any OpenAI-compatible endpoint, Google Gemini, Bedrock, Vertex, Azure — with streaming, tool calls, thinking, prompt caching and cost tracking. | `/features/models` |
+| Icon | Title | Href |
+|---|---|---|
+| `ShieldCheck` | Control before the fact | `/features/control` |
+| `History` | Accountability after it | `/features/accountability` |
+| `Puzzle` | Extensible without a build step | `/features/extensibility` |
+| `Network` | Every provider, one interface | `/features/models` |
 
-**§ Control.** Two-column `lg:grid-cols-2 gap-14 items-center`, copy left, a
-`<TerminalMock variant="permission">` right showing the permission prompt from
-`docs/getting-started.md`. Eyebrow `Control`. `h2`: **Decide once, at the choke point.**
-Body: *The runtime's tool dispatcher checks the permission engine and returns a denial
-before a tool's `execute` is ever reached — there is no second path. Rules are allow, deny
-or ask; scopes resolve session over project over user. Read-only tools pass. Anything that
-reaches the ask step with no permission requester configured resolves to deny, not "assume
-it's fine."* `<CheckList>`: four modes — `default`, `acceptEdits`, `plan`, `yolo` ·
-`--dry-run` sends file mutations to a shadow tree for `/diff` before `/apply` · Lifecycle
-hooks can veto a `preToolUse` call · An opt-in OS sandbox confines `bash` writes to the
-workspace. Link: `How permissions resolve →` `/docs/permissions`.
+**§ Control and § Accountability — one band, two beats.** The two `<SplitSection>` are
+wrapped in a single `<div className={SECTION_BAND}>` rather than each taking `band`.
+Passing `band` twice draws the hairline between them and splits the pair back into two
+sections; one wrapper gives them one continuous raised ground and nothing in between. They
+are one demonstration — the gate, then the receipt the gate leaves — and the `<ArcRule />`
+that used to sit either side of them is gone because the wrapper's `border-y` is the break.
 
-**§ Accountability.** Mirrored layout (copy right on desktop). Eyebrow `Accountability`.
-`h2`: **The session is the artifact.** Body: *Every session is a `.jsonl` file — a header
-line, then one JSON line per entry, appended in order. The structure is a tree: each entry
-carries a `parentId`, so resuming from three turns ago and trying a different approach
-starts a branch instead of overwriting what came after. Both branches stay walkable.*
-Then a `<CommandList>` of three rows (mono command + one line each):
+- **Control.** `lg:grid-cols-2 gap-14 items-center`, copy left, a
+  `<TerminalMock variant="permission">` right. The still is correct here precisely because
+  the hero already played the live one: this is the anatomy of the prompt, not a claim that
+  it stops. Eyebrow `Control`. `h2`: **Decide once, at the choke point.** Body: *The
+  runtime's tool dispatcher checks the permission engine and returns a denial before a
+  tool's `execute` is ever reached — there is no second path. Rules are allow, deny or ask;
+  scopes resolve session over project over user. Read-only tools pass. Anything that
+  reaches the ask step with no permission requester configured resolves to deny, not
+  "assume it's fine."* `<CheckList>`: four modes — `default`, `acceptEdits`, `plan`,
+  `yolo` · `--dry-run` sends file mutations to a shadow tree for `/diff` before `/apply` ·
+  Lifecycle hooks can veto a `preToolUse` call · An opt-in OS sandbox confines `bash`
+  writes to the workspace. Two links: `How permissions resolve →` `/docs/permissions` and
+  `See a whole session →` `/terminal`.
+- **Accountability.** Mirrored (`reverse`, copy right on desktop). Eyebrow
+  `Accountability`. `h2`: **The session is the artifact.** Body: *Every session is a
+  `.jsonl` file — a header line, then one JSON line per entry, appended in order. The
+  structure is a tree: each entry carries a `parentId`, so resuming from three turns ago
+  and trying a different approach starts a branch instead of overwriting what came after.
+  Both branches stay walkable.* Then a `<CommandList>` of three rows: `arcturn replay
+  <session>` · `arcturn bisect <session>` · `arcturn blame <file>`, one line each. Closing
+  line: *Underneath, every `write` and `edit` snapshots the file's prior content first, so
+  `/rewind` can restore it.* Link `Replay, bisect and blame →` `/features/accountability`.
 
-- `arcturn replay <session>` — re-runs the original prompts against the same model or
-  another one, emitting NDJSON per turn, so you can diff two runs mechanically.
-- `arcturn bisect <session>` — binary-searches those prompts for the turn where behaviour
-  diverged, replaying a recorded cassette hermetically: no provider, no network.
-- `arcturn blame <file>` — per line, which turn wrote it and what evidence that turn had:
-  files read, pages fetched, commands run, with anything from a fetch or an MCP server
-  marked untrusted.
+**§ Extensibility.** `density="tight"` — six one-line cards are an inventory, not a beat,
+and the tighter tier is what stops the run of full beats reading as one ribbon. Eyebrow
+`Extend`. `h2`: **Add a capability without recompiling anything.** `sm:grid-cols-2
+md:grid-cols-3` of `<LinkCard>`: MCP · Markdown skills · Hooks · Sub-agents · Workflows ·
+Custom tools, each one line and a `/docs/<slug>` link.
 
-Closing line: *Underneath, every `write` and `edit` snapshots the file's prior content
-first, so `/rewind` can restore it.* Link `Replay, bisect and blame →` `/features/accountability`.
-
-**§ Extensibility.** Eyebrow `Extend`. `h2`: **Add a capability without recompiling
-anything.** `md:grid-cols-3` of six small `<Card>`: MCP (`Connect stdio and streamable-HTTP
-servers; their tools, resources and prompts just work.`) · Markdown skills (`Drop a file in
-.arcturn/skills and it's a slash command — frontmatter, $ARGUMENTS, $SKILL_DIR, no build
-step.`) · Hooks (`Shell commands at tool and session boundaries, with veto power over a
-preToolUse call.`) · Sub-agents (`Scoped child agents with their own tools and models;
-their events stream back into the parent session.`) · Workflows (`A markdown numbered list
-is the control flow; the model fills in only the content.`) · Custom tools (`The Tool
-interface in TypeScript when a markdown file isn't enough.`) — each links to its doc.
-
-**§ Models.** Eyebrow `Models`. `h2`: **Bring your own provider.** Body: *One interface
+**§ Models.** Eyebrow `Models`. `h2`: **Bring your own provider.** Lede: *One interface
 across Anthropic, OpenAI and every OpenAI-compatible endpoint, Google Gemini, Bedrock,
 Vertex and Azure — streaming, tool calls, thinking, prompt caching and cost tracking
 included. Point `--model` at `<provider>/<model>`, route different roles to different
 models, or set a failover chain.* A `<CodeBlock>` with the three `arcturn --model …` lines
-from `docs/getting-started.md`. **A required footnote in `caption`/`--text-faint`:** *Only
-the OpenAI-compatible path has completed real multi-turn tool-calling sessions against a
-live endpoint. The first-party Anthropic, OpenAI and Google adapters are unproven against
-real traffic, and Bedrock, Vertex and Azure have not reached their endpoints at all.* Link
-`Providers and status →` `/features/models`.
+from `docs/getting-started.md`, and nothing else: the honesty footnote that used to sit
+under it in `--text-faint` is now the Receipts beat below. **Removing it from here was a
+promotion, not a deletion** — it may never be dropped, only made larger.
+
+**§ Receipts.** New, and the point of the second half of the page. `band`, eyebrow
+`Receipts`, `h2`: **What has actually run, and what hasn't.**
+
+- Lede, at `--text-lede` where the old footnote was 13px `--text-faint`: *N of the M
+  provider paths have completed real multi-turn tool-calling sessions against a live
+  endpoint. Another K have never reached their endpoints at all. Which is which is in the
+  table, not in a footnote.* **N, M and K are computed** — `PROVEN_PROVIDERS`,
+  `PROVIDER_ROWS.length`, `UNREACHED_PROVIDERS` — never typed. A row changing status
+  changes the sentence.
+- `<StatusTable rows={PROVIDER_ROWS} />`, all nine rows, in order, no filtering to the
+  proven six and no softened status. `PROVIDER_ROWS` lives in `lib/providers.ts` and is
+  the single copy, read by this page and by `/features/models`; the statuses are gated by
+  the disclosure in `content/blog/why-arcturn.md` and cannot be upgraded without it.
+  StatusTable's ground is transparent by construction, so it sits on the band as-is.
+- Then, at `body` size and `--text-muted`: *Four waves of adversarial review went at the
+  seams. They found `/apply` writing outside the workspace through an in-workspace
+  symlink, served sessions and sub-agents escaping the audit trail entirely, a WebSocket
+  upgrade with no `Origin` check, and two features that were present but unreachable. All
+  four are* [written up on the security page](/security#adversarial-review) *rather than
+  quietly patched out.*
+- Then the strongest sentence on the site, alone, at `body` size in `--text` rather than
+  `--text-muted`: **Every fix landed with a regression test verified to fail against the
+  previous behaviour first.** It is not an aside and never gets caption size.
+- Links: `Providers and status →` `/features/models` · `Every known limit →` `/security`.
 
 **§ SDK.** Eyebrow `Embed it`. `h2`: **The same runtime, without a terminal in front of
 it.** Body: *`@arcturn/core` is what the CLI is built on. One `Agent` per session, one
 `AgentEvent` stream out — the same events the CLI emits with `--output-format json`.*
-`<CodeBlock>` with a short TypeScript snippet (the build agent takes it verbatim from
-`content/docs/sdk.md` — do not write new API surface). Link `Embedding with the SDK →` `/sdk`.
+`<CodeBlock>` with a short TypeScript snippet taken verbatim from `content/docs/sdk.md` —
+do not write new API surface. Link `Embedding with the SDK →` `/sdk`.
 
-**§ Open source.** Eyebrow `Open source`. `h2`: **Apache-2.0, and checkable.** Body: *No
-commercial-use restriction, no source-available licence with a catch in clause four. The
-codebase has been through four waves of adversarial review, and the findings are on the
-security page rather than quietly patched out — including two features that turned out to
-be present but unreachable.* Buttons: `On GitHub` ↗ · `How to verify it →` `/open-source`.
+**§ Open source.** `density="tight"` — a coda, not a beat. Eyebrow `Open source`. `h2`:
+**Apache-2.0, and checkable.** Body: *No commercial-use restriction, no source-available
+licence with a catch in clause four. One repository holds the CLI, the runtime, the
+harness and the regression tests behind the findings above — and the commands that check
+them are written down rather than described.* It back-references Receipts instead of
+restating it: the adversarial-review findings are named once on this page, in Receipts.
+Buttons: `On GitHub` ↗ · `How to verify it →` `/open-source` · `Read the limits →`
+`/security`.
 
-**§ Final CTA.** Centred, `.container-prose`, `py-28`, `<ArcHalo>` at 30% opacity behind.
-`h2`: **Every turn counts.** Lede: *Start a session, watch every tool call ask first, then
-go back and read exactly what happened.* Primary `Get started` → `/docs/getting-started`;
-ghost `Read the docs` → `/docs`. Below: the install `<CommandChip>` again.
+**§ Final CTA.** `<CTASection />` with no props: centred, `.container-prose`, the shared
+`default` tier, `<ArcHalo>` at 30% opacity behind. `h2`: **Every turn counts.** Lede:
+*Start a session, watch every tool call ask first, then go back and read exactly what
+happened.* Primary `Get started` → `/docs/getting-started`; ghost `Read the docs` →
+`/docs`. Below: the install `<CommandChip>` again, on `INSTALL_COMMAND` — so the two
+install chips on the page cannot disagree.
 
 ### 3.2 `/features` — Overview
 
@@ -1033,7 +1349,7 @@ to a static component.
 | `SiteFooter` | — | Columns + Author & Support + legal row (§5.3). |
 | `Logo` | `size?: number; showWordmark?: boolean` | `StarMark` + "arcturn" at weight 700. |
 | `Container` | `size?: "prose" \| "content" \| "wide" \| "shell"; as?: ElementType` | |
-| `Section` | `eyebrow?: string; title?: ReactNode; lede?: ReactNode; align?: "start" \| "center"; id?: string` | The landing-section wrapper: rhythm, `ArcEyebrow`, heading levels. |
+| `Section` | `eyebrow?: string; title?: ReactNode; lede?: ReactNode; align?: "start" \| "center"; size?: ContainerSize; density?: "default" \| "tight"; band?: boolean; headingLevel?: 2 \| 3; id?: string` | The landing-section wrapper: rhythm, `ArcEyebrow`, heading levels. Also exports `SECTION_RHYTHM` and `SECTION_BAND` (§2.3.1) — the other two section components import them rather than restating the numbers. |
 | `PageHeader` | `title: string; lede?: ReactNode; eyebrow?: string; breadcrumb?: ReactNode` | Interior-page `h1` block. |
 
 ### Primitives
@@ -1053,7 +1369,7 @@ to a static component.
 | `CommandList` | `items: { command: string; body: ReactNode }[]` — mono command + prose. |
 | `Prose` | `children` (or `html: string`) — the shared typographic scope (§2.2.3) used by docs, blog, and long-form marketing. **One implementation. Every long-form page uses it.** |
 | `DocLinks` | `links: { href: string; title: string }[]; title?: string` — "Read the docs" block. |
-| `CTASection` | `variant?: "default" \| "compact"; title?: string; lede?: string` — defaults to the §3.1 final-CTA copy. |
+| `CTASection` | `variant?: "default" \| "compact"; title?: string; lede?: string; showCommand?: boolean; command?: string; band?: boolean` — defaults to the §3.1 final-CTA copy. `compact` is the `tight` rhythm tier, not a third spacing. |
 | `Reveal` ⚡ | `delay?: number; children` — the scroll-reveal wrapper, reduced-motion-aware (§2.5). |
 | `AuthorCard` | — | Name, one line, the four Author & Support links. |
 | `SkipLink` | — | |
@@ -1071,7 +1387,7 @@ to a static component.
 ### Brand
 
 `StarMark({ size?, className? })` · `ArcEyebrow({ className? })` ·
-`ArcHalo({ size?, opacity?, className? })` · `ArcRule({ className? })` — §2.4.
+`ArcHalo({ size?, opacity?, className? })` · `ArcRule({ className? })` — §2.4. `ArcRule` spans `.container`, matching the sections it divides; it used to span `.container-wide` and hang 80px past the copy on each side.
 **All four generate SVG gradient ids with `useId()`, never `Math.random()`** (the old
 site used random ids; that breaks SSR hydration and static export determinism).
 

@@ -1,4 +1,4 @@
-import type { CSSProperties } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import { cn } from "@/lib/cn";
 import { withStableKeys } from "@/lib/keys";
 import { VisuallyHidden } from "./VisuallyHidden";
@@ -10,12 +10,19 @@ import { VisuallyHidden } from "./VisuallyHidden";
  * `.force-dark` and is `aria-hidden`; the mandatory `description` prop is
  * rendered visually-hidden beside it so assistive technology gets the meaning
  * without the ANSI-style noise. The line stagger is CSS-only — no client JS.
+ *
+ * The chrome lives in `<TerminalFrame>` rather than here because
+ * `<TerminalPlayer>` — the interactive session on `/` and `/terminal` — has to
+ * draw the identical window. One copy of the window means the still and the
+ * moving picture can never drift apart.
  */
 export type TerminalVariant = "session" | "permission" | "diff" | "subagent" | "rewind";
+export type TerminalSize = "md" | "lg";
+export type TerminalTone = "default" | "muted" | "accent" | "good" | "warn" | "bad" | "prompt";
 
 export interface TerminalMockProps {
   variant?: TerminalVariant;
-  size?: "md" | "lg";
+  size?: TerminalSize;
   /** One sentence describing the session, for screen readers. Required. */
   description: string;
   /** Override the scripted lines with custom content. */
@@ -28,12 +35,16 @@ export interface TerminalMockProps {
 
 export interface TerminalLine {
   text: string;
-  tone?: "default" | "muted" | "accent" | "good" | "warn" | "bad" | "prompt";
+  tone?: TerminalTone;
   /** Render a blinking cursor at the end of this line. */
   cursor?: boolean;
 }
 
-const TONES: Record<NonNullable<TerminalLine["tone"]>, string> = {
+/**
+ * Tone → utility class. Exported so `<TerminalPlayer>` paints its streamed
+ * lines from the same table; a second table would be a second truth.
+ */
+export const TERMINAL_TONES: Record<TerminalTone, string> = {
   default: "text-text",
   muted: "text-muted",
   accent: "text-accent",
@@ -42,6 +53,64 @@ const TONES: Record<NonNullable<TerminalLine["tone"]>, string> = {
   bad: "text-bad",
   prompt: "text-faint",
 };
+
+export interface TerminalFrameProps {
+  /** Window title, shown beside the traffic lights. */
+  title: string;
+  size?: TerminalSize;
+  /** §2.3.4: `--shadow-glow` belongs to the primary CTA and the hero terminal. */
+  glow?: boolean;
+  /** The transcript. Rendered inside the `aria-hidden` subtree. */
+  children: ReactNode;
+  /**
+   * Controls rendered under the transcript, still inside the window but
+   * OUTSIDE the `aria-hidden` subtree. §2.6 hides the transcript from
+   * assistive technology, so a button placed in it would be unreachable —
+   * this slot is the only place in the frame where a real control can live.
+   */
+  footer?: ReactNode;
+}
+
+/**
+ * The window: traffic lights, title, and a transcript area that owns its own
+ * horizontal scroll (§2.3.5 — the page body never scrolls sideways).
+ */
+export function TerminalFrame({
+  title,
+  size = "md",
+  glow = false,
+  children,
+  footer,
+}: TerminalFrameProps) {
+  return (
+    <div
+      className={cn(
+        "force-dark arc-corner rounded-xl border border-default bg-surface-raised",
+        glow && "elev-glow",
+        size === "lg" ? "text-[0.875rem]" : "text-code-block",
+      )}
+    >
+      <div aria-hidden="true">
+        <div className="flex items-center gap-2 rounded-t-xl border-b border-default bg-surface-card px-4 py-3">
+          <span className="size-2.5 rounded-full bg-bad-dark" />
+          <span className="size-2.5 rounded-full bg-warn-dark" />
+          <span className="size-2.5 rounded-full bg-good-dark" />
+          <span className="ml-2 truncate font-mono text-caption text-faint">{title}</span>
+        </div>
+        <div
+          className={cn(
+            "overflow-x-auto bg-surface-inset px-4 py-4",
+            // The footer, when present, owns the bottom corners instead.
+            footer ? undefined : "rounded-b-xl",
+          )}
+        >
+          {children}
+        </div>
+      </div>
+      {footer}
+    </div>
+  );
+}
 
 const SCRIPTS: Record<TerminalVariant, { title: string; lines: TerminalLine[] }> = {
   session: {
@@ -128,37 +197,20 @@ export function TerminalMock({
 
   return (
     <div className={cn("w-full", className)}>
-      <div
-        aria-hidden="true"
-        className={cn(
-          "force-dark arc-corner rounded-xl border border-default bg-surface-raised",
-          glow && "elev-glow",
-          size === "lg" ? "text-[0.875rem]" : "text-code-block",
-        )}
-      >
-        <div className="flex items-center gap-2 rounded-t-xl border-b border-default bg-surface-card px-4 py-3">
-          <span className="size-2.5 rounded-full bg-bad-dark" />
-          <span className="size-2.5 rounded-full bg-warn-dark" />
-          <span className="size-2.5 rounded-full bg-good-dark" />
-          <span className="ml-2 truncate font-mono text-caption text-faint">
-            {title ?? script.title}
-          </span>
-        </div>
-        <div className="overflow-x-auto rounded-b-xl bg-surface-inset px-4 py-4">
-          <pre className="min-w-max font-mono leading-[1.65]">
-            {withStableKeys(body, (line) => line.text).map(({ key, item: line }, index) => (
-              <div
-                key={key}
-                className={cn("term-line", TONES[line.tone ?? "default"] ?? "text-text")}
-                style={{ animationDelay: `${index * 60}ms` } as CSSProperties}
-              >
-                {line.text || " "}
-                {line.cursor ? <span className="term-cursor ml-0.5 align-middle" /> : null}
-              </div>
-            ))}
-          </pre>
-        </div>
-      </div>
+      <TerminalFrame title={title ?? script.title} size={size} glow={glow}>
+        <pre className="min-w-max font-mono leading-[1.65]">
+          {withStableKeys(body, (line) => line.text).map(({ key, item: line }, index) => (
+            <div
+              key={key}
+              className={cn("term-line", TERMINAL_TONES[line.tone ?? "default"] ?? "text-text")}
+              style={{ animationDelay: `${index * 60}ms` } as CSSProperties}
+            >
+              {line.text || " "}
+              {line.cursor ? <span className="term-cursor ml-0.5 align-middle" /> : null}
+            </div>
+          ))}
+        </pre>
+      </TerminalFrame>
       <VisuallyHidden as="p">{description}</VisuallyHidden>
     </div>
   );

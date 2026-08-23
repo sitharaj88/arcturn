@@ -1,23 +1,67 @@
 /*
- * Documentation-only styling: the chrome that `rehype-pretty-code` figures
- * need, on top of the shared `.prose-arc` scope in `globals.css`.
+ * Two things live in this sheet.
+ *
+ * 1. THE code-block chrome — the language chip, the copy button, and the room
+ *    they reserve on the first line. `<CodeBlock>` (Shiki, at build time) and
+ *    the docs markdown pipeline (`rehype-pretty-code`, `lib/docs.ts`) both
+ *    emit a `figure.code-figure` with an optional `.code-lang` chip and a
+ *    `.code-copy` slot, so both take their chrome from these rules and cannot
+ *    drift apart again — they had already diverged twice. `<CodeBlock>`
+ *    imports this file itself, which is why the chrome is not scoped to
+ *    `/docs` the way the rest of the sheet is.
+ *
+ * 2. Documentation-only chrome: the filename bar a fence's `title="…"`
+ *    produces, and the article's min-width guard.
  *
  * Token switching for Shiki itself already lives in `globals.css` (both
  * palettes are emitted as `--shiki-light` / `--shiki-dark` custom properties
  * at build time), so nothing here has to know which theme is active.
  */
 
+/* ------------------------------------------------------------------ *
+ * Code-block chrome — shared by <CodeBlock> and the docs pipeline.
+ * ------------------------------------------------------------------ */
+
 .code-figure {
+  /* Anchor for the chip and the button; both are absolutely positioned so
+     neither pipeline has to reserve layout for them. */
   position: relative;
   margin: 0;
+
+  /* Derived, not guessed. `<CopyButton>` is a 44px touch target until `sm`
+     and 36px from there up, so the chip's step-aside and the first line's
+     right padding are both computed from that one number. A hard-coded step
+     is how the chip ended up underneath the button on a phone. */
+  --code-copy-size: 2.75rem;
+  --code-chrome-edge: 0.45rem;
+  --code-chrome-gap: 0.4rem;
+  --code-chrome-step: calc(
+    var(--code-chrome-edge) +
+    var(--code-copy-size) +
+    var(--code-chrome-gap)
+  );
+  /* Chip room on top of the button's: enough for a five-letter language. */
+  --code-chrome-inset: calc(var(--code-chrome-step) + 2.4rem);
 }
 
-/* The pipeline emits the figure with the <pre> inside it; the <pre> keeps the
-   ground and the hairline from `.prose-arc pre`, so the figure adds none. */
-.prose-arc .code-figure pre {
+@media (min-width: 40rem) {
+  .code-figure {
+    --code-copy-size: 2.25rem;
+  }
+}
+
+/* The scrolling block. It is the `<pre>` in docs — which keeps its ground and
+   hairline from `.prose-arc pre`, so the figure adds neither — and a
+   `.code-scroll` wrapper in `<CodeBlock>`, whose figure owns the border so
+   the filename bar can share it. Only the chrome reservation is shared.
+
+   Child combinators, not descendants: `<CodeBlock>` keeps its `<pre>` one
+   level deeper, inside `.code-scroll`, so a block rendered inside `.prose-arc`
+   would otherwise reserve the inset twice. */
+.prose-arc .code-figure > pre,
+.code-figure > .code-scroll {
   margin: 0;
-  /* Room for the language chip and the copy button on the first line. */
-  padding-right: 5.5rem;
+  padding-right: var(--code-chrome-inset);
 }
 
 .code-figure .code-lang {
@@ -39,18 +83,20 @@
 
 .code-figure .code-copy {
   position: absolute;
-  top: 0.4rem;
-  right: 0.45rem;
+  top: var(--code-chrome-edge);
+  right: var(--code-chrome-edge);
   z-index: 2;
 }
 
 /* When both are present the chip steps aside for the button. */
 .code-figure:has(.code-copy) .code-lang {
-  right: 3.1rem;
+  right: var(--code-chrome-step);
 }
 
 /* Pointer devices reveal the button on hover or focus; touch devices, which
-   have neither, always show it. */
+   have neither, always show it — a width gate alone hides it permanently on
+   a tablet. Reduced motion flattens the fade through the kill switch in
+   `globals.css`, leaving the two end states intact. */
 @media (hover: hover) and (pointer: fine) {
   .code-figure .code-copy {
     opacity: 0;
@@ -62,6 +108,10 @@
     opacity: 1;
   }
 }
+
+/* ------------------------------------------------------------------ *
+ * Documentation-only chrome.
+ * ------------------------------------------------------------------ */
 
 /* `title="…"` on a fence renders a filename bar above the block. */
 .prose-arc .code-figure [data-rehype-pretty-code-title] {

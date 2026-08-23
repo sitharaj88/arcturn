@@ -1,5 +1,10 @@
 import { codeToHtml } from "shiki";
 import { cn } from "@/lib/cn";
+// The chip, the copy button and the room they reserve are ONE ruleset, shared
+// with the docs markdown pipeline. Importing it here — rather than leaving it
+// to `app/docs/layout.tsx` — is what lets a marketing page use the same
+// `.code-figure` chrome instead of a second, drifting copy of it.
+import "@/app/docs/docs.css";
 import { CopyButton } from "./CopyButton";
 
 /**
@@ -39,33 +44,18 @@ export async function CodeBlock({
   return (
     <figure
       className={cn(
-        "group relative overflow-hidden rounded-md border border-default bg-surface-inset",
+        // `code-figure` carries the positioning context, the chip, the button
+        // and the hover gate (`app/docs/docs.css`). Everything left here is
+        // this block's own ground — docs put the same ground on the `<pre>`.
+        "code-figure overflow-hidden rounded-md border border-default bg-surface-inset",
         className,
       )}
     >
-      <div className="pointer-events-none absolute right-2 top-2 z-10 flex items-center gap-2">
-        {language && language !== "text" ? (
-          <span className="rounded-full border border-default bg-surface-card px-2 py-0.5 text-caption uppercase tracking-wide text-faint">
-            {language}
-          </span>
-        ) : null}
-        {/*
-          Hover-capable pointers get the button on hover or focus; anything
-          else — touch at any width — keeps it visible, since a `md:` gate
-          alone hides it permanently on a tablet. Same condition as the docs
-          pipeline's `.code-copy` in `app/docs/docs.css`.
-        */}
-        <span
-          className={cn(
-            "pointer-events-auto opacity-100 transition-opacity dur-fast ease-out",
-            "[@media(hover:hover)_and_(pointer:fine)]:opacity-0",
-            "[@media(hover:hover)_and_(pointer:fine)]:group-hover:opacity-100",
-            "[@media(hover:hover)_and_(pointer:fine)]:group-focus-within:opacity-100",
-          )}
-        >
-          <CopyButton value={stripShellPrompt(source)} label="Copy code" />
+      {language && language !== "text" ? (
+        <span className="code-lang" aria-hidden="true">
+          {language}
         </span>
-      </div>
+      ) : null}
 
       {filename ? (
         <figcaption className="border-b border-default px-4 py-2 font-mono text-caption text-faint">
@@ -75,12 +65,21 @@ export async function CodeBlock({
 
       <div
         className={cn(
-          "overflow-x-auto px-4 py-4 pr-24 text-code-block [&_pre]:min-w-max [&_pre]:bg-transparent",
+          // `pl-4`, not `px-4`: the right side is the shared
+          // `--code-chrome-inset`, and pitting Tailwind's logical
+          // `padding-inline` against the sheet's physical `padding-right`
+          // makes the reservation a cascade question nobody should have to
+          // answer. Only one rule sets the right edge.
+          "code-scroll overflow-x-auto py-4 pl-4 text-code-block [&_pre]:min-w-max [&_pre]:bg-transparent",
           showLineNumbers && "code-line-numbers",
         )}
         // biome-ignore lint/security/noDangerouslySetInnerHtml: `html` is Shiki's own escaped output for local trusted source, produced at build time; no user input reaches it.
         dangerouslySetInnerHTML={{ __html: html }}
       />
+
+      <span className="code-copy">
+        <CopyButton value={stripShellPrompt(source)} label="Copy code" />
+      </span>
     </figure>
   );
 }

@@ -2,6 +2,7 @@ import { ArcHalo } from "@/components/ui/ArcHalo";
 import { Button } from "@/components/ui/Button";
 import { CommandChip } from "@/components/ui/CommandChip";
 import { Container } from "@/components/ui/Container";
+import { SECTION_BAND, SECTION_RHYTHM } from "@/components/ui/Section";
 import { cn } from "@/lib/cn";
 import { INSTALL_COMMAND } from "@/lib/utils";
 
@@ -16,6 +17,8 @@ export interface CTASectionProps {
   showCommand?: boolean;
   /** Rarely overridden — the default is the site's one install truth. */
   command?: string;
+  /** Raised ground + hairlines, to close a page on a band. */
+  band?: boolean;
   className?: string;
 }
 
@@ -25,14 +28,22 @@ export function CTASection({
   lede = "Start a session, watch every tool call ask first, then go back and read exactly what happened.",
   showCommand,
   command = INSTALL_COMMAND,
+  band = false,
   className,
 }: CTASectionProps) {
   const compact = variant === "compact";
   const withCommand = showCommand ?? !compact;
 
   return (
+    // The closing beat is a beat like any other, so it takes the shared rhythm
+    // (DESIGN.md §2.3.1): `compact` is the tight tier, not a third number.
     <section
-      className={cn("relative overflow-hidden", compact ? "py-16" : "py-24 md:py-28", className)}
+      className={cn(
+        "relative overflow-hidden",
+        compact ? SECTION_RHYTHM.tight : SECTION_RHYTHM.default,
+        band && SECTION_BAND,
+        className,
+      )}
     >
       {compact ? null : (
         <ArcHalo
@@ -43,7 +54,7 @@ export function CTASection({
       )}
       <Container size="prose" className="relative flex flex-col items-center text-center">
         <h2 className={cn("text-balance text-text", compact ? "text-h3" : "text-h2")}>{title}</h2>
-        <p className="mt-4 max-w-[56ch] text-lede text-muted">{lede}</p>
+        <p className="mt-4 max-w-(--measure-lede) text-lede text-muted">{lede}</p>
         <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
           <Button href="/docs/getting-started" size={compact ? "md" : "lg"}>
             Get started

@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { cn } from "@/lib/cn";
+import { cardSurface } from "./Card";
 
 /**
  * Every known limit of every safety control. Warn-toned, not red: these are
@@ -21,7 +22,11 @@ export function LimitsTable({ rows, className }: LimitsTableProps) {
       {rows.map((row) => (
         <li
           key={row.control}
-          className="rounded-md border border-default border-l-2 border-l-warn bg-surface-card p-4"
+          // Card's `limit` surface — the warn edge is defined once, there.
+          className={cn(
+            "rounded-md border p-4",
+            cardSurface({ variant: "limit", elevated: false }),
+          )}
         >
           <p className="text-body-sm font-medium text-text">{row.control}</p>
           <p className="mt-1.5 text-body-sm text-muted">{row.limit}</p>

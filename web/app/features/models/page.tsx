@@ -6,7 +6,8 @@ import { Container } from "@/components/ui/Container";
 import { DocLinks } from "@/components/ui/DocLinks";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { Reveal } from "@/components/ui/Reveal";
-import { type StatusRow, StatusTable } from "@/components/ui/StatusTable";
+import { StatusTable } from "@/components/ui/StatusTable";
+import { PROVIDER_ROWS } from "@/lib/providers";
 
 const LEDE =
   "One streaming client, every backend — and an honest note about which paths have actually run.";
@@ -22,63 +23,6 @@ export const metadata: Metadata = {
     url: "/features/models",
   },
 };
-
-/**
- * Rows from `content/docs/providers.md`; statuses from the disclosure in
- * `content/blog/why-arcturn.md`. No status here may be upgraded without that
- * disclosure changing first.
- */
-const PROVIDER_ROWS: StatusRow[] = [
-  {
-    name: "openai-compatible",
-    detail:
-      "Any OpenAI-shaped endpoint, credentials per endpoint. Has completed real multi-turn tool-calling sessions.",
-    status: { status: "proven" },
-  },
-  {
-    name: "anthropic",
-    detail:
-      "Claude, direct — ANTHROPIC_API_KEY, or an OAuth subscription sign-in. Verified live on Claude Haiku 4.5.",
-    status: { status: "proven" },
-  },
-  {
-    name: "openai",
-    detail: "GPT via Chat Completions — OPENAI_API_KEY. Verified live on GPT-5 nano.",
-    status: { status: "proven" },
-  },
-  {
-    name: "openai-responses",
-    detail: "GPT via the Responses API — OPENAI_API_KEY. Verified live on GPT-5 nano.",
-    status: { status: "proven" },
-  },
-  {
-    name: "google",
-    detail:
-      "Gemini, direct — GOOGLE_API_KEY (GEMINI_API_KEY also works). Verified live on Gemini 3.5 Flash Lite.",
-    status: { status: "proven" },
-  },
-  {
-    name: "anthropic-compatible",
-    detail:
-      "Any Anthropic-Messages endpoint, credentials per endpoint. Verified live against a canonical Messages API; no third-party implementation exercised yet.",
-    status: { status: "proven" },
-  },
-  {
-    name: "bedrock",
-    detail: "Claude, Nova, Llama, Mistral and Titan on AWS — the standard AWS provider chain.",
-    status: { status: "unreached" },
-  },
-  {
-    name: "vertex",
-    detail: "Gemini and Claude on Google Cloud — application-default credentials.",
-    status: { status: "unreached" },
-  },
-  {
-    name: "azure",
-    detail: "GPT on Azure OpenAI, addressed by deployment — AZURE_OPENAI_API_KEY or Entra ID.",
-    status: { status: "unreached" },
-  },
-];
 
 const MODEL_COMMANDS = `arcturn --model anthropic/claude-sonnet-4-5
 arcturn --model openai/gpt-5.1

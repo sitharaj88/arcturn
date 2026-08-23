@@ -269,7 +269,7 @@ Now the part that makes this safe to ship at all. **A `retro` proposal is never
 auto-applied**, and that is not a policy, it is the lane:
 
 ```markdown
-tools: read, grep, glob, ls, bash     # no write, no edit, no multiedit
+tools: read, grep, glob, ls, bash     # no write, no edit — that is the whole guarantee
 ```
 
 `read`+`bash` and no write tool is the **exec lane**. `retro` gets a real isolated

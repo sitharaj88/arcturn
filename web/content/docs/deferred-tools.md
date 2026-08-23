@@ -34,6 +34,14 @@ model-invoked [skill tool](/docs/skill-tool) is on: its description *is* a compa
 so deferring it would turn skills into a two-round-trip discovery. Setting your own
 `alwaysActive` replaces this whole list.
 
+Two things about that default list are worth knowing before you keep it. `multi_edit` names
+no tool — nothing in the harness registers it, in that spelling or as `multiedit`, so the
+entry is inert and is skipped like any name matching no tool; see [the reserved
+name](/docs/tools#multiedit-reserved-and-currently-inert). And
+[`search_code`](/docs/code-search) is *not* on the list, so with deferral on, the offline
+code index costs one `tool_search` round trip before the model can reach it — add it to your
+own `alwaysActive` if the work is search-heavy.
+
 Activation state is **per process**: each agent keeps its own disclosure set (one served
 session's `tool_search` never changes another session's tool list), an MCP reconnect
 carries the live agent's activations forward, and after `--resume` the model pays one
@@ -96,6 +104,8 @@ feature in the first place.
 
 ## Related
 
+- [Code search](/docs/code-search) — `search_code`, the always-registered tool that is *not*
+  in the `alwaysActive` default and so pays a discovery round trip under deferral.
 - [Context management](/docs/context-management) — the sibling levers for tool *results*
   (offloading, context editing) rather than tool *schemas*.
 - [Custom tools](/docs/sdk-tools) — the `Tool` interface deferred tools wraps; nothing

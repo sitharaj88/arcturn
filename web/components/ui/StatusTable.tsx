@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { cn } from "@/lib/cn";
+import { cardSurface } from "./Card";
 import { StatusPill, type StatusPillProps } from "./StatusPill";
 
 /**
@@ -19,7 +20,15 @@ export interface StatusTableProps {
 
 export function StatusTable({ rows, className }: StatusTableProps) {
   return (
-    <ul className={cn("list-none border-y border-default", className)}>
+    // Card's `quiet` surface: hairlines only, ground left transparent, so the
+    // table reads correctly on the page ground *and* on a raised band.
+    <ul
+      className={cn(
+        "list-none border-y",
+        cardSurface({ variant: "quiet", elevated: false }),
+        className,
+      )}
+    >
       {rows.map((row) => (
         <li
           key={row.name}

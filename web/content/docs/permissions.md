@@ -21,8 +21,8 @@ one layer of — this page is the operational reference for that one layer.
 
 - **`default`** — read-only tools run freely; anything else is asked about, unless a
   rule already settles it.
-- **`acceptEdits`** — like `default`, but `write`, `edit`, and `multiedit` are also
-  auto-approved. Good for a session where you're actively reviewing every diff yourself.
+- **`acceptEdits`** — like `default`, but `write` and `edit` are also auto-approved. Good
+  for a session where you're actively reviewing every diff yourself.
 - **`plan`** — only read-only tools may run. Every mutating tool is denied outright, with
   a message telling the model to use the `plan` tool instead. This is the enforcement
   half of [plan mode](/docs/sub-agents#plan-mode-and-todos): the model can look around and
@@ -37,12 +37,20 @@ The default tool classifications a mode reasons about:
 - **Read-only** (usable in `plan` mode, auto-allowed in `default`): `read`, `grep`, `glob`, `ls`.
   `fetch` is deliberately *not* on this list — it reads nothing local but sends data to an
   arbitrary host, so it is gated like a mutating tool and prompted per origin.
-- **Edit tools** (auto-approved by `acceptEdits`): `write`, `edit`, `multiedit`.
+- **Edit tools** (auto-approved by `acceptEdits`): `write`, `edit`. `DEFAULT_EDIT_TOOLS`
+  carries a third entry, `multiedit`, which no package registers — it is a
+  [reserved name with no tool behind it](/docs/tools#multiedit-reserved-and-currently-inert)
+  and matches no call.
 - **Always-allow** (pass silently in every mode, no prompt ever): `todo`, `plan` — pure
   session state, never worth interrupting the model over.
 
 Every one of these lists is overridable per engine instance (`readOnlyTools`, `editTools`,
 `alwaysAllowTools` in `PermissionEngineOptions`).
+
+Anything not on one of those lists is neither auto-allowed nor auto-denied: it falls through
+to the prompt. That includes tools that only read — `search_code` and `symbols` are both
+absent from the read-only list, so both are asked in `default` and refused in `plan`. See
+[Code search § Limits](/docs/code-search#limits).
 
 ## Rules
 
@@ -141,7 +149,8 @@ For every tool call, the engine works through this order and stops at the first 
    already said otherwise in step 3. Prompting for every file read would make `default`
    mode unusable.
 5. **`yolo` allows what's left; `acceptEdits` allows edit tools.** In `yolo` mode anything
-   still unresolved is allowed. In `acceptEdits`, only `write`/`edit`/`multiedit` are.
+   still unresolved is allowed. In `acceptEdits`, only `write`/`edit` are — plus the
+   reserved `multiedit` name, which no tool answers to.
 6. **Whatever's left is asked.** The configured `PermissionRequester` is called. With no
    requester configured, the call is denied — `"Permission required for \"<tool>\" but no
    permission requester is configured."` — never assumed safe.

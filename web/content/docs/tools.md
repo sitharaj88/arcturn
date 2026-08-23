@@ -25,10 +25,26 @@ order: 4
 | `fetch` | Yes | HTTP GET a URL and return readable text. |
 | `websearch` | No | Search the web and return a numbered list of results. |
 
-Two more state tools — `todo` and `plan` — ship from `@arcturn/core` rather than
-`@arcturn/tools`, because they mutate agent state instead of the outside world; see
-[Sub-agents](/docs/sub-agents) for `plan` mode and delegation. Every tool's permission
-decision, when it needs one, ultimately runs through the [permission
+Those nine are what `@arcturn/tools` provides. The CLI registers more beside them, from
+other packages — `memory`, `subagent` and `skill` have pages of their own ([Project
+memory](/docs/memory), [Sub-agents](/docs/sub-agents), [Model-invoked
+skills](/docs/skill-tool)). Three belong here, because they are part of the same
+read-and-edit loop:
+
+| Tool | Permission? | Ships from | What it does |
+|---|---|---|---|
+| `search_code` | Asked | `@arcturn/index` | An offline BM25 + structural index of the repository, returning `file:line` addresses rather than file bodies. Registered unconditionally — see [Code search](/docs/code-search). |
+| `todo` | No | `@arcturn/core` | The turn's task list. |
+| `plan` | No | `@arcturn/core` | Presents a plan for approval; see [Sub-agents](/docs/sub-agents) for `plan` mode and delegation. |
+
+`todo` and `plan` ship from `@arcturn/core` rather than `@arcturn/tools` because they mutate
+agent state instead of the outside world, and they are on the engine's always-allow list, so
+they never prompt. `search_code` is the odd one: it never calls `ctx.requestPermission`
+itself, but it is not on the read-only list either, so the call still reaches the engine and
+is prompted in `default` mode — see [its own
+limits](/docs/code-search#limits) for why, and for the rule that settles it.
+
+Every tool's permission decision, when it needs one, ultimately runs through the [permission
 engine](/docs/permissions) — this page covers what each tool asks for and does once
 allowed. `sandbox` (a filesystem jail for `bash`, see below), `dryRun` (route file
 mutations to a shadow tree — see [Dry-run mode](/docs/dry-run)), and `taint`/`canary`
@@ -50,6 +66,29 @@ MCP tools especially) can be written to a file and replaced with a stub — see
 [Context management](/docs/context-management) — and, opt-in, most tool *schemas* can be
 withheld from the request entirely until the model asks for them via `tool_search` — see
 [Deferred tools](/docs/deferred-tools).
+
+## `multiedit`: reserved, and currently inert
+
+Three lists in the codebase name a `multiedit` tool. **No package registers one.**
+`createDefaultTools` returns exactly the nine tools above, and the CLI's
+`BUILT_IN_TOOL_NAMES` — the list an extension may not shadow — does not carry the name in
+either spelling.
+
+| Where the name appears | What that list decides | Effect today |
+|---|---|---|
+| `DEFAULT_EDIT_TOOLS` (`@arcturn/core`) | Which tools `acceptEdits` auto-approves | None. Nothing is named `multiedit`, so the entry matches no call. |
+| `WRITE_TOOLS` (`/workflow` dispatch) | Which [lane](/docs/workflows#the-three-dispatch-lanes) a role's step runs on | A role that declares `multiedit` is classed **write lane** — a worktree, a captured patch — while holding no tool that can write. |
+| `DEFAULT_ALWAYS_ACTIVE_TOOLS` (deferred tools) | Which schemas are never withheld | None. The spelling there is `multi_edit`, and a name matching no tool is ignored. |
+
+Two spellings, three lists, zero tools. The name is reserved for a batch-edit tool that has
+not shipped. Until it does, "`acceptEdits` auto-approves `multiedit`" is a statement about
+an empty set, and the only observable consequence of the name anywhere is that middle row.
+
+Arcturn's [security page](/security) says adversarial review found features that were
+*present but unreachable*. This is that class, found in Arcturn's own documentation rather
+than its code: pages across these docs described a tool the harness has never registered.
+They now describe what is there. The name stays in the table above so the reservation is
+visible instead of being rediscovered.
 
 ## `read`
 

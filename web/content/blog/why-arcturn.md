@@ -184,6 +184,13 @@ documentation advertised as working. That is the argument for the distinction th
 draws everywhere between *implemented* and *verified against a live endpoint*, and it is why
 the three that remain unverified are marked rather than quietly counted.
 
+One thing has changed since I first wrote that distinction down: the install is real now.
+`arcturn` and the nine `@arcturn/*` packages behind it are published on npm at 0.1.0, so
+`npm install -g arcturn` fetches a tarball rather than asking you to clone the repo and
+build it. Publishing is a distribution fact and not a maturity claim — the version number
+is honest, the three unreached providers are still unreached, and nothing on the security
+page got shorter.
+
 If the agent you're using already tells you what it was allowed to do, what it cost, what
 it changed, and how to get back — you genuinely don't need this.
 

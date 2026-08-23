@@ -15,7 +15,10 @@ export function ArcRule({ className }: ArcRuleProps) {
   const gradientId = `arc-rule-${id}`;
 
   return (
-    <div className={cn("container-wide", className)} aria-hidden="true">
+    // `.container`, not `.container-wide`: a divider that is 10rem wider than
+    // the sections it divides reads as a stray line rather than a break in the
+    // column, and its faded ends land 80px outside the text they belong to.
+    <div className={cn("container", className)} aria-hidden="true">
       <svg
         aria-hidden="true"
         viewBox="0 0 1200 16"

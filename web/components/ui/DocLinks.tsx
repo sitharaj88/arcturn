@@ -1,6 +1,7 @@
 import { ArrowRight } from "lucide-react";
 import Link from "next/link";
 import { cn } from "@/lib/cn";
+import { cardSurface } from "./Card";
 
 /** The "read the docs" block that closes a marketing section. */
 export interface DocLink {
@@ -18,7 +19,9 @@ export function DocLinks({ links, title = "Read the docs", className }: DocLinks
   return (
     <nav
       aria-label={title}
-      className={cn("rounded-lg border border-default bg-surface-card p-5", className)}
+      // Card's surface, not a copy of it — but flat: this block sits inside a
+      // section rather than floating above the page (DESIGN.md §2.3.4).
+      className={cn("rounded-lg border p-5", cardSurface({ elevated: false }), className)}
     >
       <p className="text-eyebrow uppercase text-faint">{title}</p>
       <ul className="mt-3 list-none space-y-1">

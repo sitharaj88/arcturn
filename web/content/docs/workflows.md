@@ -175,6 +175,13 @@ them:
   step. The worktree itself is removed only on success; a failed or cancelled step keeps it
   on disk for forensics and says where.
 
+One entry in those lists is a name and nothing more. `multiedit` appears in the write-tool
+set the lane classifier matches against, but [no package registers a tool by that
+name](/docs/tools#multiedit-reserved-and-currently-inert). Declaring it is therefore the one
+way to get a role onto the **write lane** — worktree, captured patch, applied to your
+checkout — while it holds nothing that can write a file. Nothing about a role is inferred
+from what it claims; the lane is read off the declared names, and a reserved name counts.
+
 A role that declares no `tools:` at all is **refused at dispatch**, not defaulted to the read
 lane. An omitted list used to mean "every tool the session allows," which in a `yolo` session
 made declaring nothing *more* permissive than declaring `read, edit` ever was — exactly
