@@ -1,0 +1,16 @@
+# Cloudflare Pages headers. `public/` is copied verbatim into the export, so
+# this file ships inside `out/` where Pages reads it.
+
+# Next's hashed build assets never change under the same URL — a new build
+# gets new hashes — so a year-long immutable cache is exactly correct and is
+# the one delivery item the site review flagged as missing on this host.
+/_next/static/*
+  Cache-Control: public, max-age=31536000, immutable
+
+# The favicon set and OG image are content-hashed by Next as well.
+/icon.svg*
+  Cache-Control: public, max-age=31536000, immutable
+
+/*
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin

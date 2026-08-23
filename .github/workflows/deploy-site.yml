@@ -1,0 +1,48 @@
+name: Deploy site
+
+# Manual only, like every workflow in this repository: the site reaches the
+# public internet when a person says so, never as a side effect of a push.
+#
+# Ordering rule (DESIGN.md §0.6): the site claims `npm install -g arcturn`
+# works, so it must never be deployed while that package is unpublished.
+# arcturn@0.1.0 has been live on npm since 2026-08-23; if this workflow is
+# ever pointed at a release that is not yet published, publish first.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # No `version:` here on purpose: the action reads `packageManager` from
+      # package.json, and specifying both is a hard error in v4.
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --dir web build
+
+      # The export must be complete before anything ships: a partial `out/`
+      # deploys as a site with missing pages, which Pages would serve happily.
+      - name: Verify the export
+        run: |
+          pages="$(find web/out -name index.html | wc -l)"
+          echo "exported pages: $pages"
+          if [ "$pages" -lt 55 ]; then
+            echo "::error::expected at least 55 pages, got $pages — refusing to deploy a partial export"
+            exit 1
+          fi
+          test -f web/out/_headers || { echo "::error::_headers missing from export"; exit 1; }
+
+      - name: Deploy to Cloudflare Pages
+        run: npx wrangler@4 pages deploy web/out --project-name=arcturn --commit-dirty=true
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
