@@ -1,5 +1,7 @@
 # `@arcturn/mcp`
 
+> **Internal to the arcturn CLI. Published so `arcturn` resolves; its API may change in any release without a major version bump.** Embedders should depend on [`@arcturn/core`](https://www.npmjs.com/package/@arcturn/core) and [`@arcturn/ai`](https://www.npmjs.com/package/@arcturn/ai), whose surfaces are the ones the SDK documents.
+
 Model Context Protocol client bridge for the [Arcturn](https://arcturn.dev) agent
 harness. `McpManager` connects to a set of configured servers and bridges their tools
 into ordinary `Tool[]` from `@arcturn/types` — the model sees no difference between an

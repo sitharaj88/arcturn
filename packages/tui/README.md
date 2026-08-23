@@ -1,5 +1,7 @@
 # `@arcturn/tui`
 
+> **Internal to the arcturn CLI. Published so `arcturn` resolves; its API may change in any release without a major version bump.** Embedders should depend on [`@arcturn/core`](https://www.npmjs.com/package/@arcturn/core) and [`@arcturn/ai`](https://www.npmjs.com/package/@arcturn/ai), whose surfaces are the ones the SDK documents.
+
 A from-scratch terminal UI library with differential rendering, built for the
 [Arcturn](https://arcturn.dev) CLI but standalone and independently usable. It depends
 only on `marked` and `get-east-asian-width`, and every terminal interaction goes through

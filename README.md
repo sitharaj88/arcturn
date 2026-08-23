@@ -35,12 +35,12 @@ first-class features everything they leave out:
 | `@arcturn/ai` | Unified multi-provider LLM streaming client with model catalog and retry |
 | `@arcturn/core` | Agent runtime: event loop, steering, sessions, compaction, permissions, sub-agents |
 | `@arcturn/tools` | Built-in tools: read, write, edit, bash (+background), grep, glob, ls, fetch |
-| `@arcturn/mcp` | Model Context Protocol client bridge |
-| `@arcturn/tui` | Terminal UI library with differential rendering |
-| `@arcturn/index` | Token-optimized code index and BM25 semantic search |
-| `@arcturn/protocol` | NDJSON wire protocol for server mode |
-| `@arcturn/server` | WebSocket server exposing agent sessions to remote clients |
-| `@arcturn/evals` | Task-level eval harness: real coding tasks with programmatic assertions |
+| `@arcturn/mcp` | Model Context Protocol client bridge — internal, API may change in any release |
+| `@arcturn/tui` | Terminal UI library with differential rendering — internal, API may change in any release |
+| `@arcturn/index` | Token-optimized code index and BM25 semantic search — internal, API may change in any release |
+| `@arcturn/protocol` | NDJSON wire protocol for server mode — internal, API may change in any release |
+| `@arcturn/server` | WebSocket server exposing agent sessions to remote clients — internal, API may change in any release |
+| `@arcturn/evals` | Task-level eval harness: real coding tasks with programmatic assertions (in-repo only, not published) |
 | `arcturn` (CLI: `arcturn`) | The interactive coding agent, workflow engine, and agent-org runtime |
 
 ## Platform support
