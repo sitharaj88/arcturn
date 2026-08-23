@@ -1,12 +1,13 @@
 name: Release
 
-# Publishing is deliberately tag-triggered, never push-triggered: a merge to
-# `main` must not be able to reach npm on its own. Tag `v0.1.0` to ship 0.1.0.
+# Manual only, and deliberately so: nothing in this repository can reach npm on
+# its own. Not a push, not a merge, not a tag. Publishing happens when a person
+# opens Actions -> Release -> Run workflow and says so.
+#
+# `dry-run` defaults to TRUE, so the dangerous choice is never the default one:
+# running this workflow without thinking packs every package, proves the token
+# and the org, and uploads nothing. Untick it only when you mean it.
 on:
-  push:
-    tags: ["v*"]
-  # A dry run publishes nothing and exists so the release path can be exercised
-  # before it matters, rather than debugged for the first time under a tag.
   workflow_dispatch:
     inputs:
       dry-run:
@@ -30,9 +31,9 @@ jobs:
         node-version: [20, 22]
     steps:
       - uses: actions/checkout@v4
+      # No `version:` here on purpose: the action reads `packageManager` from
+      # package.json, and specifying both is a hard error in v4.
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
@@ -53,9 +54,9 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v4
+      # No `version:` here on purpose: the action reads `packageManager` from
+      # package.json, and specifying both is a hard error in v4.
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -65,29 +66,39 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
 
-      # The tag is the source of truth for the version. A tag that disagrees
-      # with the manifests is a mistake worth failing on, not reconciling
-      # silently — publishing 0.1.0 from a `v0.2.0` tag is unrecoverable.
-      - name: Tag must match the package version
-        if: startsWith(github.ref, 'refs/tags/v')
+      # There is no tag to check against any more, so the manifest is the source
+      # of truth and the job's own output is the record of what it shipped. A
+      # version already on npm cannot be republished — npm refuses, permanently
+      # — so catching it here turns an unrecoverable half-publish into a clean
+      # failure before the first tarball moves.
+      - name: Report the version, and refuse one already published
         run: |
-          tag="${GITHUB_REF_NAME#v}"
           pkg="$(node -p "require('./packages/cli/package.json').version")"
-          if [ "$tag" != "$pkg" ]; then
-            echo "::error::tag v$tag does not match packages/cli version $pkg"
-            exit 1
+          echo "arcturn version in the manifest: $pkg"
+          echo "dry-run: ${{ inputs.dry-run }}"
+          if [ "${{ inputs.dry-run }}" = "false" ]; then
+            if npm view "arcturn@$pkg" version >/dev/null 2>&1; then
+              echo "::error::arcturn@$pkg is already on npm — bump the version before publishing"
+              exit 1
+            fi
+            echo "arcturn@$pkg is not on the registry; publishing"
           fi
-          echo "publishing $pkg"
 
       # `pnpm publish -r` walks the workspace in dependency order and rewrites
       # every `workspace:*` range to the real version as it goes, so the
       # published `arcturn` never points at a spec npm cannot resolve.
+      #
+      # Gated on the INPUT, not on the event: this workflow has exactly one
+      # trigger now, so keying off `github.event_name` would make the publish
+      # step unreachable and every run a silent dry run.
       - name: Publish to npm
-        if: ${{ github.event_name == 'push' }}
+        if: ${{ inputs.dry-run == false }}
         run: pnpm publish -r --access public --no-git-checks --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Dry run (pack only)
-        if: ${{ github.event_name == 'workflow_dispatch' }}
+        if: ${{ inputs.dry-run }}
         run: pnpm publish -r --access public --no-git-checks --dry-run
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

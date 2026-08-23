@@ -1,9 +1,10 @@
 name: CI
 
+# Manual only. Nothing in this repository runs CI on its own — a push or a pull
+# request will not start it, so the matrix runs when a person asks for it and
+# not before. Run it from Actions -> CI -> Run workflow.
 on:
-  push:
-    branches: [main]
-  pull_request:
+  workflow_dispatch:
 
 jobs:
   build-test:
@@ -17,9 +18,9 @@ jobs:
         node-version: [20, 22]
     steps:
       - uses: actions/checkout@v4
+      # No `version:` here on purpose: the action reads `packageManager` from
+      # package.json, and specifying both is a hard error in v4.
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
