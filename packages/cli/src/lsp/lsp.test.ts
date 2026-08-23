@@ -97,6 +97,26 @@ describe("LspFrameDecoder", () => {
   });
 });
 
+/**
+ * Wait for a stderr line containing `needle`, bounded at 5s.
+ *
+ * Child stderr is delivered asynchronously and nothing orders it against
+ * the stdout the protocol runs over, so "the handshake finished" never
+ * implies "the diagnostic has arrived". Returns the line, or undefined on
+ * timeout so the caller's assertion still names what was missing.
+ */
+async function waitForStderr(
+  lspClient: { stderr: string[] },
+  needle: string,
+): Promise<string | undefined> {
+  const deadline = Date.now() + 5000;
+  for (;;) {
+    const line = lspClient.stderr.find((entry) => entry.includes(needle));
+    if (line !== undefined || Date.now() > deadline) return line;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
 describe("spawnLspClient against the fake server", () => {
   let dir: string;
   let client: LspClient | undefined;
@@ -216,7 +236,11 @@ describe("spawnLspClient against the fake server", () => {
       rootUri: pathToFileURL(dir).toString(),
     });
 
-    const line = client.stderr.find((entry) => entry.includes("configuration result"));
+    // The handshake resolves over stdout; this diagnostic arrives over
+    // stderr, and nothing orders the two — the neighbouring cancel test says
+    // as much. Wait for the line instead of asserting the race away (seen
+    // lost on the windows-22 CI leg).
+    const line = await waitForStderr(client, "configuration result");
     expect(line).toContain("length=3");
   });
 
@@ -231,8 +255,7 @@ describe("spawnLspClient against the fake server", () => {
 
     // The cancel notification is sent synchronously from the timeout
     // handler, but stderr delivery from the child process is async.
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    const cancelLine = client.stderr.find((entry) => entry.includes("$/cancelRequest"));
+    const cancelLine = await waitForStderr(client, "$/cancelRequest");
     expect(cancelLine).toBeDefined();
     expect(cancelLine).toMatch(/params=\{"id":\d+\}/);
   });
