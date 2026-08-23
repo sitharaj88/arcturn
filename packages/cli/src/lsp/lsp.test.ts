@@ -6,7 +6,13 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { resolvePath } from "@arcturn/tools";
 import type { Tool, ToolExecutionContext, ToolResult } from "@arcturn/types";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { encodeFrame, type LspClient, LspFrameDecoder, spawnLspClient } from "./client.js";
+import {
+  encodeFrame,
+  type LspClient,
+  LspFrameDecoder,
+  resolveLspSpawn,
+  spawnLspClient,
+} from "./client.js";
 import { createLspManager, formatDiagnostics } from "./manager.js";
 import { clearServerExistsCache, serverFor } from "./servers.js";
 import { wrapToolsWithLsp } from "./wrap.js";
@@ -16,6 +22,19 @@ const fakeServerPath = join(here, "fake-server.mjs");
 
 function fakeCommand(...extraArgs: string[]): string[] {
   return [process.execPath, fakeServerPath, ...extraArgs];
+}
+
+/**
+ * Remove a temp tree, retrying the way `fs.rm` documents for Windows.
+ *
+ * Every directory here is the `cwd` of a spawned server, and Windows keeps a
+ * handle on a live process's working directory — so a lagging handle release
+ * surfaces as `EBUSY` on `rmdir`. `dispose()` is what guarantees the process
+ * is gone (and a dedicated test asserts that); the retries only absorb the OS
+ * releasing the handle a beat later.
+ */
+function rmTree(dir: string): Promise<void> {
+  return rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 }
 
 function fakeContext(cwd: string): ToolExecutionContext {
@@ -89,7 +108,7 @@ describe("spawnLspClient against the fake server", () => {
   afterEach(async () => {
     await client?.dispose();
     client = undefined;
-    await rm(dir, { recursive: true, force: true });
+    await rmTree(dir);
   });
 
   it("completes the handshake and returns diagnostics published after didOpen", async () => {
@@ -236,6 +255,33 @@ describe("spawnLspClient against the fake server", () => {
     }
   });
 
+  it("does not resolve dispose() until the killed server has really exited", async () => {
+    // `proc.killed` only records that a signal was *delivered*. Resolving on
+    // that leaves the process dying in the background, and on Windows a live
+    // process holds its working directory open — so the next thing to touch
+    // the workspace (this suite's own cleanup, or a manager reusing the
+    // directory) fails with EBUSY.
+    const killSpy = vi.spyOn(ChildProcess.prototype, "kill");
+    try {
+      client = await spawnLspClient(fakeCommand("--ignore-exit"), {
+        cwd: dir,
+        rootUri: pathToFileURL(dir).toString(),
+      });
+      const localClient = client;
+      client = undefined;
+
+      await localClient.dispose();
+
+      const target = killSpy.mock.contexts[0] as ChildProcess | undefined;
+      expect(target).toBeDefined();
+      // Exited on its own (`exitCode`) or died on the signal (`signalCode`);
+      // both null would mean it was still running when dispose() resolved.
+      expect(target?.signalCode ?? target?.exitCode).not.toBeNull();
+    } finally {
+      killSpy.mockRestore();
+    }
+  });
+
   it("kills a server that ignores `exit` only after the grace period elapses", async () => {
     const killSpy = vi.spyOn(ChildProcess.prototype, "kill");
     try {
@@ -260,6 +306,75 @@ describe("spawnLspClient against the fake server", () => {
   });
 });
 
+describe("resolveLspSpawn", () => {
+  it("spawns a plain binary directly, with no shell in between", () => {
+    expect(resolveLspSpawn(["gopls"], "linux", {})).toEqual({
+      executable: "gopls",
+      args: [],
+      spawnOptions: {},
+    });
+    expect(resolveLspSpawn(["/usr/local/bin/pyright-langserver", "--stdio"], "darwin", {})).toEqual(
+      {
+        executable: "/usr/local/bin/pyright-langserver",
+        args: ["--stdio"],
+        spawnOptions: {},
+      },
+    );
+  });
+
+  it("spawns a real Windows executable directly as well", () => {
+    expect(resolveLspSpawn(["C:\\bin\\rust-analyzer.exe"], "win32", {})).toEqual({
+      executable: "C:\\bin\\rust-analyzer.exe",
+      args: [],
+      spawnOptions: {},
+    });
+  });
+
+  it("routes a Windows .cmd shim through %ComSpec%, quoted so a spaced path survives", () => {
+    // `npm i -g typescript-language-server` installs a `.cmd` shim on Windows,
+    // and `CreateProcess` cannot execute one — Node refuses to spawn a
+    // `.bat`/`.cmd` without a shell at all. Spawned directly, every
+    // npm-installed language server is simply unavailable on Windows.
+    const plan = resolveLspSpawn(
+      ["C:\\Program Files\\nodejs\\typescript-language-server.CMD", "--stdio"],
+      "win32",
+      { ComSpec: "C:\\Windows\\System32\\cmd.exe" },
+    );
+    expect(plan.executable).toBe("C:\\Windows\\System32\\cmd.exe");
+    expect(plan.args).toEqual([
+      "/d",
+      "/s",
+      "/c",
+      '""C:\\Program Files\\nodejs\\typescript-language-server.CMD" --stdio"',
+    ]);
+    // Without this, libuv re-escapes the line and cmd.exe sees something else.
+    expect(plan.spawnOptions).toEqual({ windowsVerbatimArguments: true });
+  });
+
+  it("covers .bat too, and falls back to cmd.exe when %ComSpec% is unset", () => {
+    const plan = resolveLspSpawn(["C:\\bin\\some-langserver.bat", "--stdio"], "win32", {});
+    expect(plan.executable).toBe("cmd.exe");
+    expect(plan.args).toEqual(["/d", "/s", "/c", '"C:\\bin\\some-langserver.bat --stdio"']);
+  });
+
+  it("never involves a shell on POSIX, whatever the file happens to be called", () => {
+    // A file named `x.cmd` on Linux is just a file, and there is no cmd.exe
+    // to hand it to — the decision follows the platform, not the extension.
+    const plan = resolveLspSpawn(["/opt/servers/x.cmd", "--stdio"], "linux", {
+      ComSpec: "C:\\Windows\\System32\\cmd.exe",
+    });
+    expect(plan).toEqual({
+      executable: "/opt/servers/x.cmd",
+      args: ["--stdio"],
+      spawnOptions: {},
+    });
+  });
+
+  it("rejects an empty command instead of spawning nothing", () => {
+    expect(() => resolveLspSpawn([], "linux", {})).toThrow(/at least one element/);
+  });
+});
+
 describe("createLspManager", () => {
   let dir: string;
   let manager: ReturnType<typeof createLspManager>;
@@ -274,7 +389,7 @@ describe("createLspManager", () => {
 
   afterEach(async () => {
     await manager.dispose();
-    await rm(dir, { recursive: true, force: true });
+    await rmTree(dir);
   });
 
   it("returns null for an extension with no configured server", async () => {
@@ -354,7 +469,7 @@ describe("serverFor", () => {
   afterEach(async () => {
     process.env.PATH = originalPath;
     clearServerExistsCache();
-    await rm(tempBinDir, { recursive: true, force: true });
+    await rmTree(tempBinDir);
   });
 
   it("returns undefined for an unknown extension", () => {
@@ -373,7 +488,9 @@ describe("serverFor", () => {
     process.env.PATH = tempBinDir;
     clearServerExistsCache();
 
-    expect(serverFor("main.go")).toEqual(["gopls"]);
+    // The resolved file, not the bare name: on Windows the winner may be a
+    // `.cmd`/`.bat` shim, and only the resolved name says how to spawn it.
+    expect(serverFor("main.go")).toEqual([join(tempBinDir, "gopls")]);
   });
 });
 
@@ -400,7 +517,7 @@ describe("wrapToolsWithLsp", () => {
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await rmTree(dir);
   });
 
   it("appends formatted diagnostics to a successful write result", async () => {

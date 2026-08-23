@@ -123,7 +123,14 @@ export class SessionHost {
   constructor(options: SessionHostOptions) {
     this.#agentFactory = options.agentFactory;
     this.#sessionStore = options.sessionStore;
-    this.#defaultCwd = options.defaultCwd;
+    // Both are stored resolved, and for the same reason: the confinement
+    // check below is a string comparison against `#cwdRoot`, so a default cwd
+    // that is spelled differently (relative, or — on Windows — drive-relative
+    // like `\tmp\ws`, which resolves against whatever drive the process
+    // happens to be on) would hand sessions a working directory that no
+    // longer matches the wall guarding it. Every session header then reports
+    // one canonical, absolute path whichever way it was created.
+    this.#defaultCwd = resolve(options.defaultCwd);
     this.#cwdRoot = resolve(options.cwdRoot ?? options.defaultCwd);
     this.#permissionTimeoutMs = options.permissionTimeoutMs ?? DEFAULT_PERMISSION_TIMEOUT_MS;
     this.#resolveModel = options.resolveModel ?? defaultResolveModel;

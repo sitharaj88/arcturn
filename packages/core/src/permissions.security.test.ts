@@ -6,6 +6,7 @@
  * that reopens one fails with an obvious message.
  */
 
+import { join, resolve } from "node:path";
 import type { PermissionRule } from "@arcturn/types";
 import { describe, expect, it } from "vitest";
 import {
@@ -49,25 +50,66 @@ describe("command chaining cannot ride a prefix rule", () => {
 });
 
 describe("path subjects are normalized before matching", () => {
+  // `defaultSubject` resolves a path subject, so on Windows it hands the engine
+  // `D:\repo\src\a.ts` where POSIX hands it `/repo/src/a.ts`. A rule written
+  // for that workspace is spelled the same way, so both sides of every case
+  // below are built from `resolve`/`join` rather than typed as POSIX literals:
+  // the property under test is that resolution cannot dodge a rule, not that
+  // the separator is a slash.
+  const REPO = resolve("/repo");
+  const MY_HOME = resolve("/home/me");
+
   it("a traversal cannot escape a directory grant", () => {
     const rules: PermissionRule[] = [
-      { tool: "write", specifier: "/repo/src/**", action: "allow", scope: "project" },
+      { tool: "write", specifier: join(REPO, "src", "**"), action: "allow", scope: "project" },
     ];
-    const escaped = defaultSubject("write", { path: "src/../../outside/pwned.txt" }, "/repo");
-    expect(escaped).toBe("/outside/pwned.txt");
+    const escaped = defaultSubject("write", { path: "src/../../outside/pwned.txt" }, REPO);
+    expect(escaped).toBe(resolve("/outside/pwned.txt"));
     expect(matchRules(rules, "write", escaped)).toBeUndefined();
     expect(
-      matchRules(rules, "write", defaultSubject("write", { path: "src/a.ts" }, "/repo"))?.action,
+      matchRules(rules, "write", defaultSubject("write", { path: "src/a.ts" }, REPO))?.action,
     ).toBe("allow");
+  });
+
+  it("a traversal cannot escape a directory grant spelled with backslashes", () => {
+    // The same grant as above, written the way a Windows config file writes it.
+    // `globToRegExp` treats both separators as separators on every platform, so
+    // this rule has to behave identically wherever the test runs.
+    const rules: PermissionRule[] = [
+      { tool: "write", specifier: `${REPO}\\src\\**`, action: "allow", scope: "project" },
+    ];
+    expect(
+      matchRules(rules, "write", defaultSubject("write", { path: "src/a.ts" }, REPO))?.action,
+    ).toBe("allow");
+    expect(
+      matchRules(rules, "write", defaultSubject("write", { path: "src/../../out/x" }, REPO)),
+    ).toBeUndefined();
   });
 
   it("a relative path cannot dodge an absolute deny", () => {
     const rules: PermissionRule[] = [
-      { tool: "read", specifier: "/home/me/.env", action: "deny", scope: "user" },
+      { tool: "read", specifier: join(MY_HOME, ".env"), action: "deny", scope: "user" },
     ];
-    for (const path of ["/home/me/.env", ".env", "./.env", "sub/../.env"]) {
-      const subject = defaultSubject("read", { path }, "/home/me");
+    for (const path of [join(MY_HOME, ".env"), ".env", "./.env", "sub/../.env"]) {
+      const subject = defaultSubject("read", { path }, MY_HOME);
       expect(matchRules(rules, "read", subject)?.action, `path ${path}`).toBe("deny");
+    }
+  });
+
+  it("a separator spelling cannot dodge an exact-path deny", () => {
+    // Both spellings name one file on Windows, and `path.resolve` there
+    // produces the backslash one — so a rule typed with forward slashes (what a
+    // portable config file and every doc example use) has to deny it. Pinned in
+    // both directions so neither spelling is the privileged one.
+    const forward: PermissionRule[] = [
+      { tool: "read", specifier: "C:/repo/.env", action: "deny", scope: "user" },
+    ];
+    const backward: PermissionRule[] = [
+      { tool: "read", specifier: "C:\\repo\\.env", action: "deny", scope: "user" },
+    ];
+    for (const subject of ["C:/repo/.env", "C:\\repo\\.env"]) {
+      expect(matchRules(forward, "read", subject)?.action, `forward vs ${subject}`).toBe("deny");
+      expect(matchRules(backward, "read", subject)?.action, `backward vs ${subject}`).toBe("deny");
     }
   });
 

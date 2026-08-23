@@ -1,7 +1,8 @@
 import { execFile } from "node:child_process";
 import { lstat, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import type { CommandUi, SelectOption } from "./commands.js";
@@ -61,16 +62,31 @@ async function writeFiles(root: string, files: Record<string, string>): Promise<
   }
 }
 
-/** Create a throwaway local git repository with the given files, committed. */
+/**
+ * Create a throwaway local git repository with the given files, committed.
+ *
+ * The URL comes from {@link pathToFileURL} rather than `file://${dir}`: on
+ * Windows that concatenation produces `file://C:\Users\...`, where everything
+ * after `file://` up to the first `/` reads as the *host* — so git is handed a
+ * URL with a host and no path. The canonical spelling is `file:///C:/Users/...`,
+ * which is what `pathToFileURL` produces, and on POSIX it is byte-identical to
+ * what the concatenation produced.
+ *
+ * `core.autocrlf false` for the same reason the repository root ships a
+ * `.gitattributes`: Git for Windows defaults it to `true`, which would hand
+ * every checkout of these fixtures back with CRLF endings the fixture text
+ * never had.
+ */
 async function makeGitRepo(files: Record<string, string>): Promise<{ dir: string; url: string }> {
   const dir = await scratchDir("arcturn-registry-src-");
   await gitRun(["init", "--quiet", "-b", "main"], dir);
   await gitRun(["config", "user.email", "test@example.com"], dir);
   await gitRun(["config", "user.name", "Test"], dir);
+  await gitRun(["config", "core.autocrlf", "false"], dir);
   await writeFiles(dir, files);
   await gitRun(["add", "-A"], dir);
   await gitRun(["commit", "--quiet", "-m", "init"], dir);
-  return { dir, url: `file://${dir}` };
+  return { dir, url: pathToFileURL(dir).href };
 }
 
 async function commitAll(dir: string, message: string): Promise<string> {
@@ -188,11 +204,18 @@ describe("resolveSource", () => {
     });
   });
 
+  // A `local-path` source is `resolve`d, so its location is spelled the way the
+  // running platform spells an absolute path: `/abs/path/pkg` on POSIX and
+  // `D:\abs\path\pkg` on Windows, where a leading-slash path is rooted on the
+  // current drive. The assertions below therefore resolve the expectation the
+  // same way instead of hard-coding the POSIX spelling — what is under test is
+  // that the source is recognised and anchored, not which separator it lands on.
+
   it("resolves an absolute local path", () => {
     const resolved = resolveSource("/abs/path/pkg");
     expect(resolved).toMatchObject({
       kind: "local-path",
-      location: "/abs/path/pkg",
+      location: resolve("/abs/path/pkg"),
       defaultName: "pkg",
     });
   });
@@ -200,18 +223,52 @@ describe("resolveSource", () => {
   it("resolves a relative local path against the given cwd", () => {
     const resolved = resolveSource("./my-pkg", { cwd: "/base/dir" });
     expect(resolved.kind).toBe("local-path");
-    expect(resolved.location).toBe("/base/dir/my-pkg");
+    expect(resolved.location).toBe(resolve("/base/dir", "my-pkg"));
+  });
+
+  it("recognises the Windows spellings of a local path instead of rejecting them", () => {
+    // `.\my-pkg` is what tab-completion in `cmd` and PowerShell produces, and
+    // `C:\pkgs\my-pkg` is what an absolute path looks like there. None of these
+    // starts with `/`, `./`, `../` or `~`, so every one fell through to the
+    // git-URL and `owner/repo` shapes, matched neither, and came back as
+    // `could not parse package source` — on Windows, `arcturn ext install`
+    // could not be handed a local package by the spelling its own shell
+    // completes. Recognition is asserted on both platforms; where each spelling
+    // *lands* is `path.resolve`'s business and differs by design, so what is
+    // pinned here is that it is recognised, anchored absolutely, and named
+    // after its leaf however that leaf is spelled.
+    const options = { cwd: "/base/dir", homeDir: "/home/alice" };
+    for (const raw of [
+      ".\\my-pkg",
+      "..\\my-pkg",
+      "C:\\pkgs\\my-pkg",
+      "C:/pkgs/my-pkg",
+      "\\\\server\\share\\my-pkg",
+      "~\\pkgs\\my-pkg",
+    ]) {
+      const resolvedSource = resolveSource(raw, options);
+      expect(resolvedSource.kind, raw).toBe("local-path");
+      expect(resolvedSource.defaultName, raw).toBe("my-pkg");
+      expect(isAbsolute(resolvedSource.location), raw).toBe(true);
+      expect(resolvedSource.ref, raw).toBeUndefined();
+    }
+  });
+
+  it("still reads a one-letter URL scheme as a URL, not a drive", () => {
+    // The drive-letter shape is `X:` followed by one separator; `x://host/p` is
+    // a scheme and keeps its own branch.
+    expect(resolveSource("s://host/repo.git").kind).toBe("git-url");
   });
 
   it("expands ~ against the given home directory", () => {
     const resolved = resolveSource("~/pkgs/my-pkg", { homeDir: "/home/alice" });
-    expect(resolved.location).toBe("/home/alice/pkgs/my-pkg");
+    expect(resolved.location).toBe(resolve("/home/alice", "pkgs", "my-pkg"));
   });
 
   it("never treats a local path's trailing text as a ref", () => {
     const resolved = resolveSource("/abs/path/pkg@2");
     expect(resolved.kind).toBe("local-path");
-    expect(resolved.location).toBe("/abs/path/pkg@2");
+    expect(resolved.location).toBe(resolve("/abs/path/pkg@2"));
     expect(resolved.ref).toBeUndefined();
   });
 
@@ -233,9 +290,28 @@ describe("isValidPackageName / resolvePackageDir", () => {
   it("rejects uppercase, slashes, and traversal segments", () => {
     expect(isValidPackageName("MyPkg")).toBe(false);
     expect(isValidPackageName("a/b")).toBe(false);
+    expect(isValidPackageName("a\\b")).toBe(false);
     expect(isValidPackageName("../../evil")).toBe(false);
     expect(isValidPackageName(".")).toBe(false);
     expect(isValidPackageName("..")).toBe(false);
+  });
+
+  it("rejects a name Win32 would settle onto the packages root itself", () => {
+    // `...` passes the charset and is neither `.` nor `..`, and Windows
+    // discards a component's trailing dots before the filesystem sees the
+    // name — so `<packagesRoot>\...` *is* `<packagesRoot>`, while the
+    // containment check below compares the lexical spelling where the dots are
+    // still there. Installing under that name would unpack over the root of the
+    // package store and removing it would delete the store, every other
+    // installed package with it.
+    for (const name of ["...", "....", "foo.", ".foo"]) {
+      expect(isValidPackageName(name), name).toBe(false);
+      expect(() => resolvePackageDir("/home/user/.arcturn/packages", name), name).toThrow(
+        RegistryError,
+      );
+    }
+    // The charset itself is unchanged: a dot inside a name is still ordinary.
+    expect(isValidPackageName("my-pkg_1.0")).toBe(true);
   });
 
   it("rejects a traversal-attempting name when resolving a package directory", () => {
@@ -246,7 +322,7 @@ describe("isValidPackageName / resolvePackageDir", () => {
 
   it("resolves a safe name inside packagesRoot", () => {
     const dir = resolvePackageDir("/home/user/.arcturn/packages", "safe-name");
-    expect(dir).toBe("/home/user/.arcturn/packages/safe-name");
+    expect(dir).toBe(resolve("/home/user/.arcturn/packages", "safe-name"));
   });
 });
 

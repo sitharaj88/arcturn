@@ -161,6 +161,21 @@ export interface SandboxProbe {
    * the original path on failure rather than requiring probes to do so.
    */
   realpathSync: (path: string) => string;
+  /**
+   * The environment the unsandboxed fallback resolves its shell from —
+   * `%ComSpec%` on win32 (see {@link resolveShell}). Optional, and omitting
+   * it means the real `process.env`, which is what production wants.
+   *
+   * It is here so that a test asking "what does win32 do when `%ComSpec%` is
+   * unset" can answer with `env: {}` instead of deleting the variable out of
+   * the live process. That mattered on Windows itself: the real Windows
+   * environment block is case-insensitive, `ComSpec` and `COMSPEC` are one
+   * variable there, and a `delete process.env.ComSpec` that only removes the
+   * casing it was spelled with leaves the other one standing — so the test
+   * that meant "unset" was running against a set variable. It is also plain
+   * shared mutable state in a parallel test runner.
+   */
+  env?: NodeJS.ProcessEnv;
 }
 
 /** The real environment: `process.platform`, `node:fs`'s `existsSync`, `process.env.PATH`, etc. */
@@ -172,6 +187,7 @@ export function defaultSandboxProbe(): SandboxProbe {
     homeDir: homedir(),
     tmpDir: tmpdir(),
     realpathSync,
+    env: process.env,
   };
 }
 
@@ -212,13 +228,17 @@ export interface SandboxInvocation {
  * rather than ones the user typed — so it hands back a shell that actually
  * exists on `platform` instead of a hardcoded `/bin/sh` that doesn't on
  * win32.
+ *
+ * @param env - Environment `resolveShell` reads `%ComSpec%` from;
+ *   `undefined` means the real `process.env` (see {@link SandboxProbe.env}).
  */
 function unsandboxed(
   command: string,
   platform: NodeJS.Platform,
   unavailableNote?: string,
+  env?: NodeJS.ProcessEnv,
 ): SandboxInvocation {
-  const shell = resolveShell(platform);
+  const shell = resolveShell(platform, env);
   return {
     executable: shell.executable,
     args: shell.args(command),
@@ -246,7 +266,7 @@ export function resolveSandboxInvocation(
   mode: BashSandboxMode,
   probe: SandboxProbe = defaultSandboxProbe(),
 ): SandboxInvocation {
-  if (mode === "off") return unsandboxed(command, probe.platform);
+  if (mode === "off") return unsandboxed(command, probe.platform, undefined, probe.env);
 
   // Resolve symlinks in each root's *parent* before joining `.arcturn` on: the
   // child needn't exist yet, but its containing directory generally does.
@@ -258,7 +278,7 @@ export function resolveSandboxInvocation(
 
   if (probe.platform === "darwin") {
     if (!probe.existsSync(SANDBOX_EXEC_PATH)) {
-      return unsandboxed(command, probe.platform, SANDBOX_UNAVAILABLE_NOTE);
+      return unsandboxed(command, probe.platform, SANDBOX_UNAVAILABLE_NOTE, probe.env);
     }
     const profile = buildSandboxExecProfile(roots);
     return {
@@ -270,7 +290,7 @@ export function resolveSandboxInvocation(
 
   if (probe.platform === "linux") {
     if (!commandExistsOnPath(BWRAP_BINARY, probe.path, probe.existsSync)) {
-      return unsandboxed(command, probe.platform, SANDBOX_UNAVAILABLE_NOTE);
+      return unsandboxed(command, probe.platform, SANDBOX_UNAVAILABLE_NOTE, probe.env);
     }
     return { executable: BWRAP_BINARY, args: buildBwrapArgv(roots, command), spawnOptions: {} };
   }
@@ -278,5 +298,5 @@ export function resolveSandboxInvocation(
   // No sandboxing backend exists for this platform at all (win32 today) —
   // say so explicitly rather than reusing the "binary missing" wording,
   // which would wrongly imply a backend exists here in principle.
-  return unsandboxed(command, probe.platform, noSandboxBackendNote(probe.platform));
+  return unsandboxed(command, probe.platform, noSandboxBackendNote(probe.platform), probe.env);
 }

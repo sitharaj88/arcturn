@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 import { Agent, MemorySessionStore } from "@arcturn/core";
 import type { AgentEvent, Tool } from "@arcturn/types";
 import { describe, expect, it } from "vitest";
@@ -19,6 +19,7 @@ interface HostFixture {
 function buildHost(
   llm: ReturnType<typeof createScriptedLLM> | ReturnType<typeof createGatedLLM>,
   tools: Tool[] = [],
+  defaultCwd = "/tmp/arcturn-test",
 ): HostFixture {
   const host = new SessionHost({
     agentFactory: (opts) =>
@@ -30,7 +31,7 @@ function buildHost(
         cwd: opts.cwd,
         sessionId: opts.sessionId,
       }),
-    defaultCwd: "/tmp/arcturn-test",
+    defaultCwd,
     permissionTimeoutMs: 200,
   });
   return { host };
@@ -41,14 +42,33 @@ describe("SessionHost", () => {
     const { host } = buildHost(createScriptedLLM([textTurn("hi")]));
     const header = await host.createSession({});
     expect(header.sessionId).toBeTruthy();
-    expect(header.cwd).toBe("/tmp/arcturn-test");
+    // `resolve`, not the literal: on Windows a leading-slash path is
+    // drive-*relative*, and the header reports the resolved absolute form.
+    expect(header.cwd).toBe(resolve("/tmp/arcturn-test"));
     expect(header.version).toBe(1);
   });
 
   it("honours an explicit cwd inside the served workspace", async () => {
     const { host } = buildHost(createScriptedLLM([textTurn("hi")]));
     const header = await host.createSession({ cwd: "sub/dir" });
-    expect(header.cwd).toBe(join("/tmp/arcturn-test", "sub/dir"));
+    // `resolve`, not `join`: the host resolves the request against the served
+    // root, and on Windows resolving is what supplies the drive letter that
+    // joining two drive-less paths never would.
+    expect(header.cwd).toBe(resolve("/tmp/arcturn-test", "sub/dir"));
+  });
+
+  it("reports one canonical, absolute cwd whether or not the client named one", async () => {
+    // The confinement wall is a string comparison against the *resolved*
+    // root, so a default cwd kept in whatever spelling the caller happened to
+    // use hands out working directories the wall no longer matches — and
+    // every tool in the session resolves its paths against that value. A
+    // relative `defaultCwd` shows it on any platform; on Windows a
+    // leading-slash path like `/tmp/ws` is drive-relative and does the same.
+    const { host } = buildHost(createScriptedLLM([textTurn("hi")]), [], ".");
+    const implicit = await host.createSession({});
+    const explicit = await host.createSession({ cwd: "." });
+    expect(isAbsolute(implicit.cwd)).toBe(true);
+    expect(implicit.cwd).toBe(explicit.cwd);
   });
 
   it("refuses a cwd outside the served workspace", async () => {

@@ -135,8 +135,38 @@ async function currentBranch(exec: ExecFn, cwd: string): Promise<string | undefi
 }
 
 /**
- * Best-effort default branch: the local `origin/HEAD` pointer, then
- * `init.defaultBranch`, then `"main"`. Never touches the network.
+ * What a repository's base branch is usually called, tried in this order once
+ * the repository itself has been asked and had nothing to say.
+ */
+const DEFAULT_BRANCH_NAMES: readonly string[] = ["main", "master", "trunk", "develop"];
+
+/** Whether `refs/heads/<branch>` is a ref this repository actually has. */
+async function localBranchExists(exec: ExecFn, cwd: string, branch: string): Promise<boolean> {
+  if (branch === "") return false;
+  const result = await git(exec, cwd, ["rev-parse", "--verify", "-q", `refs/heads/${branch}`]);
+  return result.ok;
+}
+
+/**
+ * Best-effort default branch: the local `origin/HEAD` pointer, then a branch
+ * this repository actually has. Never touches the network.
+ *
+ * `init.defaultBranch` is consulted, but only as a **candidate**. It says what
+ * this machine names a branch when it creates one, which is a different claim
+ * from "this repository's base branch is called that", and the two come apart
+ * constantly: Git for Windows and every developer who ever ran `git config
+ * --global init.defaultBranch master` disagree with a repository whose branch
+ * is `main`. Taking the config's word for it made `/pr` compute
+ * `git log master..HEAD` — a range git rejects outright — so the PR body said
+ * "no commits ahead of the base branch" about a branch full of commits, and
+ * the refusal that stops a PR being opened *from* the default branch silently
+ * stopped firing because `branch === base` could no longer be true. A name no
+ * ref answers to is not an answer, so it is verified before it is used.
+ *
+ * The last line is the old behaviour, unchanged, and it is reached only when
+ * the repository has no branch by any of these names — an unborn branch, or a
+ * checkout whose branches are all named something else. There is nothing to
+ * verify against there, so the configured name is still the best guess.
  */
 async function defaultBranch(exec: ExecFn, cwd: string): Promise<string> {
   const originHead = await git(exec, cwd, [
@@ -150,9 +180,13 @@ async function defaultBranch(exec: ExecFn, cwd: string): Promise<string> {
     const slash = ref.indexOf("/");
     if (slash !== -1) return ref.slice(slash + 1);
   }
-  const configured = await git(exec, cwd, ["config", "--get", "init.defaultBranch"]);
-  if (configured.ok && configured.stdout.trim() !== "") return configured.stdout.trim();
-  return "main";
+  const configured = (
+    await git(exec, cwd, ["config", "--get", "init.defaultBranch"])
+  ).stdout.trim();
+  for (const candidate of new Set([configured, ...DEFAULT_BRANCH_NAMES])) {
+    if (await localBranchExists(exec, cwd, candidate)) return candidate;
+  }
+  return configured === "" ? "main" : configured;
 }
 
 async function remoteUrl(exec: ExecFn, cwd: string, name = "origin"): Promise<string | undefined> {
@@ -405,9 +439,28 @@ export function slugifyBranchName(text: string): string {
   return slug === "" ? `arcturn/${Date.now()}` : slug;
 }
 
-async function branchCommitSubjects(exec: ExecFn, cwd: string, base: string): Promise<string[]> {
-  const result = await git(exec, cwd, ["log", `${base}..HEAD`, "--pretty=format:%s"]);
-  return result.ok ? nonEmptyLines(result.stdout) : [];
+/**
+ * The commit subjects this branch adds on top of `base`.
+ *
+ * `undefined` when git could not answer the question at all — which is not the
+ * same fact as "there are none", and must not be reported as one: a PR body
+ * that says "no commits ahead" about an unanswerable range is a claim nobody
+ * checked. The remote-tracking spelling is tried second so a checkout that has
+ * the base branch only as `origin/<base>` (a CI clone of one branch, a
+ * worktree) still gets a real answer instead of that claim.
+ *
+ * @param base - The base branch's short name.
+ */
+async function branchCommitSubjects(
+  exec: ExecFn,
+  cwd: string,
+  base: string,
+): Promise<string[] | undefined> {
+  for (const rev of [base, `origin/${base}`]) {
+    const result = await git(exec, cwd, ["log", `${rev}..HEAD`, "--pretty=format:%s"]);
+    if (result.ok) return nonEmptyLines(result.stdout);
+  }
+  return undefined;
 }
 
 /** `gh pr create` prints the new PR's URL, usually as the last line of stdout. */
@@ -502,11 +555,13 @@ function createPrCommand(exec: ExecFn): SlashCommand {
       }
 
       const subjects = await branchCommitSubjects(exec, cwd, base);
-      const title = args.trim() || subjects[0] || branch;
+      const title = args.trim() || subjects?.[0] || branch;
       const body =
-        subjects.length === 0
-          ? "_No commits ahead of the base branch._"
-          : ["## Commits", "", ...subjects.map((subject) => `- ${subject}`)].join("\n");
+        subjects === undefined
+          ? `_Could not list this branch's commits against \`${base}\`._`
+          : subjects.length === 0
+            ? "_No commits ahead of the base branch._"
+            : ["## Commits", "", ...subjects.map((subject) => `- ${subject}`)].join("\n");
 
       const created = await gh(exec, cwd, [
         "pr",

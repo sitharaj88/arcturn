@@ -1,10 +1,9 @@
 /** The `glob` built-in tool: find files by glob pattern via tinyglobby. */
 
 import { stat } from "node:fs/promises";
-import { relative } from "node:path";
 import type { Tool, ToolResult } from "@arcturn/types";
 import { glob as tinyGlob } from "tinyglobby";
-import { resolvePath } from "./path-utils.js";
+import { displayPath, resolvePath } from "./path-utils.js";
 import { abortedResult, errorResult, textResult } from "./result-utils.js";
 
 const MAX_RESULTS = 500;
@@ -88,7 +87,7 @@ export function createGlobTool(): Tool {
 
       const truncated = withMtime.length > MAX_RESULTS;
       const capped = withMtime.slice(0, MAX_RESULTS);
-      const relPaths = capped.map((m) => relative(ctx.cwd, m.path) || m.path);
+      const relPaths = capped.map((m) => displayPath(ctx.cwd, m.path));
 
       const details: GlobToolDetails = { matchCount: withMtime.length, truncated };
       let text = relPaths.length > 0 ? relPaths.join("\n") : "No files matched.";

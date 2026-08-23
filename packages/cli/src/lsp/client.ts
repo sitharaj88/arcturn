@@ -9,7 +9,8 @@
  */
 
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
-import { basename } from "node:path";
+import { basename, win32 } from "node:path";
+import { resolveShell } from "@arcturn/tools";
 import { packageInfo } from "../meta.js";
 
 /** One LSP `Range` position (zero-based, matching the protocol). */
@@ -150,7 +151,11 @@ export interface LspClient {
    * one). Rejects on a server error response or timeout.
    */
   request(method: string, params: unknown, timeoutMs?: number): Promise<unknown>;
-  /** Shut the server down gracefully, then kill the process. Safe to call more than once. */
+  /**
+   * Shut the server down gracefully, then kill the process. Safe to call more
+   * than once. Resolves only once the process has actually exited (bounded),
+   * so the workspace it was spawned in is free to be deleted or reused.
+   */
   dispose(): Promise<void>;
   /** Lines captured from the server's stderr, most recent last (capped). */
   readonly stderr: readonly string[];
@@ -161,6 +166,74 @@ const DEFAULT_WAIT_TIMEOUT_MS = 3000;
 const MAX_STDERR_LINES = 200;
 /** Grace period after `exit` for the server to close on its own before a hard kill. */
 const EXIT_GRACE_MS = 300;
+/**
+ * How long `dispose` waits for a *killed* server to actually be gone before
+ * escalating, and again before giving up. Bounded so teardown can never hang.
+ */
+const KILL_GRACE_MS = 1000;
+
+/**
+ * Windows script extensions `CreateProcess` cannot execute: spawning one
+ * without a shell fails outright (Node refuses `.bat`/`.cmd` without
+ * `shell`/`ComSpec` since the CVE-2024-27980 fix). This is not an edge case
+ * for language servers — an npm-installed `typescript-language-server` or
+ * `pyright-langserver` *is* a `.cmd` shim on Windows, so without this the
+ * whole LSP feature is silently unavailable there.
+ */
+const WINDOWS_SCRIPT_EXTENSIONS: readonly string[] = [".cmd", ".bat"];
+
+/** How one language server command is actually handed to `spawn`. */
+export interface LspSpawnPlan {
+  /** Executable to spawn. */
+  executable: string;
+  /** Argument vector for {@link LspSpawnPlan.executable}. */
+  args: string[];
+  /**
+   * Options that MUST be merged into the `spawn` call — dropping them mangles
+   * the command line `cmd.exe` receives. See `ShellSpawnOptions`.
+   */
+  spawnOptions: { windowsVerbatimArguments?: boolean };
+}
+
+/**
+ * Quote one argument inside a `cmd /d /s /c "<line>"` command line.
+ *
+ * `/s` strips exactly the outer quote pair and leaves inner quotes alone, so
+ * an argument that carries its own quotes survives verbatim — which is what a
+ * server path like `C:\Program Files\nodejs\x.cmd` needs.
+ */
+function quoteForCmdLine(argument: string): string {
+  return /[\s&|<>^]/.test(argument) ? `"${argument}"` : argument;
+}
+
+/**
+ * Decide how to invoke a language server command on `platform`.
+ *
+ * Pure: it reads nothing but its arguments, so a Windows invocation is
+ * testable from a POSIX machine (the same shape `resolveShell` uses in
+ * `@arcturn/tools`). Everything except a Windows batch shim is spawned
+ * directly — no shell, no quoting, no interpretation of the argv.
+ *
+ * @param platform - Target platform; defaults to `process.platform`.
+ * @param env - Environment to read `%ComSpec%` from; defaults to `process.env`.
+ */
+export function resolveLspSpawn(
+  command: readonly string[],
+  platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+): LspSpawnPlan {
+  const [bin, ...args] = command;
+  if (!bin) throw new Error("resolveLspSpawn: command must have at least one element");
+  const direct: LspSpawnPlan = { executable: bin, args: [...args], spawnOptions: {} };
+  if (platform !== "win32") return direct;
+  // `win32.extname`, not the host's: this must read a Windows path the same
+  // way when the decision is simulated from POSIX in a test.
+  if (!WINDOWS_SCRIPT_EXTENSIONS.includes(win32.extname(bin).toLowerCase())) return direct;
+
+  const shell = resolveShell(platform, env);
+  const line = [bin, ...args].map(quoteForCmdLine).join(" ");
+  return { executable: shell.executable, args: shell.args(line), spawnOptions: shell.spawnOptions };
+}
 
 /**
  * Spawn a language server and complete the `initialize`/`initialized`
@@ -175,12 +248,18 @@ export async function spawnLspClient(
   command: readonly string[],
   options: SpawnLspClientOptions,
 ): Promise<LspClient> {
-  const [bin, ...args] = command;
-  if (!bin) throw new Error("spawnLspClient: command must have at least one element");
+  if (command.length === 0) {
+    throw new Error("spawnLspClient: command must have at least one element");
+  }
 
-  const proc: ChildProcessWithoutNullStreams = spawn(bin, args, {
+  const plan = resolveLspSpawn(command);
+  const proc: ChildProcessWithoutNullStreams = spawn(plan.executable, plan.args, {
     cwd: options.cwd,
     stdio: ["pipe", "pipe", "pipe"],
+    // A language server is a background process the user never interacts
+    // with; without this Windows flashes a console window for every spawn.
+    windowsHide: true,
+    ...plan.spawnOptions,
   });
 
   const stderrLines: string[] = [];
@@ -383,7 +462,10 @@ export async function spawnLspClient(
       initializeTimeoutMs,
     );
   } catch (error) {
+    // Same discipline as `dispose`: leave nothing running behind a rejected
+    // handshake, and let the process go before the caller reacts to it.
     proc.kill();
+    await waitForExit(KILL_GRACE_MS);
     throw spawnError ?? error;
   }
   sendNotification("initialized", {});
@@ -435,12 +517,26 @@ export async function spawnLspClient(
   }
 
   /**
+   * Whether the process is really gone.
+   *
+   * `proc.killed` is deliberately not consulted: it only records that a
+   * signal was *delivered*, and flips to `true` the instant `kill()` returns
+   * — long before the process is reaped. Treating it as "exited" is what let
+   * `dispose()` resolve while the server was still alive, which on Windows
+   * leaves the spawn `cwd` locked (a live process's working directory cannot
+   * be removed) and fails the very next cleanup with `EBUSY`.
+   */
+  function hasExited(): boolean {
+    return proc.exitCode !== null || proc.signalCode !== null;
+  }
+
+  /**
    * Wait for the process to exit on its own, up to `timeoutMs`. Resolves
    * (does not reject) either way — the caller decides what to do if it's
    * still alive when this returns.
    */
   function waitForExit(timeoutMs: number): Promise<void> {
-    if (proc.exitCode !== null || proc.killed) return Promise.resolve();
+    if (hasExited()) return Promise.resolve();
     return new Promise((resolve) => {
       const timer = setTimeout(resolve, timeoutMs);
       proc.once("close", () => {
@@ -460,7 +556,7 @@ export async function spawnLspClient(
       }
     }
     waiters.clear();
-    if (proc.exitCode === null && !proc.killed) {
+    if (!hasExited()) {
       try {
         await sendRequest("shutdown", null, 1000);
         sendNotification("exit");
@@ -472,7 +568,19 @@ export async function spawnLspClient(
         // The server did not answer shutdown in time; fall through to kill it.
       }
     }
-    if (proc.exitCode === null && !proc.killed) proc.kill();
+    if (hasExited()) return;
+
+    // Force it down — and do not resolve until it is actually gone. Callers
+    // reuse or delete the workspace the moment `dispose()` returns, and a
+    // process that has been signalled is not yet a process that has exited.
+    proc.kill();
+    await waitForExit(KILL_GRACE_MS);
+    if (hasExited()) return;
+    // Still there: it either ignores SIGTERM or is wedged in uninterruptible
+    // work. SIGKILL cannot be caught (and maps to the same unconditional
+    // termination on Windows). Bounded again so teardown still finishes.
+    proc.kill("SIGKILL");
+    await waitForExit(KILL_GRACE_MS);
   }
 
   return {

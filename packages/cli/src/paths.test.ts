@@ -1,6 +1,6 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { describe, expect, it } from "vitest";
 import { cwdHash, resolveArcturnPaths } from "./paths.js";
 
@@ -23,6 +23,21 @@ describe("cwdHash", () => {
     expect(cwdHash("/tmp/Project", { caseInsensitive: true })).toBe(
       cwdHash("/tmp/project", { caseInsensitive: true }),
     );
+  });
+
+  it("gives one directory one bucket however the path is spelled", () => {
+    // `path.isAbsolute("/work/repo")` is `true` on Windows while the path is
+    // still only drive-relative, so hashing the raw spelling gave one directory
+    // two buckets there — `arcturn --cwd /work/repo` and `arcturn` run from
+    // `D:\work\repo` looked at different session histories. Every spelling
+    // `resolve` settles onto one path has to settle onto one bucket, on either
+    // separator, because both name the same directory on the platform that
+    // accepts both.
+    const settled = resolve("/work/repo");
+    expect(cwdHash("/work/repo")).toBe(cwdHash(settled));
+    expect(cwdHash(settled.replace(/\\/g, "/"))).toBe(cwdHash(settled));
+    expect(cwdHash(`${settled}${sep}`)).toBe(cwdHash(settled));
+    expect(cwdHash(join(settled, "sub", ".."))).toBe(cwdHash(settled));
   });
 
   it("keeps two buckets where the filesystem keeps two directories", () => {

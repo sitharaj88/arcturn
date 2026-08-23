@@ -2,10 +2,10 @@
 
 import type { Dirent } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
-import { join, relative } from "node:path";
+import { join } from "node:path";
 import type { Tool, ToolResult } from "@arcturn/types";
 import { glob as tinyGlob } from "tinyglobby";
-import { resolvePath } from "./path-utils.js";
+import { displayPath, resolvePath } from "./path-utils.js";
 import { abortedResult, errorResult, textResult } from "./result-utils.js";
 
 const SKIP_DIRS = new Set([".git", "node_modules"]);
@@ -156,7 +156,7 @@ export function createGrepTool(): Tool {
         filesSearched++;
 
         const lines = buffer.toString("utf8").split("\n");
-        const relPath = relative(ctx.cwd, file) || file;
+        const relPath = displayPath(ctx.cwd, file);
         for (let i = 0; i < lines.length; i++) {
           if (matchCount >= MAX_MATCHES) {
             truncated = true;

@@ -7,7 +7,11 @@
  * - **Storage.** One `0600` JSON file per server, `mcp-<server>.json`, inside
  *   the `0700` `~/.arcturn/auth` directory — the same discipline the provider
  *   OAuth store already uses, written through a temp file and renamed so a
- *   crash never leaves a half-written credential.
+ *   crash never leaves a half-written credential. Those mode bits are POSIX:
+ *   on Windows `mkdir`'s mode is ignored and `chmod` only toggles the
+ *   read-only attribute, so there the credential is protected by the ACL on
+ *   the user's profile directory instead. The modes are still requested
+ *   unconditionally, because they are what protects the file everywhere else.
  * - **Interaction.** A one-shot loopback listener on `127.0.0.1` with an
  *   ephemeral port, the authorization URL printed to the terminal, and a
  *   best-effort attempt to open the user's browser.

@@ -137,9 +137,14 @@ the CLI does, an embedder can do through `@arcturn/core` and `@arcturn/ai`.
 
 ### Platform support
 
-Linux, macOS and Windows, on Node 20 and 22, each verified in CI rather than
-assumed. Shell resolution, path handling and case sensitivity are resolved per
-platform at runtime.
+Linux, macOS and Windows, on Node 20 and 22, with a six-leg CI matrix building
+and testing all of them. That matrix earned its keep before this release ever
+shipped: its first real run failed 54 tests on Windows and surfaced ten genuine
+platform bugs the POSIX suites could not see — model-facing paths carrying the
+host separator, a `/dev/null` redirect refused as a workspace escape, language
+servers unspawnable because npm ships them as `.cmd` shims. All fixed, with the
+matrix as referee. Shell resolution, path handling and case sensitivity are
+resolved per platform at runtime.
 
 [Unreleased]: https://github.com/sitharaj88/arcturn/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/sitharaj88/arcturn/releases/tag/v0.1.0

@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Tool, ToolExecutionContext, ToolResult } from "@arcturn/types";
@@ -12,7 +12,7 @@ import {
   defaultKillEnvironment,
   FOREGROUND_KILL_DRAIN_MS,
 } from "./bash.js";
-import { createFakeContext, denyAllPermissions } from "./test-utils.js";
+import { createFakeContext, denyAllPermissions, removeTempDir } from "./test-utils.js";
 
 /** Whether a process (any process, not just our own children) is still alive. */
 function isAlive(pid: number): boolean {
@@ -59,7 +59,7 @@ describe("bash tool", () => {
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await removeTempDir(dir);
   });
 
   it("runs a command and returns merged output with exit code details", async () => {
@@ -240,6 +240,20 @@ describe("bash tool", () => {
       // poll generously past the SIGKILL grace period in case it doesn't.
       const died = await waitUntil(() => !isAlive(grandchildPid), BACKGROUND_KILL_GRACE_MS + 2_000);
       expect(died).toBe(true);
+
+      // Two different observers, so this needs its own wait rather than
+      // reusing the one above. `died` comes from polling `kill(pid, 0)`, which
+      // sees the grandchild go the instant the kernel reaps it; `running`
+      // flips on the manager's own `close` handler, which needs the top-level
+      // shell to exit AND its stdio pipes to close AND the event to reach this
+      // loop's turn. The gap between the two is small and real, and asserting
+      // on `running` at the moment `died` became true was reading the manager
+      // before it could have known. What the test means is that it converges.
+      const observedExit = await waitUntil(
+        () => manager.poll(taskId)?.running === false,
+        BACKGROUND_KILL_GRACE_MS + 2_000,
+      );
+      expect(observedExit).toBe(true);
       expect(manager.poll(taskId)?.running).toBe(false);
     },
     15_000,
@@ -254,7 +268,7 @@ describe("BackgroundTaskManager kill: platform-specific termination (D2)", () =>
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await removeTempDir(dir);
   });
 
   it("POSIX (darwin/linux): signals the process group via posixKill, never windowsKill", async () => {
@@ -328,7 +342,7 @@ describe("bash foreground kill: process-tree termination", () => {
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await removeTempDir(dir);
   });
 
   /** A kill environment that records calls without actually killing anything. */
@@ -451,7 +465,7 @@ describePosix("bash tool timeout teaching + repeat-timeout circuit breaker", () 
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await removeTempDir(dir);
   });
 
   /** Run `command` with a short timeout so it is killed by the tool. */

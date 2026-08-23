@@ -5024,6 +5024,33 @@ const CONFINEMENT_PASSTHROUGH_TOOLS: ReadonlySet<string> = new Set([
  */
 const CONFINEMENT_FLOOR_SCOPE: PermissionScope = "user";
 
+/** The drive letter a Windows absolute path starts with, e.g. `C:`. */
+const DRIVE_PREFIX = /^[A-Za-z]:/;
+
+/**
+ * A path with its drive letter removed and its separators folded to `/`.
+ *
+ * Windows spells one place several ways — `C:\Windows`, `c:/windows`, and the
+ * same directory on `D:` for a runner whose volume is not `C:` — and a wall
+ * that compares the bytes reads them as three different places.
+ */
+function driveRelative(path: string): string {
+  return path.replace(DRIVE_PREFIX, "").replace(/\\/g, "/");
+}
+
+/**
+ * Every sink a Windows path can name, drive-relative and folded — the null
+ * device as a POSIX-shaped command spells it (`C:\dev\null`), as Windows
+ * spells it (`\\.\NUL`), and the two standard streams a redirect discards to.
+ */
+const WINDOWS_DEVICE_SINKS: ReadonlySet<string> = new Set([
+  "/dev/null",
+  "/dev/stdout",
+  "/dev/stderr",
+  "/nul",
+  "//./nul",
+]);
+
 /**
  * Whether a path names a device rather than somebody's work.
  *
@@ -5032,10 +5059,28 @@ const CONFINEMENT_FLOOR_SCOPE: PermissionScope = "user";
  * {@link SYSTEM_PATH_PREFIXES} is a place a checkout can live, so this is the
  * one write the toolchain exemption keeps.
  *
+ * A role writes `2>/dev/null` on every platform — the commands a model
+ * produces are POSIX shell whatever the host is — and on Windows
+ * `path.resolve` hands that back as `C:\dev\null`. Reading it there as "a
+ * file called null in somebody's directory" refused the commonest redirect
+ * there is on one platform out of three.
+ *
+ * On a drive-rooted path only the **sinks themselves** count, never the
+ * subtree: POSIX has a `/dev` filesystem where everything under it is a
+ * device, and Windows has no `/dev` at all — what it has is a great many
+ * developers who keep their checkouts in `C:\dev`, and `> C:\dev\repo\out.js`
+ * is a write into somebody's work like any other. `\\.\NUL` is the sink
+ * spelled the way Windows spells it. A bare `NUL` never arrives here: it is
+ * relative, so it resolves *inside* the worktree and is allowed before this
+ * is asked.
+ *
  * @param path - An absolute, already-resolved path.
  */
-function isDevicePath(path: string): boolean {
-  return path === "/dev" || path.startsWith("/dev/");
+export function isDevicePath(path: string): boolean {
+  // POSIX, unchanged: the whole of `/dev` is devices.
+  if (path === "/dev" || path.startsWith("/dev/")) return true;
+  if (!DRIVE_PREFIX.test(path) && !path.startsWith("\\\\")) return false;
+  return WINDOWS_DEVICE_SINKS.has(driveRelative(path).toLowerCase());
 }
 
 /** A leading `VAR=value` token, which stands in front of the command word. */
@@ -5271,9 +5316,45 @@ function expandHome(value: string): string {
     : value;
 }
 
-/** Whether an absolute path is toolchain territory rather than someone's work. */
-function isSystemPath(path: string): boolean {
-  return SYSTEM_PATH_PREFIXES.some((prefix) => path.startsWith(prefix));
+/**
+ * Toolchain territory on a Windows volume, as {@link SYSTEM_PATH_PREFIXES} is
+ * on a POSIX one — drive-rooted and slash-folded, so `C:\Windows\System32`,
+ * `c:/windows/system32` and `D:\Program Files\nodejs` all read as one place.
+ *
+ * These are matched only against a path that carries a drive letter, so a
+ * POSIX path can never reach them: `/windows/anything` on Linux is somebody's
+ * directory, not a toolchain, and this list must not decide otherwise.
+ */
+const WINDOWS_SYSTEM_PATH_PREFIXES: readonly string[] = [
+  "/windows/",
+  "/program files/",
+  "/program files (x86)/",
+  "/programdata/",
+];
+
+/**
+ * Whether an absolute path is toolchain territory rather than someone's work.
+ *
+ * POSIX paths are decided by {@link SYSTEM_PATH_PREFIXES} exactly as before.
+ * A drive-rooted path is decided by {@link WINDOWS_SYSTEM_PATH_PREFIXES} as
+ * well, and it has to be: on Windows every one of the POSIX prefixes is a
+ * string no real path begins with, so the toolchain exemption did not exist
+ * there and a role that ran `C:\Windows\System32\where.exe node` — or
+ * anything else the shell resolved to an absolute interpreter — was refused
+ * for reading the toolchain it was told to use. A false refusal on this wall
+ * costs the step a turn and teaches the model the wall is arbitrary, which is
+ * the failure mode {@link isPlausibleTarget} was written for.
+ *
+ * The exemption stays what it was in the direction that matters: **reads and
+ * runs only**. A write into any of these is refused on either platform.
+ *
+ * @param path - An absolute, already-resolved path.
+ */
+export function isSystemPath(path: string): boolean {
+  if (SYSTEM_PATH_PREFIXES.some((prefix) => path.startsWith(prefix))) return true;
+  if (!DRIVE_PREFIX.test(path)) return false;
+  const rooted = driveRelative(path).toLowerCase();
+  return WINDOWS_SYSTEM_PATH_PREFIXES.some((prefix) => rooted.startsWith(prefix));
 }
 
 /**
@@ -6019,10 +6100,16 @@ export function worktreeBashRefusal(command: string, worktreeDir: string): strin
         }
         const path = resolve(root, expandHome(candidate));
         if (isUnder(path, root, realRoot)) continue;
+        // A device is nobody's work, wherever it sorts: `2>/dev/null` is a
+        // discard, and on Windows it resolves to `C:\dev\null`, which is not
+        // under any toolchain root — so asking that question first is what
+        // keeps the commonest redirect there is from being refused on one
+        // platform out of three.
+        if (isDevicePath(path)) continue;
         // Reading from or running the toolchain is fine; writing into it is
         // how a checkout under /tmp gets edited by a role that owes its work
         // to a diff nobody will ever see.
-        if (isSystemPath(path) && (isDevicePath(path) || !writing)) continue;
+        if (isSystemPath(path) && !writing) continue;
         // A write target is a target whatever it looks like; a read has to
         // look like a path before it is worth a refusal.
         if (!writing && !isPlausibleTarget(candidate, path, root)) continue;

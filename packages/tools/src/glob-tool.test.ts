@@ -1,8 +1,10 @@
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createGlobTool } from "./glob-tool.js";
+import { resolvePath } from "./path-utils.js";
 import { createFakeContext } from "./test-utils.js";
 
 describe("glob tool", () => {
@@ -34,6 +36,23 @@ describe("glob tool", () => {
     expect(text).toContain("src/old.ts");
     expect(text).toContain("src/new.ts");
     expect(text).not.toContain("readme.md");
+  });
+
+  it("spells every result with forward slashes, whatever the host separator is", async () => {
+    // Same contract as `grep`, same reason: the model re-encodes these paths
+    // into a JSON tool call, where a `\` is an escape character.
+    const tool = createGlobTool();
+    const { ctx } = createFakeContext({ cwd: dir });
+
+    const result = await tool.execute({ pattern: "**/*.ts" }, ctx);
+    const text = (result.content[0] as { text: string }).text;
+    const lines = text.split("\n").filter((line) => line.length > 0);
+
+    expect(lines).toHaveLength(2);
+    expect(text).not.toContain("\\");
+    for (const line of lines) {
+      expect(existsSync(resolvePath(dir, line))).toBe(true);
+    }
   });
 
   it("sorts results by most recently modified first", async () => {

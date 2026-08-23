@@ -1,7 +1,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Tool, ToolExecutionContext, ToolResult } from "@arcturn/types";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -13,6 +13,19 @@ import {
   type SymbolInfo,
   workspaceSymbols,
 } from "./symbols.js";
+
+/**
+ * An absolute path fixture that is genuinely absolute on the platform the
+ * test runs on: `/repo/a.ts` on POSIX, `<current drive>:\repo\a.ts` on
+ * Windows (a leading-slash path there is drive-*relative*, not absolute).
+ *
+ * `pathToFileURL` resolves a drive-less path against the current drive in
+ * exactly the same way, so a `file://` URI built from this value round-trips
+ * back to this value — which is the property these tests are about.
+ */
+function repoPath(...segments: string[]): string {
+  return resolve("/repo", ...segments);
+}
 
 /** A fake {@link SymbolCapableClient} that answers fixed methods with canned results or delays. */
 function fakeClient(
@@ -63,7 +76,7 @@ function firstText(result: ToolResult): string {
 describe("documentSymbols", () => {
   it("returns null when the manager has no client for this path", async () => {
     const manager = fakeManager({ client: null });
-    const result = await documentSymbols(manager, "/repo/a.ts", "const a = 1;");
+    const result = await documentSymbols(manager, repoPath("a.ts"), "const a = 1;");
     expect(result).toBeNull();
   });
 
@@ -90,16 +103,16 @@ describe("documentSymbols", () => {
       ],
     });
     const manager = fakeManager({ client });
-    const result = await documentSymbols(manager, "/repo/a.ts", "class Foo {}");
+    const result = await documentSymbols(manager, repoPath("a.ts"), "class Foo {}");
     expect(result).toEqual([
-      { name: "Foo", kind: "class", path: "/repo/a.ts", line: 1 },
-      { name: "bar", kind: "method", path: "/repo/a.ts", line: 2 },
-      { name: "helper", kind: "function", path: "/repo/a.ts", line: 13 },
+      { name: "Foo", kind: "class", path: repoPath("a.ts"), line: 1 },
+      { name: "bar", kind: "method", path: repoPath("a.ts"), line: 2 },
+      { name: "helper", kind: "function", path: repoPath("a.ts"), line: 13 },
     ] satisfies SymbolInfo[]);
   });
 
   it("parses a flat SymbolInformation[] response", async () => {
-    const uri = pathToFileURL("/repo/a.ts").toString();
+    const uri = pathToFileURL(repoPath("a.ts")).toString();
     const client = fakeClient({
       "textDocument/documentSymbol": async () => [
         {
@@ -113,8 +126,8 @@ describe("documentSymbols", () => {
       ],
     });
     const manager = fakeManager({ client });
-    const result = await documentSymbols(manager, "/repo/a.ts", "class Foo {}");
-    expect(result).toEqual([{ name: "Foo", kind: "class", path: "/repo/a.ts", line: 5 }]);
+    const result = await documentSymbols(manager, repoPath("a.ts"), "class Foo {}");
+    expect(result).toEqual([{ name: "Foo", kind: "class", path: repoPath("a.ts"), line: 5 }]);
   });
 
   it("maps unknown SymbolKind numbers to a fallback name", async () => {
@@ -128,21 +141,21 @@ describe("documentSymbols", () => {
       ],
     });
     const manager = fakeManager({ client });
-    const result = await documentSymbols(manager, "/repo/a.ts", "");
-    expect(result).toEqual([{ name: "weird", kind: "symbol", path: "/repo/a.ts", line: 1 }]);
+    const result = await documentSymbols(manager, repoPath("a.ts"), "");
+    expect(result).toEqual([{ name: "weird", kind: "symbol", path: repoPath("a.ts"), line: 1 }]);
   });
 
   it("returns an empty array when the server reports no symbols", async () => {
     const client = fakeClient({ "textDocument/documentSymbol": async () => [] });
     const manager = fakeManager({ client });
-    const result = await documentSymbols(manager, "/repo/a.ts", "");
+    const result = await documentSymbols(manager, repoPath("a.ts"), "");
     expect(result).toEqual([]);
   });
 
   it("returns null when the request does not resolve within the timeout", async () => {
     const client = fakeClient({ "textDocument/documentSymbol": neverResolves });
     const manager = fakeManager({ client });
-    const result = await documentSymbols(manager, "/repo/a.ts", "", 20);
+    const result = await documentSymbols(manager, repoPath("a.ts"), "", 20);
     expect(result).toBeNull();
   });
 
@@ -153,7 +166,7 @@ describe("documentSymbols", () => {
       },
     });
     const manager = fakeManager({ client });
-    const result = await documentSymbols(manager, "/repo/a.ts", "");
+    const result = await documentSymbols(manager, repoPath("a.ts"), "");
     expect(result).toBeNull();
   });
 });
@@ -166,8 +179,8 @@ describe("workspaceSymbols", () => {
   });
 
   it("combines matches from every active client", async () => {
-    const uriA = pathToFileURL("/repo/a.ts").toString();
-    const uriB = pathToFileURL("/repo/b.py").toString();
+    const uriA = pathToFileURL(repoPath("a.ts")).toString();
+    const uriB = pathToFileURL(repoPath("b.py")).toString();
     const clientA = fakeClient({
       "workspace/symbol": async () => [
         {
@@ -195,8 +208,8 @@ describe("workspaceSymbols", () => {
     const manager = fakeManager({ activeClients: [clientA, clientB] });
     const result = await workspaceSymbols(manager, "Foo");
     expect(result).toEqual([
-      { name: "FooA", kind: "class", path: "/repo/a.ts", line: 1 },
-      { name: "FooB", kind: "function", path: "/repo/b.py", line: 10 },
+      { name: "FooA", kind: "class", path: repoPath("a.ts"), line: 1 },
+      { name: "FooB", kind: "function", path: repoPath("b.py"), line: 10 },
     ]);
   });
 
@@ -209,6 +222,34 @@ describe("workspaceSymbols", () => {
     expect(result).toEqual([]);
   });
 
+  it("decodes a percent-escaped file:// uri back to the exact path on disk", async () => {
+    // A language server answers with a `file://` URI, and what that URI looks
+    // like is platform-dependent: on Windows it carries a drive letter and
+    // forward slashes (`file:///C:/repo/...`) where POSIX has neither. Either
+    // way the parsed result must be the path the file actually lives at, with
+    // every escape decoded — a naive `uri.slice("file://".length)` passes on
+    // POSIX for tidy names and is wrong for both of these.
+    const messy = repoPath("a dir", "sp#ce & \u00fcnicode.ts");
+    const uri = pathToFileURL(messy).toString();
+    expect(uri).toContain("%"); // the URI really is escaped, so decoding is load-bearing
+    const client = fakeClient({
+      "workspace/symbol": async () => [
+        {
+          name: "Messy",
+          kind: 5,
+          location: {
+            uri,
+            range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+          },
+        },
+      ],
+    });
+    const manager = fakeManager({ activeClients: [client] });
+    const result = await workspaceSymbols(manager, "Messy");
+    expect(result).toEqual([{ name: "Messy", kind: "class", path: messy, line: 1 }]);
+    expect(fileURLToPath(uri)).toBe(messy);
+  });
+
   it("returns null when every active client times out", async () => {
     const client = fakeClient({ "workspace/symbol": neverResolves });
     const manager = fakeManager({ activeClients: [client] });
@@ -217,7 +258,7 @@ describe("workspaceSymbols", () => {
   });
 
   it("keeps results from clients that answer even if one sibling times out", async () => {
-    const uri = pathToFileURL("/repo/a.ts").toString();
+    const uri = pathToFileURL(repoPath("a.ts")).toString();
     const slow = fakeClient({ "workspace/symbol": neverResolves });
     const fast = fakeClient({
       "workspace/symbol": async () => [
@@ -233,7 +274,7 @@ describe("workspaceSymbols", () => {
     });
     const manager = fakeManager({ activeClients: [slow, fast] });
     const result = await workspaceSymbols(manager, "Fast", 20);
-    expect(result).toEqual([{ name: "Fast", kind: "class", path: "/repo/a.ts", line: 1 }]);
+    expect(result).toEqual([{ name: "Fast", kind: "class", path: repoPath("a.ts"), line: 1 }]);
   });
 });
 

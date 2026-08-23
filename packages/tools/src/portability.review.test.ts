@@ -15,7 +15,7 @@
  */
 
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ToolResult } from "@arcturn/types";
@@ -23,7 +23,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { BackgroundTaskManager, createBashTool } from "./bash.js";
 import { createEditTool } from "./edit.js";
 import { resolveShell } from "./shell.js";
-import { createFakeContext } from "./test-utils.js";
+import { createFakeContext, removeTempDir } from "./test-utils.js";
 
 const textOf = (result: ToolResult): string =>
   result.content.map((part) => (part.type === "text" ? part.text : "")).join("\n");
@@ -35,7 +35,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  await rm(dir, { recursive: true, force: true });
+  await removeTempDir(dir);
 });
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));

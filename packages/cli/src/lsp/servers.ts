@@ -29,7 +29,7 @@ export const LSP_SERVER_REGISTRY: readonly LspServerEntry[] = [
   { extensions: [".rs"], command: ["rust-analyzer"] },
 ];
 
-const binaryExistsCache = new Map<string, boolean>();
+const resolvedBinaryCache = new Map<string, string | undefined>();
 
 /** Directories to try candidate names in, from `PATH`. */
 function pathDirs(): string[] {
@@ -43,17 +43,24 @@ function candidateNames(name: string): string[] {
   return [name, ...exts.map((ext) => `${name}${ext}`)];
 }
 
-/** Whether `name` resolves to an executable file somewhere on `PATH`. Cached. */
-function binaryExists(name: string): boolean {
-  const cached = binaryExistsCache.get(name);
-  if (cached !== undefined) return cached;
+/**
+ * The file `name` resolves to on `PATH`, or `undefined`. Cached.
+ *
+ * The resolved *path* is what callers get, not a yes/no: on Windows the
+ * winning candidate may be `<name>.cmd` (npm installs every JS language
+ * server as a `.cmd` shim), and how a command is spawned depends on which
+ * one it turned out to be — see `resolveLspSpawn` in `./client.ts`.
+ */
+function resolveBinary(name: string): string | undefined {
+  if (resolvedBinaryCache.has(name)) return resolvedBinaryCache.get(name);
 
-  let found = false;
+  let found: string | undefined;
   for (const dir of pathDirs()) {
     for (const candidate of candidateNames(name)) {
+      const full = join(dir, candidate);
       try {
-        accessSync(join(dir, candidate), constants.X_OK);
-        found = true;
+        accessSync(full, constants.X_OK);
+        found = full;
         break;
       } catch {
         // Not here; keep looking.
@@ -61,7 +68,7 @@ function binaryExists(name: string): boolean {
     }
     if (found) break;
   }
-  binaryExistsCache.set(name, found);
+  resolvedBinaryCache.set(name, found);
   return found;
 }
 
@@ -69,20 +76,21 @@ function binaryExists(name: string): boolean {
  * Resolve the language server command for `path`, by extension.
  *
  * @param path - Any path (absolute or relative); only its extension is used.
- * @returns The `argv` to spawn, or `undefined` when the extension is unknown
- *   or its server's binary is not on `PATH`.
+ * @returns The `argv` to spawn with `argv[0]` resolved to the file that was
+ *   actually found on `PATH`, or `undefined` when the extension is unknown or
+ *   its server's binary is not on `PATH`.
  */
 export function serverFor(path: string): readonly string[] | undefined {
   const ext = extname(path).toLowerCase();
   for (const entry of LSP_SERVER_REGISTRY) {
-    if (entry.extensions.includes(ext) && binaryExists(entry.command[0] as string)) {
-      return entry.command;
-    }
+    if (!entry.extensions.includes(ext)) continue;
+    const resolved = resolveBinary(entry.command[0] as string);
+    if (resolved) return [resolved, ...entry.command.slice(1)];
   }
   return undefined;
 }
 
 /** Clear the cached `PATH` lookups. Exposed for tests that manipulate `PATH`. */
 export function clearServerExistsCache(): void {
-  binaryExistsCache.clear();
+  resolvedBinaryCache.clear();
 }

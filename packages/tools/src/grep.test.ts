@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createGrepTool } from "./grep.js";
+import { resolvePath } from "./path-utils.js";
 import { createFakeContext } from "./test-utils.js";
 
 describe("grep tool", () => {
@@ -39,6 +40,25 @@ describe("grep tool", () => {
     expect(text).not.toContain("node_modules");
     expect(text).not.toContain(".git");
     expect(text).not.toContain("binary.bin");
+  });
+
+  it("spells every match's path with forward slashes, whatever the host separator is", async () => {
+    // Not cosmetic. The model hands this path straight back in the next tool
+    // call, inside a JSON string, and `"src\new.ts"` is valid JSON whose value
+    // is `src`, a newline, `ew.ts` — a Windows-shaped path silently becomes a
+    // corrupted `read` argument that nobody can see go wrong. `/` has no such
+    // trap and win32 accepts it everywhere `\` works.
+    const tool = createGrepTool();
+    const { ctx } = createFakeContext({ cwd: dir });
+
+    const result = await tool.execute({ pattern: "needle" }, ctx);
+    const text = (result.content[0] as { text: string }).text;
+
+    expect(text).toContain("src/a.ts:1:");
+    expect(text).not.toContain("\\");
+    // ...and the rendered path is a path: it resolves back to the file it named.
+    const rendered = (text.split(":")[0] ?? "").trim();
+    expect(resolvePath(dir, rendered)).toBe(join(dir, "src", "a.ts"));
   });
 
   it("supports case-insensitive search", async () => {

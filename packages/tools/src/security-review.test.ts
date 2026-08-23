@@ -7,13 +7,13 @@
  */
 
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { BackgroundTaskManager, createBashTool } from "./bash.js";
 import type { SandboxProbe } from "./sandbox.js";
-import { createFakeContext } from "./test-utils.js";
+import { createFakeContext, removeTempDir } from "./test-utils.js";
 
 async function pathExists(path: string): Promise<boolean> {
   try {
@@ -43,7 +43,7 @@ describe("SANDBOX: background bash refuses a sandbox request (fixed)", () => {
   const dirs: string[] = [];
 
   afterEach(async () => {
-    await Promise.all(dirs.splice(0).map((d) => rm(d, { recursive: true, force: true })));
+    await Promise.all(dirs.splice(0).map(removeTempDir));
   });
 
   it("the foreground write is sandbox-denied and the background variant is refused outright", async () => {

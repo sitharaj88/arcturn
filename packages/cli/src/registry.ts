@@ -155,12 +155,29 @@ const PACKAGE_NAME_PATTERN = /^[a-z0-9._-]+$/;
 /**
  * Whether a name is safe to use as a single path segment under
  * `~/.arcturn/packages`: lowercase letters, digits, `.`, `_` and `-` only, and
- * not exactly `.` or `..`.
+ * no leading or trailing dot.
+ *
+ * The dot rule is what makes {@link resolvePackageDir}'s containment check hold
+ * on Windows, and it is not a style preference. `...` passes the charset and is
+ * neither `.` nor `..`, so it used to be accepted — and Win32 discards a path
+ * component's trailing dots before the filesystem ever sees the name. So
+ * `<packagesRoot>\...` *is* `<packagesRoot>`, while the containment check
+ * compares the lexical spelling, where the dots are still there and the path
+ * looks like an ordinary child. `arcturn ext install <src> --name "..."` would
+ * therefore unpack a package over the root of the package store, and
+ * `arcturn ext remove "..."` would `rm -rf` the store itself, every other
+ * installed package with it. `foo.` is the same defect one dot in: it names
+ * `foo` on Windows and `foo.` everywhere else, so two spellings would install
+ * over each other on one platform and not the other.
+ *
+ * Nothing legitimate is lost: {@link slugifyName} strips leading and trailing
+ * dots from every derived name already, so only an explicit `--name` could ever
+ * carry one. Subsumes the old `.`/`..` special cases.
  *
  * @param name - Candidate package name.
  */
 export function isValidPackageName(name: string): boolean {
-  return PACKAGE_NAME_PATTERN.test(name) && name !== "." && name !== "..";
+  return PACKAGE_NAME_PATTERN.test(name) && !name.startsWith(".") && !name.endsWith(".");
 }
 
 /**
@@ -228,6 +245,35 @@ const SCP_LIKE = /^[\w.-]+@[\w.-]+:[\w./-]+$/;
 const GITHUB_SHORTHAND =
   /^([a-zA-Z0-9](?:[a-zA-Z0-9-]{0,38}))\/([a-zA-Z0-9._-]+)((?:\/[a-zA-Z0-9._-]+)*)$/;
 
+/**
+ * A drive-qualified Windows path: a letter, a colon, and exactly one separator.
+ *
+ * The one-separator rule is what keeps `c://host/p` a URL — a scheme is a
+ * letter run followed by `://`, and a drive letter is a *single* letter
+ * followed by one separator, so the two shapes never overlap.
+ */
+const WINDOWS_DRIVE_PATH = /^[a-zA-Z]:[\\/](?![\\/])/;
+
+/**
+ * Whether a source string names a directory on this machine rather than a
+ * repository to clone.
+ *
+ * Every shape is recognised in both separators, on every platform. The Windows
+ * spellings — `.\pkg`, `..\pkg`, `C:\pkgs\pkg`, `\\server\share\pkg`,
+ * `~\pkgs\pkg` — matched none of the POSIX prefixes below, so they fell
+ * through to the git-URL and `owner/repo` shapes, matched neither of those
+ * either, and came back as `could not parse package source`: on Windows,
+ * `arcturn ext install` could not be handed a local package by the spelling the
+ * shell itself completes.
+ *
+ * Recognised everywhere rather than behind `process.platform` because a source
+ * string is text a user typed, not a property of the machine parsing it, and a
+ * platform branch here would make the same argument mean different things in
+ * the same documentation. The cost on POSIX is that `C:\pkgs\pkg` now fails
+ * later ("no such directory") instead of immediately ("could not parse") —
+ * which is the more accurate of the two messages anyway, since a directory of
+ * that name is legal there.
+ */
 function isLocalPathSpec(text: string): boolean {
   return (
     text === "." ||
@@ -235,7 +281,12 @@ function isLocalPathSpec(text: string): boolean {
     text.startsWith("/") ||
     text.startsWith("./") ||
     text.startsWith("../") ||
-    text.startsWith("~")
+    text.startsWith("~") ||
+    // `\pkg` (rooted on the current drive) and `\\server\share\pkg` (UNC).
+    text.startsWith("\\") ||
+    text.startsWith(".\\") ||
+    text.startsWith("..\\") ||
+    WINDOWS_DRIVE_PATH.test(text)
   );
 }
 
@@ -293,18 +344,27 @@ function githubShorthandSource(
   return { kind: "github-shorthand", location, ref, subdir, defaultName: slugifyName(leaf), raw };
 }
 
+/** The last non-empty segment of a path, in either separator. */
+function pathLeaf(location: string): string {
+  const segments = location.split(/[\\/]/).filter((segment) => segment !== "");
+  return segments[segments.length - 1] ?? location;
+}
+
 function localSource(text: string, options: ResolveSourceOptions, raw: string): ResolvedSource {
   const homeDir = options.homeDir ?? homedir();
   const cwd = options.cwd ?? process.cwd();
-  const expanded =
-    text === "~" ? homeDir : text.startsWith("~/") ? join(homeDir, text.slice(2)) : text;
+  const tilde = text === "~" ? "" : /^~[\\/]/.test(text) ? text.slice(2) : undefined;
+  const expanded = tilde === undefined ? text : tilde === "" ? homeDir : join(homeDir, tilde);
   const location = resolve(cwd, expanded);
+  // Split rather than `basename`, because the leaf of `C:\pkgs\my-pkg` is
+  // `my-pkg` whoever is reading it — `path.basename` only knows that on
+  // Windows, and on POSIX would name the package after the whole string.
   return {
     kind: "local-path",
     location,
     ref: undefined,
     subdir: undefined,
-    defaultName: slugifyName(basename(location)),
+    defaultName: slugifyName(pathLeaf(location)),
     raw,
   };
 }

@@ -1556,12 +1556,22 @@ async function gitAvailable(): Promise<boolean> {
 const hasGit = await gitAvailable();
 
 describe.skipIf(!hasGit)("TeamManager against real git", () => {
-  async function makeRepo(): Promise<string> {
+  async function makeRepo(autocrlf = false): Promise<string> {
     const dir = await scratchDir("arcturn-team-repo-");
     const run = (args: string[]): Promise<unknown> => execFileAsync("git", args, { cwd: dir });
     await run(["init", "--quiet"]);
     await run(["config", "user.email", "team@example.com"]);
     await run(["config", "user.name", "Team"]);
+    // A throwaway repository must not inherit the machine's line-ending
+    // policy. Git for Windows defaults `core.autocrlf=true`, which rewrites
+    // every checkout to CRLF — so a byte-exact assertion about what a member
+    // wrote becomes an assertion about the runner's git config, and fails on
+    // windows-latest for a reason that has nothing to do with the team lane.
+    // Arcturn's own checkout gets this from `.gitattributes`; these get it
+    // explicitly, and "survives a CRLF checkout" below turns the other
+    // convention on deliberately rather than inheriting it by accident.
+    await run(["config", "core.autocrlf", autocrlf ? "true" : "false"]);
+    await run(["config", "core.eol", autocrlf ? "crlf" : "lf"]);
     await writeFile(join(dir, "seed.txt"), "seed\n");
     await run(["add", "."]);
     await run(["commit", "--quiet", "-m", "seed"]);
@@ -1635,6 +1645,38 @@ describe.skipIf(!hasGit)("TeamManager against real git", () => {
     expect(await readFile(join(repo, "alpha.ts"), "utf8")).toContain("alpha");
     expect(await readFile(join(repo, "beta.ts"), "utf8")).toContain("beta");
     expect(manager.get(status.id)?.status).toBe("merged");
+  });
+
+  it("merges into a CRLF checkout, the way a Windows repository is configured", async () => {
+    // `core.autocrlf=true` is Git for Windows' default, so a member's worktree
+    // is checked out CRLF while the patch cut from it is LF — and a patch that
+    // does not apply is a member's work lost. This turns that configuration on
+    // deliberately, on every platform, rather than waiting for a runner to
+    // have it: the assertion is that the CONTENT lands, and that the endings
+    // are the ones the repository asked for rather than the ones the member's
+    // editor happened to write.
+    const repo = await makeRepo(true);
+    // The seed file was WRITTEN with LF; deleting it and checking it out again
+    // is what makes the working tree hold what a Windows clone would hold.
+    await rm(join(repo, "seed.txt"));
+    await execFileAsync("git", ["checkout", "--", "seed.txt"], { cwd: repo });
+    expect(await readFile(join(repo, "seed.txt"), "utf8")).toBe("seed\r\n");
+
+    const plan = planJson([{ id: "alpha", files: ["seed.txt"] }]);
+    const manager = await managerFor(repo, plan, async (_brief, cwd) => {
+      // What the member sees is a CRLF checkout…
+      expect(await readFile(join(cwd, "seed.txt"), "utf8")).toBe("seed\r\n");
+      // …and what its editor writes is ordinary LF.
+      await writeFile(join(cwd, "seed.txt"), "seed\nedited by alpha\n");
+    });
+    const status = await manager.start("edit the seed");
+    const report = await manager.merge(status.id);
+
+    expect(report?.conflicts).toBe(0);
+    expect(report?.merged).toBe(1);
+    const merged = await readFile(join(repo, "seed.txt"), "utf8");
+    expect(merged.replace(/\r\n/g, "\n")).toBe("seed\nedited by alpha\n");
+    expect(merged).toBe("seed\r\nedited by alpha\r\n");
   });
 
   it("detects a real conflict and leaves the tree and the patch untouched", async () => {

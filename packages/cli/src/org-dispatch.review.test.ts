@@ -271,6 +271,11 @@ describe("finding: a write-lane role is rooted at HEAD, so it cannot see the pip
     await exec("git", ["init", "-q", "-b", "main"], { cwd: repo });
     await exec("git", ["config", "user.email", "t@example.com"], { cwd: repo });
     await exec("git", ["config", "user.name", "t"], { cwd: repo });
+    // Git for Windows defaults `core.autocrlf` to true, which would hand this
+    // fixture's own text back with line endings it was never written with —
+    // and every assertion below compares content byte for byte. Repo-local, so
+    // the worktrees the write lane adds inherit it.
+    await exec("git", ["config", "core.autocrlf", "false"], { cwd: repo });
     await writeFile(join(repo, "src", "a.ts"), "base\n", "utf8");
     await exec("git", ["add", "-A"], { cwd: repo });
     await exec("git", ["commit", "-qm", "base"], { cwd: repo });
@@ -321,6 +326,11 @@ describe("finding: a write-lane role is rooted at HEAD, so it cannot see the pip
     await exec("git", ["init", "-q", "-b", "main"], { cwd: repo });
     await exec("git", ["config", "user.email", "t@example.com"], { cwd: repo });
     await exec("git", ["config", "user.name", "t"], { cwd: repo });
+    // Git for Windows defaults `core.autocrlf` to true, which would hand this
+    // fixture's own text back with line endings it was never written with —
+    // and every assertion below compares content byte for byte. Repo-local, so
+    // the worktrees the write lane adds inherit it.
+    await exec("git", ["config", "core.autocrlf", "false"], { cwd: repo });
     await writeFile(join(repo, "src", "a.ts"), "base\n", "utf8");
     await exec("git", ["add", "-A"], { cwd: repo });
     await exec("git", ["commit", "-qm", "base"], { cwd: repo });
@@ -598,7 +608,11 @@ describe("finding: omitting `tools:` is more permissive than declaring `edit`", 
       systemPrompt: "You implement.",
       source: "<test>",
     };
-    const runStep = vi.fn(async () => ({ text: "", usage: emptyUsage(), isError: false }));
+    // `usage(0, 0)`, not an `emptyUsage()` that was never defined: the call is
+    // only reached if the pre-flight *fails* to refuse, and a `ReferenceError`
+    // there would report the regression as a broken test rather than as the
+    // dispatch it is.
+    const runStep = vi.fn(async () => ({ text: "", usage: usage(0, 0), isError: false }));
     const workflow = parseWorkflow("---\nname: p\n---\n1. @developer implement it\n", {
       name: "p",
     }) as Workflow;
@@ -740,6 +754,11 @@ describe("refuted: probes that came back clean", () => {
     await exec("git", ["init", "-q", "-b", "main"], { cwd: repo });
     await exec("git", ["config", "user.email", "t@example.com"], { cwd: repo });
     await exec("git", ["config", "user.name", "t"], { cwd: repo });
+    // Git for Windows defaults `core.autocrlf` to true, which would hand this
+    // fixture's own text back with line endings it was never written with —
+    // and every assertion below compares content byte for byte. Repo-local, so
+    // the worktrees the write lane adds inherit it.
+    await exec("git", ["config", "core.autocrlf", "false"], { cwd: repo });
     await writeFile(join(repo, "src", "a.ts"), "old\n", "utf8");
     await exec("git", ["add", "-A"], { cwd: repo });
     await exec("git", ["commit", "-qm", "base"], { cwd: repo });

@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { delimiter, join, sep } from "node:path";
+import { delimiter, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   buildBwrapArgv,
@@ -13,19 +13,7 @@ import {
   type SandboxProbe,
   type SandboxWritableRoots,
 } from "./sandbox.js";
-
-/** Run `fn` with `process.env.ComSpec` temporarily set (or deleted), restoring it afterward. */
-function withComSpec<T>(value: string | undefined, fn: () => T): T {
-  const original = process.env.ComSpec;
-  try {
-    if (value === undefined) delete process.env.ComSpec;
-    else process.env.ComSpec = value;
-    return fn();
-  } finally {
-    if (original === undefined) delete process.env.ComSpec;
-    else process.env.ComSpec = original;
-  }
-}
+import { POSIX_DEFAULT_SHELL, WINDOWS_SHELL_FLAGS } from "./shell.js";
 
 const ROOTS: SandboxWritableRoots = {
   cwd: "/repo/project",
@@ -33,6 +21,15 @@ const ROOTS: SandboxWritableRoots = {
   homeDir: "/Users/arcturn",
 };
 
+/**
+ * A probe with no ambient state in it: `env` defaults to an EMPTY environment
+ * rather than the real `process.env`, so "what does win32 do when `%ComSpec%`
+ * is unset" is asked by passing nothing instead of by deleting a variable out
+ * of the running process. On Windows that deletion did not even work — the
+ * Windows environment block is case-insensitive, so a runner that exported
+ * `COMSPEC` kept it through a `delete process.env.ComSpec` and the test that
+ * meant "unset" ran against a set variable.
+ */
 function fakeProbe(overrides: Partial<SandboxProbe>): SandboxProbe {
   return {
     platform: "darwin",
@@ -41,8 +38,21 @@ function fakeProbe(overrides: Partial<SandboxProbe>): SandboxProbe {
     homeDir: ROOTS.homeDir,
     tmpDir: ROOTS.tmpDir,
     realpathSync: (p) => p,
+    env: {},
     ...overrides,
   };
+}
+
+/**
+ * The state directory allow-line exactly as the profile spells it.
+ *
+ * Both halves are platform-dependent and both have to be applied, or the
+ * assertion only holds where the author happened to run it: `join` uses the
+ * host separator (`\` on Windows), and {@link escapeSandboxProfilePath} then
+ * doubles every one of those backslashes for the profile's string literal.
+ */
+function subpathLiteral(...segments: string[]): string {
+  return `"${escapeSandboxProfilePath(join(...segments))}"`;
 }
 
 describe("escapeSandboxProfilePath", () => {
@@ -65,7 +75,9 @@ describe("buildSandboxExecProfile", () => {
     expect(profile).toContain("(deny file-write*)");
     expect(profile).toContain('(allow file-write* (subpath "/repo/project"))');
     expect(profile).toContain('(allow file-write* (subpath "/private/tmp"))');
-    expect(profile).toContain(`(allow file-write* (subpath "${join(ROOTS.homeDir, ".arcturn")}"))`);
+    expect(profile).toContain(
+      `(allow file-write* (subpath ${subpathLiteral(ROOTS.homeDir, ".arcturn")}))`,
+    );
   });
 
   it("carves the org memory store back out, after the allow that would cover it", () => {
@@ -76,11 +88,10 @@ describe("buildSandboxExecProfile", () => {
     // load-bearing — sandbox-exec takes the LAST matching rule, so the deny has
     // to come after the allow it narrows.
     const profile = buildSandboxExecProfile(ROOTS);
-    const store = join(ROOTS.homeDir, ".arcturn", "org-memory");
-    expect(profile).toContain(`(deny file-write* (subpath "${store}"))`);
-    expect(profile.indexOf(`(deny file-write* (subpath "${store}"))`)).toBeGreaterThan(
-      profile.indexOf(`(allow file-write* (subpath "${join(ROOTS.homeDir, ".arcturn")}"))`),
-    );
+    const deny = `(deny file-write* (subpath ${subpathLiteral(ROOTS.homeDir, ".arcturn", "org-memory")}))`;
+    const allow = `(allow file-write* (subpath ${subpathLiteral(ROOTS.homeDir, ".arcturn")}))`;
+    expect(profile).toContain(deny);
+    expect(profile.indexOf(deny)).toBeGreaterThan(profile.indexOf(allow));
   });
 
   it("escapes quotes/backslashes embedded in a root path", () => {
@@ -144,8 +155,11 @@ describe("buildBwrapArgv", () => {
 
 describe("commandExistsOnPath", () => {
   it("finds a binary in one of the PATH directories", () => {
+    // The expected path has to be built with `join` too, not spliced with
+    // `sep`: `join` normalises the whole string, so on win32 `/opt/bin` +
+    // `bwrap` is `\opt\bin\bwrap`, not `/opt/bin\bwrap`.
     const pathEnv = ["/usr/bin", "/opt/bin", "/nonexistent-dir"].join(delimiter);
-    const exists = (p: string) => p === `/opt/bin${sep}bwrap`;
+    const exists = (p: string) => p === join("/opt/bin", "bwrap");
     expect(commandExistsOnPath("bwrap", pathEnv, exists)).toBe(true);
   });
 
@@ -196,7 +210,10 @@ describe("resolveSandboxInvocation", () => {
     const probe = fakeProbe({
       platform: "linux",
       path: "/usr/local/bin",
-      existsSync: (p: string) => p === "/usr/local/bin/bwrap",
+      // `commandExistsOnPath` probes `join(dir, name)`, which is
+      // `\usr\local\bin\bwrap` on a win32 host — spell the expectation the
+      // same way so the probe answers "found" wherever the suite runs.
+      existsSync: (p: string) => p === join("/usr/local/bin", "bwrap"),
     });
     const invocation = resolveSandboxInvocation("echo hi", ROOTS.cwd, "workspace-write", probe);
     expect(invocation.executable).toBe("bwrap");
@@ -216,40 +233,49 @@ describe("resolveSandboxInvocation", () => {
   });
 
   it("win32 (no sandboxing backend exists at all): falls back unsandboxed via cmd.exe, with an explicit no-confinement note naming the platform (D3)", () => {
-    withComSpec(String.raw`C:\Windows\System32\cmd.exe`, () => {
-      const probe = fakeProbe({ platform: "win32" });
-      const invocation = resolveSandboxInvocation("echo hi", ROOTS.cwd, "workspace-write", probe);
-      expect(invocation.executable).toBe(String.raw`C:\Windows\System32\cmd.exe`);
-      expect(invocation.args).toEqual(["/d", "/s", "/c", '"echo hi"']);
-      expect(invocation.spawnOptions).toEqual({ windowsVerbatimArguments: true });
-      // Must be plainly told nothing is confined, not the generic
-      // "binary happens to be missing" note used for darwin/linux.
-      expect(invocation.unavailableNote).not.toBe(SANDBOX_UNAVAILABLE_NOTE);
-      expect(invocation.unavailableNote).toBe(noSandboxBackendNote("win32"));
-      expect(invocation.unavailableNote).toContain('"win32"');
-      expect(invocation.unavailableNote).toMatch(/without confinement/i);
+    const probe = fakeProbe({
+      platform: "win32",
+      env: { ComSpec: String.raw`C:\Windows\System32\cmd.exe` },
     });
+    const invocation = resolveSandboxInvocation("echo hi", ROOTS.cwd, "workspace-write", probe);
+    expect(invocation.executable).toBe(String.raw`C:\Windows\System32\cmd.exe`);
+    expect(invocation.args).toEqual(["/d", "/s", "/c", '"echo hi"']);
+    expect(invocation.spawnOptions).toEqual({ windowsVerbatimArguments: true });
+    // Must be plainly told nothing is confined, not the generic
+    // "binary happens to be missing" note used for darwin/linux.
+    expect(invocation.unavailableNote).not.toBe(SANDBOX_UNAVAILABLE_NOTE);
+    expect(invocation.unavailableNote).toBe(noSandboxBackendNote("win32"));
+    expect(invocation.unavailableNote).toContain('"win32"');
+    expect(invocation.unavailableNote).toMatch(/without confinement/i);
+  });
+
+  it("win32: honours %ComSpec% however the environment happens to spell it", () => {
+    // The Windows environment block is case-insensitive: `COMSPEC` IS
+    // `ComSpec`. A plain object (an injected env, or one inherited through an
+    // MSYS layer) is not, so the lookup has to do the folding itself.
+    const probe = fakeProbe({
+      platform: "win32",
+      env: { COMSPEC: String.raw`C:\Windows\system32\cmd.exe` },
+    });
+    const invocation = resolveSandboxInvocation("echo hi", ROOTS.cwd, "workspace-write", probe);
+    expect(invocation.executable).toBe(String.raw`C:\Windows\system32\cmd.exe`);
   });
 
   it("win32: falls back to plain cmd.exe when $ComSpec is unset", () => {
-    withComSpec(undefined, () => {
-      const probe = fakeProbe({ platform: "win32" });
-      const invocation = resolveSandboxInvocation("echo hi", ROOTS.cwd, "workspace-write", probe);
-      expect(invocation.executable).toBe("cmd.exe");
-      expect(invocation.args).toEqual(["/d", "/s", "/c", '"echo hi"']);
-    });
+    const probe = fakeProbe({ platform: "win32", env: {} });
+    const invocation = resolveSandboxInvocation("echo hi", ROOTS.cwd, "workspace-write", probe);
+    expect(invocation.executable).toBe("cmd.exe");
+    expect(invocation.args).toEqual(["/d", "/s", "/c", '"echo hi"']);
   });
 
   it('mode "off" on win32 also uses cmd.exe, never a hardcoded /bin/sh that does not exist on Windows', () => {
-    withComSpec(undefined, () => {
-      const probe = fakeProbe({ platform: "win32" });
-      const invocation = resolveSandboxInvocation("echo hi", ROOTS.cwd, "off", probe);
-      expect(invocation).toEqual({
-        executable: "cmd.exe",
-        args: ["/d", "/s", "/c", '"echo hi"'],
-        spawnOptions: { windowsVerbatimArguments: true },
-        unavailableNote: undefined,
-      });
+    const probe = fakeProbe({ platform: "win32", env: {} });
+    const invocation = resolveSandboxInvocation("echo hi", ROOTS.cwd, "off", probe);
+    expect(invocation).toEqual({
+      executable: "cmd.exe",
+      args: ["/d", "/s", "/c", '"echo hi"'],
+      spawnOptions: { windowsVerbatimArguments: true },
+      unavailableNote: undefined,
     });
   });
 
@@ -291,15 +317,21 @@ describe("resolveSandboxInvocation", () => {
   });
 
   it("uses the real environment (defaultSandboxProbe) when no probe is passed", () => {
-    // Smoke test only: on this test runner's actual (POSIX) platform, "off"
-    // must still resolve to a plain "/bin/sh -c" passthrough.
+    // Smoke test: with no probe, "off" resolves to whatever THIS platform's
+    // shell is — `/bin/sh -c` on POSIX, `%ComSpec% /d /s /c` on Windows. The
+    // point is that the default probe reaches the real platform, so the
+    // expectation is written per-platform rather than assuming the author's.
     const invocation = resolveSandboxInvocation("echo hi", ROOTS.cwd, "off");
-    expect(invocation).toEqual({
-      executable: "/bin/sh",
-      args: ["-c", "echo hi"],
-      spawnOptions: {},
-      unavailableNote: undefined,
-    });
+    if (process.platform === "win32") {
+      expect(invocation.executable).toMatch(/cmd\.exe$/i);
+      expect(invocation.args).toEqual([...WINDOWS_SHELL_FLAGS, '"echo hi"']);
+      expect(invocation.spawnOptions).toEqual({ windowsVerbatimArguments: true });
+    } else {
+      expect(invocation.executable).toBe(POSIX_DEFAULT_SHELL);
+      expect(invocation.args).toEqual(["-c", "echo hi"]);
+      expect(invocation.spawnOptions).toEqual({});
+    }
+    expect(invocation.unavailableNote).toBeUndefined();
   });
 });
 

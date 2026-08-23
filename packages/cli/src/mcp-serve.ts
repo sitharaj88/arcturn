@@ -128,12 +128,13 @@
  */
 
 import { realpathSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { calculateCostUsd } from "@arcturn/ai";
 import {
   createId,
   createSessionId,
   DEFAULT_READ_ONLY_TOOLS,
+  defaultCaseInsensitivePaths,
   type ExplainedPermissionRule,
   JsonlSessionStore,
   PermissionEngine,
@@ -1153,7 +1154,7 @@ function escapesWorkspace(
   if (reachesReservedZone(specifier, workspace, home)) return true;
   // Names a path inside the workspace: it can only ever grant where the mode
   // could already have granted, so keeping it changes nothing about the wall.
-  if (specifier === workspace || specifier.startsWith(`${workspace}${sep}`)) return false;
+  if (namesPathUnder(specifier, workspace)) return false;
   // Everything else names somewhere other than the workspace, or names
   // everywhere. `allow bash "*"` in a project config is the whole escape in one
   // line; `allow read "/Users/me/**"` is the same escape spelled out. Both
@@ -1165,6 +1166,23 @@ function escapesWorkspace(
 const PROJECT_DIR_SEGMENT = new RegExp(
   `(^|[\\\\/])${PROJECT_DIR_NAME.replace(".", "\\.")}([\\\\/]|$)`,
 );
+
+/**
+ * Whether a path names {@link PROJECT_DIR_NAME} at any depth, as the filesystem
+ * reads the name rather than as the bytes happen to be spelled.
+ *
+ * The case fold matters wherever the volume folds case: `.ARCTURN\config.json`
+ * opens `.arcturn\config.json` on every Windows volume and on a stock macOS,
+ * and a wall that reads it as an ordinary directory is a wall with a spelling
+ * for a door. The permission rules covering the same two zones already fold
+ * case (`matchSpecifier` asks {@link defaultCaseInsensitivePaths} too), so
+ * without this the physical half was the weaker of the two.
+ *
+ * @param value - A path, absolute or workspace-relative, in either separator.
+ */
+function namesProjectDir(value: string): boolean {
+  return PROJECT_DIR_SEGMENT.test(defaultCaseInsensitivePaths() ? value.toLowerCase() : value);
+}
 
 /**
  * Whether a rule specifier names anything in a zone the peer may not reach.
@@ -1184,12 +1202,49 @@ function reachesReservedZone(
   workspace: string,
   home: string | undefined,
 ): boolean {
-  if (PROJECT_DIR_SEGMENT.test(specifier)) return true;
+  if (namesProjectDir(specifier)) return true;
   if (home === undefined) return false;
   // Only when the home is inside the workspace: a specifier naming a home
   // elsewhere is already dropped for naming somewhere other than the workspace.
   if (!within(home, workspace)) return false;
-  return specifier === home || specifier.startsWith(`${home}${sep}`);
+  return namesPathUnder(specifier, home);
+}
+
+/**
+ * Fold a path specifier to the spelling the permission engine compares on: one
+ * separator, and one case wherever the filesystem folds case.
+ *
+ * The same fold `matchSpecifier` applies (`@arcturn/core`'s `canonicalPath`),
+ * and it has to be, because this decides which inherited rules survive and the
+ * engine decides what they then match. Comparing raw strings here made the two
+ * halves disagree on Windows in the direction that costs a user their config:
+ * `allow write "C:/repo/src/**"` — the portable, forward-slash spelling every
+ * doc example uses — did not start with `C:\repo\`, so it was read as naming
+ * somewhere other than the workspace and dropped, while the engine would have
+ * matched it perfectly happily. Same for `c:\repo\src\**`, which names the
+ * same directory on a volume that folds case.
+ *
+ * Case is folded only where {@link defaultCaseInsensitivePaths} says the volume
+ * folds it, which is what keeps this from *widening* the grant on Linux: there
+ * `/REPO/src/**` really is a different directory from `/repo`, and a rule
+ * naming it stays dropped.
+ */
+function canonicalSpecifier(value: string): string {
+  const separated = value.replaceAll("\\", "/");
+  return defaultCaseInsensitivePaths() ? separated.toLowerCase() : separated;
+}
+
+/**
+ * Whether a specifier names `root` itself or something under it, compared the
+ * way the filesystem compares names.
+ *
+ * @param specifier - The rule's specifier.
+ * @param root - An already-resolved directory.
+ */
+function namesPathUnder(specifier: string, root: string): boolean {
+  const folded = canonicalSpecifier(specifier);
+  const base = canonicalSpecifier(root);
+  return folded === base || folded.startsWith(`${base}/`);
 }
 
 /**
@@ -1250,6 +1305,40 @@ function confineToWorkspace(
 type PathVerdict = "inside" | "outside" | "reserved" | "credential";
 
 /**
+ * Trailing dots and spaces on a path component, which Win32 discards.
+ *
+ * Anchored to a separator or to the end of the string, and never applied to a
+ * component that is *only* dots, so `.` and `..` — which `resolve` has already
+ * removed by the time anything here runs — could not be eaten even if they
+ * survived.
+ */
+const WIN32_DISCARDED_TAIL = /(?<=[^\\/. ])[. ]+(?=[\\/]|$)/g;
+
+/**
+ * The spelling Win32 actually opens, for a path that names a component with a
+ * trailing dot or space.
+ *
+ * Win32 path normalization strips both from every component before the call
+ * reaches the filesystem, so `<cwd>\.arcturn.\config.json` creates and opens
+ * `<cwd>\.arcturn\config.json` — the file whose `permissions` and `hooks`
+ * seed every later session in that checkout. Nothing else in either wall sees
+ * that: the glob `**\/.arcturn/**` needs a literal `.arcturn` followed by a
+ * separator, `relative()` compares components verbatim, and
+ * {@link physicalPath} preserves the tail verbatim whenever the leaf does not
+ * exist yet — which is precisely the case for the write that creates it.
+ *
+ * Folded on every platform rather than behind a `process.platform` branch: on a
+ * filesystem that really does keep a directory called `.arcturn.` this can only
+ * ever refuse one more path, and a boundary that is stricter than it needs to
+ * be on Linux is a boundary that is right on Windows.
+ *
+ * @param value - An absolute path.
+ */
+function win32Settled(value: string): string {
+  return value.replace(WIN32_DISCARDED_TAIL, "");
+}
+
+/**
  * Place one path against all three walls, physically.
  *
  * The filesystem is only consulted when it can change the answer. A symlink can
@@ -1261,7 +1350,11 @@ type PathVerdict = "inside" | "outside" | "reserved" | "credential";
  *
  * The reserved and credential tests run on the *physical* spelling, so a name
  * inside the workspace that resolves onto `.arcturn`, onto the arcturn home or
- * onto a `.env` is placed by what it opens rather than by what it is called.
+ * onto a `.env` is placed by what it opens rather than by what it is called —
+ * and on {@link win32Settled}'s spelling of it as well, because that is what
+ * Win32 opens when a component carries a trailing dot or space. Both spellings
+ * are classified and the stricter verdict wins; a path with neither (every
+ * ordinary one) is classified once.
  *
  * @param value - The candidate path, resolved against the workspace already.
  * @param wall - See {@link WorkspaceWall}.
@@ -1271,15 +1364,20 @@ function placePath(value: string, wall: WorkspaceWall): PathVerdict {
   if (!within(target, wall.root) && !within(target, wall.realRoot)) return "outside";
   const physical = physicalPath(target, wall.realRoot);
   if (!within(physical, wall.realRoot)) return "outside";
-  for (const zone of wall.reserved) {
-    if (within(physical, zone)) return "reserved";
+  const settled = win32Settled(physical);
+  const spellings = settled === physical ? [physical] : [physical, settled];
+  for (const candidate of spellings) {
+    for (const zone of wall.reserved) {
+      if (within(candidate, zone)) return "reserved";
+    }
+    if (namesProjectDir(relative(wall.realRoot, candidate))) return "reserved";
   }
-  const inside = relative(wall.realRoot, physical);
-  if (PROJECT_DIR_SEGMENT.test(inside)) return "reserved";
   // The classifier `search_code` filters with, on the same repo-relative
   // spelling it documents, so both surfaces answer "is this a credential file?"
   // identically or the promise on one of them is a lie.
-  if (isSensitivePath(inside)) return "credential";
+  for (const candidate of spellings) {
+    if (isSensitivePath(relative(wall.realRoot, candidate))) return "credential";
+  }
   return "inside";
 }
 

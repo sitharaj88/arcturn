@@ -38,7 +38,7 @@ export type { GrepToolDetails } from "./grep.js";
 export { createGrepTool } from "./grep.js";
 export type { LsToolDetails } from "./ls.js";
 export { createLsTool } from "./ls.js";
-export { resolvePath } from "./path-utils.js";
+export { displayPath, resolvePath, toPosixSeparators } from "./path-utils.js";
 export type { ReadToolDetails } from "./read.js";
 export { createReadTool } from "./read.js";
 export type {

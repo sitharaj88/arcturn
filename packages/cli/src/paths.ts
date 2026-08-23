@@ -10,7 +10,7 @@
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, resolve } from "node:path";
+import { resolve } from "node:path";
 import { defaultCaseInsensitivePaths } from "@arcturn/core";
 
 /** A read-only environment map. */
@@ -85,12 +85,24 @@ export interface CwdHashOptions {
  * Case is folded only where the filesystem folds it, so a Linux checkout that
  * really does have two directories differing only in case keeps two buckets.
  *
+ * The spelling is settled by {@link resolve} unconditionally, not only when the
+ * path looks relative. `path.isAbsolute("/work/repo")` is `true` on Windows and
+ * the path is still not a directory: it is rooted on whatever drive the process
+ * happens to be on, so `resolve` turns it into `D:\work\repo` — the spelling
+ * every caller here passes, since they all get their `cwd` from
+ * {@link resolveArcturnPaths}. Trusting `isAbsolute` therefore gave one
+ * directory two buckets on Windows depending on how it was spelled, which is
+ * the exact defect the case folding below exists to prevent. `resolve` also
+ * settles `C:/work/repo` and `/work/repo/` onto the same bucket as
+ * `C:\work\repo`, and is the identity on a path that is already settled — so
+ * no existing bucket moves.
+ *
  * @param cwd - Directory to hash. Resolved to an absolute path first.
  * @param options - Overrides the case policy (for tests, or an unusual mount).
  * @returns 16 lowercase hex characters.
  */
 export function cwdHash(cwd: string, options: CwdHashOptions = {}): string {
-  const absolute = isAbsolute(cwd) ? cwd : resolve(cwd);
+  const absolute = resolve(cwd);
   const caseInsensitive = options.caseInsensitive ?? defaultCaseInsensitivePaths();
   return createHash("sha256")
     .update(caseInsensitive ? absolute.toLowerCase() : absolute)

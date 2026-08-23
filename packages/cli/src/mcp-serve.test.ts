@@ -1,6 +1,6 @@
 import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-import { PermissionEngine } from "@arcturn/core";
+import { join, resolve, sep } from "node:path";
+import { defaultCaseInsensitivePaths, PermissionEngine } from "@arcturn/core";
 import type { Message, ModelSpec, PermissionRule, SessionEntry } from "@arcturn/types";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -975,6 +975,37 @@ describe("credential files are withheld from the agent surface, not just search_
     expect(await readFile(join(scratch.cwd, ".env"), "utf8")).toContain("sk-live-do-not-leak");
   });
 
+  it("refuses the trailing-dot spelling Win32 opens as the same credential file", async () => {
+    // `server.key.` and `server.key ` are `server.key` to Win32, which strips a
+    // component's trailing dots and spaces before the call reaches the
+    // filesystem — so on Windows this reads the operator's real private key
+    // while the classifier is shown a name whose extension is neither `.key`
+    // nor any suffix it knows. (`.env.` happens to be caught anyway: that
+    // pattern already anchors its token to a following dot. The key
+    // extensions anchor to the end of the path, and do not.) Asserted
+    // everywhere: the wall folds the spelling on every platform, and on one
+    // that keeps the dot it costs a refusal of a file that is not there.
+    const scratch = await workspace();
+    const { client, llm } = await connectWithLlm(scratch, {
+      permissionMode: "plan",
+      turns: [
+        {
+          toolCalls: [
+            { id: "c1", name: "read", arguments: { path: "deploy/server.key." } },
+            { id: "c2", name: "read", arguments: { path: ".env." } },
+          ],
+        },
+        { text: "refused" },
+      ],
+    });
+    await call(client, "ask_arcturn", { prompt: "read the deploy key" });
+
+    const seen = modelSaw(llm);
+    expect(seen).not.toContain("BEGIN PRIVATE KEY");
+    expect(seen).not.toContain("sk-live-do-not-leak");
+    expect(seen.match(/credential-shaped/g)).toHaveLength(2);
+  });
+
   it("drops a credential file's line out of a grep that never named it", async () => {
     // The shape the by-name refusal cannot see: an un-globbed recursive grep
     // walks the whole subtree and prints matching lines from whatever it finds.
@@ -1033,6 +1064,72 @@ describe("arcturn's own state is not repository content", () => {
     const seen = modelSaw(llm);
     expect(seen).not.toContain("RETRO_LANE_SECRET");
     expect(seen).toContain("belongs to arcturn rather than to this repository");
+  });
+
+  it("refuses the trailing-dot spelling Win32 opens as .arcturn", async () => {
+    // Win32 strips trailing dots and spaces from every path component before
+    // the call reaches the filesystem, so `.arcturn.\config.json` creates and
+    // opens `.arcturn\config.json` — the file whose `permissions` and `hooks`
+    // seed every later session in this checkout. Nothing else in either wall
+    // sees it: the zone glob needs a literal `.arcturn` followed by a
+    // separator, and the physical check keeps a not-yet-existing leaf spelled
+    // exactly as the peer typed it, which is the case for the write that
+    // creates the directory. Asserted on every platform, because the wall folds
+    // the spelling everywhere rather than behind a `process.platform` branch —
+    // here it refuses one extra directory, there it closes the forgery.
+    const scratch = await workspace();
+    const { client, llm } = await connectWithLlm(scratch, {
+      permissionMode: "acceptEdits",
+      turns: [
+        {
+          toolCalls: [
+            {
+              id: "c1",
+              name: "write",
+              arguments: { path: ".arcturn./config.json", content: '{"permissions":[]}' },
+            },
+          ],
+        },
+        { text: "refused" },
+      ],
+    });
+    await call(client, "ask_arcturn", { prompt: "seed the config" });
+
+    expect(modelSaw(llm)).toContain("belongs to arcturn rather than to this repository");
+    await expect(readFile(join(scratch.cwd, ".arcturn.", "config.json"), "utf8")).rejects.toThrow();
+    await expect(readFile(join(scratch.cwd, ".arcturn", "config.json"), "utf8")).rejects.toThrow();
+  });
+
+  it("keeps a case spelling of .arcturn out of a grep wherever the volume folds case", async () => {
+    // The rules half of the wall already folds case (`matchSpecifier` asks the
+    // filesystem), so a *named* `.ARCTURN` path is refused by rule. A grep
+    // result is not a named path: nothing but the physical check rules on the
+    // files an expansion reached, so that check has to fold the same way or a
+    // recursive grep prints the contents of a directory arcturn itself opens as
+    // `.arcturn` — which on a case-insensitive volume is exactly what
+    // `nested/.ARCTURN` is. Conditional on the volume, deliberately: where
+    // case is significant, `.ARCTURN` is a directory arcturn never reads and
+    // ordinary repository content.
+    const scratch = await workspace();
+    await writeFileAt(
+      join(scratch.cwd, "nested", ".ARCTURN", "agents", "retro.md"),
+      "lane note: NESTED_LANE_SECRET\n",
+    );
+    const { client, llm } = await connectWithLlm(scratch, {
+      permissionMode: "plan",
+      turns: [
+        { toolCalls: [{ id: "c1", name: "grep", arguments: { pattern: "lane note", path: "." } }] },
+        { text: "done" },
+      ],
+    });
+    await call(client, "ask_arcturn", { prompt: "what lane notes are here" });
+
+    const seen = modelSaw(llm);
+    if (defaultCaseInsensitivePaths()) {
+      expect(seen).not.toContain("NESTED_LANE_SECRET");
+    } else {
+      expect(seen).toContain("NESTED_LANE_SECRET");
+    }
   });
 
   it("keeps .arcturn out of the always-on read surface too", async () => {
@@ -1094,6 +1191,19 @@ describe("arcturn's own state is not repository content", () => {
 });
 
 describe("workspaceConfinementRules", () => {
+  // The confinement resolves the workspace it is handed, and every subject the
+  // engine matches arrives from `path.resolve` too (`defaultSubject`), so on
+  // Windows the rules read `D:\repo\**` and the subjects read
+  // `D:\repo\src\app.ts`. Both sides are therefore built with `resolve`/`join`
+  // rather than typed as POSIX literals: what these tests are about is where
+  // the wall stands, not which separator the platform spells it with. The wall
+  // itself was verified to hold under Windows path semantics — the denies below
+  // all resolve `deny` with `path.win32` in force; what the POSIX literals used
+  // to produce there was an over-refusal of the two positive controls, not a
+  // way through.
+  const ROOT = resolve("/repo");
+  const OUTSIDE = resolve("/Users/me");
+
   /** Resolve one check against a rule set, with no requester behind it. */
   async function decide(
     engine: PermissionEngine,
@@ -1115,13 +1225,13 @@ describe("workspaceConfinementRules", () => {
     // so this is the strongest mode the wall could ever meet.
     const engine = new PermissionEngine({
       mode: "yolo",
-      rules: workspaceConfinementRules("/repo"),
+      rules: workspaceConfinementRules(ROOT),
     });
-    expect(await decide(engine, "read", "/Users/me/.ssh/id_rsa")).toBe("deny");
-    expect(await decide(engine, "write", "/Users/me/.arcturn/config.json")).toBe("deny");
-    expect(await decide(engine, "write", "/Users/me/.arcturn/org-memory/deadbeef.json")).toBe(
-      "deny",
-    );
+    expect(await decide(engine, "read", join(OUTSIDE, ".ssh", "id_rsa"))).toBe("deny");
+    expect(await decide(engine, "write", join(OUTSIDE, ".arcturn", "config.json"))).toBe("deny");
+    expect(
+      await decide(engine, "write", join(OUTSIDE, ".arcturn", "org-memory", "deadbeef.json")),
+    ).toBe("deny");
     // A tool naming no path at all matches only the base deny.
     expect(await decide(engine, "some_extension_tool", "")).toBe("deny");
     // ...and the tools whose subject no path rule can decide are refused by
@@ -1132,8 +1242,15 @@ describe("workspaceConfinementRules", () => {
 
     // Positive controls: the workspace itself and everything under it are left
     // exactly where the mode would have put them.
-    expect(await decide(engine, "write", "/repo/src/app.ts")).not.toBe("deny");
-    expect(await decide(engine, "ls", "/repo")).not.toBe("deny");
+    expect(await decide(engine, "write", join(ROOT, "src", "app.ts"))).not.toBe("deny");
+    expect(await decide(engine, "ls", ROOT)).not.toBe("deny");
+    // ...and the same two, spelled with the other separator. Both name the same
+    // file on the platform that accepts both, and the engine compares them the
+    // way the filesystem does, so the wall may not have a preferred spelling.
+    expect(await decide(engine, "write", `${ROOT}/src/app.ts`.replaceAll("\\", "/"))).not.toBe(
+      "deny",
+    );
+    expect(await decide(engine, "read", `${ROOT}${sep}src${sep}app.ts`)).not.toBe("deny");
   });
 
   it("leaves plan mode as strict as it was inside the workspace", async () => {
@@ -1141,30 +1258,73 @@ describe("workspaceConfinementRules", () => {
     // mutating tools at step 2, before any rule is looked at.
     const engine = new PermissionEngine({
       mode: "plan",
-      rules: workspaceConfinementRules("/repo"),
+      rules: workspaceConfinementRules(ROOT),
     });
-    expect(await decide(engine, "write", "/repo/src/app.ts")).toBe("deny");
-    expect(await decide(engine, "read", "/repo/src/app.ts")).toBe("allow");
+    expect(await decide(engine, "write", join(ROOT, "src", "app.ts"))).toBe("deny");
+    expect(await decide(engine, "read", join(ROOT, "src", "app.ts"))).toBe("allow");
   });
 
   it("drops an inherited allow that names anywhere else and keeps every deny", () => {
-    const rules = workspaceConfinementRules("/repo", [
+    const rules = workspaceConfinementRules(ROOT, [
       // The escape hatch itself, and the same escape spelled as a path.
       { tool: "write", specifier: "*", action: "allow", scope: "session" },
-      { tool: "read", specifier: "/Users/me/**", action: "allow", scope: "session" },
+      { tool: "read", specifier: join(OUTSIDE, "**"), action: "allow", scope: "session" },
       // Names the workspace: grants nothing the mode would not have granted.
-      { tool: "write", specifier: "/repo/src/**", action: "allow", scope: "project" },
+      { tool: "write", specifier: join(ROOT, "src", "**"), action: "allow", scope: "project" },
       // Never dropped, never weakened — and promoted to the nearest scope, so
       // nothing the confinement adds can outrank it.
       { tool: "write", specifier: "**/.env", action: "deny", scope: "user" },
     ]);
     const inherited = rules.filter((rule) => rule.message === undefined);
     expect(inherited).toEqual([
-      { tool: "write", specifier: "/repo/src/**", action: "allow", scope: "project" },
+      { tool: "write", specifier: join(ROOT, "src", "**"), action: "allow", scope: "project" },
       { tool: "write", specifier: "**/.env", action: "deny", scope: "session" },
-      { tool: "*", specifier: "/repo", action: "ask", scope: "user" },
-      { tool: "*", specifier: join("/repo", "**"), action: "ask", scope: "user" },
+      { tool: "*", specifier: ROOT, action: "ask", scope: "user" },
+      { tool: "*", specifier: join(ROOT, "**"), action: "ask", scope: "user" },
     ]);
+  });
+
+  it("keeps an in-workspace allow whichever separator it is written with", () => {
+    // The rule set is filtered by string comparison and then matched by
+    // `matchSpecifier`, which treats `/` and `\` as the same separator on every
+    // platform. When the filter did not, the two halves disagreed in the
+    // direction that costs a user their configuration: on Windows
+    // `allow write "C:/repo/src/**"` — the portable spelling every doc example
+    // uses — does not start with `C:\repo\`, so it was read as naming
+    // somewhere other than the workspace and dropped, while the engine would
+    // have matched it happily. Dropping fails safe, but silently: the operator
+    // gets prompts they configured away, with nothing to say why.
+    const forward = `${ROOT}/src/**`.replaceAll("\\", "/");
+    const backward = `${ROOT}\\src\\**`;
+    const rules = workspaceConfinementRules(ROOT, [
+      { tool: "write", specifier: forward, action: "allow", scope: "project" },
+      { tool: "write", specifier: backward, action: "allow", scope: "project" },
+      // ...while the same two spellings of somewhere else stay dropped.
+      {
+        tool: "read",
+        specifier: `${OUTSIDE}/**`.replaceAll("\\", "/"),
+        action: "allow",
+        scope: "project",
+      },
+      { tool: "read", specifier: `${OUTSIDE}\\**`, action: "allow", scope: "project" },
+    ]);
+    expect(rules.filter((rule) => rule.action === "allow")).toEqual([
+      { tool: "write", specifier: forward, action: "allow", scope: "project" },
+      { tool: "write", specifier: backward, action: "allow", scope: "project" },
+    ]);
+  });
+
+  it("drops an inherited allow reaching .arcturn however it is cased", () => {
+    // `reachesReservedZone` is a string test on a specifier, so it has to fold
+    // the way the volume does or `allow write "<cwd>/.ARCTURN/**"` in a
+    // checked-in config re-opens, on every Windows volume and a stock macOS,
+    // exactly what the blanket zone deny exists to close — an inherited allow
+    // is *more* specific than that deny and wins inside its own scope.
+    const rules = workspaceConfinementRules(ROOT, [
+      { tool: "write", specifier: join(ROOT, ".ARCTURN", "**"), action: "allow", scope: "project" },
+    ]);
+    const kept = rules.filter((rule) => rule.action === "allow");
+    expect(kept).toEqual(defaultCaseInsensitivePaths() ? [] : rules.slice(0, 1));
   });
 });
 

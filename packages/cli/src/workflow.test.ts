@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { PermissionEngine } from "@arcturn/core";
 import type {
@@ -30,6 +30,8 @@ import {
   discoverWorkflows,
   expandStepPrompt,
   formatWriteLaneTrailer,
+  isDevicePath,
+  isSystemPath,
   isWorkflowParseError,
   parseWorkflow,
   parseWriteLaneTrailer,
@@ -2619,6 +2621,39 @@ describe("runWorkflow — engine-minted patch records", () => {
   });
 });
 
+/**
+ * `git init` a throwaway repository with an identity and — the point of this
+ * helper — a line-ending policy of its own.
+ *
+ * A repository that inherits the machine's policy is a repository whose
+ * contents depend on the machine: Git for Windows defaults
+ * `core.autocrlf=true`, so every checkout it makes (a lane's worktree
+ * included) is rewritten to CRLF, and "the role's edit landed in the user's
+ * tree" becomes an assertion about the runner's git config rather than about
+ * the write lane. Arcturn's own checkout is pinned by `.gitattributes`; these
+ * fixtures are pinned here — and the one test that wants the *other*
+ * convention asks for it by name rather than inheriting it by accident.
+ *
+ * @param repo - Directory to initialise; created if it is not there.
+ * @param autocrlf - Configure the repository the way Git for Windows does.
+ * @returns A `git` runner bound to that repository.
+ */
+async function initFixtureRepo(
+  repo: string,
+  autocrlf = false,
+): Promise<(...args: string[]) => Promise<void>> {
+  await mkdir(repo, { recursive: true });
+  const git = async (...args: string[]): Promise<void> => {
+    await execFileAsync("git", args, { cwd: repo });
+  };
+  await git("init", "-q", "-b", "main");
+  await git("config", "user.email", "t@example.com");
+  await git("config", "user.name", "t");
+  await git("config", "core.autocrlf", autocrlf ? "true" : "false");
+  await git("config", "core.eol", autocrlf ? "crlf" : "lf");
+  return git;
+}
+
 describe("createRuntimeWriteLane — seeded worktrees", () => {
   it("seeds each worktree with the run's applied patches and captures only the role's delta", async () => {
     const root = await scratchDir();
@@ -2626,12 +2661,7 @@ describe("createRuntimeWriteLane — seeded worktrees", () => {
     const home = join(root, "home");
     await mkdir(join(repo, "src"), { recursive: true });
     await mkdir(home, { recursive: true });
-    const git = async (...args: string[]): Promise<void> => {
-      await execFileAsync("git", args, { cwd: repo });
-    };
-    await git("init", "-q", "-b", "main");
-    await git("config", "user.email", "t@example.com");
-    await git("config", "user.name", "t");
+    const git = await initFixtureRepo(repo);
     await writeFile(join(repo, "src", "a.ts"), "base\n", "utf8");
     await git("add", "-A");
     await git("commit", "-qm", "base");
@@ -2683,12 +2713,7 @@ describe("createRuntimeWriteLane — seeded worktrees", () => {
     const home = join(root, "home");
     await mkdir(join(repo, "src"), { recursive: true });
     await mkdir(home, { recursive: true });
-    const git = async (...args: string[]): Promise<void> => {
-      await execFileAsync("git", args, { cwd: repo });
-    };
-    await git("init", "-q", "-b", "main");
-    await git("config", "user.email", "t@example.com");
-    await git("config", "user.name", "t");
+    const git = await initFixtureRepo(repo);
     await writeFile(join(repo, "src", "a.ts"), "base\n", "utf8");
     await writeFile(join(repo, "src", "mine.ts"), "committed\n", "utf8");
     await git("add", "-A");
@@ -2720,6 +2745,66 @@ describe("createRuntimeWriteLane — seeded worktrees", () => {
     expect(patch).not.toContain("mine.ts");
     expect(await readFile(join(repo, "src", "mine.ts"), "utf8")).toBe("my own work in progress\n");
     expect(await readFile(join(repo, "src", "a.ts"), "utf8")).toBe("role edit\n");
+  });
+
+  it("captures and applies through a CRLF checkout, as a Windows repository is configured", async () => {
+    // `core.autocrlf=true` is Git for Windows' default, and it makes the two
+    // halves of this lane disagree on paper: `git worktree add` writes the
+    // role a CRLF checkout, while the patch cut back out of it is LF. A patch
+    // that does not apply is a lost role edit, so the round trip is proved
+    // here on EVERY platform by configuring the repository the way Windows
+    // configures it, rather than by waiting for a runner that happens to.
+    const root = await scratchDir();
+    const repo = join(root, "repo");
+    const home = join(root, "home");
+    await mkdir(join(repo, "src"), { recursive: true });
+    await mkdir(home, { recursive: true });
+    const git = await initFixtureRepo(repo, true);
+    await writeFile(join(repo, "src", "a.ts"), "one\ntwo\nthree\n", "utf8");
+    await git("add", "-A");
+    await git("commit", "-qm", "base");
+    // Written with LF, committed as LF, and checked out again the way this
+    // repository asks for: CRLF on disk, which is what a Windows clone holds.
+    await rm(join(repo, "src", "a.ts"));
+    await git("checkout", "--", "src/a.ts");
+    expect(await readFile(join(repo, "src", "a.ts"), "utf8")).toBe("one\r\ntwo\r\nthree\r\n");
+
+    let sawInWorktree = "";
+    const host: WriteLaneHost = {
+      cwd: repo,
+      paths: { home },
+      router: { specFor: () => ({ id: "anthropic/fake" }) as unknown as ModelSpec },
+      buildSessionAgent: (options) =>
+        sessionAgent(async () => {
+          const cwd = options.cwd ?? repo;
+          sawInWorktree = await readFile(join(cwd, "src", "a.ts"), "utf8");
+          // An editor writing LF into a CRLF checkout — the ordinary case,
+          // and the one that would make a naive diff claim every line changed.
+          await writeFile(join(cwd, "src", "a.ts"), "one\nEDITED\nthree\n", "utf8");
+        }),
+    };
+    const outcome = await createRuntimeRunStep(
+      { createSubagent: () => fakeAgent({ events: COMPLETED, text: "x" }) },
+      {
+        resolveAgent: () => role("developer", ["read", "edit"]),
+        writeLane: createRuntimeWriteLane(host, "run-crlf"),
+      },
+    )(request(parseOk([FRONT, "1. @developer edit it"].join("\n"))));
+
+    // The role really was handed a CRLF checkout…
+    expect(sawInWorktree).toBe("one\r\ntwo\r\nthree\r\n");
+    // …the patch is one line, not the whole file re-ended…
+    expect(outcome.isError).toBe(false);
+    expect(outcome.record).toMatchObject({ status: "applied", files: 1 });
+    const patch = await readFile(outcome.record?.patchPath as string, "utf8");
+    expect(patch).toContain("-two");
+    expect(patch).toContain("+EDITED");
+    expect(patch).not.toContain("+one");
+    expect(patch).not.toContain("+three");
+    // …and it landed in the user's checkout, in the endings that checkout uses.
+    const applied = await readFile(join(repo, "src", "a.ts"), "utf8");
+    expect(applied.replace(/\r\n/g, "\n")).toBe("one\nEDITED\nthree\n");
+    expect(applied).toBe("one\r\nEDITED\r\nthree\r\n");
   });
 
   it("labels the session agent it builds so its prompts name the role and step", () => {
@@ -2789,13 +2874,7 @@ function sessionAgent(work: () => Promise<void>): WriteLaneSessionAgent {
 describe("createRuntimeWriteLane — untracked-file seeding", () => {
   /** Init a repo at `repo` with one committed file, ready for a lane. */
   async function initRepo(repo: string): Promise<(...args: string[]) => Promise<void>> {
-    await mkdir(repo, { recursive: true });
-    const git = async (...args: string[]): Promise<void> => {
-      await execFileAsync("git", args, { cwd: repo });
-    };
-    await git("init", "-q", "-b", "main");
-    await git("config", "user.email", "t@example.com");
-    await git("config", "user.name", "t");
+    const git = await initFixtureRepo(repo);
     await writeFile(join(repo, "a.ts"), "base\n", "utf8");
     await git("add", "-A");
     await git("commit", "-qm", "base");
@@ -3115,6 +3194,25 @@ describe("createRuntimeWriteLane — background task ownership", () => {
  */
 const OUTSIDE_CHECKOUT = join(homedir(), "arcturn-outside-checkout");
 
+/**
+ * An absolute path that is absolute on the platform the test is running on.
+ *
+ * `"/wt"` is a complete absolute path on POSIX and a *drive-relative* one on
+ * Windows, where `path.resolve` — which the confinement runs its worktree
+ * through before it writes a single rule — turns it into `C:\wt`. A rule
+ * specifier or an assertion written as the bare literal therefore says
+ * something different from what it means on Windows: the allow glob is
+ * `C:\wt\**` and the subject it is asked about is `/wt/src/app.ts`, which
+ * matches nothing, so the confinement denies the role its own checkout.
+ * Built through `abs(...)` both sides are spelled the way the platform spells
+ * them, and the test says the same thing on either separator.
+ */
+const abs = (...segments: string[]): string => resolve("/", ...segments);
+
+/** The role's own checkout, and the user's — platform-correct on both. */
+const WT = abs("wt");
+const CHECKOUT = abs("repo");
+
 describe("createRuntimeWriteLane — worktree confinement", () => {
   /** A `bash` double that records what it was actually asked to run. */
   function recordingBash(ran: string[]): WriteLaneTool {
@@ -3166,19 +3264,19 @@ describe("createRuntimeWriteLane — worktree confinement", () => {
     const { host } = confinedHost(engine);
     await createRuntimeWriteLane(host, "run-confine").spawn({
       def: developer(),
-      cwd: "/wt",
+      cwd: WT,
       stepId: "3",
     });
 
     const escaped = await engine.check({
       toolName: "write",
       toolCallId: "call-1",
-      subject: "/repo/test/server-bugs.test.js",
+      subject: join(CHECKOUT, "test", "server-bugs.test.js"),
     });
     expect(escaped.behavior).toBe("deny");
     // …and the denial teaches, because no prompt is raised for the role to
     // learn from: a deny it cannot read is a deny it walks into every turn.
-    expect(escaped.message).toContain("/wt");
+    expect(escaped.message).toContain(WT);
     expect(escaped.message).toMatch(/relative/);
     expect(escaped.message).toMatch(/isolated git worktree/);
 
@@ -3186,7 +3284,10 @@ describe("createRuntimeWriteLane — worktree confinement", () => {
     // 3, which is exactly why the confinement is rules and not a mode.
     expect(engine.mode).toBe("yolo");
 
-    for (const inside of ["/wt/test/server-bugs.test.js", "/wt/src/deep/nested/app.ts"]) {
+    for (const inside of [
+      join(WT, "test", "server-bugs.test.js"),
+      join(WT, "src", "deep", "nested", "app.ts"),
+    ]) {
       const allowed = await engine.check({
         toolName: "write",
         toolCallId: `call-${inside}`,
@@ -3199,12 +3300,17 @@ describe("createRuntimeWriteLane — worktree confinement", () => {
       const denied = await engine.check({
         toolName: tool,
         toolCallId: `call-${tool}`,
-        subject: "/repo/src/server.js",
+        subject: join(CHECKOUT, "src", "server.js"),
       });
       expect(denied.behavior).toBe("deny");
       expect(
-        (await engine.check({ toolName: tool, toolCallId: `in-${tool}`, subject: "/wt/src/a.ts" }))
-          .behavior,
+        (
+          await engine.check({
+            toolName: tool,
+            toolCallId: `in-${tool}`,
+            subject: join(WT, "src", "a.ts"),
+          })
+        ).behavior,
       ).toBe("allow");
     }
   });
@@ -3217,29 +3323,34 @@ describe("createRuntimeWriteLane — worktree confinement", () => {
     const engine = new PermissionEngine({
       mode: "default",
       rules: [
-        { tool: "write", specifier: "/repo/src/server.js", action: "allow", scope: "session" },
-        { tool: "edit", specifier: "/repo/**", action: "allow", scope: "session" },
-        { tool: "write", specifier: "/wt/.env", action: "deny", scope: "user" },
+        {
+          tool: "write",
+          specifier: join(CHECKOUT, "src", "server.js"),
+          action: "allow",
+          scope: "session",
+        },
+        { tool: "edit", specifier: join(CHECKOUT, "**"), action: "allow", scope: "session" },
+        { tool: "write", specifier: join(WT, ".env"), action: "deny", scope: "user" },
         { tool: "bash", specifier: "npm *", action: "allow", scope: "project" },
       ],
     });
     const { host } = confinedHost(engine);
     await createRuntimeWriteLane(host, "run-inherit").spawn({
       def: developer(),
-      cwd: "/wt",
+      cwd: WT,
       stepId: "1",
     });
 
     for (const [tool, subject] of [
-      ["write", "/repo/src/server.js"],
-      ["edit", "/repo/src/server.js"],
+      ["write", join(CHECKOUT, "src", "server.js")],
+      ["edit", join(CHECKOUT, "src", "server.js")],
     ] as const) {
       const decision = await engine.check({ toolName: tool, toolCallId: `c-${tool}`, subject });
       expect(decision.behavior).toBe("deny");
     }
     // a deny the user set is never dropped — narrowing only ever narrows
     expect(
-      (await engine.check({ toolName: "write", toolCallId: "c-env", subject: "/wt/.env" }))
+      (await engine.check({ toolName: "write", toolCallId: "c-env", subject: join(WT, ".env") }))
         .behavior,
     ).toBe("deny");
     // and a rule about another tool is none of the confinement's business:
@@ -3250,8 +3361,13 @@ describe("createRuntimeWriteLane — worktree confinement", () => {
     ).toBe("allow");
     // the role can still work where it is supposed to
     expect(
-      (await engine.check({ toolName: "write", toolCallId: "c-in", subject: "/wt/src/app.ts" }))
-        .behavior,
+      (
+        await engine.check({
+          toolName: "write",
+          toolCallId: "c-in",
+          subject: join(WT, "src", "app.ts"),
+        })
+      ).behavior,
     ).toBe("allow");
   });
 
@@ -3261,7 +3377,7 @@ describe("createRuntimeWriteLane — worktree confinement", () => {
     const { host, installed } = confinedHost(engine, [recordingBash(ran)]);
     await createRuntimeWriteLane(host, "run-bash").spawn({
       def: developer(),
-      cwd: "/wt",
+      cwd: WT,
       stepId: "4.2",
     });
     const bash = installed()[0];
@@ -3316,6 +3432,62 @@ describe("createRuntimeWriteLane — worktree confinement", () => {
     }
   });
 
+  it("knows the toolchain on both spellings of an absolute path", () => {
+    // The wall's toolchain exemption is a list of POSIX prefixes, and on
+    // Windows every one of them is a string no real path begins with — so the
+    // exemption did not exist there, and a role running an absolute
+    // interpreter was refused for reading the toolchain it was told to use. A
+    // false refusal costs the step a turn and teaches the model that the wall
+    // is arbitrary. Both spellings are asserted here, on every platform,
+    // because only one of them can be resolved on the machine running this.
+    for (const path of ["/usr/bin/env", "/opt/homebrew/bin/node", "/private/tmp/build"]) {
+      expect(isSystemPath(path), path).toBe(true);
+    }
+    for (const path of [
+      "C:\\Windows\\System32\\cmd.exe",
+      "c:/windows/system32/where.exe",
+      "D:\\Program Files\\nodejs\\node.exe",
+      "C:\\Program Files (x86)\\Git\\bin\\sh.exe",
+      "C:\\ProgramData\\chocolatey\\bin\\node.exe",
+    ]) {
+      expect(isSystemPath(path), path).toBe(true);
+    }
+    // …and somebody's work is still somebody's work on either spelling. A
+    // POSIX `/windows/...` is a directory some Linux box has, not a toolchain:
+    // the Windows list may only be reached through a drive letter.
+    for (const path of [
+      "/Users/me/repo/src/app.ts",
+      "/windows/repo/src/app.ts",
+      "/home/me/.arcturn/org-memory/x.json",
+      "C:\\Users\\me\\repo\\src\\app.ts",
+      "C:\\wt\\src\\app.ts",
+    ]) {
+      expect(isSystemPath(path), path).toBe(false);
+    }
+  });
+
+  it("knows the null sink wherever the platform puts it", () => {
+    // `2>/dev/null` is what a role writes — the commands a model produces are
+    // POSIX shell whatever the host is — and on Windows that resolves to
+    // `C:\dev\null`, which is under no toolchain root at all. Reading it as a
+    // file in somebody's directory refused the commonest redirect there is.
+    for (const path of ["/dev/null", "/dev", "/dev/stdout", "C:\\dev\\null", "\\\\.\\NUL"]) {
+      expect(isDevicePath(path), path).toBe(true);
+    }
+    // …and only the sinks themselves on a Windows volume. POSIX has a `/dev`
+    // filesystem; Windows has developers who keep their checkouts in `C:\dev`,
+    // and a write into one of those is a write into somebody's work.
+    for (const path of [
+      "/devices/null",
+      "C:\\development\\null",
+      "/repo/dev/null.txt",
+      "C:\\dev\\my-repo\\out.js",
+      "C:\\dev",
+    ]) {
+      expect(isDevicePath(path), path).toBe(false);
+    }
+  });
+
   it("leaves a lane whose child has no permission engine exactly as it was", async () => {
     // Every pre-existing lane double is this shape; confinement must not be
     // the thing that makes them throw.
@@ -3335,7 +3507,7 @@ describe("createRuntimeWriteLane — worktree confinement", () => {
     };
     await createRuntimeWriteLane(host, "run-plain").spawn({
       def: developer(),
-      cwd: "/wt",
+      cwd: WT,
       stepId: "1",
     });
     // the bash guard does not need an engine, so it still holds
@@ -3355,29 +3527,39 @@ describe("createRuntimeWriteLane — worktree confinement", () => {
     ];
     const engine = new PermissionEngine({
       mode: "yolo",
-      rules: worktreeConfinementRules("/wt", inherited),
+      rules: worktreeConfinementRules(WT, inherited),
     });
-    for (const subject of ["/wt/.env", "/wt/src/secrets/keys.json"]) {
+    for (const subject of [join(WT, ".env"), join(WT, "src", "secrets", "keys.json")]) {
       expect(
         (await engine.check({ toolName: "write", toolCallId: `c-${subject}`, subject })).behavior,
         subject,
       ).toBe("deny");
     }
     expect(
-      (await engine.check({ toolName: "write", toolCallId: "c-ok", subject: "/wt/src/app.ts" }))
-        .behavior,
+      (
+        await engine.check({
+          toolName: "write",
+          toolCallId: "c-ok",
+          subject: join(WT, "src", "app.ts"),
+        })
+      ).behavior,
     ).toBe("allow");
 
     // …and a child of a session that forbids writing at all still cannot write
     const forbidden = new PermissionEngine({
       mode: "yolo",
-      rules: worktreeConfinementRules("/wt", [
+      rules: worktreeConfinementRules(WT, [
         { tool: "write", specifier: "*", action: "deny", scope: "user" },
       ]),
     });
     expect(
-      (await forbidden.check({ toolName: "write", toolCallId: "c-no", subject: "/wt/src/app.ts" }))
-        .behavior,
+      (
+        await forbidden.check({
+          toolName: "write",
+          toolCallId: "c-no",
+          subject: join(WT, "src", "app.ts"),
+        })
+      ).behavior,
     ).toBe("deny");
   });
 
@@ -3422,8 +3604,8 @@ describe("createRuntimeWriteLane — worktree confinement", () => {
     // default is inverted now: a tool the confinement cannot place is denied,
     // subject included — an argument shape `defaultSubject` cannot read is
     // exactly the case it cannot rule on.
-    const engine = new PermissionEngine({ mode: "yolo", rules: worktreeConfinementRules("/wt") });
-    for (const subject of ["/repo/src/server.js", ""]) {
+    const engine = new PermissionEngine({ mode: "yolo", rules: worktreeConfinementRules(WT) });
+    for (const subject of [join(CHECKOUT, "src", "server.js"), ""]) {
       const denied = await engine.check({
         toolName: "mcp__fs__write_file",
         toolCallId: `c-${subject}`,
@@ -3438,7 +3620,7 @@ describe("createRuntimeWriteLane — worktree confinement", () => {
         await engine.check({
           toolName: "mcp__fs__write_file",
           toolCallId: "c-in",
-          subject: "/wt/src/server.js",
+          subject: join(WT, "src", "server.js"),
         })
       ).behavior,
     ).toBe("allow");
@@ -3453,7 +3635,7 @@ describe("createRuntimeWriteLane — worktree confinement", () => {
     const asked: string[] = [];
     const engine = new PermissionEngine({
       mode: "default",
-      rules: worktreeConfinementRules("/wt"),
+      rules: worktreeConfinementRules(WT),
       requester: async (request) => {
         asked.push(request.toolName);
         return { requestId: request.id, behavior: "allow" };
@@ -3467,8 +3649,13 @@ describe("createRuntimeWriteLane — worktree confinement", () => {
     // …and reading the user's checkout is how a role writes a patch that
     // applies to it, so that is settled without asking, exactly as before.
     expect(
-      (await engine.check({ toolName: "read", toolCallId: "c-read", subject: "/repo/src/a.ts" }))
-        .behavior,
+      (
+        await engine.check({
+          toolName: "read",
+          toolCallId: "c-read",
+          subject: join(CHECKOUT, "src", "a.ts"),
+        })
+      ).behavior,
     ).toBe("allow");
     expect(asked).toEqual(["bash"]);
 
@@ -3478,7 +3665,7 @@ describe("createRuntimeWriteLane — worktree confinement", () => {
     for (const scope of ["session", "project", "user"] as const) {
       const granted = new PermissionEngine({
         mode: "default",
-        rules: worktreeConfinementRules("/wt", [
+        rules: worktreeConfinementRules(WT, [
           { tool: "bash", specifier: "npm *", action: "allow", scope },
         ]),
       });
@@ -3493,26 +3680,32 @@ describe("createRuntimeWriteLane — worktree confinement", () => {
   it("never lets deny-by-default's own pass-through widen an inherited deny", async () => {
     const engine = new PermissionEngine({
       mode: "yolo",
-      rules: worktreeConfinementRules("/wt", [
+      rules: worktreeConfinementRules(WT, [
         { tool: "*", specifier: "**/.env", action: "deny", scope: "user" },
       ]),
     });
     // the inherited deny outranks the pass-through rule for `read` as well
     expect(
-      (await engine.check({ toolName: "read", toolCallId: "c-env", subject: "/wt/.env" })).behavior,
+      (await engine.check({ toolName: "read", toolCallId: "c-env", subject: join(WT, ".env") }))
+        .behavior,
     ).toBe("deny");
     // …and a session that forbade everything still forbids everything, inside
     // the worktree included: the confinement narrows, it never grants.
     const forbidden = new PermissionEngine({
       mode: "yolo",
-      rules: worktreeConfinementRules("/wt", [
+      rules: worktreeConfinementRules(WT, [
         { tool: "*", specifier: "*", action: "deny", scope: "user" },
       ]),
     });
     for (const tool of ["read", "write", "mcp__fs__write_file"]) {
       expect(
-        (await forbidden.check({ toolName: tool, toolCallId: `c-${tool}`, subject: "/wt/a.ts" }))
-          .behavior,
+        (
+          await forbidden.check({
+            toolName: tool,
+            toolCallId: `c-${tool}`,
+            subject: join(WT, "a.ts"),
+          })
+        ).behavior,
         tool,
       ).toBe("deny");
     }
@@ -3712,7 +3905,7 @@ describe("createRuntimeWriteLane — worktree confinement", () => {
     // LATER runs, so this is the one subject a pass-through tool may not name.
     const store = "/Users/operator/.arcturn/org-memory/1011a15b6f9d8222.json";
     for (const mode of ["yolo", "acceptEdits", "default"] as const) {
-      const engine = new PermissionEngine({ mode, rules: worktreeConfinementRules("/wt") });
+      const engine = new PermissionEngine({ mode, rules: worktreeConfinementRules(WT) });
       for (const [tool, subject] of [
         ["bash", `cp /tmp/payload.json ${store}`],
         ["bash", `tee ${store} < payload.json`],
@@ -3734,7 +3927,7 @@ describe("createRuntimeWriteLane — worktree confinement", () => {
     // "npm *"` on both counts and wins on the deny bias.
     const granted = new PermissionEngine({
       mode: "yolo",
-      rules: worktreeConfinementRules("/wt", [
+      rules: worktreeConfinementRules(WT, [
         { tool: "bash", specifier: "npm *", action: "allow", scope: "session" },
         { tool: "bash", specifier: "*", action: "allow", scope: "session" },
       ]),
@@ -4049,7 +4242,14 @@ describe("createRuntimeWriteLane — the lane owns its child's tool list", () =>
     await mkdir(checkout, { recursive: true });
     // What `git worktree add` reproduces when the repository has a symlink
     // checked in, and what `ln -s "$HOME/repo" vendor` leaves behind.
-    await symlink(checkout, join(worktree, "vendor"), "dir");
+    //
+    // `"junction"` rather than `"dir"`: Node ignores the type argument
+    // everywhere but Windows, and on Windows a directory *symlink* needs a
+    // privilege an ordinary account does not hold, while a junction needs
+    // none — so this fixture is buildable on all three runners. Both are
+    // reparse points that `realpathSync` follows, which is the whole of what
+    // the physical wall below is asked to see through.
+    await symlink(checkout, join(worktree, "vendor"), "junction");
 
     const wrote: string[] = [];
     const writeTool: WriteLaneTool = {

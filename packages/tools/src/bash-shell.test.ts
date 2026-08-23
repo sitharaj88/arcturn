@@ -7,13 +7,13 @@
  * so a call site that quietly kept its own hardcoded `/bin/sh` fails here.
  */
 
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { BackgroundTaskManager, createBashTool } from "./bash.js";
 import type { SandboxProbe } from "./sandbox.js";
-import { createFakeContext } from "./test-utils.js";
+import { createFakeContext, removeTempDir } from "./test-utils.js";
 
 /**
  * The recording shell is a POSIX script, so these tests only make sense on a
@@ -52,7 +52,7 @@ describe("bash tool shell resolution", () => {
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await removeTempDir(dir);
   });
 
   /** The argv lines the recording shell captured, or `undefined` if it never ran. */

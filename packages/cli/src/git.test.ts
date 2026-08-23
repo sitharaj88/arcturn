@@ -522,6 +522,91 @@ describe("/pr", () => {
     await runtime.dispose();
   });
 
+  it("reads the base branch off the repository, not off init.defaultBranch", async () => {
+    // The machine says branches are called "master"; this repository's is
+    // called "main". Git for Windows and every developer who ever ran
+    // `git config --global init.defaultBranch master` is in this state, and
+    // taking the config's word for it produced `git log master..HEAD` — a
+    // range git rejects — so a branch full of commits was reported as empty.
+    const { runtime, cwd } = await setup();
+    await initRepo(cwd, "main");
+    await execFileAsync("git", ["config", "init.defaultBranch", "master"], { cwd });
+    await writeIn(cwd, "a.txt", "hello\n");
+    await commitAll(cwd, "init");
+    await addOrigin(cwd, await createBareOrigin());
+    await execFileAsync("git", ["checkout", "-q", "-b", "feature-x"], { cwd });
+    await writeIn(cwd, "b.txt", "one\n");
+    await commitAll(cwd, "add one");
+
+    const { exec, calls } = makeExec(
+      readyGh((args) => {
+        const key = args.join(" ");
+        if (key.startsWith("pr view ")) ghFail("no pull requests found for branch");
+        if (key.startsWith("pr create ")) return { stdout: "https://x/pull/1\n", stderr: "" };
+        return ghFail(`unhandled: ${key}`);
+      }),
+    );
+    const registry = registryFor(exec);
+    await registry.dispatch("/pr", { runtime, ui: fakeUi([true]) });
+
+    const created = calls.find((call) => call.args[0] === "pr" && call.args[1] === "create");
+    const body = created?.args[(created?.args.indexOf("--body") ?? -1) + 1] ?? "";
+    expect(body).toContain("add one");
+    expect(body).not.toContain("No commits ahead");
+    await runtime.dispose();
+  });
+
+  it("still refuses a PR from the default branch when the machine names branches differently", async () => {
+    // The same disagreement, on the guard rather than the body: with the base
+    // taken from config, `branch === base` was false on the default branch
+    // itself, and the refusal that keeps a PR from being opened from `main`
+    // silently stopped firing.
+    const { runtime, cwd } = await setup();
+    await initRepo(cwd, "main");
+    await execFileAsync("git", ["config", "init.defaultBranch", "master"], { cwd });
+    await writeIn(cwd, "a.txt", "hello\n");
+    await commitAll(cwd, "init");
+    await addOrigin(cwd, await createBareOrigin());
+
+    const { exec, calls } = makeExec(readyGh(() => ghFail("should not be reached")));
+    const registry = registryFor(exec);
+    const ui = fakeUi();
+    await registry.dispatch("/pr", { runtime, ui });
+
+    expect(ui.notices[0]).toMatchObject({ level: "error" });
+    expect(ui.notices[0]?.text).toContain('Refusing to open a PR from "main"');
+    expect(calledWith(calls, "git", "push")).toBe(false);
+    await runtime.dispose();
+  });
+
+  it("says the range was unanswerable rather than claiming there were no commits", async () => {
+    // A repository whose only branch is named something else entirely: there
+    // is no base to diff against, and "no commits ahead of the base branch"
+    // would be a claim nobody checked.
+    const { runtime, cwd } = await setup();
+    await initRepo(cwd, "release/2026.1");
+    await writeIn(cwd, "a.txt", "hello\n");
+    await commitAll(cwd, "only commit");
+    await addOrigin(cwd, await createBareOrigin());
+
+    const { exec, calls } = makeExec(
+      readyGh((args) => {
+        const key = args.join(" ");
+        if (key.startsWith("pr view ")) ghFail("no pull requests found for branch");
+        if (key.startsWith("pr create ")) return { stdout: "https://x/pull/2\n", stderr: "" };
+        return ghFail(`unhandled: ${key}`);
+      }),
+    );
+    const registry = registryFor(exec);
+    await registry.dispatch("/pr", { runtime, ui: fakeUi([true]) });
+
+    const created = calls.find((call) => call.args[0] === "pr" && call.args[1] === "create");
+    const body = created?.args[(created?.args.indexOf("--body") ?? -1) + 1] ?? "";
+    expect(body).toContain("Could not list");
+    expect(body).not.toContain("No commits ahead");
+    await runtime.dispose();
+  });
+
   it('detects "no origin remote" before ever calling gh', async () => {
     const { runtime, cwd } = await setup();
     await initRepo(cwd, "feature-x");

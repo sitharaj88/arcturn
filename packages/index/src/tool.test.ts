@@ -1,4 +1,6 @@
 import { rm } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join, sep } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { chunkFile as realChunkFile } from "./chunker.js";
 import {
@@ -85,6 +87,25 @@ describe("search_code — execution", () => {
     expect(text).toContain("class TokenBucket");
     expect(text).toContain('Next: read({"path":"src/rate-limit.ts","offset":2');
     expect(text).not.toContain("return n > 0;");
+  });
+
+  it("addresses files with forward slashes, whatever the platform's separator is", async () => {
+    // The index is a shared vocabulary: the model is told "paths are
+    // repo-relative with forward slashes", the `path` filter is matched
+    // against that spelling, and the `read` call the result suggests is fed
+    // straight back in. If a Windows run stored `src\users\repository.ts`
+    // instead, every stored key, every path filter and every suggested next
+    // step would diverge by platform.
+    const { tool, root } = await setup();
+    const ctx = createFakeContext(root);
+
+    const text = resultText(await tool.execute({ query: "user id" }, ctx));
+    expect(text).toContain("src/users/repository.ts");
+    expect(text).not.toContain("\\");
+
+    // ...and the `path` filter speaks the same dialect.
+    const scoped = resultText(await tool.execute({ query: "user id", path: "src/users/**" }, ctx));
+    expect(scoped).toContain("src/users/repository.ts");
   });
 
   it("reports index and budget accounting in details", async () => {
@@ -190,16 +211,21 @@ describe("search_code — execution", () => {
 
 describe("CodeIndexService", () => {
   it("persists each root under its own hashed directory", async () => {
-    const service = new CodeIndexService({ indexRoot: "/tmp/arcturn-test-index" });
+    // `indexDirFor` joins with the platform separator, so the expectation is
+    // spelled with `join` rather than with a POSIX literal.
+    const indexRoot = join("/tmp", "arcturn-test-index");
+    const service = new CodeIndexService({ indexRoot });
     const a = service.directoryFor("/repo/a");
     const b = service.directoryFor("/repo/b");
     expect(a).not.toBe(b);
-    expect(a.startsWith("/tmp/arcturn-test-index")).toBe(true);
-    expect(a).toBe(indexDirFor("/tmp/arcturn-test-index", "/repo/a"));
+    expect(a.startsWith(indexRoot + sep)).toBe(true);
+    expect(a).toBe(indexDirFor(indexRoot, "/repo/a"));
   });
 
   it("defaults to ~/.arcturn/index", () => {
-    expect(defaultIndexRoot().endsWith("/.arcturn/index")).toBe(true);
+    const root = defaultIndexRoot();
+    expect(root.startsWith(homedir() + sep)).toBe(true);
+    expect(root.split(sep).slice(-2)).toEqual([".arcturn", "index"]);
   });
 
   it("shares one in-flight refresh between concurrent searches", async () => {

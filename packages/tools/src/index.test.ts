@@ -1,9 +1,9 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { BackgroundTaskManager, createDefaultTools } from "./index.js";
-import { createFakeContext } from "./test-utils.js";
+import { createFakeContext, removeTempDir } from "./test-utils.js";
 
 describe("createDefaultTools", () => {
   let dir: string;
@@ -13,7 +13,7 @@ describe("createDefaultTools", () => {
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await removeTempDir(dir);
   });
 
   it("returns all 9 built-in tools with the expected names", () => {
@@ -54,6 +54,14 @@ describe("createDefaultTools", () => {
     const result = await bash.execute({ command: "echo hi", background: true }, ctx);
     const taskId = (result.details as { taskId: string }).taskId;
     expect(backgroundTasks.poll(taskId)).toBeDefined();
+
+    // The assertion is done; this is teardown. The task was spawned with
+    // `cwd: dir` and a live process holds its working directory open on
+    // Windows, so leaving it running would have `afterEach` racing a handle
+    // the test itself opened. Wait for the manager to see it exit.
+    for (let i = 0; i < 100 && backgroundTasks.poll(taskId)?.running; i++) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
   });
 
   it("gives each call to createDefaultTools its own background task manager", () => {

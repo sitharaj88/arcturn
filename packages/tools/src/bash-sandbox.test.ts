@@ -1,11 +1,11 @@
 import { existsSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { BackgroundTaskManager, createBashTool } from "./bash.js";
 import type { SandboxProbe } from "./sandbox.js";
-import { createFakeContext } from "./test-utils.js";
+import { createFakeContext, removeTempDir } from "./test-utils.js";
 
 function fakeProbe(overrides: Partial<SandboxProbe>): SandboxProbe {
   return {
@@ -27,7 +27,7 @@ describe("createBashTool sandbox integration", () => {
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await removeTempDir(dir);
   });
 
   it("default (no options) is unaffected: no sandbox fields in details", async () => {
@@ -109,7 +109,7 @@ describe.runIf(hasRealSandboxExec)("createBashTool sandbox integration (real san
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await removeTempDir(dir);
   });
 
   it("actually denies a write outside the workspace when sandboxed end-to-end", async () => {

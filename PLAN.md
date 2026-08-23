@@ -207,8 +207,23 @@ network fault so it retries and fails over. A role that hits a genuine ambiguity
 emits `ORG-ASK:` and the run pauses for a human answer instead of guessing or
 failing; `ORG-HALT:` remains the fatal form.
 
-**Cross-platform (2026-08-21).** Windows is a supported target, verified in CI
-rather than assumed: shell resolution is platform-aware, path comparison
+**Cross-platform (2026-08-21, corrected 2026-08-23).** Windows is a supported
+target. The original entry here claimed "verified in CI rather than assumed" —
+which was false, because the repository had never been pushed and CI had never
+run. The first real run (2026-08-23) failed 54 Windows tests and 1 macOS test,
+and the failures decomposed into ten real platform bugs, a set of tests that
+assumed POSIX, and environment artefacts (git autocrlf, EBUSY teardown). The
+bugs included: grep/glob handing the model host-separator paths that round-trip
+as broken JSON (`"src\new.ts"` is valid JSON containing a newline); the
+`/dev/null` carve-out missing on Windows so the bash wall refused the commonest
+redirect there is; the toolchain-path exemption not existing at all on Windows;
+LSP servers unspawnable because npm installs them as `.cmd` shims CreateProcess
+cannot execute; Win32 trailing-dot stripping walking a path past the `.arcturn`
+zone wall; and a case-sensitive grep filter that disclosed `.ARCTURN/**`
+contents on any case-folding volume — that last one live on macOS too. All
+fixed; the matrix referees what a macOS machine can only simulate. The lesson
+is the same one the provider table taught: "verified" is a word for things that
+have actually run. Windows specifics: shell resolution is platform-aware, path comparison
 normalizes separators, and permission path matching folds case on
 case-insensitive filesystems — probed at runtime, not inferred from the platform
 name. That last one was a live security bug: `.ENV` walked straight past a
