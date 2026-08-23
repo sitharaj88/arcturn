@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { PILLARS } from "@/components/marketing";
 import { CTASection } from "@/components/site/CTASection";
+import { ArcRule } from "@/components/ui/ArcRule";
 import { Container } from "@/components/ui/Container";
 import { FeatureCard } from "@/components/ui/FeatureCard";
 import { LinkCard } from "@/components/ui/LinkCard";
@@ -100,7 +101,7 @@ export default function FeaturesPage() {
         <PageHeader title="Features" lede={LEDE} />
       </Container>
 
-      <Section>
+      <Section eyebrow="Four pillars" title="What Arcturn does">
         <div className="grid gap-5 md:grid-cols-2 md:gap-6">
           {PILLARS.map((pillar, index) => (
             <Reveal key={pillar.href} delay={index * 0.06}>
@@ -116,6 +117,8 @@ export default function FeaturesPage() {
           ))}
         </div>
       </Section>
+
+      <ArcRule />
 
       <Section
         eyebrow="Also included"

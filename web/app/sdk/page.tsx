@@ -1,6 +1,7 @@
 import { Boxes, CircleDollarSign, GitBranch, Radio, ShieldCheck, Wrench } from "lucide-react";
 import type { Metadata } from "next";
 import { Code } from "@/components/marketing";
+import { ArcRule } from "@/components/ui/ArcRule";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { CodeBlock } from "@/components/ui/CodeBlock";
@@ -131,12 +132,23 @@ const PACKAGE_ROWS = [
     term: <Code>@arcturn/tui</Code>,
     definition: "Terminal UI library with differential rendering",
   },
+  {
+    term: <Code>@arcturn/index</Code>,
+    definition: "Token-optimized code index and BM25 semantic search",
+  },
   { term: <Code>@arcturn/protocol</Code>, definition: "NDJSON wire protocol for server mode" },
   {
     term: <Code>@arcturn/server</Code>,
     definition: "WebSocket server exposing agent sessions to remote clients",
   },
-  { term: <Code>arcturn</Code>, definition: "The interactive coding agent (CLI: arcturn)" },
+  {
+    term: <Code>@arcturn/evals</Code>,
+    definition: "Task-level eval harness: real coding tasks with programmatic assertions",
+  },
+  {
+    term: <Code>arcturn</Code>,
+    definition: "The interactive coding agent, workflow engine, and agent-org runtime",
+  },
 ];
 
 export default function SdkPage() {
@@ -198,6 +210,8 @@ export default function SdkPage() {
         </div>
       </Section>
 
+      <ArcRule />
+
       <Section
         eyebrow="The event stream"
         title="One subscription, every event."
@@ -223,10 +237,12 @@ export default function SdkPage() {
         </p>
       </Section>
 
+      <ArcRule />
+
       <Section
         eyebrow="Package map"
-        title="Five packages you can use on their own."
-        lede="The runtime is split by concern, and each piece is usable without the rest. None of them are published to npm yet — inside the repository they are pnpm workspace packages."
+        title="Eleven packages, split by concern."
+        lede="The runtime is split by concern and each piece has its own dependency surface — @arcturn/types, core, index and protocol carry no external runtime dependencies at all."
       >
         <DefinitionTable rows={PACKAGE_ROWS} termHeader="Package" defHeader="What it is" />
       </Section>

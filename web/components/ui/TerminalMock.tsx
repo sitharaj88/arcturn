@@ -20,6 +20,8 @@ export interface TerminalMockProps {
   description: string;
   /** Override the scripted lines with custom content. */
   lines?: TerminalLine[];
+  /** §2.3.4 reserves the glow for the hero terminal, so every other one is flat. */
+  glow?: boolean;
   title?: string;
   className?: string;
 }
@@ -117,6 +119,7 @@ export function TerminalMock({
   size = "md",
   description,
   lines,
+  glow = false,
   title,
   className,
 }: TerminalMockProps) {
@@ -128,19 +131,20 @@ export function TerminalMock({
       <div
         aria-hidden="true"
         className={cn(
-          "force-dark arc-corner overflow-hidden rounded-xl border border-default bg-surface-raised elev-glow",
+          "force-dark arc-corner rounded-xl border border-default bg-surface-raised",
+          glow && "elev-glow",
           size === "lg" ? "text-[0.875rem]" : "text-code-block",
         )}
       >
-        <div className="flex items-center gap-2 border-b border-default bg-surface-card px-4 py-3">
-          <span className="size-2.5 rounded-full bg-[#f2726b]" />
-          <span className="size-2.5 rounded-full bg-[#e8b53a]" />
-          <span className="size-2.5 rounded-full bg-[#5fd39b]" />
+        <div className="flex items-center gap-2 rounded-t-xl border-b border-default bg-surface-card px-4 py-3">
+          <span className="size-2.5 rounded-full bg-bad-dark" />
+          <span className="size-2.5 rounded-full bg-warn-dark" />
+          <span className="size-2.5 rounded-full bg-good-dark" />
           <span className="ml-2 truncate font-mono text-caption text-faint">
             {title ?? script.title}
           </span>
         </div>
-        <div className="overflow-x-auto bg-surface-inset px-4 py-4">
+        <div className="overflow-x-auto rounded-b-xl bg-surface-inset px-4 py-4">
           <pre className="min-w-max font-mono leading-[1.65]">
             {withStableKeys(body, (line) => line.text).map(({ key, item: line }, index) => (
               <div

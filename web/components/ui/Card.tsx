@@ -14,7 +14,7 @@ export interface CardProps {
   variant?: CardVariant;
   href?: string;
   external?: boolean;
-  /** Set false to drop the corner tick (e.g. dense list rows). */
+  /** Opt in to the corner tick — §2.4 gives it to feature cards, not every card. */
   corner?: boolean;
   className?: string;
   children: ReactNode;
@@ -35,7 +35,7 @@ export function Card({
   variant = "default",
   href,
   external,
-  corner = true,
+  corner = false,
   className,
   children,
 }: CardProps) {

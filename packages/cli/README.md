@@ -94,16 +94,21 @@ variable is set **right now** — and the providers you can sign into with a sub
 
 ### Adapters
 
-| Provider id | Backend | Credentials |
-| --- | --- | --- |
-| `anthropic` | Claude, Messages API | `ANTHROPIC_API_KEY` (or `ANTHROPIC_AUTH_TOKEN`), or `arcturn auth login anthropic` |
-| `openai` · `openai-responses` | Chat Completions / the Responses API | `OPENAI_API_KEY` |
-| `google` | Gemini | `GOOGLE_API_KEY` (or `GEMINI_API_KEY`) |
-| `azure` | Azure OpenAI deployments | `AZURE_OPENAI_API_KEY` |
-| `bedrock` | AWS Bedrock | ambient AWS credentials (profile, role, env) |
-| `vertex` | Google Vertex AI | ambient Google application-default credentials |
-| `openai-compatible` · `anthropic-compatible` | Any endpoint speaking either wire format | whatever the spec's `apiKeyEnv` names |
-| `github-copilot` · `openai-codex` · `anthropic-oauth` | Subscription-only backends | `arcturn auth login <provider>` |
+`Verified` records whether the adapter has been driven against the provider's real
+endpoint — streaming, a tool call answered on a second turn, and cost accounting — not
+merely unit-tested. See [Model providers](https://arcturn.dev/docs/providers) for why that
+distinction is called out.
+
+| Provider id | Backend | Credentials | Verified |
+| --- | --- | --- | --- |
+| `anthropic` | Claude, Messages API | `ANTHROPIC_API_KEY` (or `ANTHROPIC_AUTH_TOKEN`), or `arcturn auth login anthropic` | ✅ Haiku 4.5 |
+| `openai` · `openai-responses` | Chat Completions / the Responses API | `OPENAI_API_KEY` | ✅ GPT-5 nano, both surfaces |
+| `google` | Gemini | `GOOGLE_API_KEY` (or `GEMINI_API_KEY`) | ✅ Gemini 3.5 Flash Lite |
+| `openai-compatible` · `anthropic-compatible` | Any endpoint speaking either wire format | whatever the spec's `apiKeyEnv` names | ✅ both — Z.AI GLM and a canonical Messages API |
+| `azure` | Azure OpenAI deployments | `AZURE_OPENAI_API_KEY` | ⚠️ not yet |
+| `bedrock` | AWS Bedrock | ambient AWS credentials (profile, role, env) | ⚠️ not yet |
+| `vertex` | Google Vertex AI | ambient Google application-default credentials | ⚠️ not yet |
+| `github-copilot` · `openai-codex` · `anthropic-oauth` | Subscription-only backends | `arcturn auth login <provider>` | ⚠️ OAuth endpoints unverified |
 
 ### Presets
 

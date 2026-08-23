@@ -5,9 +5,9 @@ import { cn } from "@/lib/cn";
 import { CopyButton } from "./CopyButton";
 
 /**
- * A single copyable command on a gold-tinted plate. Used for the clone
- * command on the home page — Arcturn is not on npm yet, so the install is a
- * clone and the caption says so.
+ * A single copyable command on a gold-tinted plate. Used for the install
+ * command on the home page, where the caption carries the one prerequisite
+ * worth knowing before someone runs it.
  */
 export interface CommandChipProps {
   command: string;

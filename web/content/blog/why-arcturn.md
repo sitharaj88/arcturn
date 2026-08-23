@@ -107,7 +107,7 @@ than no feature, since you'll trust it.
 
 ## What I owe you before you trust any of this
 
-arcturn is pre-1.0. It is one person. It has no users. It is not on npm yet.
+arcturn is pre-1.0. It is one person. It has no production users.
 
 I'd rather lead with that than bury it, because the useful thing I can offer instead of
 adoption numbers is evidence you can check yourself.
@@ -152,15 +152,37 @@ source-available licence with a catch in clause four.
 
 Today arcturn is a terminal coding agent and the TypeScript SDK it's built on — the same
 runtime, the same event stream, just without a terminal in front of it. It talks to
-Anthropic, OpenAI, Google, Bedrock, Vertex, Azure, and any OpenAI-compatible endpoint by
-URL. It speaks MCP. It runs sub-agents, hooks, skills, plan mode, background shell.
-Sixteen pages of documentation.
+Anthropic, OpenAI, Google, Bedrock, Vertex, Azure, and any OpenAI- or Anthropic-compatible
+endpoint by URL. It speaks MCP. It runs sub-agents, hooks, skills, plan mode, background
+shell. Forty-three pages of documentation.
 
-What it isn't: proven at scale, battle-tested, or finished. Exactly one provider path has
-completed real multi-turn tool-calling sessions against a live endpoint — the
-OpenAI-compatible one. The first-party Anthropic, OpenAI and Google adapters are unproven
-against real traffic, and Bedrock, Vertex and Azure have never reached their endpoints at
-all. That's written down in the repo too.
+What it isn't: proven at scale, battle-tested, or finished. Six provider paths have
+completed real multi-turn tool-calling sessions against a live endpoint — first-party
+Anthropic, Google, and OpenAI on both its Chat Completions and Responses surfaces, plus
+both compatibility adapters. Bedrock, Vertex and Azure have never reached their endpoints
+at all, and the OAuth endpoint URLs remain unverified against live provider documentation.
+That's written down in the repo too.
+
+One caveat on the compatibility adapters, since it would be easy to overclaim. Each was
+verified against a single implementation of its protocol — `openai-compatible` against
+Z.AI's GLM endpoints across 170-odd real sessions, `anthropic-compatible` against a
+canonical Messages API. That proves the adapter's own request shaping, streaming, tool
+assembly and accounting. It does not prove any particular third-party service, which may
+deviate from the protocol in its own way.
+
+The live runs are worth being specific about, because each of them found a bug that a
+green test suite could not. Anthropic's found a `--print` that read stdin to EOF whenever it
+was not a terminal, so an inherited pipe — every CI runner, Makefile and `spawn()` — hung
+forever before emitting a single event. Google's found tool calling broken outright: Gemini
+signs the tool *call*, not only the thinking that led to it, and rejected every follow-up
+turn with a 400 until the signature was carried back; multi-turn tool use had never once
+completed. OpenAI's found the Responses adapter registered, documented and unit-tested, with
+no catalog entries — so no user could select it.
+
+Three providers, three bugs, all in code with passing tests, two of them in features the
+documentation advertised as working. That is the argument for the distinction this site
+draws everywhere between *implemented* and *verified against a live endpoint*, and it is why
+the three that remain unverified are marked rather than quietly counted.
 
 If the agent you're using already tells you what it was allowed to do, what it cost, what
 it changed, and how to get back — you genuinely don't need this.
@@ -172,6 +194,5 @@ me.
 npm install -g arcturn
 ```
 
-That command is what it'll be; the package isn't published yet, so for now it's a clone
-and a build. Either way, the interesting part isn't the install. It's that everything
-above is checkable. Judge it on the code.
+The interesting part isn't the install, though. It's that everything above is checkable.
+Judge it on the code.

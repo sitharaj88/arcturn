@@ -29,8 +29,9 @@ const BASE =
 
 const VARIANTS: Record<ButtonVariant, string> = {
   // The gold fill is #f2af48 in both themes: the primary CTA is identical
-  // everywhere and never darkens on light (DESIGN.md §2.1.2).
-  primary: "bg-gold text-on-accent border border-transparent hover:bg-gold-hover elev-glow",
+  // everywhere and never darkens on light (DESIGN.md §2.1.2). The glow is not
+  // part of the variant — §2.3.4 gives it to one CTA per page, opted in there.
+  primary: "bg-gold text-on-accent border border-transparent hover:bg-gold-hover",
   ghost:
     "border border-strong text-text bg-transparent hover:bg-surface-hover hover:border-accent-edge",
   quiet: "border border-transparent text-muted hover:text-text hover:bg-surface-hover",

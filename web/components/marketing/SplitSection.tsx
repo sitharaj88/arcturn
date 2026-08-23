@@ -38,7 +38,7 @@ export function SplitSection({
               <span>{eyebrow}</span>
             </p>
             <h2 className="mt-3 text-h2 text-balance text-text">{title}</h2>
-            <div className="mt-5 flex flex-col gap-5">{children}</div>
+            <div className="mt-5 flex max-w-[68ch] flex-col gap-5 lg:max-w-none">{children}</div>
           </Reveal>
           <Reveal delay={0.06} className={cn("min-w-0", reverse && "lg:order-1")}>
             {media}

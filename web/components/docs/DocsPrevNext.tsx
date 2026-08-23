@@ -25,7 +25,7 @@ export function DocsPrevNext({ prev, next, className }: DocsPrevNextProps) {
     >
       {prev ? (
         <Link href={`/docs/${prev.slug}`} className={cn(card, "sm:col-start-1")} rel="prev">
-          <span className="flex items-center gap-1.5 text-caption text-faint">
+          <span className="flex items-center gap-1.5 text-caption text-faint transition-colors dur-fast ease-out group-hover:text-muted">
             <ArrowLeft
               className="size-3.5 transition-transform dur-fast ease-out group-hover:-translate-x-0.5"
               aria-hidden="true"
@@ -42,7 +42,7 @@ export function DocsPrevNext({ prev, next, className }: DocsPrevNextProps) {
           className={cn(card, "sm:col-start-2 sm:items-end sm:text-right")}
           rel="next"
         >
-          <span className="flex items-center gap-1.5 text-caption text-faint">
+          <span className="flex items-center gap-1.5 text-caption text-faint transition-colors dur-fast ease-out group-hover:text-muted">
             Next
             <ArrowRight
               className="size-3.5 transition-transform dur-fast ease-out group-hover:translate-x-0.5"

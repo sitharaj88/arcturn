@@ -59,9 +59,9 @@ export function CopyButton({ value, label = "Copy to clipboard", className }: Co
     <button
       type="button"
       onClick={copy}
-      aria-label={copied ? "Copied" : label}
+      aria-label={label}
       className={cn(
-        "inline-flex size-9 shrink-0 items-center justify-center rounded-md border border-default",
+        "inline-flex size-11 shrink-0 items-center justify-center rounded-md border border-default sm:size-9",
         "bg-surface-card text-faint transition-colors dur-fast ease-out",
         "hover:border-strong hover:text-text",
         className,

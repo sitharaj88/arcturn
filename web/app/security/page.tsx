@@ -1,5 +1,7 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { Code, ProseSection } from "@/components/marketing";
+import { CTASection } from "@/components/site/CTASection";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Container } from "@/components/ui/Container";
@@ -62,6 +64,21 @@ const CONTROLS = [
 
 const LIMITS: LimitRow[] = [
   {
+    control: "Permission engine",
+    limit: (
+      <>
+        Two edges, both structural. <Code>alwaysAllowTools</Code> is consulted at step 1 of
+        resolution, before any rule: a tool on that list is allowed without the rule set being
+        reached at all, so a host that widens it past the runtime’s own <Code>todo</Code> and{" "}
+        <Code>plan</Code> puts those tools beyond even a <Code>deny</Code>. And a rule matches the
+        subject a tool reports — an absolute path from <Code>write</Code> and <Code>edit</Code>, the
+        command line from <Code>bash</Code>, tested per shell segment — so a path rule never sees
+        the path a shell command reaches by another spelling: <Code>deny **/*.env</Code> stops an{" "}
+        <Code>edit</Code> of that file and does not stop <Code>cat .env</Code>.
+      </>
+    ),
+  },
+  {
     control: "Checkpoints and /rewind",
     limit: (
       <>
@@ -116,10 +133,17 @@ const LIMITS: LimitRow[] = [
     control: "Speculative approval",
     limit: (
       <>
-        Only <Code>write</Code> and <Code>edit</Code> can be speculated, because only file mutations
-        can be undone by throwing a directory away. Everything else is blocked outright while a
-        speculation is open — including a <Code>bash</Code> call that would only have touched files,
-        because the wrapper cannot know that in advance.
+        Not one of the eight above: speculation is off by default and is introduced on{" "}
+        <Link
+          href="/features/control"
+          className="text-accent underline decoration-accent/40 underline-offset-2 hover:decoration-current"
+        >
+          Control
+        </Link>
+        . Only <Code>write</Code> and <Code>edit</Code> can be speculated, because only file
+        mutations can be undone by throwing a directory away. Everything else is blocked outright
+        while a speculation is open — including a <Code>bash</Code> call that would only have
+        touched files, because the wrapper cannot know that in advance.
       </>
     ),
   },
@@ -269,6 +293,11 @@ export default function SecurityPage() {
           ]}
         />
       </Container>
+
+      <CTASection
+        title="Read the limits, then run it."
+        lede="Every control on this page has an edge, and every edge is written down. Start a session and watch the first one hold."
+      />
     </>
   );
 }

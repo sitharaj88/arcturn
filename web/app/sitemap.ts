@@ -7,6 +7,14 @@ import { SITE_URL } from "@/lib/utils";
 /** Required by `output: "export"` — this route has no per-request data. */
 export const dynamic = "force-static";
 
+/**
+ * Absolute URL for a site-relative path. `next.config.ts` sets
+ * `trailingSlash: true`, so a slash-less URL here would 301 on every crawl.
+ */
+function url(pathname: string): string {
+  return `${SITE_URL}${pathname.endsWith("/") ? pathname : `${pathname}/`}`;
+}
+
 /** Static routes that don't come from `content/**` (DESIGN.md §5.4). */
 const STATIC_ROUTES = [
   "/",
@@ -39,17 +47,17 @@ export default function sitemap(): MetadataRoute.Sitemap {
   const now = new Date();
 
   const staticEntries: MetadataRoute.Sitemap = STATIC_ROUTES.map((route) => ({
-    url: `${SITE_URL}${route}`,
+    url: url(route),
     lastModified: now,
   }));
 
   const docEntries: MetadataRoute.Sitemap = docSlugs().map((slug) => ({
-    url: `${SITE_URL}/docs/${slug}`,
+    url: url(`/docs/${slug}`),
     lastModified: now,
   }));
 
   const blogEntries: MetadataRoute.Sitemap = allPostSlugs().map((slug) => ({
-    url: `${SITE_URL}/blog/${slug}`,
+    url: url(`/blog/${slug}`),
     lastModified: now,
   }));
 

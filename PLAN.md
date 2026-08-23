@@ -247,8 +247,36 @@ two turns, real token usage including cache reads). This validates the OpenAI-co
 streaming path end to end: SSE parsing, tool-call assembly, tool execution, result
 feedback, and the second turn.
 
-Still unproven: Anthropic, OpenAI and Google first-party adapters; Bedrock, Vertex and
-Azure have never reached their endpoints; the OAuth endpoint URLs and client ids remain
-unverified against live provider documentation (isolated in one overridable block in
-oauth/providers.ts, with ARCTURN_OAUTH_* env overrides so a stale value needs no code change).
-Running one real session per remaining provider family is the next validation step.
+**First-party adapters proven (2026-08-23).** One live run per provider family, each
+covering streaming, a tool call whose result is fed back and answered on a second turn,
+and cost accounting checked against the published rates. Anthropic on Claude Haiku 4.5,
+Google on Gemini 3.5 Flash Lite, OpenAI on GPT-5 nano through *both* surfaces — Chat
+Completions and the Responses API. Total spend under two cents.
+
+All three found a bug no test suite had. Anthropic's: `--print` read stdin to EOF whenever
+it was not a TTY, so an inherited pipe — every CI runner, Makefile and `spawn()` — hung
+forever, before emitting a single event. Google's: Gemini signs the tool *call*, not only
+the thinking that led to it, and rejects the follow-up turn with a 400 without the
+signature back, so multi-turn tool use had never once completed. This repo had filed that
+under "Contracts v2 · reasoning continuity" as a fidelity nicety; it was a total feature
+failure. OpenAI's: the Responses adapter was registered, documented and unit-tested, and
+had no catalog entries, so `--model openai-responses/...` answered `Unknown model` — 929
+lines nobody could select.
+
+The lesson is worth keeping: all three were reachable only by talking to a real endpoint,
+and two were in features the docs advertised as working.
+
+The `anthropic-compatible` adapter was verified the same way, pointed at a canonical
+Messages API with the same key: full tool round trip, $0.0014. Each compatibility adapter is
+therefore proven against exactly one implementation of its protocol — `openai-compatible`
+against Z.AI across 170-odd sessions — which proves the adapter, not any given third-party
+service.
+
+Still unproven: Bedrock, Vertex and Azure have never reached their endpoints — each needs a
+cloud account (AWS model access, a GCP project with application-default credentials, an
+Azure deployment) rather than an API key, which is why they are the ones outstanding. Their
+stream translation is partly covered by the runs above (`azure` reuses `openaiEventStream`,
+`vertex` reuses both `anthropicEventStream` and `googleEventStream`); `bedrock` shares none
+of it and is the largest genuinely untested surface. The OAuth endpoint URLs and client ids remain unverified against live
+provider documentation (isolated in one overridable block in oauth/providers.ts, with
+ARCTURN_OAUTH_* env overrides so a stale value needs no code change).

@@ -9,6 +9,14 @@ import { ARC_PATH, STAR_PATH } from "./StarMark";
  * animation is CSS, so the global reduce block neutralises it).
  *
  * Always decorative; position it with the `className` from the caller.
+ *
+ * The halo is deliberately wider than a phone viewport (`min(440px, 118vw)`),
+ * so **the caller's positioned ancestor must clip it** — `relative
+ * overflow-hidden` on the section, not on anything inside this component. The
+ * component cannot enforce that itself: a clipper around the `<svg>` would be
+ * the very box that overflows, and one at this component's root would clip
+ * against whatever the caller made `relative`, which on the home hero is the
+ * terminal column — erasing the deliberate `-top-56 right-[-18%]` bleed.
  */
 export interface ArcHaloProps {
   /** Rendered edge length in px at >=768px. Below that it scales down. */

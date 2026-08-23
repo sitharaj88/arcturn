@@ -10,6 +10,15 @@ export const SITE_URL = "https://arcturn.dev";
 /** The GitHub repository every "on GitHub" link points at. */
 export const REPO_URL = "https://github.com/sitharaj88/arcturn";
 
+/**
+ * The one install command the site shows, in the one place it is written down.
+ *
+ * It names a published package, which couples two releases: this site must not
+ * be deployed before `arcturn` exists on npm, or every install chip on it is a
+ * lie the reader finds out about at the shell.
+ */
+export const INSTALL_COMMAND = "npm install -g arcturn";
+
 /** Author & support links (DESIGN.md §5.3) — mandatory, exact, never reordered. */
 export const AUTHOR_LINKS = [
   { label: "Website", href: "https://sitharaj.in" },

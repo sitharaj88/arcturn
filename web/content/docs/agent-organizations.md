@@ -1,8 +1,8 @@
 ---
 title: Agent organizations
 description: Turn a workflow into a software org — named roles with their own models and tools, three dispatch lanes that decide what each can touch, and a human gate for the questions a model should not answer alone.
-section: Extend
-order: 10.85
+section: Core concepts
+order: 8.97
 ---
 
 A [workflow](/docs/workflows) is a pipeline. An **agent organization** is what you get

@@ -1,8 +1,8 @@
 ---
 title: Workflows
 description: Deterministic, file-defined multi-step runs — a markdown numbered list is the control flow, with the model filling in only the content.
-section: Extend
-order: 10.8
+section: Core concepts
+order: 8.96
 ---
 
 ## Skills, agents, and workflows are three different levers

@@ -7,6 +7,12 @@ import { StarMark } from "@/components/ui/StarMark";
 /**
  * The 404 (DESIGN.md §3.13). With `output: "export"` this emits `404.html`,
  * which static hosts serve directly — there is no catch-all route.
+ *
+ * `overflow-hidden` on the Container is load-bearing, not decoration: the halo
+ * is deliberately wider than a phone (`min(440px, 118vw)` below 48rem) and is
+ * absolutely positioned against this Container, so this is the box that has to
+ * clip it. Without it the page scrolls sideways at 360px, which §2.3.5 calls a
+ * non-negotiable.
  */
 export default function NotFound() {
   const featurePages = [
@@ -19,7 +25,7 @@ export default function NotFound() {
   return (
     <Container
       size="prose"
-      className="relative flex min-h-[60vh] flex-col items-center justify-center py-20 text-center"
+      className="relative flex min-h-[60vh] flex-col items-center justify-center overflow-hidden py-20 text-center"
     >
       <ArcHalo
         size={420}

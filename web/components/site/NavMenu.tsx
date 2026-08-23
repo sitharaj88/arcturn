@@ -103,13 +103,13 @@ export function NavMenu({ className }: { className?: string }) {
                       <Link
                         href={item.href}
                         aria-current={pathname === item.href ? "page" : undefined}
-                        className="block rounded-md px-2 py-2 transition-colors dur-fast ease-out hover:bg-surface-hover"
+                        className="group block rounded-md px-2 py-2 transition-colors dur-fast ease-out hover:bg-surface-hover"
                       >
                         <span className="block text-body-sm font-medium text-text">
                           {item.label}
                         </span>
                         {item.description ? (
-                          <span className="mt-0.5 block text-caption text-faint">
+                          <span className="mt-0.5 block text-caption text-faint transition-colors dur-fast ease-out group-hover:text-muted">
                             {item.description}
                           </span>
                         ) : null}

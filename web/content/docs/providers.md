@@ -1,8 +1,8 @@
 ---
 title: Model providers
 description: Every model backend Arcturn can drive, and how to authenticate with each.
-section: Core concepts
-order: 2
+section: Start
+order: 3
 ---
 
 ## One interface, every backend
@@ -11,22 +11,55 @@ Arcturn drives every model through a single `LLMClient` interface, so a provider
 `--model` flag rather than a code change. Adapters register themselves into a provider
 registry, which is why adding a backend never touches dispatch code.
 
-Nine providers are registered out of the box:
+Nine providers are registered out of the box. The last column is the one worth reading
+first — it separates what has been driven against a live endpoint from what has only been
+built and unit-tested:
 
-| Provider id | What it drives | Credentials |
-|---|---|---|
-| `anthropic` | Claude, direct | `ANTHROPIC_API_KEY` |
-| `openai` | GPT, Chat Completions | `OPENAI_API_KEY` |
-| `openai-responses` | GPT, Responses API | `OPENAI_API_KEY` |
-| `google` | Gemini, direct | `GOOGLE_API_KEY` |
-| `bedrock` | Claude, Nova, Llama, Mistral, Titan on AWS | AWS provider chain |
-| `vertex` | Gemini and Claude on Google Cloud | Application-default credentials |
-| `azure` | GPT on Azure OpenAI | `AZURE_OPENAI_API_KEY` or Entra ID |
-| `openai-compatible` | Any OpenAI-shaped endpoint | Per endpoint |
-| `anthropic-compatible` | Any Anthropic-Messages endpoint | Per endpoint |
+| Provider id | What it drives | Credentials | Verified live |
+|---|---|---|---|
+| `anthropic` | Claude, direct | `ANTHROPIC_API_KEY` | ✅ Claude Haiku 4.5 |
+| `openai` | GPT, Chat Completions | `OPENAI_API_KEY` | ✅ GPT-5 nano |
+| `openai-responses` | GPT, Responses API | `OPENAI_API_KEY` | ✅ GPT-5 nano |
+| `google` | Gemini, direct | `GOOGLE_API_KEY` | ✅ Gemini 3.5 Flash Lite |
+| `openai-compatible` | Any OpenAI-shaped endpoint | Per endpoint | ✅ Z.AI GLM, 170+ sessions |
+| `anthropic-compatible` | Any Anthropic-Messages endpoint | Per endpoint | ✅ canonical Messages API |
+| `bedrock` | Claude, Nova, Llama, Mistral, Titan on AWS | AWS provider chain | ⚠️ not yet |
+| `vertex` | Gemini and Claude on Google Cloud | Application-default credentials | ⚠️ not yet |
+| `azure` | GPT on Azure OpenAI | `AZURE_OPENAI_API_KEY` or Entra ID | ⚠️ not yet |
 
-The last two matter more than they look: most third-party inference services speak one of
-those two protocols, so Arcturn reaches them without a bespoke adapter each.
+The two compatible adapters matter more than they look: most third-party inference services
+speak one of those two protocols, so Arcturn reaches them without a bespoke adapter each.
+
+### What "verified live" means, and why the column exists
+
+A ✅ means a real request went to that provider's real endpoint and came back correct across
+four things: streaming text, a tool call whose result is fed back and answered from on a
+second turn, usage and cost accounting that matches the published rates, and — where the
+provider supports it — a thinking block.
+
+The column exists because every one of those live runs found a bug that a green test suite
+could not. Anthropic's found a `--print` that hung forever on an inherited stdin, which is
+the exact shape CI uses. Google's found tool calling broken outright: Gemini signs the tool
+*call*, not just the thinking that led to it, and rejected every second turn with a 400
+until the signature was carried back. OpenAI's found the Responses adapter documented here
+but impossible to select, because it shipped with no catalog entries.
+
+None of those were reachable by unit tests, and two were in features these docs advertised
+as working. So a ⚠️ is not a claim that an adapter is broken — the code is implemented,
+reviewed and unit-tested, and `bedrock` and `azure` reuse stream translation that the ✅
+rows exercise. It is a claim about what has been *demonstrated*, and given the hit rate
+above, the honest distinction is worth more to you than a longer list of ticks.
+
+One honest qualification on the two compatibility adapters. Each was verified against a
+single implementation of its protocol — `openai-compatible` against Z.AI's GLM endpoints
+across 170-odd real sessions, `anthropic-compatible` against a canonical Messages API. That
+proves the adapter's own request shaping, streaming, tool assembly and accounting; it does
+not prove any particular third-party service, which may deviate in its own way.
+
+The three unverified cloud backends need an AWS account with model access, a GCP project
+with application-default credentials, or an Azure deployment respectively — which is why
+they are the ones still outstanding. If you run Arcturn against one, the result is worth
+reporting either way.
 
 ## Cloud backends
 
@@ -336,3 +369,12 @@ const onAws = bedrockModel("us.anthropic.claude-sonnet-4-5-20250929-v1:0", {
 
 Costs are tracked per request when a model's pricing is known; where a price could not be
 sourced confidently it is omitted rather than guessed, so `costUsd` is simply absent.
+
+## Related
+
+- [Model routing](/docs/model-routing) — the config-and-precedence reference behind the
+  per-role routes above: what each route kind resolves to, and which layer wins.
+- [Configuration](/docs/configuration) — where `model`, `route` and provider credentials
+  sit among every other key, and how session, project and user layers combine.
+- [Audit trail & cost accounting](/docs/audit-cost) — what the per-request cost above adds
+  up to across a whole session, and the `--max-cost` ceiling that stops it.

@@ -1,8 +1,8 @@
 ---
 title: Model-invoked skills
 description: The skill tool exposes the same skill library markdown skills use to the model itself, so it can reach for a skill mid-task without the user typing a slash command.
-section: Extend
-order: 10.9
+section: Core concepts
+order: 6.6
 ---
 
 ## Two ways into the same skill library

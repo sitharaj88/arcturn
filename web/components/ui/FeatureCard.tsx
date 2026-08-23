@@ -25,7 +25,11 @@ export function FeatureCard({
   className,
 }: FeatureCardProps) {
   return (
-    <Card href={href} className={cn("group flex flex-col", size === "lg" && "sm:p-8", className)}>
+    <Card
+      href={href}
+      corner
+      className={cn("group flex flex-col", size === "lg" && "sm:p-8", className)}
+    >
       <span
         aria-hidden="true"
         className="inline-flex size-10 items-center justify-center rounded-md border border-accent-edge bg-[color-mix(in_oklab,var(--accent)_10%,transparent)] text-accent"

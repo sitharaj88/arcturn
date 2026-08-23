@@ -16,7 +16,7 @@ import { FeatureCard } from "@/components/ui/FeatureCard";
 import { LinkCard } from "@/components/ui/LinkCard";
 import { Reveal } from "@/components/ui/Reveal";
 import { Section } from "@/components/ui/Section";
-import { TerminalMock } from "@/components/ui/TerminalMock";
+import { type TerminalLine, TerminalMock } from "@/components/ui/TerminalMock";
 import { REPO_URL } from "@/lib/utils";
 
 const HERO_LEDE =
@@ -95,6 +95,26 @@ const EXTEND_CARDS = [
   },
 ];
 
+/**
+ * The hero has to show the one thing a capable agent doesn't do: stop at the
+ * gate, take a decision, and leave a receipt. A read/grep/edit transcript would
+ * read identically coming from any other agent. The cost line is trimmed of its
+ * turn count because at 360px the longer form clips inside the terminal's own
+ * scroll container, and the tail is the part that carries the budget.
+ */
+const HERO_LINES: TerminalLine[] = [
+  { text: "✦ arcturn · claude-sonnet-4-5 · ~/projects/api", tone: "accent" },
+  { text: "› add input validation to the /signup handler", tone: "prompt" },
+  { text: "" },
+  { text: "  read   src/routes/signup.ts", tone: "muted" },
+  { text: "⚠ Permission required — edit src/routes/signup.ts", tone: "warn" },
+  { text: "  a  allow    d  deny    A  always allow src/**.ts", tone: "muted" },
+  { text: "✓ allowed · edit src/routes/signup.ts  +24 −3", tone: "good" },
+  { text: "  checkpoint 019a1f@3 · /rewind restores", tone: "muted" },
+  { text: "" },
+  { text: "  session 019a1f · $0.0412 / $2.00", tone: "muted", cursor: true },
+];
+
 const MODEL_COMMANDS = `arcturn --model anthropic/claude-sonnet-4-5
 arcturn --model openai/gpt-5.1
 arcturn --model google/gemini-3-pro-preview`;
@@ -138,7 +158,8 @@ export default function HomePage() {
               </h1>
               <p className="mt-6 max-w-[60ch] text-lede text-muted">{HERO_LEDE}</p>
               <div className="mt-8 flex flex-wrap gap-3">
-                <Button href="/docs/getting-started" size="lg">
+                {/* §2.3.4 — the one glowing CTA on the page. */}
+                <Button href="/docs/getting-started" size="lg" className="elev-glow">
                   Get started
                 </Button>
                 <Button href="/blog/why-arcturn" variant="ghost" size="lg">
@@ -147,10 +168,10 @@ export default function HomePage() {
               </div>
               <div className="mt-8 max-w-lg">
                 <CommandChip
-                  command="git clone https://github.com/sitharaj88/arcturn"
+                  command="npm install -g arcturn"
                   caption={
                     <>
-                      Not on npm yet — clone and build. See{" "}
+                      Node 20 or newer. See{" "}
                       <Link
                         href="/docs/getting-started"
                         className="text-accent underline decoration-accent/40 underline-offset-2 hover:decoration-current"
@@ -168,10 +189,12 @@ export default function HomePage() {
               <ArcHalo size={760} opacity={0.5} className="-top-56 right-[-18%] hidden lg:block" />
               <ArcHalo size={440} opacity={0.4} className="-top-24 right-[-24%] lg:hidden" />
               <TerminalMock
-                variant="session"
+                lines={HERO_LINES}
+                title="arcturn — ~/projects/api"
                 size="lg"
+                glow
                 className="relative"
-                description="An arcturn session: a prompt to add input validation, then read, grep and edit tool calls, LSP diagnostics, and a running cost against a session budget."
+                description="An arcturn session: a prompt to add input validation, a file read, then a permission prompt to edit src/routes/signup.ts offering allow, deny or always-allow for src/**.ts. The edit is allowed, a checkpoint is recorded for /rewind, and the session's cost so far is shown against its budget."
               />
             </div>
           </div>
@@ -190,7 +213,7 @@ export default function HomePage() {
           {GAP_CARDS.map((card, index) => (
             <Reveal key={card.key} delay={index * 0.06}>
               <Card variant="quiet" className="h-full">
-                <h3 className="text-h4 text-text">{card.title}</h3>
+                <h3 className="text-h3 text-text">{card.title}</h3>
                 <p className="mt-2 text-body-sm text-muted">{card.body}</p>
               </Card>
             </Reveal>
@@ -213,6 +236,7 @@ export default function HomePage() {
                 title={pillar.title}
                 body={pillar.body}
                 href={pillar.href}
+                size="lg"
                 className="h-full"
               />
             </Reveal>
@@ -259,7 +283,10 @@ export default function HomePage() {
             </>,
           ]}
         />
-        <SectionLink href="/docs/permissions">How permissions resolve</SectionLink>
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-1">
+          <SectionLink href="/docs/permissions">How permissions resolve</SectionLink>
+          <SectionLink href="/terminal">See a whole session</SectionLink>
+        </div>
       </SplitSection>
 
       <ArcRule />
@@ -339,10 +366,10 @@ export default function HomePage() {
         <div className="flex flex-col gap-5">
           <CodeBlock code={MODEL_COMMANDS} language="bash" />
           <p className="max-w-[68ch] text-caption text-faint">
-            Only the OpenAI-compatible path has completed real multi-turn tool-calling sessions
-            against a live endpoint. The first-party Anthropic, OpenAI and Google adapters are
-            unproven against real traffic, and Bedrock, Vertex and Azure have not reached their
-            endpoints at all.
+            Six provider paths have completed real multi-turn tool-calling sessions against a live
+            endpoint: first-party Anthropic, Google, and OpenAI on both its Chat Completions and
+            Responses surfaces, plus both compatibility adapters. Bedrock, Vertex and Azure have not
+            reached their endpoints at all.
           </p>
           <SectionLink href="/features/models">Providers and status</SectionLink>
         </div>
@@ -376,9 +403,15 @@ export default function HomePage() {
         <div className="flex flex-col gap-6">
           <p className="max-w-[68ch] text-body text-muted">
             No commercial-use restriction, no source-available licence with a catch in clause four.
-            The codebase has been through four waves of adversarial review, and the findings are on
-            the security page rather than quietly patched out — including two features that turned
-            out to be present but unreachable.
+            The codebase has been through four waves of adversarial review, and the findings are on{" "}
+            <Link
+              href="/security"
+              className="text-accent underline decoration-accent/40 underline-offset-2 hover:decoration-current"
+            >
+              the security page
+            </Link>{" "}
+            rather than quietly patched out — including two features that turned out to be present
+            but unreachable.
           </p>
           <div className="flex flex-wrap gap-3">
             <Button href={REPO_URL} external variant="ghost">
@@ -386,6 +419,9 @@ export default function HomePage() {
             </Button>
             <Button href="/open-source" variant="quiet">
               How to verify it
+            </Button>
+            <Button href="/security" variant="quiet">
+              Read the limits
             </Button>
           </div>
         </div>

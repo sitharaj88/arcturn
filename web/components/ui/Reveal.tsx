@@ -52,9 +52,9 @@ export function Reveal({ delay = 0, className, children }: RevealProps) {
     <div
       ref={ref}
       className={cn(className)}
-      style={
-        delay ? ({ "--reveal-delay": `${Math.round(delay * 1000)}ms` } as CSSProperties) : undefined
-      }
+      // `--reveal-delay` inherits, so a nested Reveal that omitted its own
+      // would animate on its ancestor's stagger. Always declare it.
+      style={{ "--reveal-delay": `${Math.round(delay * 1000)}ms` } as CSSProperties}
     >
       {children}
     </div>

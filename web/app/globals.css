@@ -792,7 +792,6 @@
 pre[data-theme] span,
 code[data-theme] span {
   color: var(--shiki-light);
-  background-color: var(--shiki-light-bg);
   font-style: var(--shiki-light-font-style);
   font-weight: var(--shiki-light-font-weight);
   text-decoration: var(--shiki-light-text-decoration);
@@ -804,7 +803,6 @@ code[data-theme] span {
   :root:not([data-theme="light"]) pre[data-theme] span,
   :root:not([data-theme="light"]) code[data-theme] span {
     color: var(--shiki-dark);
-    background-color: var(--shiki-dark-bg);
     font-style: var(--shiki-dark-font-style);
     font-weight: var(--shiki-dark-font-weight);
     text-decoration: var(--shiki-dark-text-decoration);
@@ -818,15 +816,29 @@ code[data-theme] span {
 .force-dark .shiki,
 .force-dark .shiki span {
   color: var(--shiki-dark);
-  background-color: var(--shiki-dark-bg);
   font-style: var(--shiki-dark-font-style);
   font-weight: var(--shiki-dark-font-weight);
   text-decoration: var(--shiki-dark-text-decoration);
 }
 
-/* The block's own chrome owns the ground colour, not Shiki's theme bg. */
-.shiki {
-  /* biome-ignore lint/complexity/noImportantStyles: Shiki writes its theme background inline on .shiki; only !important can hand the ground colour back to the block chrome. */
+/* The block's own chrome owns the ground colour, not Shiki's theme bg.
+ *
+ * Two markup shapes reach this stylesheet: `<pre class="shiki">` with
+ * `<span class="line">` (the homepage's inline snippets) and
+ * `<pre data-theme>` with `<span data-line>` (the docs pipeline). Only the
+ * first carries `--shiki-light-bg`/`--shiki-dark-bg` inline on the `<pre>`.
+ *
+ * That difference is why the rules above no longer paint a background on
+ * spans. Custom properties inherit, so a per-span
+ * `background-color: var(--shiki-light-bg)` resolved to the theme's own
+ * `#fff` on every descendant of a `.shiki` block — a white stripe per line,
+ * sitting on top of the transparent block chrome, in light theme. The docs
+ * pages escaped it only because their markup happens not to define the
+ * variable. Ground belongs to `.prose-arc pre` (`--code-bg`); Shiki supplies
+ * foreground colour and nothing else. */
+.shiki,
+pre[data-theme] {
+  /* biome-ignore lint/complexity/noImportantStyles: Shiki writes its theme background inline on the `<pre>`; only !important can hand the ground colour back to the block chrome. */
   background-color: transparent !important;
 }
 
@@ -846,9 +858,62 @@ code[data-theme] span {
     /* biome-ignore-start lint/complexity/noImportantStyles: the reduced-motion kill switch must beat every author rule, including Tailwind utilities and inline styles. */
     animation-duration: 0.001ms !important;
     animation-iteration-count: 1 !important;
+    /* Zeroing the durations alone still choreographs: an `animation: … both`
+       with a delay holds its `from` frame until the delay elapses, so
+       TerminalMock's inline `animationDelay: index * 60ms` made the lines
+       appear one at a time over half a second. Delays are motion too. */
+    animation-delay: 0.001ms !important;
     transition-duration: 0.001ms !important;
+    transition-delay: 0s !important;
     scroll-behavior: auto !important;
     /* biome-ignore-end lint/complexity/noImportantStyles: end of the reduced-motion kill switch. */
+  }
+
+  /* §2.5 promises the hover `translateY` is *dropped*, not merely instant —
+     a zero-duration lift still snaps the card 2px on the way to nowhere.
+     `translate` and not `transform`: Tailwind v4 compiles `-translate-y-*` to
+     the individual property, and declaring both here is actively worse — the
+     minifier folds a neighbouring `transform: none` over the `translate` reset
+     and the lift comes back. Scoped to `:hover` so layout transforms survive
+     (`*:hover` matches every ancestor of the pointer, not just its target). */
+  *:hover {
+    /* biome-ignore-start lint/complexity/noImportantStyles: same kill switch — it has to beat the Tailwind hover utility. */
+    translate: none !important;
+    /* biome-ignore-end lint/complexity/noImportantStyles: end of the hover-lift drop. */
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * §2.6 — forced colours (Windows High Contrast). The mode drops background
+ * images and overrides every author colour, so anything that carries meaning
+ * in colour alone has to be restated in a system colour here.
+ * ------------------------------------------------------------------ */
+
+@media (forced-colors: active) {
+  /* The background image goes; `-webkit-text-fill-color: transparent` does
+     not. Without this the h1's gradient phrase renders as an empty gap. */
+  .text-gradient {
+    background: none;
+    -webkit-text-fill-color: currentColor;
+    forced-color-adjust: none;
+    color: CanvasText;
+  }
+
+  /* Accent borders flatten to plain text colour, which erases the only
+     difference between the current item and its neighbours. `Highlight` is
+     the system's "this one is selected", and `forced-color-adjust: none` is
+     what stops the mode from forcing it back. The docs sidebar and the table
+     of contents are matched by their utility class because both components
+     set the marker inline and neither has a hook of its own. */
+  .arc-corner::before {
+    forced-color-adjust: none;
+    border-top-color: Highlight;
+    border-left-color: Highlight;
+  }
+
+  .border-l-accent {
+    forced-color-adjust: none;
+    border-left-color: Highlight;
   }
 }
 

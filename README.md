@@ -13,7 +13,7 @@ first-class features everything they leave out:
 - **Permission engine** — rule-based allow/deny/ask with session, project, and user scopes; `acceptEdits`, `plan`, and `yolo` modes.
 - **Plan mode & todos** — structured task state that lives in the session tree.
 - **Background processes** — long-running shell tasks with streamed output events.
-- **Multi-provider AI** — Anthropic, OpenAI (and every OpenAI-compatible endpoint), Google Gemini, with streaming, tool calls, thinking, prompt caching, and cost tracking.
+- **Multi-provider AI** — Anthropic, OpenAI (Chat Completions *and* the Responses API), Google Gemini, and every OpenAI-compatible endpoint, with streaming, tool calls, thinking, prompt caching, and cost tracking. Each of those has been driven against its real endpoint, not just unit-tested. Bedrock, Vertex and Azure adapters ship too, but have never reached a live endpoint — the [provider table](https://arcturn.dev/docs/providers) says which is which, and why that distinction earned its own column.
 - **Lifecycle hooks** — shell commands run at tool and session boundaries and can veto a `preToolUse` call before it ever executes.
 - **Markdown skills** — drop a markdown file in `.arcturn/skills` and it's a slash command; frontmatter, `$ARGUMENTS`, `$SKILL_DIR`, no build step.
 - **Checkpoints & `/rewind`** — every file edit is snapshotted first; `/rewind` restores files and forks the conversation back to any earlier turn.

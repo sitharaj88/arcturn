@@ -3,6 +3,7 @@ import { Button } from "@/components/ui/Button";
 import { CommandChip } from "@/components/ui/CommandChip";
 import { Container } from "@/components/ui/Container";
 import { cn } from "@/lib/cn";
+import { INSTALL_COMMAND } from "@/lib/utils";
 
 /**
  * The closing call to action (DESIGN.md §3.1). Defaults to the home page's
@@ -13,6 +14,8 @@ export interface CTASectionProps {
   title?: string;
   lede?: string;
   showCommand?: boolean;
+  /** Rarely overridden — the default is the site's one install truth. */
+  command?: string;
   className?: string;
 }
 
@@ -21,6 +24,7 @@ export function CTASection({
   title = "Every turn counts.",
   lede = "Start a session, watch every tool call ask first, then go back and read exactly what happened.",
   showCommand,
+  command = INSTALL_COMMAND,
   className,
 }: CTASectionProps) {
   const compact = variant === "compact";
@@ -50,7 +54,7 @@ export function CTASection({
         </div>
         {withCommand ? (
           <div className="mt-8 w-full max-w-md">
-            <CommandChip command="git clone https://github.com/sitharaj88/arcturn" />
+            <CommandChip command={command} />
           </div>
         ) : null}
       </Container>

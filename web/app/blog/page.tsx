@@ -32,14 +32,14 @@ export default function BlogIndexPage() {
                 <span aria-hidden="true"> · </span>
                 {post.readingTime}
               </p>
-              <h3 className="mt-2 text-h3">
+              <h2 className="mt-2 text-h3">
                 <Link
                   href={`/blog/${post.slug}`}
                   className="text-text underline-offset-4 hover:text-accent hover:underline"
                 >
                   {post.title}
                 </Link>
-              </h3>
+              </h2>
               <p className="mt-2 max-w-[60ch] text-body text-muted">{post.description}</p>
               <p className="mt-3 text-body-sm text-faint">{post.author}</p>
             </li>

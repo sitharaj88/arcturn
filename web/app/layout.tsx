@@ -29,13 +29,24 @@ export const metadata: Metadata = {
     description: DESCRIPTION,
     url: SITE_URL,
     locale: "en",
+    // No `images` here on purpose: a page that declares its own `openGraph`
+    // replaces this object wholesale, and thirteen of them do. The share image
+    // is the `app/opengraph-image.png` file convention instead — that one is
+    // inherited by every segment and survives the override. It is a committed
+    // PNG rather than the `opengraph-image.tsx` route it replaces, because the
+    // route emitted an extension-less asset that static hosts label
+    // application/octet-stream and every social crawler then refuses.
   },
   twitter: {
     card: "summary_large_image",
     title: "Arcturn — Every turn counts.",
     description: DESCRIPTION,
   },
-  robots: { index: true, follow: true },
+  manifest: "/site.webmanifest",
+  // Relative: Next resolves it per route against `metadataBase`, so every page
+  // gets its own canonical (with the `trailingSlash` the export actually
+  // serves). Per-page `alternates` still win over this.
+  alternates: { canonical: "./" },
 };
 
 export const viewport: Viewport = {

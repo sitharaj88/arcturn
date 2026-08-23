@@ -191,3 +191,9 @@ exit 0
 The trailing `|| true` matters: a hook's own failure to format still resolves the hook
 process with exit `0`, so it's reported as a plain `allow` rather than a spurious
 "exited with code 1" warning on every file prettier doesn't understand.
+
+## Related
+
+- [Permissions](/docs/permissions) — the allow/deny/ask resolver a `preToolUse` veto sits
+  alongside. Both run before a tool's `execute`, so read this for which one decides first
+  and what a denial from either looks like to the model.

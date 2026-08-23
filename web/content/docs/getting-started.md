@@ -53,7 +53,16 @@ three (`.github/workflows/ci.yml`) on Node 20 and 22. A few things vary by platf
 
 ## Install
 
-Arcturn is not yet published to npm. Until it is, run it from a clone of the monorepo:
+```bash
+npm install -g arcturn
+```
+
+Node 20 or newer. `pnpm add -g arcturn` and `bun add -g arcturn` work the same way, and
+`npx arcturn` runs it without installing anything.
+
+### From source
+
+To work on Arcturn itself, or to run an unreleased commit, build it from a clone:
 
 ```bash
 git clone https://github.com/sitharaj88/arcturn.git
@@ -62,7 +71,7 @@ pnpm install
 pnpm -r build
 ```
 
-Link the CLI binary onto your `PATH`:
+Then link the CLI binary onto your `PATH`:
 
 ```bash
 cd packages/cli
@@ -70,9 +79,8 @@ pnpm link --global
 ```
 
 That builds `packages/cli/dist/main.js` (the file `bin.arcturn` points at in
-`packages/cli/package.json`) and exposes it as the `arcturn` command. Once a release goes
-out, `npm install -g arcturn` (or `pnpm add -g arcturn`) will install the same binary
-without a source checkout — this page will drop the build step at that point.
+`packages/cli/package.json`) and exposes it as the `arcturn` command — the same binary the
+published package installs, built from whatever commit you have checked out.
 
 ## Signing in
 
@@ -206,6 +214,8 @@ precedence.
 
 ## Where to go next
 
+- [Model providers](/docs/providers) — every backend, how to authenticate, and which paths
+  have been verified against a live endpoint.
 - [Configuration](/docs/configuration) — every config key, default, and env var.
 - [Tools](/docs/tools) — what the built-in tools do and how they report back.
 - [@-mentions & images](/docs/mentions) — reference files and images from the prompt.
@@ -218,3 +228,5 @@ precedence.
 - [Checkpoints & /rewind](/docs/checkpoints) — undo file changes and fork the conversation.
 - [Dry-run mode](/docs/dry-run) — send file mutations to a shadow tree for review first.
 - [Architecture](/docs/architecture) — how the packages fit together.
+- [CLI reference](/docs/cli-reference) — every flag, subcommand and slash command, in one
+  place.

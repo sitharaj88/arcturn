@@ -25,12 +25,18 @@ The runtime is split across five packages, each usable on its own:
 
 ### Installing today
 
-None of these are published to npm yet. Inside this repository they're plain pnpm
-workspace packages, so anything in `packages/*/src` is reachable by workspace protocol
-dependency (`"@arcturn/core": "workspace:*"`) from another package in the same
+Install only the layer you need:
+
+```bash
+npm install @arcturn/core @arcturn/ai @arcturn/types
+```
+
+Every package ships compiled JS plus `.d.ts` files under its own `dist/` — the SDK is
+consumed as build output, not as source. Working inside this repository instead, they are
+plain pnpm workspace packages, so anything in `packages/*/src` is reachable by workspace
+protocol dependency (`"@arcturn/core": "workspace:*"`) from another package in the same
 workspace, or by pointing a `file:` dependency at a built `packages/*` directory from
-outside it. Every package needs to be built first — the SDK ships compiled JS plus
-`.d.ts` files under each package's `dist/`, not source.
+outside it — in which case build them first.
 
 ## The mental model
 

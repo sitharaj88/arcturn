@@ -29,7 +29,7 @@ export function SiteHeader({ className }: { className?: string }) {
         <div className="flex items-center gap-1">
           <ThemeToggle />
           <GitHubLink className="hidden sm:inline-flex" />
-          <Button href="/docs/getting-started" size="sm" className="hidden lg:inline-flex">
+          <Button href="/docs/getting-started" size="sm" className="hidden sm:inline-flex">
             Get started
           </Button>
           <MobileNav />

@@ -34,8 +34,9 @@ const STATUS_ROWS: StatusRow[] = [
   },
   {
     name: "Published to npm",
-    detail: "Not yet. Install from source: clone the monorepo, pnpm install, pnpm -r build.",
-    status: { status: "planned", label: "Not yet" },
+    detail:
+      "Yes, as of the 0.1.0 release this site ships alongside: npm install -g arcturn. Building from a clone still works and is how you run an unreleased commit.",
+    status: { status: "proven", label: "0.1.0" },
   },
   {
     name: "Version",
@@ -54,10 +55,10 @@ const STATUS_ROWS: StatusRow[] = [
     status: { status: "unreached", label: "None" },
   },
   {
-    name: "Proven provider path",
+    name: "Proven provider paths",
     detail:
-      "The OpenAI-compatible path, which has completed real multi-turn tool-calling sessions against a live endpoint. Everything else is unproven or unreached.",
-    status: { status: "proven", label: "One" },
+      "Anthropic, Google, OpenAI on both its Chat Completions and Responses surfaces, and both compatibility adapters — each driven against a live endpoint through streaming, a tool call answered on a second turn, and cost accounting checked against published rates. Bedrock, Vertex and Azure are implemented but have never reached an endpoint.",
+    status: { status: "proven", label: "Six" },
   },
 ];
 

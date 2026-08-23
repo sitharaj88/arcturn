@@ -60,7 +60,7 @@ const agent = createAgent({ ...base, sessionStore: store, sessionId: "release-no
 |---|---|---|---|
 | `maxTurns` | `number` | `200` | Ceiling on tool-call turns within one `prompt()` call. This is a runaway-loop backstop, not a budget — it's set high on purpose so a genuinely long task finishes. Lower it per run for a tight leash (e.g. in a sandboxed eval). |
 | `thinking` | `ThinkingLevel` (`"off" \| "low" \| "medium" \| "high"`) | `"off"` | Extended-thinking level, changeable at runtime with `agent.setThinking(level)`. |
-| `compaction` | `CompactionOptions` | see below | Automatic-compaction tuning — full table in [Sessions & persistence](/docs/sdk-sessions#compaction). |
+| `compaction` | `CompactionOptions` | see below | Automatic-compaction tuning — full table in [Sessions & persistence](/docs/sdk-sessions#forcing-compaction). |
 | `signal` | `AbortSignal` | none | An external signal; aborting it aborts the agent's current run the same way `agent.abort()` does. Useful when the host already has one abort controller per request. |
 
 ```ts

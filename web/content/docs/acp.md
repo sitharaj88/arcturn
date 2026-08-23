@@ -255,3 +255,9 @@ that can speak NDJSON JSON-RPC over a pair of streams — including a scripted t
 which is how `packages/cli/src/acp/acp.test.ts` and `e2e.test.ts` exercise the whole
 `initialize` → `session/new` → `session/prompt` → `session/update`* → response lifecycle
 against a real `ArcturnRuntime` with no network access.
+
+## Related
+
+- [Server mode](/docs/server-mode) — the other way to drive a session from outside the
+  terminal. ACP puts Arcturn inside one editor over stdio; server mode exposes the same
+  `Agent` to remote clients over a typed WebSocket protocol.

@@ -37,28 +37,31 @@ const PROVIDER_ROWS: StatusRow[] = [
   },
   {
     name: "anthropic",
-    detail: "Claude, direct — ANTHROPIC_API_KEY, or an OAuth subscription sign-in.",
-    status: { status: "unproven" },
+    detail:
+      "Claude, direct — ANTHROPIC_API_KEY, or an OAuth subscription sign-in. Verified live on Claude Haiku 4.5.",
+    status: { status: "proven" },
   },
   {
     name: "openai",
-    detail: "GPT via Chat Completions — OPENAI_API_KEY.",
-    status: { status: "unproven" },
+    detail: "GPT via Chat Completions — OPENAI_API_KEY. Verified live on GPT-5 nano.",
+    status: { status: "proven" },
   },
   {
     name: "openai-responses",
-    detail: "GPT via the Responses API — OPENAI_API_KEY.",
-    status: { status: "unproven" },
+    detail: "GPT via the Responses API — OPENAI_API_KEY. Verified live on GPT-5 nano.",
+    status: { status: "proven" },
   },
   {
     name: "google",
-    detail: "Gemini, direct — GOOGLE_API_KEY (GEMINI_API_KEY also works).",
-    status: { status: "unproven" },
+    detail:
+      "Gemini, direct — GOOGLE_API_KEY (GEMINI_API_KEY also works). Verified live on Gemini 3.5 Flash Lite.",
+    status: { status: "proven" },
   },
   {
     name: "anthropic-compatible",
-    detail: "Any Anthropic-Messages endpoint, credentials per endpoint.",
-    status: { status: "unproven" },
+    detail:
+      "Any Anthropic-Messages endpoint, credentials per endpoint. Verified live against a canonical Messages API; no third-party implementation exercised yet.",
+    status: { status: "proven" },
   },
   {
     name: "bedrock",
@@ -85,9 +88,9 @@ arcturn --list-models        # the catalog, then exit
 arcturn --list-providers     # every provider and preset endpoint`;
 
 const ROUTER_TABLE = `main         the main conversation loop
-subagent     delegated sub-agent work — often mechanical, so a cheaper model is fine
-compaction   summarizing history when the context window fills
-title        session-title suggestions — a few words`;
+subagent     delegated sub-agent work — sub-agents, scouts and /team members
+compaction   summarizing history when the context window fills — accepted in config, reserved
+title        session-title suggestions — reserved; today's title is derived from the task text`;
 
 export default function ModelsPage() {
   return (
@@ -105,11 +108,24 @@ export default function ModelsPage() {
               <div className="flex flex-col gap-5">
                 <StatusTable rows={PROVIDER_ROWS} />
                 <p className="max-w-[68ch] text-caption text-faint">
-                  Status means exactly what it says. Exactly one provider path has completed real
-                  multi-turn tool-calling sessions against a live endpoint — the OpenAI-compatible
-                  one. The first-party Anthropic, OpenAI and Google adapters are unproven against
-                  real traffic, and Bedrock, Vertex and Azure have never reached their endpoints at
-                  all.
+                  Status means exactly what it says. <em>Proven</em> is a real request to a real
+                  endpoint, correct across streaming, a tool call whose result is fed back and
+                  answered on a second turn, and cost accounting that matches the published rates.
+                  Six paths clear that bar: first-party Anthropic, Google, and OpenAI on both its
+                  Chat Completions and Responses surfaces, plus both compatibility adapters.
+                  Bedrock, Vertex and Azure have never reached their endpoints at all. Each
+                  compatibility adapter was verified against one implementation of its protocol —{" "}
+                  <Code>openai-compatible</Code> against Z.AI, <Code>anthropic-compatible</Code>{" "}
+                  against a canonical Messages API — which proves the adapter, not any particular
+                  third-party service.
+                </p>
+                <p className="max-w-[68ch] text-caption text-faint">
+                  The distinction is drawn because it earned itself. Each of those live runs found a
+                  bug the test suite could not: a <Code>--print</Code> that hung forever on the
+                  inherited stdin every CI runner supplies, Gemini rejecting every second turn of
+                  tool use over a dropped signature, and a Responses adapter that was registered and
+                  documented but had no catalog entry, so nobody could select it. Three providers,
+                  three bugs, all in code with passing tests.
                 </p>
               </div>
             }
@@ -122,9 +138,10 @@ export default function ModelsPage() {
             <p>
               The last two rows matter more than they look: most third-party inference services
               speak one of those two protocols, so Arcturn reaches them without a bespoke adapter
-              each. Thirty-five endpoint presets ship as remembered{" "}
-              <Code>{"{ baseUrl, apiKeyEnv, protocol }"}</Code> triples — and a preset is a
-              convenience, not a gate: any endpoint works by URL without one.
+              each. Endpoint presets ship as remembered{" "}
+              <Code>{"{ baseUrl, apiKeyEnv, protocol }"}</Code> triples — run{" "}
+              <Code>arcturn --list-providers</Code> for the current set. A preset is a convenience,
+              not a gate: any endpoint works by URL without one.
             </p>
           </ProseSection>
         </Reveal>
@@ -155,10 +172,15 @@ export default function ModelsPage() {
             media={<CodeBlock code={ROUTER_TABLE} language="text" />}
           >
             <p>
-              Four call sites can use four different models instead of one flagship everywhere. A
-              missing route falls back to whatever <Code>main</Code> resolved to, and a bad id is
-              caught rather than thrown — the kind falls back and records a warning, because a stale
-              model id in a config file must never be the reason Arcturn fails to start.
+              Two of the four route kinds reach a live call site today: <Code>main</Code> for the
+              conversation loop, and <Code>subagent</Code> for delegated work — sub-agents, scouts
+              and <Code>/team</Code> members alike — so a mechanical subtask need not run on the
+              model steering the session. <Code>compaction</Code> and <Code>title</Code> are
+              accepted in config and reserved; a session title is derived from the task text
+              directly today and makes no model call at all. A missing route falls back to whatever{" "}
+              <Code>main</Code> resolved to, and a bad id is caught rather than thrown — the kind
+              falls back and records a warning, because a stale model id in a config file must never
+              be the reason Arcturn fails to start.
             </p>
             <p>
               A model string can also be an array, which builds a failover chain. The rule that

@@ -48,9 +48,12 @@ the one unrecoverable failure mode for this site.
    must not be softened, collapsed behind a toggle, or moved below the fold of their page.
 5. **The prose in `content/**` is source of truth and is never rewritten.** Docs and blog
    pages render the markdown as-is. Marketing copy in this spec is new and is what you type.
-6. Install copy: Arcturn is **not on npm yet**. The install is a clone + build. Never show
-   `npm install -g arcturn` as a working command; where the future command appears (blog
-   post only, already written) it is already framed as future.
+6. Install copy: the install is **`npm install -g arcturn`**, written down once in
+   `web/lib/utils.ts` as `INSTALL_COMMAND` and imported everywhere it is shown — never
+   retyped. That command names a published package, which couples the two releases: **the
+   site may not be deployed before `arcturn` is published to npm.** A clone + build stays
+   documented on `/docs/getting-started` as the way to run an unreleased commit, not as
+   the install.
 
 ---
 
@@ -633,8 +636,8 @@ terminal below at full width, `pt-16 pb-14`; halo shrinks per §2.4.
   blame.*
 - Buttons: primary `Get started` → `/docs/getting-started`; secondary (`ghost`)
   `Why I built it` → `/blog/why-arcturn`.
-- Below buttons, `<CommandChip>`: `git clone https://github.com/sitharaj88/arcturn` with a
-  copy button and the caption *Not on npm yet — clone and build. See*
+- Below buttons, `<CommandChip>`: `INSTALL_COMMAND` (`npm install -g arcturn`) with a
+  copy button and the caption *Node 20 or newer. See*
   [Getting started](/docs/getting-started).
 
 **§ Honesty band.** Full-width strip, `--surface-raised`, hairline top and bottom,
@@ -732,7 +735,7 @@ be present but unreachable.* Buttons: `On GitHub` ↗ · `How to verify it →` 
 **§ Final CTA.** Centred, `.container-prose`, `py-28`, `<ArcHalo>` at 30% opacity behind.
 `h2`: **Every turn counts.** Lede: *Start a session, watch every tool call ask first, then
 go back and read exactly what happened.* Primary `Get started` → `/docs/getting-started`;
-ghost `Read the docs` → `/docs`. Below: the clone `<CommandChip>` again.
+ghost `Read the docs` → `/docs`. Below: the install `<CommandChip>` again.
 
 ### 3.2 `/features` — Overview
 

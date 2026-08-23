@@ -49,7 +49,20 @@ export async function CodeBlock({
             {language}
           </span>
         ) : null}
-        <span className="pointer-events-auto opacity-100 transition-opacity dur-fast ease-out md:opacity-0 md:group-hover:opacity-100 md:group-focus-within:opacity-100">
+        {/*
+          Hover-capable pointers get the button on hover or focus; anything
+          else — touch at any width — keeps it visible, since a `md:` gate
+          alone hides it permanently on a tablet. Same condition as the docs
+          pipeline's `.code-copy` in `app/docs/docs.css`.
+        */}
+        <span
+          className={cn(
+            "pointer-events-auto opacity-100 transition-opacity dur-fast ease-out",
+            "[@media(hover:hover)_and_(pointer:fine)]:opacity-0",
+            "[@media(hover:hover)_and_(pointer:fine)]:group-hover:opacity-100",
+            "[@media(hover:hover)_and_(pointer:fine)]:group-focus-within:opacity-100",
+          )}
+        >
           <CopyButton value={stripShellPrompt(source)} label="Copy code" />
         </span>
       </div>
@@ -62,7 +75,7 @@ export async function CodeBlock({
 
       <div
         className={cn(
-          "overflow-x-auto px-4 py-4 text-code-block [&_pre]:min-w-max [&_pre]:bg-transparent",
+          "overflow-x-auto px-4 py-4 pr-24 text-code-block [&_pre]:min-w-max [&_pre]:bg-transparent",
           showLineNumbers && "code-line-numbers",
         )}
         // biome-ignore lint/security/noDangerouslySetInnerHtml: `html` is Shiki's own escaped output for local trusted source, produced at build time; no user input reaches it.

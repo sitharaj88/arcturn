@@ -263,3 +263,9 @@ await manager.close();                        // everything
 
 Always close the manager when a session ends — stdio servers are child processes, and an
 unclosed one is a leaked process.
+
+## Related
+
+- [Arcturn as an MCP server](/docs/mcp-server) — the same protocol pointed the other way:
+  `arcturn mcp-serve` lets a foreign client drive Arcturn, instead of Arcturn connecting
+  out to servers you configured.

@@ -83,9 +83,20 @@ the CLI does, an embedder can do through `@arcturn/core` and `@arcturn/ai`.
 
 ### Models and providers
 
-- **Multi-provider AI**: Anthropic (direct, Bedrock and Vertex), OpenAI and every
-  OpenAI-compatible endpoint, and Google Gemini — with streaming, tool calls,
+- **Multi-provider AI**: Anthropic, OpenAI (Chat Completions *and* the Responses
+  API), Google Gemini, every OpenAI-compatible endpoint, plus Bedrock, Vertex,
+  Azure and any Anthropic-Messages endpoint — with streaming, tool calls,
   thinking, prompt caching and cost tracking across all of them.
+- **Six of those are verified against live endpoints**, not merely unit-tested:
+  Anthropic, Google, OpenAI on both surfaces, and both compatibility adapters.
+  Each run covered streaming, a tool call whose result is fed back and answered
+  on a second turn, and cost accounting checked against published rates. The
+  compatibility adapters were each verified against one implementation of their
+  protocol — Z.AI for `openai-compatible`, a canonical Messages API for
+  `anthropic-compatible` — which proves the adapter rather than any particular
+  third-party service. Bedrock, Vertex and Azure are implemented but have never
+  reached a live endpoint; the provider table marks which is which rather than
+  presenting one undifferentiated list.
 - **Model routing** with tiers and per-route fallback, and a live catalog:
   `/model refresh` queries each provider's own model list and merges newly
   released models in without touching curated entries.

@@ -13,8 +13,10 @@ Arcturn is a pnpm workspace, ESM throughout, TypeScript 5.x targeting Node ≥ 2
 packages/
   types      @arcturn/types      Zero-dep shared contracts: messages, events, tools,
                                     permissions, session tree, protocol schemas.
-  ai         @arcturn/ai         Unified LLM layer over official provider SDKs
-                                    (Anthropic, OpenAI, Google, Bedrock, Vertex);
+  ai         @arcturn/ai         Unified LLM layer over nine provider adapters
+                                    (Anthropic, OpenAI Chat Completions, OpenAI
+                                    Responses, Google, Bedrock, Vertex, Azure, and the
+                                    OpenAI- and Anthropic-compatible endpoint adapters);
                                     streaming, tool calls, thinking, model catalog, cost.
   core       @arcturn/core       Agent runtime: event loop, steering/abort, session
                                     store (JSONL tree, branching), compaction, hooks,
@@ -32,7 +34,8 @@ packages/
   cli        arcturn (bin: arcturn)  Interactive coding agent: TUI app, print/JSON modes,
                                     extensions, skills, themes, config, plan mode, LSP.
   evals      @arcturn/evals      Evaluation harness for scoring agent runs.
-website/                           This site — Astro + Tailwind landing page and docs.
+web/                               This site — Next.js 16 static export, Tailwind v4,
+                                    markdown docs.
 ```
 
 ## Dependency flow

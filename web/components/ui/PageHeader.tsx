@@ -35,7 +35,7 @@ export function PageHeader({
       ) : null}
       <h1 className={cn("text-display-2 text-balance text-text", eyebrow && "mt-3")}>{title}</h1>
       {lede ? (
-        <p className={cn("mt-5 max-w-[60ch] text-lede text-muted", centered && "mx-auto")}>
+        <p className={cn("mt-4 max-w-[60ch] text-lede text-muted", centered && "mx-auto")}>
           {lede}
         </p>
       ) : null}
