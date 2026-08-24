@@ -51,6 +51,24 @@ export const QUOTED_FILENAME = "probe (1).ts";
 /** A name that needs neither quoting nor refusing. */
 export const PLAIN_FILENAME = "probe-target.ts";
 
+/**
+ * What the stand-in engine writes to stderr instead of serving.
+ *
+ * Deliberately shaped like the real failure this suite exists to cover: on a
+ * GUI-launched editor `arcturn serve` resolves its model before it binds
+ * anything, finds no credential, prints two lines and exits. Two lines rather
+ * than one because the extension has to carry a *block* of the engine's
+ * output through to the card and the log, not just its first line — and the
+ * "fake arcturn" prefix so nobody reading a log mistakes it for the engine.
+ */
+export const SERVE_STDERR = [
+  "fake arcturn: No API key found for Claude Sonnet 4.5 (anthropic/claude-sonnet-4-5).",
+  "fake arcturn: Set ANTHROPIC_API_KEY in your environment, or pick another model with --model.",
+].join("\n");
+
+/** The exit code it uses. Matches what the real CLI answers for this failure. */
+export const SERVE_EXIT_CODE = 2;
+
 /** The marker `HOSTILE_FILENAME` would create if the injection ever ran. */
 export const INJECTION_MARKER = "pwned";
 
@@ -72,10 +90,11 @@ const PROBE_SOURCE = [
  *
  * - `--version` — what `cli.ts` probes with `execFile` before it will drive
  *   the engine. Answering `0.2.0` keeps the upgrade nag out of the run.
- * - `serve …` — what the sidebar spawns. It records the argument vector and
- *   exits without announcing an address, which is a failure the supervisor is
- *   documented to turn into a reconnect card. The *record* is the point: it is
- *   how the suite proves a spawn did, or did not, happen.
+ * - `serve …` — what the sidebar spawns. It records the argument vector, writes
+ *   {@link SERVE_STDERR} and exits without announcing an address, which is the
+ *   failure the supervisor is documented to turn into a reconnect card. The
+ *   *record* is the point: it is how the suite proves a spawn did, or did not,
+ *   happen — and the stderr is what test 06 follows through to the log.
  * - anything else — the TUI. It puts the tty in raw mode and appends every
  *   byte it receives to a log, so the suite can read back exactly what the
  *   extension typed into a real VS Code terminal.
@@ -96,8 +115,8 @@ if (argv[0] === "--version") {
 }
 
 if (argv[0] === "serve") {
-  process.stderr.write("fake arcturn: this build does not serve\\n");
-  process.exit(3);
+  process.stderr.write(${JSON.stringify(SERVE_STDERR)} + "\\n");
+  process.exit(${SERVE_EXIT_CODE});
 }
 
 process.stdout.write("fake arcturn TUI: reading raw stdin\\r\\n");
@@ -199,6 +218,8 @@ export function buildFixtures(extensionRoot) {
       ARCTURN_IT_FILE_QUOTED: QUOTED_FILENAME,
       ARCTURN_IT_FILE_HOSTILE: HOSTILE_FILENAME,
       ARCTURN_IT_INJECTION_MARKER: INJECTION_MARKER,
+      ARCTURN_IT_SERVE_STDERR: SERVE_STDERR,
+      ARCTURN_IT_SERVE_EXIT_CODE: String(SERVE_EXIT_CODE),
     },
   };
 }

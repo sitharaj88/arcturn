@@ -17,6 +17,7 @@
 
 import * as vscode from "vscode";
 import type { ChatViewModel } from "./chat-state.js";
+import type { ConnectionReport } from "./connection-card.js";
 import { createNonce, renderSidebarHtml } from "./webview-html.js";
 import {
   type ConnectionStatus,
@@ -47,7 +48,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
   #resolved = false;
   /** The last state posted, replayed when the webview reloads. */
   #lastState: ChatViewModel | undefined;
-  #lastConnection: { status: ConnectionStatus; detail?: string } = { status: "idle" };
+  #lastConnection: { status: ConnectionStatus; report?: ConnectionReport } = { status: "idle" };
   #lastCost = "";
 
   constructor(handlers: SidebarViewHandlers) {
@@ -98,10 +99,20 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
     this.#post({ type: "state", state });
   }
 
-  /** Push the connection status (the reconnect card). */
-  postConnection(status: ConnectionStatus, detail?: string): void {
-    this.#lastConnection = detail === undefined ? { status } : { status, detail };
-    this.#post({ type: "connection", status, ...(detail === undefined ? {} : { detail }) });
+  /**
+   * Push the connection status (the reconnect card).
+   *
+   * The report is remembered, not just posted: `retainContextWhenHidden` is
+   * off, so a webview that is hidden and revealed again reloads and asks for a
+   * replay — and a user who closes the panel over a failed start must not come
+   * back to a card that has forgotten why it is there.
+   *
+   * @param status - Where the connection stands.
+   * @param report - The failure, when there is one.
+   */
+  postConnection(status: ConnectionStatus, report?: ConnectionReport): void {
+    this.#lastConnection = report === undefined ? { status } : { status, report };
+    this.#post(this.#connectionMessage());
   }
 
   /** Push the cost label. */
@@ -119,12 +130,20 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
     await vscode.commands.executeCommand(`${SidebarViewProvider.viewId}.focus`);
   }
 
-  #replay(): void {
-    this.#post({
+  #connectionMessage(): HostMessage {
+    const { status, report } = this.#lastConnection;
+    if (report === undefined) return { type: "connection", status };
+    return {
       type: "connection",
-      status: this.#lastConnection.status,
-      ...(this.#lastConnection.detail === undefined ? {} : { detail: this.#lastConnection.detail }),
-    });
+      status,
+      detail: report.headline,
+      ...(report.engineOutput === "" ? {} : { engineOutput: report.engineOutput }),
+      actions: report.actions,
+    };
+  }
+
+  #replay(): void {
+    this.#post(this.#connectionMessage());
     if (this.#lastState !== undefined) this.#post({ type: "state", state: this.#lastState });
     if (this.#lastCost !== "") this.#post({ type: "cost", label: this.#lastCost });
   }

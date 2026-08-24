@@ -44,6 +44,19 @@ body {
   border-radius: 4px;
 }
 #banner .banner-text { display: block; margin-bottom: 6px; white-space: pre-wrap; }
+.engine-output {
+  margin: 0 0 8px;
+  padding: 6px 8px;
+  max-height: 12em;
+  overflow: auto;
+  border-left: 2px solid var(--vscode-editorError-foreground, var(--vscode-panel-border));
+  background: var(--vscode-textCodeBlock-background, var(--vscode-editorWidget-background));
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.95em;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+#banner-actions { margin-top: 0; }
 #transcript {
   flex: 1 1 auto;
   overflow-y: auto;
@@ -153,7 +166,8 @@ export const SIDEBAR_SCRIPT = `
 
   var banner = document.getElementById("banner");
   var bannerText = document.getElementById("banner-text");
-  var reconnectButton = document.getElementById("reconnect");
+  var engineOutput = document.getElementById("engine-output");
+  var bannerActions = document.getElementById("banner-actions");
   var transcript = document.getElementById("transcript");
   var todosList = document.getElementById("todos");
   var planBox = document.getElementById("plan");
@@ -268,9 +282,49 @@ export const SIDEBAR_SCRIPT = `
     hint.textContent = parts.join(" \\u00B7 ");
   }
 
-  function renderConnection(status, detail) {
+  /**
+   * The engine's own stderr, as text.
+   *
+   * textContent, never markup: this is whatever the child process wrote, and
+   * an engine (or a tool it ran) that printed a tag must render as characters.
+   */
+  function renderEngineOutput(text) {
+    if (!text) {
+      engineOutput.textContent = "";
+      engineOutput.classList.add("hidden");
+      return;
+    }
+    engineOutput.textContent = text;
+    engineOutput.classList.remove("hidden");
+  }
+
+  /** Rebuild the card's buttons from the host's list. Ids are host-supplied. */
+  function renderActions(actions) {
+    bannerActions.textContent = "";
+    if (!actions || actions.length === 0) {
+      bannerActions.classList.add("hidden");
+      return;
+    }
+    bannerActions.classList.remove("hidden");
+    for (var i = 0; i < actions.length; i += 1) {
+      var action = actions[i];
+      if (!action || typeof action.id !== "string" || typeof action.label !== "string") continue;
+      var button = el("button", i === actions.length - 1 ? "" : "secondary", action.label);
+      button.type = "button";
+      bannerActions.appendChild(button);
+      (function (id) {
+        button.addEventListener("click", function () {
+          post({ type: "action", id: id });
+        });
+      })(action.id);
+    }
+  }
+
+  function renderConnection(status, detail, output, actions) {
     if (status === "ready") {
       banner.classList.add("hidden");
+      renderEngineOutput("");
+      renderActions([]);
       prompt.disabled = false;
       sendButton.disabled = false;
       return;
@@ -280,20 +334,21 @@ export const SIDEBAR_SCRIPT = `
     sendButton.disabled = status !== "ready";
     if (status === "starting") {
       bannerText.textContent = "Starting the Arcturn engine\\u2026";
-      reconnectButton.classList.add("hidden");
+      renderEngineOutput("");
+      renderActions([]);
       return;
     }
     if (status === "idle") {
       bannerText.textContent = "Arcturn is not connected.";
-      reconnectButton.classList.remove("hidden");
-      reconnectButton.textContent = "Connect";
+      renderEngineOutput("");
+      renderActions([{ id: "reconnect", label: "Connect" }]);
       return;
     }
-    bannerText.textContent = detail
-      ? "The Arcturn engine stopped.\\n" + detail
-      : "The Arcturn engine stopped.";
-    reconnectButton.classList.remove("hidden");
-    reconnectButton.textContent = "Reconnect";
+    bannerText.textContent = detail || "The Arcturn engine stopped.";
+    renderEngineOutput(output);
+    renderActions(
+      actions && actions.length > 0 ? actions : [{ id: "reconnect", label: "Retry" }]
+    );
   }
 
   function send() {
@@ -307,9 +362,6 @@ export const SIDEBAR_SCRIPT = `
   sendButton.addEventListener("click", send);
   abortButton.addEventListener("click", function () {
     post({ type: "abort" });
-  });
-  reconnectButton.addEventListener("click", function () {
-    post({ type: "reconnect" });
   });
   document.getElementById("sessions").addEventListener("click", function () {
     post({ type: "command", command: "sessions" });
@@ -334,7 +386,12 @@ export const SIDEBAR_SCRIPT = `
     }
     if (message.type === "connection") {
       if (typeof message.status !== "string") return;
-      renderConnection(message.status, typeof message.detail === "string" ? message.detail : "");
+      renderConnection(
+        message.status,
+        typeof message.detail === "string" ? message.detail : "",
+        typeof message.engineOutput === "string" ? message.engineOutput : "",
+        Array.isArray(message.actions) ? message.actions : []
+      );
       return;
     }
     if (message.type === "cost") {

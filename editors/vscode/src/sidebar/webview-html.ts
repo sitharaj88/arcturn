@@ -84,7 +84,8 @@ export function renderSidebarHtml(options: SidebarHtmlOptions): string {
 <div id="root">
   <div id="banner" class="hidden" role="status" aria-live="polite">
     <span id="banner-text" class="banner-text"></span>
-    <button id="reconnect" type="button" class="secondary">Reconnect</button>
+    <pre id="engine-output" class="engine-output hidden"></pre>
+    <div id="banner-actions" class="row"></div>
   </div>
   <div id="side">
     <div id="plan" class="hidden"></div>

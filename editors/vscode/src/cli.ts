@@ -29,6 +29,7 @@ import {
   normalizeCliPathSetting,
   parseVersionOutput,
 } from "./cli-resolve.js";
+import { resolveUserEnvironment, type UserEnvironment } from "./user-env.js";
 
 /**
  * The engine binary this extension will drive.
@@ -49,9 +50,26 @@ export type ResolveCli = () => Promise<ResolvedCli | undefined>;
 export interface CliProvisionerOptions {
   readonly platform?: NodeJS.Platform;
   readonly home?: string;
+  /**
+   * `PATH` to search. Overrides {@link CliProvisionerOptions.environment}, and
+   * is the reason no unit test here has to run a shell.
+   */
   readonly pathVar?: string;
   readonly isExecutable?: (candidate: string) => boolean;
-  readonly probeVersion?: (command: string) => Promise<string | undefined>;
+  readonly probeVersion?: (
+    command: string,
+    env?: Record<string, string | undefined>,
+  ) => Promise<string | undefined>;
+  /**
+   * The user's real environment.
+   *
+   * Defaults to `user-env.ts`'s once-per-window login-shell probe. It is a
+   * function, not a value, because resolving it spawns a process and RFC 0004
+   * §3 gives activation no budget for that — see the call sites in
+   * {@link resolveOnce}, both of which are inside a `resolveCli()` a user
+   * action asked for.
+   */
+  readonly environment?: () => Promise<UserEnvironment>;
 }
 
 /** The provisioner owned by `activate()` for the lifetime of the window. */
@@ -66,13 +84,28 @@ export interface CliProvisioner extends vscode.Disposable {
 
 const VERSION_TIMEOUT_MS = 5000;
 
-/** Ask the binary what it is. Silence (or a crash) answers `undefined`. */
-function probeVersionByExec(command: string): Promise<string | undefined> {
+/**
+ * Ask the binary what it is. Silence (or a crash) answers `undefined`.
+ *
+ * The environment matters here as much as it does for `serve`: a global npm
+ * install writes a shell shim that runs `node`, and on a GUI-launched macOS
+ * editor `node` is not on the inherited `PATH`. Without the resolved
+ * environment this probe answers `undefined` for a perfectly good install and
+ * the user gets no version at all.
+ */
+function probeVersionByExec(
+  command: string,
+  env?: Record<string, string | undefined>,
+): Promise<string | undefined> {
   return new Promise((resolve) => {
     execFile(
       command,
       ["--version"],
-      { timeout: VERSION_TIMEOUT_MS, windowsHide: true },
+      {
+        timeout: VERSION_TIMEOUT_MS,
+        windowsHide: true,
+        ...(env === undefined ? {} : { env }),
+      },
       (error, stdout, stderr) => {
         if (error) {
           resolve(undefined);
@@ -102,9 +135,28 @@ function isExecutableFile(candidate: string): boolean {
 export function createCliProvisioner(options: CliProvisionerOptions = {}): CliProvisioner {
   const platform = options.platform ?? process.platform;
   const home = options.home ?? homedir();
-  const pathVar = options.pathVar ?? process.env.PATH;
   const isExecutable = options.isExecutable ?? isExecutableFile;
   const probeVersion = options.probeVersion ?? probeVersionByExec;
+  /**
+   * Resolving the environment means running the user's login shell. Supplying
+   * `pathVar` is how a test says "I have already decided what to search", and
+   * it therefore also opts out of the probe — which is what keeps every unit
+   * test in `cli.test.ts` hermetic on a machine with any shell profile at all.
+   */
+  const environment =
+    options.environment ??
+    (options.pathVar === undefined
+      ? resolveUserEnvironment
+      : async (): Promise<UserEnvironment> => ({
+          env: { ...process.env, PATH: options.pathVar },
+          source: "process",
+          diagnostic: "",
+          secrets: [],
+          retryable: false,
+        }));
+  /** At most one probe per provisioner, however many commands ask. */
+  let pendingEnv: Promise<UserEnvironment> | undefined;
+  const currentEnv = (): Promise<UserEnvironment> => (pendingEnv ??= environment());
 
   let pending: Promise<ResolvedCli | undefined> | undefined;
   let notifiedMissing = false;
@@ -154,16 +206,23 @@ export function createCliProvisioner(options: CliProvisionerOptions = {}): CliPr
       home,
       platform,
     );
+    // The first thing in this function that costs a process — and it is only
+    // reached from `resolveCli()`, which only a command or the sidebar calls.
+    const userEnv = await currentEnv();
+    const pathVar = options.pathVar ?? userEnv.env.PATH;
     const decision = decideCli({ configured, pathVar, platform, isExecutable });
     if (decision.kind === "missing") {
       if (!notifiedMissing) {
         notifiedMissing = true;
-        track(offerInstall(describeMissingCli(decision)));
+        // On Windows there is no login shell to have failed at, so the note
+        // would be a claim about a probe that was never meant to run.
+        const fellBack = platform !== "win32" && userEnv.source === "process";
+        track(offerInstall(describeMissingCli(decision, fellBack)));
       }
       return undefined;
     }
 
-    const version = await probeVersion(decision.cli.command);
+    const version = await probeVersion(decision.cli.command, userEnv.env);
     if (isOutdated(version, MIN_ENGINE_VERSION) && !notifiedUpgrade) {
       notifiedUpgrade = true;
       // Offered, not enforced: an old engine still runs, and blocking the

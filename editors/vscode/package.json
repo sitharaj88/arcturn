@@ -107,6 +107,11 @@
         "command": "arcturn.reconnect",
         "title": "Reconnect",
         "category": "Arcturn"
+      },
+      {
+        "command": "arcturn.showLog",
+        "title": "Show Log",
+        "category": "Arcturn"
       }
     ],
     "keybindings": [
@@ -150,6 +155,10 @@
         },
         {
           "command": "arcturn.reconnect",
+          "when": "config.arcturn.serve.enabled"
+        },
+        {
+          "command": "arcturn.showLog",
           "when": "config.arcturn.serve.enabled"
         }
       ],

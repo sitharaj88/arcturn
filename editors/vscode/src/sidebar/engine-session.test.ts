@@ -364,6 +364,124 @@ describe("createEngineSession", () => {
     });
     await h.session.start();
     expect(h.session.status).toBe("disconnected");
-    expect(onConnection).toHaveBeenLastCalledWith("disconnected", expect.stringMatching(/serve/i));
+    expect(onConnection).toHaveBeenLastCalledWith(
+      "disconnected",
+      expect.stringMatching(/serve/i),
+      expect.objectContaining({ actions: expect.any(Array) }),
+    );
+  });
+});
+
+describe("createEngineSession: telling the user why the engine never started", () => {
+  /** A spawn whose child writes the engine's real refusal and exits, like `arcturn serve` does. */
+  function refusingSpawn(stderr: string, code = 2): SpawnLike {
+    return () => {
+      const child = new FakeChild();
+      queueMicrotask(() => {
+        child.stderr.emit(stderr);
+        child.exit(code, null);
+      });
+      return child;
+    };
+  }
+
+  const NO_KEY =
+    "arcturn: No API key found for Claude Sonnet 4.5 (anthropic/claude-sonnet-4-5).\n" +
+    "Set ANTHROPIC_API_KEY in your environment, or pick another model with --model.\n";
+
+  it("hands the card the engine's own words, verbatim, alongside the summary", async () => {
+    const reports: unknown[] = [];
+    const h = harness({
+      spawn: refusingSpawn(NO_KEY),
+      host: {
+        onChat: () => {},
+        onCost: () => {},
+        askPermission: async () => ({ behavior: "deny" }),
+        onConnection: (_status, _detail, report) => reports.push(report),
+      },
+    });
+    await h.session.start();
+    const report = reports.at(-1) as { engineOutput: string; headline: string; actions: unknown[] };
+    expect(report.engineOutput).toContain("No API key found for Claude Sonnet 4.5");
+    expect(report.engineOutput).toContain("Set ANTHROPIC_API_KEY in your environment");
+    expect(report.headline).toMatch(/could not start/i);
+    expect(report.actions.length).toBeGreaterThan(0);
+  });
+
+  it("keeps the token out of the structured report as well as the detail", async () => {
+    const reports: { engineOutput: string }[] = [];
+    const h = harness({
+      spawn: refusingSpawn(`arcturn: refusing --token ${TOKEN}\n`),
+      host: {
+        onChat: () => {},
+        onCost: () => {},
+        askPermission: async () => ({ behavior: "deny" }),
+        onConnection: (_s, _d, report) => {
+          if (report !== undefined) reports.push(report);
+        },
+      },
+    });
+    await h.session.start();
+    expect(reports.at(-1)?.engineOutput).not.toContain(TOKEN);
+    expect(reports.at(-1)?.engineOutput).toContain("arcturn: refusing");
+  });
+
+  it("reports a missing CLI as a card that offers the installer", async () => {
+    const reports: { actions: { id: string }[] }[] = [];
+    const h = harness({
+      resolveCli: async () => undefined,
+      host: {
+        onChat: () => {},
+        onCost: () => {},
+        askPermission: async () => ({ behavior: "deny" }),
+        onConnection: (_s, _d, report) => {
+          if (report !== undefined) reports.push(report);
+        },
+      },
+    });
+    await h.session.start();
+    expect(reports.at(-1)?.actions.map((a) => a.id)).toContain("installCli");
+  });
+
+  it("exposes the failure so a command invoked from the palette can show it too", async () => {
+    const h = harness({ spawn: refusingSpawn(NO_KEY) });
+    await h.session.start();
+    expect(h.session.failure?.engineOutput).toContain("No API key found");
+    expect(h.session.status).toBe("disconnected");
+  });
+
+  it("clears the remembered failure once the engine comes back", async () => {
+    const h = harness();
+    await started(h);
+    expect(h.session.failure).toBeUndefined();
+  });
+
+  it("spawns serve with the environment it is given, not the extension host's", async () => {
+    const envs: (Record<string, string | undefined> | undefined)[] = [];
+    const h = harness({
+      resolveEnv: async () => ({ PATH: "/opt/homebrew/bin", ANTHROPIC_API_KEY: "k" }),
+      spawn: (_command, _args, options) => {
+        envs.push(options.env);
+        const child = new FakeChild();
+        queueMicrotask(() => child.announce());
+        return child;
+      },
+    });
+    await h.session.start();
+    expect(envs[0]?.PATH).toBe("/opt/homebrew/bin");
+    expect(envs[0]?.ANTHROPIC_API_KEY).toBe("k");
+  });
+
+  it("does not resolve the environment until it is actually starting the engine", async () => {
+    let calls = 0;
+    const h = harness({
+      resolveEnv: async () => {
+        calls += 1;
+        return { PATH: "/usr/bin" };
+      },
+    });
+    expect(calls).toBe(0);
+    await started(h);
+    expect(calls).toBe(1);
   });
 });

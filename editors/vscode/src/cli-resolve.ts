@@ -220,12 +220,36 @@ export function decideCli(lookup: CliLookup): CliDecision {
   return { kind: "missing", reason: "not-on-path" };
 }
 
-/** The one notification the user gets when the engine is not there. */
-export function describeMissingCli(decision: Extract<CliDecision, { kind: "missing" }>): string {
+/**
+ * Appended to the "not found" notification when the login-shell probe failed.
+ *
+ * Without it the message is misleading on exactly the machine where it matters
+ * most: a GUI-launched editor searching `launchd`'s `PATH` will not find a
+ * binary in `/opt/homebrew/bin` no matter how correctly it is installed, and
+ * "not found on your PATH" reads as a claim about the user's shell rather than
+ * about the four directories the editor actually looked in.
+ */
+export const SHELL_ENV_FALLBACK_NOTE =
+  "Arcturn could not read your login shell's environment, so it searched only the PATH VS Code " +
+  "itself was started with — which on a Dock- or Spotlight-launched editor does not include " +
+  "Homebrew or a version manager.";
+
+/**
+ * The one notification the user gets when the engine is not there.
+ *
+ * @param decision - Why the lookup missed.
+ * @param shellEnvFellBack - Whether the login-shell probe failed, in which
+ *   case the PATH that was searched is not the user's own.
+ */
+export function describeMissingCli(
+  decision: Extract<CliDecision, { kind: "missing" }>,
+  shellEnvFellBack = false,
+): string {
+  const note = shellEnvFellBack ? ` ${SHELL_ENV_FALLBACK_NOTE}` : "";
   if (decision.reason === "setting-not-executable") {
-    return `Arcturn: the arcturn.cliPath setting points at "${decision.configured}", which is not an executable file.`;
+    return `Arcturn: the arcturn.cliPath setting points at "${decision.configured}", which is not an executable file.${note}`;
   }
-  return `Arcturn: the ${CLI_PACKAGE} CLI was not found on your PATH.`;
+  return `Arcturn: the ${CLI_PACKAGE} CLI was not found on your PATH.${note}`;
 }
 
 /** The upgrade nag. Both numbers are named so the user can check the claim. */

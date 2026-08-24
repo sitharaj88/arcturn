@@ -26,8 +26,10 @@ import type { WebSocketLike } from "../serve/engine.js";
 import { createRedactor } from "../serve/redact.js";
 import type { SpawnLike } from "../serve/supervisor.js";
 import { generateToken } from "../serve/token.js";
+import { forgetFailedUserEnvironment, resolveUserEnvironment } from "../user-env.js";
 import type { ChatViewModel } from "./chat-state.js";
 import { createCoalescer } from "./coalesce.js";
+import { type ConnectionActionId, type ConnectionReport, reportText } from "./connection-card.js";
 import { costBreakdown, costLabel } from "./cost.js";
 import { answerFromChoice, permissionChoices } from "./dialog.js";
 import { createEngineSession, type EngineSession } from "./engine-session.js";
@@ -66,6 +68,7 @@ export const SIDEBAR_COMMANDS = {
   abortRun: "arcturn.abortRun",
   showCost: "arcturn.showCost",
   reconnect: "arcturn.reconnect",
+  showLog: "arcturn.showLog",
 } as const;
 
 /**
@@ -119,8 +122,8 @@ export function activateSidebar(
         case "abort":
           void withEngine((session) => session.controller?.abort());
           return;
-        case "reconnect":
-          void restart();
+        case "action":
+          void runAction(message.id);
           return;
         case "toggle":
           engine?.controller?.toggle(message.blockId);
@@ -158,6 +161,7 @@ export function activateSidebar(
       spawn: nodeSpawn as unknown as SpawnLike,
       socketFactory: webSocketFactory,
       generateToken,
+      resolveEnv,
       log,
       ...(port === undefined ? {} : { port }),
       ...(model === undefined || model === "" ? {} : { model }),
@@ -167,8 +171,15 @@ export function activateSidebar(
           statusBar.update(cost);
           provider.postCost(costLabel(cost));
         },
-        onConnection: (status, detail) => {
-          provider.postConnection(status, detail);
+        onConnection: (status, detail, report) => {
+          provider.postConnection(status, report);
+          // The card is only visible when the view is open. The Output channel
+          // is where the same words live for everyone else — including the
+          // user who reached this through the command palette.
+          if (detail !== undefined) log(`sidebar: ${detail}`);
+          // A connection that came back is a new chance to be told about the
+          // next failure; a failure that repeats verbatim is not.
+          if (status === "ready") announcedFailure = undefined;
           // `$0.00` on a live session is a complete, true answer; the item is
           // hidden only when there is no session for it to describe.
           if (status === "ready") statusBar.show();
@@ -189,11 +200,93 @@ export function activateSidebar(
     return engine;
   }
 
+  /**
+   * The environment the engine is spawned with, resolved on first start.
+   *
+   * Two things happen here that must not happen anywhere else. The values of
+   * credential-shaped variables are registered with the output channel's
+   * redactor, so that if one ever reaches a diagnostic by some route nobody
+   * anticipated it is blanked by value rather than by shape. And the
+   * *diagnostic* — which by construction names no variable and quotes no
+   * value — is logged once, so a user whose shell probe failed can see that it
+   * failed instead of wondering why their key is still invisible.
+   */
+  let loggedEnvironment = false;
+  async function resolveEnv(): Promise<Record<string, string | undefined>> {
+    const resolved = await resolveUserEnvironment();
+    for (const secret of resolved.secrets) redactor.add(secret);
+    if (!loggedEnvironment) {
+      loggedEnvironment = true;
+      log(resolved.diagnostic);
+    }
+    return resolved.env;
+  }
+
+  /** One of the card's buttons, from the webview or from a notification. */
+  async function runAction(id: ConnectionActionId): Promise<void> {
+    switch (id) {
+      case "reconnect":
+        await restart();
+        return;
+      case "showLog":
+        output.show(true);
+        return;
+      case "installCli":
+        await vscode.commands.executeCommand("arcturn.installCli");
+        return;
+      case "openCliSetting":
+        await vscode.commands.executeCommand("workbench.action.openSettings", "arcturn.cliPath");
+        return;
+      case "openModelSetting":
+        await vscode.commands.executeCommand(
+          "workbench.action.openSettings",
+          "arcturn.defaultModel",
+        );
+        return;
+    }
+  }
+
+  /**
+   * The failure already announced with a notification.
+   *
+   * A card is the sidebar's answer; a palette command has no card, and used to
+   * answer a dead engine with nothing at all — no picker, no message, an empty
+   * Output channel nobody was told to open. So the first command that cannot
+   * run raises exactly one notification carrying the engine's own words. It is
+   * one per failure, not one per command: three commands in a row on a machine
+   * with no API key must not stack three identical toasts, which is the toast
+   * storm RFC 0004 §1 says the card exists to avoid.
+   */
+  let announcedFailure: string | undefined;
+
+  /** A notification carries at most this many buttons before it stops reading as one. */
+  const MAX_NOTIFICATION_ACTIONS = 3;
+
+  async function announce(report: ConnectionReport): Promise<void> {
+    const text = reportText(report);
+    if (announcedFailure === text) return;
+    announcedFailure = text;
+    const buttons = report.actions.slice(0, MAX_NOTIFICATION_ACTIONS);
+    const choice = await vscode.window.showErrorMessage(
+      text,
+      ...buttons.map((action) => action.label),
+    );
+    const picked = buttons.find((action) => action.label === choice);
+    if (picked !== undefined) await runAction(picked.id);
+  }
+
   async function start(): Promise<void> {
     await ensureEngine().start();
   }
 
   async function restart(): Promise<void> {
+    // Retry means retry the whole start. A login-shell probe that failed is
+    // the step most likely to have failed transiently (a slow `nvm`, a machine
+    // waking from sleep) and the step whose failure is least visible, so a
+    // retry that skipped it would keep spawning serve with an environment that
+    // has no API keys in it. A probe that *succeeded* is left cached — see
+    // `user-env.ts`.
+    if (forgetFailedUserEnvironment()) loggedEnvironment = false;
     await ensureEngine().restart();
   }
 
@@ -203,6 +296,14 @@ export function activateSidebar(
   ): Promise<void> {
     const session = ensureEngine();
     await session.start();
+    const failure = session.failure;
+    if (failure !== undefined) {
+      // Running the action now would reach a `controller` that is `undefined`
+      // and return silently — which is what an empty model picker looked like
+      // from the outside.
+      await announce(failure);
+      return;
+    }
     try {
       await action(session);
     } catch (error) {
@@ -217,6 +318,7 @@ export function activateSidebar(
       webviewOptions: { retainContextWhenHidden: false },
     }),
     vscode.commands.registerCommand(SIDEBAR_COMMANDS.reconnect, () => restart()),
+    vscode.commands.registerCommand(SIDEBAR_COMMANDS.showLog, () => output.show(true)),
     vscode.commands.registerCommand(SIDEBAR_COMMANDS.abortRun, () =>
       withEngine((session) => session.controller?.abort()),
     ),

@@ -101,7 +101,8 @@ const mocha = {
  * `01-activation` has to observe a *cold* extension host — it asserts that
  * activating spawned nothing — so anything that touches the engine must come
  * after it. `05-sidebar-view` deliberately resolves the webview, which starts
- * the engine, so it comes last.
+ * the engine, and `06-engine-failure` reads what the extension made of the
+ * engine dying, so those two come last and in that order.
  */
 const orderedFiles = [
   "out/integration/01-activation.test.js",
@@ -109,6 +110,7 @@ const orderedFiles = [
   "out/integration/03-terminal.test.js",
   "out/integration/04-mention-injection.test.js",
   "out/integration/05-sidebar-view.test.js",
+  "out/integration/06-engine-failure.test.js",
 ];
 
 export default defineConfig([

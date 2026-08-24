@@ -161,3 +161,96 @@ describe("createCliProvisioner", () => {
     provisioner.dispose();
   });
 });
+
+describe("createCliProvisioner: the environment it looks in", () => {
+  it("searches the login shell's PATH, which is the only place /opt/homebrew/bin appears", async () => {
+    // A GUI-launched VS Code on macOS inherits launchd's PATH, not the
+    // user's; without the shell probe the binary below is invisible.
+    const provisioner = createCliProvisioner({
+      platform: "darwin",
+      home: "/Users/me",
+      environment: async () => ({
+        env: { PATH: "/opt/arcturn-fixture/bin:/usr/bin" },
+        source: "shell",
+        diagnostic: "environment: read 42 variables from /bin/zsh in 180ms",
+        secrets: [],
+        retryable: false,
+      }),
+      isExecutable: (candidate) => candidate === "/opt/arcturn-fixture/bin/arcturn",
+      probeVersion: async () => "0.2.0",
+    });
+    expect(await provisioner.resolveCli()).toEqual({
+      command: "/opt/arcturn-fixture/bin/arcturn",
+      source: "path",
+      version: "0.2.0",
+    });
+    provisioner.dispose();
+  });
+
+  it("resolves the environment lazily — constructing the provisioner probes nothing", () => {
+    let calls = 0;
+    const provisioner = createCliProvisioner({
+      platform: "darwin",
+      home: "/Users/me",
+      environment: async () => {
+        calls += 1;
+        return {
+          env: { PATH: "/usr/bin" },
+          source: "shell",
+          diagnostic: "",
+          secrets: [],
+          retryable: false,
+        };
+      },
+      isExecutable: () => false,
+      probeVersion: async () => undefined,
+    });
+    expect(calls).toBe(0);
+    provisioner.dispose();
+  });
+
+  it("says the shell probe failed in the same notification that says the CLI is missing", async () => {
+    const provisioner = createCliProvisioner({
+      platform: "darwin",
+      home: "/Users/me",
+      environment: async () => ({
+        env: { PATH: "/usr/bin:/bin" },
+        source: "process",
+        diagnostic:
+          "environment: could not read the login shell environment (the shell timed out after 5000ms); using the extension host's own environment.",
+        secrets: [],
+        retryable: false,
+      }),
+      isExecutable: () => false,
+      probeVersion: async () => undefined,
+    });
+    expect(await provisioner.resolveCli()).toBe(undefined);
+    expect(fake.messages).toHaveLength(1);
+    expect(fake.messages[0]?.message).toMatch(/login shell/i);
+    provisioner.dispose();
+  });
+
+  it("hands the resolved environment to the version probe, so the shim can find node", async () => {
+    const seen: (Record<string, string | undefined> | undefined)[] = [];
+    const provisioner = createCliProvisioner({
+      platform: "darwin",
+      home: "/Users/me",
+      environment: async () => ({
+        env: { PATH: "/opt/homebrew/bin:/usr/bin" },
+        source: "shell",
+        diagnostic: "",
+        secrets: [],
+        retryable: false,
+      }),
+      isExecutable: () => true,
+      probeVersion: async (_command, env) => {
+        seen.push(env);
+        return "0.2.0";
+      },
+    });
+    fake.config["arcturn.cliPath"] = "/opt/homebrew/bin/arcturn";
+    await provisioner.resolveCli();
+    expect(seen[0]?.PATH).toBe("/opt/homebrew/bin:/usr/bin");
+    provisioner.dispose();
+  });
+});

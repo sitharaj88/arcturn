@@ -98,6 +98,49 @@ untouched.
 
 ### Fixed
 
+- **The VS Code extension could not see your shell's environment, and did not
+  say so when that killed the engine.** Two defects, one user report ("I can't
+  select a model; it says no API key found"), reproduced against a real
+  GUI-launched editor.
+
+  A macOS or Linux app started from the Dock, Spotlight or a desktop launcher
+  inherits `launchd`'s (or the session's) environment, not the user's login
+  shell — so `PATH` has no `/opt/homebrew/bin` and `ANTHROPIC_API_KEY` does not
+  exist. `arcturn serve` then resolved its model, found no credential, printed
+  two lines to stderr and exited before announcing an address. The extension
+  captured that stderr and threw it away short of the screen: the sidebar card
+  said only "The Arcturn engine stopped" with a *Reconnect* button that could
+  only fail again, and a sidebar command invoked from the palette returned
+  silently, which looked like an empty model picker.
+
+  - **The failure is now visible, in the engine's own words.** `serve`'s exit
+    carries a structured failure (reason, exit status, redacted stderr) that
+    becomes a card with the engine's stderr quoted verbatim and the buttons
+    that are actually useful for it — *Show Log*, *Choose a Model*, *Set CLI
+    Path*, *Install CLI*, *Retry*. The same text goes to the Output channel,
+    reachable from the new **Arcturn: Show Log** command, and a palette command
+    that cannot run raises exactly one error notification instead of nothing.
+    The token stays redacted everywhere, including in the structured failure.
+  - **The extension now resolves your real environment.** On first engine start
+    — never at activation — it runs `vscode.env.shell` as an interactive login
+    shell, reads its environment, and uses it for `arcturn serve`, for finding
+    the `arcturn` binary on `PATH`, and for the `--version` probe. Per-shell
+    flags for zsh/bash, sh/dash, fish, nushell, tcsh and pwsh; five-second
+    deadline; a successful read cached for the window, a *failed* one dropped
+    and re-attempted when you reconnect; falls back to VS Code's own
+    environment with a diagnostic that says what you lose. The shell is asked
+    for `env -0`, so variables are NUL-separated: a newline inside a value
+    cannot be misread as declaring a new variable, which would otherwise let
+    anything able to set one environment variable set any of them — `PATH`
+    included, and `PATH` decides which `arcturn` binary runs. An `env` that
+    does not accept `-0` makes the probe refuse rather than guess.
+    VS Code's own variables always win, and
+    `PATH` is merged with the shell's entries first. Nothing from that
+    environment is ever logged — the diagnostic carries a shell path, a count
+    and a duration, and credential-shaped values are registered with the log's
+    redactor as a second line of defence. Skipped on Windows, where a GUI
+    process already inherits the user's environment.
+
 - **`grep` handed a file path answered "No matches found"** — the walker
   swallowed `ENOTDIR` and searched nothing, a silent false negative a model
   reads as evidence of absence. A file root now searches that file. Found by

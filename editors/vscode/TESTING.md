@@ -68,8 +68,11 @@ writes a small program in its place and points `arcturn.cliPath` at it. It is
 pty. It does three things:
 
 - `--version` → prints `0.2.0`, so the provisioner resolves and does not nag.
-- `serve …` → records its argument vector, then exits without announcing an
-  address (which the supervisor is documented to turn into a reconnect card).
+- `serve …` → records its argument vector, writes two lines to stderr and
+  exits `2` without announcing an address. The message is shaped like the real
+  failure (`No API key found for …` / `Set ANTHROPIC_API_KEY …`) because the
+  claim `06-engine-failure` makes is about carrying a *block* of the engine's
+  own output through to something a user reads.
 - no arguments → the TUI. Puts the tty in raw mode and appends **every byte it
   receives** to a log.
 
@@ -80,7 +83,7 @@ the terminal.
 
 ## What integration covers
 
-26 tests across two launches.
+30 tests across two launches.
 
 **Launch 1 — `default`** (workspace with `arcturn.serve.enabled: true`)
 
@@ -118,6 +121,20 @@ the terminal.
   view, VS Code calls `resolveWebviewView`, and the engine starts — observed as
   a recorded `arcturn serve` invocation, with `--host 127.0.0.1`, `--port 0`,
   `--cwd` the workspace folder, and a 64-character token.
+- **The engine refusing to start** (`06-engine-failure`) — the stand-in engine
+  dies the way the real one does on a machine with no API key, and the suite
+  follows what the extension made of it into the Output channel: **both** of
+  the engine's stderr lines are there verbatim, the extension says the engine
+  *could not start* and names the exit status, the generated token is **not**
+  there, and no value of any credential-shaped variable in this window's own
+  environment is either. That last one is a real check rather than a
+  formality: the extension resolves the developer's actual login shell during
+  this run, so the environment it read is full of live secrets.
+
+  The Output channel is observable because showing one materialises a document
+  with the `output:` scheme in `vscode.workspace.textDocuments`. The **card**
+  and the **notification** on that same path are not observable at all (see
+  "does not cover" below) and are covered by unit tests instead.
 
 **Launch 2 — `serve-disabled`** (workspace with `arcturn.serve.enabled: false`)
 
@@ -200,17 +217,24 @@ picker's catalog contents, and anything about answer quality.
 
 **Needs a human looking at pixels.** The webview's rendered DOM. The extension
 host can prove a provider was registered and resolved; it cannot read the
-page. Theme-awareness, keyboard-only operation, and "the reconnect card looks
-like a card and not a stack trace" are all unverified here. The webview's CSP
+page. Theme-awareness, keyboard-only operation, "the reconnect card looks like
+a card and not a stack trace", and the card's action buttons
+(*Show Log* / *Choose a Model* / *Retry*) actually rendering are all unverified
+here. What the card is *told* to render is covered by
+`src/sidebar/connection-card.test.ts` and `src/sidebar/view.ts`'s tests. The webview's CSP
 and message validation are covered by unit tests against the HTML string, not
 against a rendered page.
 
 **Notifications.** There is no stable API to read what is on screen, so
-`showInformationMessage` / `showWarningMessage` / `showQuickPick` are
-invisible to the suite. Concretely: the injection test proves nothing was
-typed, but *not* that the user was told why. The same goes for the
-missing-CLI notification, its "Install" / "Set path…" buttons, and the
-version-upgrade nag — all of RFC 0004 §1's provisioning UX is unobserved.
+`showInformationMessage` / `showWarningMessage` / `showErrorMessage` /
+`showQuickPick` are invisible to the suite. Concretely: the injection test
+proves nothing was typed, but *not* that the user was told why. The same goes
+for the missing-CLI notification, its "Install" / "Set path…" buttons, the
+version-upgrade nag, and the one error notification a palette command raises
+when the engine could not start — all of RFC 0004 §1's provisioning UX is
+unobserved. `06-engine-failure` gets as close as the API allows by following
+the same words into the Output channel, and `src/sidebar/index.test.ts` covers
+the notification itself against a fake `vscode`.
 `arcturn.installCli` itself is never invoked: it types `npm install -g
 arcturn` into a terminal, and a test suite should not do that to the machine
 it runs on.
@@ -238,6 +262,31 @@ done here.
 **Other platforms.** Everything above was observed on macOS only. The Windows
 quoting path in `launch.ts` (the PowerShell call operator) and the `.cmd`
 shim ordering in `cli-resolve.ts` have unit tests and no integration coverage.
+
+**The login-shell probe, per shell.** `src/shell-env.ts` picks different flags
+for zsh/bash, sh/dash, fish, nushell, tcsh and pwsh. The integration run only
+ever exercises whichever shell `vscode.env.shell` reports on the machine it
+runs on — one of them. The flag table and the parser have unit tests
+(`src/shell-env.test.ts`) that inject the runner, deliberately, so that no test
+in this repository depends on the developer's own shell.
+
+That isolation was itself a blind spot once: injecting the runner meant the
+parser only ever saw output a test author *imagined* `env(1)` producing, and a
+value containing a newline — which `env` prints raw — could be read as a new
+assignment. `src/shell-env.shell.test.ts` closes it by running the real
+`shellProbeCommand()` against `/bin/bash` with `HOME` pointed at a temporary
+directory holding a crafted `.bash_profile`, so a real `env` writes the bytes.
+It skips where `/bin/bash` does not exist. The zsh, sh and tcsh recipes were
+additionally checked by hand against the real binaries on macOS.
+**fish, nushell and pwsh are derived from their documented flags and have not
+been run.** A shell whose recipe is wrong fails the probe, which falls back to
+the extension host's environment and says so in the Output channel — bounded,
+visible, and not a crash.
+
+**An `env` without `-0`.** The probe asks for NUL-separated output, which BSD
+`env` (macOS) and GNU coreutils `env` both support. BusyBox's may not; that
+path is covered by a unit test (an empty body is refused, never parsed) but has
+not been run on a BusyBox image.
 
 **The hostile filename is macOS-legal.** `ev"il;touch pwned;#.ts` is created
 successfully on APFS, so nothing was skipped here — but a filesystem that

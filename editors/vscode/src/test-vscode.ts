@@ -204,6 +204,12 @@ export function createFakeVscode(): Record<string, unknown> {
     CodeActionKind,
     Disposable: FakeDisposable,
     Uri: { file: fakeUri, parse: fakeUri },
+    /**
+     * `env.shell` is what `user-env.ts` asks for before it probes a login
+     * shell. A fixed value here is deliberate: no test in this repository may
+     * depend on the shell the developer happens to run.
+     */
+    env: { shell: "/bin/zsh" },
     window: {
       get activeTextEditor() {
         return fake.activeTextEditor;

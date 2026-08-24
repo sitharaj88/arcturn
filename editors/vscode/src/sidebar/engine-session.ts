@@ -26,7 +26,19 @@ import type {
   WebSocketLike,
 } from "../serve/engine.js";
 import { createRedactor } from "../serve/redact.js";
-import { type ServeProcess, type SpawnLike, startServeProcess } from "../serve/supervisor.js";
+import {
+  type ServeProcess,
+  ServeStartError,
+  type SpawnLike,
+  startServeProcess,
+} from "../serve/supervisor.js";
+import {
+  type ConnectionReport,
+  missingCliReport,
+  outageReport,
+  reportText,
+  startFailureReport,
+} from "./connection-card.js";
 import {
   type ControllerHost,
   createSessionController,
@@ -36,7 +48,15 @@ import type { ConnectionStatus } from "./webview-messages.js";
 
 /** The controller host, plus the connection status the reconnect card renders. */
 export interface EngineSessionHost extends ControllerHost {
-  onConnection: (status: ConnectionStatus, detail?: string) => void;
+  /**
+   * @param status - Where the connection stands.
+   * @param detail - The whole thing as text, redacted: what the Output channel
+   *   records and what a notification shows.
+   * @param report - The same failure as a card — headline, the engine's own
+   *   words, and the buttons to offer. Absent for a status that is not a
+   *   failure.
+   */
+  onConnection: (status: ConnectionStatus, detail?: string, report?: ConnectionReport) => void;
 }
 
 /** Construction options for {@link createEngineSession}. */
@@ -61,11 +81,29 @@ export interface EngineSessionOptions {
   startupTimeoutMs?: number;
   /** Redacted diagnostics sink. */
   log?: (line: string) => void;
+  /**
+   * The environment `arcturn serve` is spawned with.
+   *
+   * Called on the first start and on every restart, never at construction —
+   * resolving it means running the user's login shell (see `shell-env.ts`),
+   * which RFC 0004 §3 forbids spending activation on. Omitted, the child
+   * inherits the extension host's own environment, which on a GUI-launched
+   * macOS editor is the environment that has no API keys in it.
+   */
+  resolveEnv?: () => Promise<Record<string, string | undefined>>;
 }
 
 /** A managed `arcturn serve` plus the session open against it. */
 export interface EngineSession {
   readonly status: ConnectionStatus;
+  /**
+   * Why the engine is not connected, or `undefined` while it is.
+   *
+   * The sidebar has a card for this; a command invoked from the palette has
+   * nothing, and used to fail silently. This is what lets that path say the
+   * same thing the card says.
+   */
+  readonly failure: ConnectionReport | undefined;
   /** The open session, or `undefined` while not connected. */
   readonly controller: SessionController | undefined;
   /** Start the engine and open a new session. Idempotent; never throws. */
@@ -96,6 +134,7 @@ export interface EngineSession {
 export function createEngineSession(options: EngineSessionOptions): EngineSession {
   const redactor = createRedactor();
   let status: ConnectionStatus = "idle";
+  let failure: ConnectionReport | undefined;
   let serve: ServeProcess | undefined;
   let client: ProtocolClient | undefined;
   let controller: SessionController | undefined;
@@ -110,9 +149,29 @@ export function createEngineSession(options: EngineSessionOptions): EngineSessio
    */
   let generation = 0;
 
-  const setStatus = (next: ConnectionStatus, detail?: string): void => {
+  /**
+   * Publish a status.
+   *
+   * The report is redacted here rather than at the call sites: it is built
+   * from the child's stderr, and this session is the only object that knows
+   * the token by value. `supervisor.ts` has already redacted the same text by
+   * value; doing it again costs nothing and means a report assembled from any
+   * other source cannot skip the step.
+   */
+  const setStatus = (next: ConnectionStatus, report?: ConnectionReport): void => {
     status = next;
-    options.host.onConnection(next, detail === undefined ? undefined : redactor.redact(detail));
+    if (report === undefined) {
+      failure = undefined;
+      options.host.onConnection(next);
+      return;
+    }
+    const redacted: ConnectionReport = {
+      headline: redactor.redact(report.headline),
+      engineOutput: redactor.redact(report.engineOutput),
+      actions: report.actions,
+    };
+    failure = next === "disconnected" ? redacted : undefined;
+    options.host.onConnection(next, reportText(redacted), redacted);
   };
 
   const log = (line: string): void => options.log?.(redactor.redact(line));
@@ -127,7 +186,7 @@ export function createEngineSession(options: EngineSessionOptions): EngineSessio
     if (disposed || gen !== generation || status === "disconnected") return;
     controller?.dispose();
     controller = undefined;
-    setStatus("disconnected", detail);
+    setStatus("disconnected", outageReport(detail));
   };
 
   const teardown = (): void => {
@@ -197,10 +256,17 @@ export function createEngineSession(options: EngineSessionOptions): EngineSessio
     if (cli === undefined) {
       setStatus(
         "disconnected",
-        "The arcturn CLI could not be found. Set arcturn.cliPath, or install it with npm install -g arcturn.",
+        missingCliReport(
+          "The arcturn CLI could not be found. Set arcturn.cliPath, or install it with npm install -g arcturn.",
+        ),
       );
       return;
     }
+
+    // Resolved here — after the CLI lookup, before the spawn — because this is
+    // the first moment the extension actually needs it, and running a login
+    // shell is not something to do on a path the user has not asked for.
+    const env = await options.resolveEnv?.();
 
     const token = options.generateToken();
     redactor.add(token);
@@ -217,6 +283,7 @@ export function createEngineSession(options: EngineSessionOptions): EngineSessio
       cwd: options.cwd,
       token,
       spawn: options.spawn,
+      ...(env === undefined ? {} : { env }),
       ...(options.startupTimeoutMs === undefined
         ? {}
         : { startupTimeoutMs: options.startupTimeoutMs }),
@@ -255,7 +322,16 @@ export function createEngineSession(options: EngineSessionOptions): EngineSessio
     starting ??= boot()
       .catch((error: unknown) => {
         teardown();
-        setStatus("disconnected", `Could not start arcturn serve: ${redactor.message(error)}`);
+        setStatus(
+          "disconnected",
+          error instanceof ServeStartError
+            ? startFailureReport(error.failure)
+            : // Everything else that can throw out of `boot()` — the socket
+              // refusing the address, `authenticate` failing, `createSession`
+              // erroring — happened *after* serve came up, so it is the
+              // extension's own account rather than the engine's.
+              outageReport(`Could not start arcturn serve: ${redactor.message(error)}`),
+        );
       })
       .finally(() => {
         starting = undefined;
@@ -272,6 +348,9 @@ export function createEngineSession(options: EngineSessionOptions): EngineSessio
     get status(): ConnectionStatus {
       return status;
     },
+    get failure(): ConnectionReport | undefined {
+      return failure;
+    },
     get controller(): SessionController | undefined {
       return controller;
     },
@@ -280,6 +359,7 @@ export function createEngineSession(options: EngineSessionOptions): EngineSessio
       if (disposed) return;
       teardown();
       status = "idle";
+      failure = undefined;
       await start();
     },
     listSessions: () => requireClient().listSessions(),
@@ -298,6 +378,7 @@ export function createEngineSession(options: EngineSessionOptions): EngineSessio
       teardown();
       // Deliberate shutdown: the card is for outages, not for closing the view.
       status = "idle";
+      failure = undefined;
     },
   };
 }

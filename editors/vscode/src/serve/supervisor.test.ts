@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ChildLike, SpawnLike } from "./supervisor.js";
-import { startServeProcess } from "./supervisor.js";
+import { ServeStartError, startServeProcess } from "./supervisor.js";
 
 const TOKEN = "0123456789abcdef0123456789abcdef";
 
@@ -188,5 +188,66 @@ describe("startServeProcess", () => {
     serve.dispose();
     await new Promise((resolve) => setTimeout(resolve, 25));
     expect(h.child.signals).toEqual(["SIGTERM", "SIGKILL"]);
+  });
+});
+
+describe("startServeProcess: the failure the user has to be shown", () => {
+  it("carries the child's own stderr as a field, not only inside a sentence", async () => {
+    const h = harness();
+    const started = startServeProcess(options(h));
+    h.child.stderr.emit(
+      "arcturn: No API key found for Claude Sonnet 4.5 (anthropic/claude-sonnet-4-5).\n" +
+        "Set ANTHROPIC_API_KEY in your environment, or pick another model with --model.\n",
+    );
+    h.child.exit(2, null);
+    const error = await started.catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ServeStartError);
+    const failure = (error as ServeStartError).failure;
+    expect(failure.reason).toBe("exited");
+    expect(failure.code).toBe(2);
+    expect(failure.stderr).toBe(
+      "arcturn: No API key found for Claude Sonnet 4.5 (anthropic/claude-sonnet-4-5).\n" +
+        "Set ANTHROPIC_API_KEY in your environment, or pick another model with --model.",
+    );
+  });
+
+  it("redacts the token out of the structured stderr too, not just the message", async () => {
+    const h = harness();
+    const started = startServeProcess(options(h));
+    h.child.stderr.emit(`arcturn: bad --token ${TOKEN}\n`);
+    h.child.exit(2, null);
+    const error = (await started.catch((e: unknown) => e)) as ServeStartError;
+    expect(error.failure.stderr).not.toContain(TOKEN);
+    expect(error.failure.stderr).toContain("arcturn: bad");
+  });
+
+  it("reports an empty stderr rather than inventing one when the child said nothing", async () => {
+    const h = harness();
+    const started = startServeProcess(options(h));
+    h.child.exit(127, null);
+    const error = (await started.catch((e: unknown) => e)) as ServeStartError;
+    expect(error.failure.stderr).toBe("");
+    expect(error.failure.code).toBe(127);
+  });
+
+  it("distinguishes a timeout, a spawn failure and a bad address from a plain exit", async () => {
+    const timedOut = (await startServeProcess(options(harness(), { startupTimeoutMs: 5 })).catch(
+      (e: unknown) => e,
+    )) as ServeStartError;
+    expect(timedOut.failure.reason).toBe("timeout");
+
+    const spawnFailed = harness();
+    const spawning = startServeProcess(options(spawnFailed));
+    spawnFailed.child.fail(new Error("ENOENT"));
+    expect(((await spawning.catch((e: unknown) => e)) as ServeStartError).failure.reason).toBe(
+      "spawn",
+    );
+
+    const badAddress = harness();
+    const announcing = startServeProcess(options(badAddress));
+    badAddress.child.stdout.emit("arcturn serving on ws://192.168.1.5:53145\n");
+    expect(((await announcing.catch((e: unknown) => e)) as ServeStartError).failure.reason).toBe(
+      "address",
+    );
   });
 });

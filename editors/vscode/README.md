@@ -39,8 +39,9 @@ terminal*, so you can always read what it ran and re-run it yourself.
 | Arcturn: Abort Run | `arcturn.abortRun` | — | Stops the turn in flight. |
 | Arcturn: Show Cost | `arcturn.showCost` | — | The breakdown behind the status bar figure. |
 | Arcturn: Reconnect | `arcturn.reconnect` | — | Restarts `arcturn serve` and reattaches after the engine dies. |
+| Arcturn: Show Log | `arcturn.showLog` | — | Opens the **Arcturn Sidebar** output channel — everything the engine wrote, redacted, plus which environment the extension resolved. This is where you look when something did not start. |
 
-The last six drive the sidebar, so they are hidden from the palette when
+The last seven drive the sidebar, so they are hidden from the palette when
 `arcturn.serve.enabled` is off — with no serve there is no engine behind them,
 and six entries that can only fail is not a menu.
 
@@ -84,6 +85,16 @@ stripped name points at a different file, which is a wrong answer delivered
 quietly. Spaces, quotes, brackets, braces, `#`, `~`, `*` and `?` are all fine;
 so is anything non-ASCII.
 
+**When the engine cannot start, it tells you what the engine said.** If
+`arcturn serve` exits before it announces an address — no API key, a binary it
+cannot run, a model it cannot resolve — the sidebar shows a card carrying the
+engine's own stderr, unedited, with the buttons that are actually useful for
+it (*Show Log*, *Choose a Model*, *Set CLI Path*, *Install CLI*, *Retry*). The
+same words go to the Output channel, and a sidebar command invoked from the
+palette raises one error notification rather than opening an empty picker. The
+extension never rewords the engine's explanation: the engine is the part that
+knows which credential is missing.
+
 **`arcturn.serve.enabled` applies immediately.** Turning it off shuts the
 sidebar and its `arcturn serve` process down there and then, rather than at the
 next window reload; a listening socket you believe you switched off is worse
@@ -94,6 +105,71 @@ One known sharp edge worth stating plainly: the `:12-34` line range in a
 mention is context for the model to read, not an instruction the engine's
 mention expander parses today — it inlines whole files, not ranges. The range
 tells the agent where to look; it does not yet narrow what gets injected.
+
+## Your shell's environment, and why the extension goes looking for it
+
+On macOS, an app launched from the Dock, Spotlight or Finder is started by
+`launchd` and inherits **launchd's** environment — not your shell's. Nothing
+exported from `~/.zshrc`, `~/.zprofile` or `~/.bash_profile` is there. A
+GUI-launched VS Code on a normal Mac has:
+
+```
+PATH=/usr/bin:/bin:/usr/sbin:/sbin        # no /opt/homebrew/bin, no nvm, no pnpm
+ANTHROPIC_API_KEY                          # absent
+```
+
+Which is why "I installed the CLI and the extension can't find it" and "it says
+no API key found" are the same bug. Linux desktop launchers have the same
+problem. So, **the first time it actually needs to start the engine** — never at
+activation — the extension runs your own login shell, asks it to print its
+environment, and uses that for `arcturn serve`, for finding the `arcturn`
+binary, and for the `--version` probe.
+
+- **Which shell.** `vscode.env.shell` — the same one the integrated terminal
+  opens. bash/zsh/ksh get `-l -i -c`; `sh`/`dash`/`ash` get `-c` only (dash
+  rejects `-l`); fish gets `-l -i -c`; nushell gets `-l -c` (never `-i`, which
+  opens a REPL); tcsh gets `-i -c` (its `-l` must be the only flag); pwsh gets
+  `-Login -Command`. An unrecognised shell is tried as POSIX.
+- **Once per window — unless it failed.** A successful read is cached: not once
+  per spawn, and *Retry* does not re-run your whole login shell for an answer
+  that was already right. Edit your profile and reload the window, the same as
+  for anything else VS Code reads at startup. A **failed** probe is different —
+  it is the absence of an answer, not an answer — so *Retry* (and
+  **Arcturn: Reconnect**) drops it and probes again.
+- **Bounded.** Five seconds. A profile that hangs cannot hang the extension —
+  it falls back to VS Code's own environment and writes a line to
+  **Arcturn: Show Log** saying so and saying what you lose by it. The
+  "arcturn not found" notification says it too, so a wrong `PATH` never reads
+  as "your install is broken".
+- **Unambiguous.** The shell is asked for `env -0`, so every variable is
+  separated by a NUL — the one byte a variable's name or value cannot contain.
+  A value with a newline in it therefore cannot be misread as declaring a new
+  variable, which would otherwise be a way for anything that can set one
+  environment variable to set *any* of them, `PATH` included. On a system whose
+  `env` does not accept `-0` (some BusyBox images), Arcturn refuses to parse
+  rather than guessing, and falls back with the diagnostic above.
+- **Nothing is logged.** Your environment contains credentials. The Output
+  channel gets a shell path, a variable *count* and a duration — never a name,
+  never a value, and never the shell's own output, on the success path or the
+  failure path. Values of credential-shaped variables are additionally
+  registered with the log's redactor, so one reaching a diagnostic by some
+  other route is blanked by value.
+- **Your editor still wins.** A variable VS Code already set is kept; the shell
+  only fills in what is missing. `PATH` is merged, shell entries first, so
+  `arcturn` resolves to the binary your terminal would run. `VSCODE_*`,
+  `ELECTRON_*` and `NODE_OPTIONS` are never imported from a profile.
+
+**Not done on Windows**, deliberately: a GUI process there already inherits the
+user's environment block and there is no login shell to replicate.
+
+**Still not handled:** an environment that only exists once a shell has entered
+your project — a `direnv`/`asdf`/`mise` hook that fires on `cd`, or a key set by
+a shell function rather than `export`ed — is invisible to this. The probe reads
+what `env` prints, and it deliberately does **not** `cd` into the workspace
+first: running your login shell inside a directory whose contents you have just
+opened is a bigger door than this fix needs. If your key lives in one of those,
+export it from a profile file, or point `arcturn.defaultModel` at a model whose
+credential the engine can already see.
 
 ## Requirements
 

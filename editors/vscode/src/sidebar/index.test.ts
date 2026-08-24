@@ -29,6 +29,10 @@ const ledger = vi.hoisted(() => ({
   }[],
   views: [] as { id: string; options: unknown }[],
   quickPicks: [] as { items: { label: string; description?: string }[]; options: unknown }[],
+  messages: [] as { level: string; message: string; items: string[] }[],
+  executed: [] as { command: string; args: unknown[] }[],
+  shownOutputs: 0,
+  forgotEnvironment: 0,
   config: {} as Record<string, unknown>,
   folders: [{ uri: { fsPath: "/workspace" } }] as { uri: { fsPath: string } }[] | undefined,
   disposed: 0,
@@ -39,9 +43,31 @@ const ledger = vi.hoisted(() => ({
     ledger.statusBars = [];
     ledger.views = [];
     ledger.quickPicks = [];
+    ledger.messages = [];
+    ledger.executed = [];
+    ledger.shownOutputs = 0;
+    ledger.forgotEnvironment = 0;
     ledger.config = {};
     ledger.folders = [{ uri: { fsPath: "/workspace" } }];
     ledger.disposed = 0;
+  },
+}));
+
+// The login-shell probe is a process spawn; the seam's job is to call it
+// lazily and pass the result on, which is provable without running a shell —
+// and no test here may depend on the developer's own profile.
+vi.mock("../user-env.js", () => ({
+  resolveUserEnvironment: async () => ({
+    env: { PATH: "/opt/homebrew/bin:/usr/bin" },
+    source: "shell" as const,
+    shell: "/bin/zsh",
+    diagnostic: "environment: read 3 variables from /bin/zsh in 12ms",
+    secrets: ["shell-secret-value"],
+    retryable: false,
+  }),
+  forgetFailedUserEnvironment: () => {
+    ledger.forgotEnvironment += 1;
+    return true;
   },
 }));
 
@@ -69,6 +95,9 @@ vi.mock("vscode", () => {
         ledger.outputs.push(channel);
         return {
           appendLine: (line: string) => channel.lines.push(line),
+          show: () => {
+            ledger.shownOutputs += 1;
+          },
           dispose: () => {
             channel.disposed = true;
           },
@@ -104,7 +133,18 @@ vi.mock("vscode", () => {
         ledger.quickPicks.push({ items, options });
         return Promise.resolve(undefined);
       },
-      showWarningMessage: () => Promise.resolve(undefined),
+      showWarningMessage: (message: string, ...items: string[]) => {
+        ledger.messages.push({ level: "warning", message, items });
+        return Promise.resolve(undefined);
+      },
+      showErrorMessage: (message: string, ...items: string[]) => {
+        ledger.messages.push({
+          level: "error",
+          message,
+          items: items.filter((i) => typeof i === "string"),
+        });
+        return Promise.resolve(undefined);
+      },
       showInputBox: () => Promise.resolve(undefined),
     },
     commands: {
@@ -112,7 +152,10 @@ vi.mock("vscode", () => {
         ledger.commands.set(id, handler);
         return { dispose: () => ledger.commands.delete(id) };
       },
-      executeCommand: () => Promise.resolve(undefined),
+      executeCommand: (command: string, ...args: unknown[]) => {
+        ledger.executed.push({ command, args });
+        return Promise.resolve(undefined);
+      },
     },
     workspace: {
       get workspaceFolders() {
@@ -207,5 +250,50 @@ describe("activateSidebar", () => {
     const { disposable } = activate();
     disposable.dispose();
     expect(ledger.commands.size).toBe(0);
+  });
+});
+
+describe("a command invoked while the engine cannot start", () => {
+  /**
+   * The mocked `node:child_process.spawn` throws, so `startServeProcess`
+   * rejects before any address is announced — the same shape as the real
+   * failure a user hits when `arcturn serve` exits over a missing API key.
+   */
+  it("says so, instead of opening an empty picker", async () => {
+    activate();
+    await ledger.commands.get(SIDEBAR_COMMANDS.selectModel)?.();
+    const errors = ledger.messages.filter((entry) => entry.level === "error");
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.message).toMatch(/arcturn/i);
+    expect(errors[0]?.items).toContain("Show Log");
+    expect(ledger.quickPicks).toHaveLength(0);
+  });
+
+  it("does not stack one toast per command", async () => {
+    activate();
+    await ledger.commands.get(SIDEBAR_COMMANDS.selectModel)?.();
+    await ledger.commands.get(SIDEBAR_COMMANDS.showSessions)?.();
+    await ledger.commands.get(SIDEBAR_COMMANDS.newSession)?.();
+    expect(ledger.messages.filter((entry) => entry.level === "error")).toHaveLength(1);
+  });
+
+  it("writes the same explanation to the output channel", async () => {
+    activate();
+    await ledger.commands.get(SIDEBAR_COMMANDS.selectModel)?.();
+    expect(ledger.outputs[0]?.lines.join("\n")).toMatch(/could not start/i);
+  });
+
+  it("registers a Show Log command so the detail is reachable from the palette", async () => {
+    activate();
+    await ledger.commands.get(SIDEBAR_COMMANDS.showLog)?.();
+    expect(ledger.shownOutputs).toBeGreaterThan(0);
+  });
+});
+
+describe("retrying after the engine failed to start", () => {
+  it("lets the login-shell probe be re-attempted, so a transient failure is not permanent", async () => {
+    activate();
+    await ledger.commands.get(SIDEBAR_COMMANDS.reconnect)?.();
+    expect(ledger.forgotEnvironment).toBeGreaterThan(0);
   });
 });

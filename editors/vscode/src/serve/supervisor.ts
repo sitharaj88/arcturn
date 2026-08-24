@@ -46,6 +46,54 @@ export type SpawnLike = (
   options: { cwd: string; env?: Record<string, string | undefined>; stdio: readonly string[] },
 ) => ChildLike;
 
+/**
+ * Why a start failed, in a shape the sidebar can render.
+ *
+ * The `Error` message these travel with is for the log; this is for the card.
+ * `stderr` is the engine's **own words**, redacted and otherwise verbatim, so
+ * the UI can show what `arcturn serve` actually said — which for the most
+ * common failure is a complete, actionable sentence the extension has no
+ * business paraphrasing:
+ *
+ * ```
+ * arcturn: No API key found for Claude Sonnet 4.5 (anthropic/claude-sonnet-4-5).
+ * Set ANTHROPIC_API_KEY in your environment, or pick another model with --model.
+ * ```
+ */
+export interface ServeStartFailure {
+  /**
+   * - `spawn` — the child could not be executed at all.
+   * - `exited` — it ran and then died before announcing an address.
+   * - `timeout` — it is still running but never announced one.
+   * - `address` — it announced something that is not loopback.
+   */
+  readonly reason: "spawn" | "exited" | "timeout" | "address";
+  /** Exit code, when the platform reported one. */
+  readonly code: number | null;
+  /** Terminating signal, when there was one. */
+  readonly signal: string | null;
+  /** Redacted tail of the child's stderr. `""` when it said nothing. */
+  readonly stderr: string;
+}
+
+/**
+ * A failed start, with the failure attached rather than only spelled into the
+ * message.
+ *
+ * The message stays human-readable (and redacted) because it is what reaches
+ * the Output channel; {@link ServeStartError.failure} is what
+ * `sidebar/connection-card.ts` turns into a card the user can act on.
+ */
+export class ServeStartError extends Error {
+  readonly failure: ServeStartFailure;
+
+  constructor(message: string, failure: ServeStartFailure) {
+    super(message);
+    this.name = "ServeStartError";
+    this.failure = failure;
+  }
+}
+
 /** How an exit after a successful start is reported. */
 export interface ServeExitInfo {
   code: number | null;
@@ -115,6 +163,9 @@ export function startServeProcess(options: ServeProcessOptions): Promise<ServePr
     let killTimer: ReturnType<typeof setTimeout> | undefined;
     let startupTimer: ReturnType<typeof setTimeout> | undefined;
 
+    /** The redacted stderr tail, as one block. */
+    const capturedStderr = (): string => stderrTail.join("\n").trim();
+
     let child: ChildLike;
     try {
       child = options.spawn(options.command, options.args, {
@@ -123,7 +174,14 @@ export function startServeProcess(options: ServeProcessOptions): Promise<ServePr
         stdio: ["ignore", "pipe", "pipe"],
       });
     } catch (error) {
-      reject(new Error(`Could not start arcturn serve: ${redactor.message(error)}`));
+      reject(
+        new ServeStartError(`Could not start arcturn serve: ${redactor.message(error)}`, {
+          reason: "spawn",
+          code: null,
+          signal: null,
+          stderr: "",
+        }),
+      );
       return;
     }
 
@@ -146,12 +204,12 @@ export function startServeProcess(options: ServeProcessOptions): Promise<ServePr
       (killTimer as { unref?: () => void }).unref?.();
     };
 
-    const fail = (message: string): void => {
+    const fail = (message: string, failure: ServeStartFailure): void => {
       if (settled) return;
       settled = true;
       if (startupTimer !== undefined) clearTimeout(startupTimer);
       terminate();
-      reject(new Error(redactor.redact(message)));
+      reject(new ServeStartError(redactor.redact(message), failure));
     };
 
     const succeed = (socketUrl: string): void => {
@@ -183,6 +241,7 @@ export function startServeProcess(options: ServeProcessOptions): Promise<ServePr
       if (!isLoopbackSocketUrl(announced)) {
         fail(
           `arcturn serve bound ${announced}, which is not a loopback address; refusing to hand it a token`,
+          { reason: "address", code: null, signal: null, stderr: capturedStderr() },
         );
         return;
       }
@@ -210,7 +269,14 @@ export function startServeProcess(options: ServeProcessOptions): Promise<ServePr
       }
       settled = true;
       if (startupTimer !== undefined) clearTimeout(startupTimer);
-      reject(new Error(message));
+      reject(
+        new ServeStartError(message, {
+          reason: "spawn",
+          code: null,
+          signal: null,
+          stderr: capturedStderr(),
+        }),
+      );
     });
 
     child.on("exit", (code, signal) => {
@@ -218,11 +284,12 @@ export function startServeProcess(options: ServeProcessOptions): Promise<ServePr
       if (killTimer !== undefined) clearTimeout(killTimer);
       stdout.flush();
       stderr.flush();
-      const detail = stderrTail.join("\n").trim();
+      const detail = capturedStderr();
       if (!settled) {
         fail(
           `arcturn serve exited ${signal ?? `with code ${String(code)}`} before it announced an address` +
             (detail === "" ? "" : `:\n${detail}`),
+          { reason: "exited", code, signal, stderr: detail },
         );
         return;
       }
@@ -239,6 +306,7 @@ export function startServeProcess(options: ServeProcessOptions): Promise<ServePr
     startupTimer = setTimeout(() => {
       fail(
         `arcturn serve did not start within ${String(options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS)}ms`,
+        { reason: "timeout", code: null, signal: null, stderr: capturedStderr() },
       );
     }, options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS);
     (startupTimer as { unref?: () => void }).unref?.();

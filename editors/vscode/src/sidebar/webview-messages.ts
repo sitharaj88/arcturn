@@ -14,6 +14,11 @@
  */
 
 import type { ChatViewModel } from "./chat-state.js";
+import {
+  CONNECTION_ACTIONS,
+  type ConnectionAction,
+  type ConnectionActionId,
+} from "./connection-card.js";
 
 /** Ceiling on a prompt, mirroring nothing in particular — just not unbounded. */
 export const MAX_PROMPT_LENGTH = 100_000;
@@ -32,7 +37,19 @@ export type ConnectionStatus = "idle" | "starting" | "ready" | "disconnected";
 /** Host → webview. */
 export type HostMessage =
   | { type: "state"; state: ChatViewModel }
-  | { type: "connection"; status: ConnectionStatus; detail?: string }
+  | {
+      type: "connection";
+      status: ConnectionStatus;
+      /** The extension's own one-line account of the failure. */
+      detail?: string;
+      /**
+       * The engine's own words, verbatim and redacted. Rendered as text, in
+       * its own block, so a user reads what `arcturn serve` actually said.
+       */
+      engineOutput?: string;
+      /** Buttons the card offers, most useful first. */
+      actions?: ConnectionAction[];
+    }
   | { type: "cost"; label: string };
 
 /** Webview → host. */
@@ -40,8 +57,8 @@ export type WebviewMessage =
   | { type: "ready" }
   | { type: "send"; text: string }
   | { type: "abort" }
-  | { type: "reconnect" }
   | { type: "toggle"; blockId: string }
+  | { type: "action"; id: ConnectionActionId }
   | { type: "command"; command: WebviewCommand };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -53,7 +70,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  *
  * @param value - Whatever arrived on `onDidReceiveMessage`.
  * @returns A freshly built message, or `undefined` when the value is not one
- *   of the six the webview is allowed to send.
+ *   of the six the webview is allowed to send. The `action` case is validated
+ *   against {@link CONNECTION_ACTIONS} rather than by shape alone.
  */
 export function parseWebviewMessage(value: unknown): WebviewMessage | undefined {
   if (!isRecord(value)) return undefined;
@@ -62,8 +80,15 @@ export function parseWebviewMessage(value: unknown): WebviewMessage | undefined 
       return { type: "ready" };
     case "abort":
       return { type: "abort" };
-    case "reconnect":
-      return { type: "reconnect" };
+    case "action": {
+      // The card's buttons are the only thing that sends this, and the host
+      // turns an id into a VS Code command. Accepting an arbitrary string here
+      // would be handing the webview a command runner.
+      const id = value.id;
+      if (typeof id !== "string") return undefined;
+      if (!(CONNECTION_ACTIONS as readonly string[]).includes(id)) return undefined;
+      return { type: "action", id: id as ConnectionActionId };
+    }
     case "send": {
       const text = value.text;
       if (typeof text !== "string") return undefined;

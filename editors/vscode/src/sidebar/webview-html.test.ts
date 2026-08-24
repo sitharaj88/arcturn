@@ -80,6 +80,16 @@ describe("the client script", () => {
     expect(SIDEBAR_SCRIPT).toContain("KNOWN_HOST_MESSAGES");
   });
 
+  it("parses as JavaScript", () => {
+    // The script ships as a string, so a syntax error in it is invisible to
+    // tsc and to every other test in this file — and the failure it produces
+    // is a sidebar that renders nothing, with the error inside a webview
+    // devtools console nobody has open. Compiling it is the cheapest way to
+    // know it is at least a program. It is never *run* here: it reaches for
+    // `document` and `acquireVsCodeApi` the moment it does.
+    expect(() => new Function(SIDEBAR_SCRIPT)).not.toThrow();
+  });
+
   it("closes no script tag early, which would break out of the inline block", () => {
     expect(SIDEBAR_SCRIPT).not.toContain("</script");
     expect(SIDEBAR_STYLE).not.toContain("</style");
