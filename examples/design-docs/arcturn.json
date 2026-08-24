@@ -1,0 +1,13 @@
+{
+  "name": "design-docs",
+  "description": "Four commands for the writing a repository asks for before code: an ADR that invents no alternatives, an import-backed architecture map, a fitness function proven to bite, and an HLD drafted as a form.",
+  "version": "0.1.0",
+  "provides": {
+    "skills": [
+      "skills/adr-record",
+      "skills/arch-map.md",
+      "skills/fitness-function",
+      "skills/hld-draft.md"
+    ]
+  }
+}

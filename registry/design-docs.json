@@ -1,0 +1,31 @@
+{
+  "name": "design-docs",
+  "kinds": ["skills"],
+  "source": "sitharaj88/arcturn/examples/design-docs",
+  "description": "Four commands for the writing a repository asks for before code — an ADR, an architecture map, a fitness function and a high-level design — each refusing to assert what the tree does not show.",
+  "maintainer": {
+    "name": "Sitharaj Seenivasan",
+    "url": "https://sitharaj.in"
+  },
+  "disclosure": {
+    "skills": [
+      {
+        "name": "adr-record",
+        "line": "Record one architecture decision as Proposed, with rejected alternatives only where the author supplied them or the repo shows they were tried."
+      },
+      {
+        "name": "arch-map",
+        "line": "Map a codebase from resolved imports at file:line — no node and no edge without ledger evidence, and every unresolvable wiring listed rather than drawn."
+      },
+      {
+        "name": "fitness-function",
+        "line": "Turn an architectural rule into a check and prove it bites — FAIL on a planted violation, PASS on HEAD, both transcripts, or the output is UNPROVEN CHECK."
+      },
+      {
+        "name": "hld-draft",
+        "line": "Draft a high-level design as a scaffold with labelled holes — every constraint cited to a file:line or a quoted brief, everything else Assumed — unconfirmed."
+      }
+    ],
+    "executable": false
+  }
+}
