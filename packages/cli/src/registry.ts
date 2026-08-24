@@ -9,6 +9,12 @@
  *   and no `skills/` directory but plain `.md` files at its root is *also*
  *   recognised as skills, so "the simplest possible package is just a folder
  *   of markdown".
+ * - `agents/` — markdown agent roles (see `agents.ts`): one `.md` file per
+ *   role, whose `tools:` line decides the lane the workflow engine runs it on
+ *   (`roleDispatch` in `workflow.ts` — read, exec or write).
+ * - `workflows/` — numbered-markdown pipelines (see `workflow.ts`): one `.md`
+ *   file per workflow, optionally capped by a `budgetUsd:` frontmatter key.
+ *   A package carrying both `agents/` and `workflows/` is an **org kit**.
  * - `extensions/` — JavaScript/TypeScript extension modules (see
  *   `extensions.ts`). Unlike skills, loading one of these means **executing
  *   arbitrary code with the user's full permissions**.
@@ -17,7 +23,8 @@
  *   own MCP config.
  * - `arcturn.json` — an optional manifest naming the package and, when the
  *   convention-based directories aren't the right shape, explicitly listing
- *   what it provides (`{ "provides": { "skills": [...], ... } }`). Absent a
+ *   what it provides (`{ "provides": { "skills": [...], "agents": [...],
+ *   "workflows": [...], "extensions": [...], "themes": [...] } }`). Absent a
  *   manifest, everything is detected by convention.
  *
  * `arcturn add <source>` / `/add <source>` resolves a source (a git URL, a
@@ -25,17 +32,24 @@
  * copies it into `~/.arcturn/packages/<name>/`, records the exact resolved commit
  * for reproducibility, and links (or, when a symlink can't be made, copies)
  * each piece it finds into the root Arcturn already scans — `~/.arcturn/skills`,
- * `~/.arcturn/extensions`, `~/.arcturn/themes`, `~/.arcturn/mcp.json` — so it is
- * immediately available with no further setup.
+ * `~/.arcturn/agents`, `~/.arcturn/workflows`, `~/.arcturn/extensions`,
+ * `~/.arcturn/themes`, `~/.arcturn/mcp.json` — so it is immediately available
+ * with no further setup.
+ *
+ * `arcturn inspect <source>` is the install's counterpart: it stages a source
+ * through the very same {@link resolveSource} and {@link stageSource} an
+ * install uses, links **nothing**, and reports what an install *would* add —
+ * see {@link inspectPackage}.
  *
  * SECURITY MODEL
  * ---------------
  * Installing a package that provides extensions means running someone else's
  * JavaScript with the user's full permissions the moment Arcturn next loads
- * `~/.arcturn/extensions`; installing one that provides only skills carries no
- * code-execution risk (a skill is a prompt template — a prompt-injection
- * surface, not an execution one). This module treats the two very
- * differently:
+ * `~/.arcturn/extensions`; installing one that provides only skills, agents or
+ * workflows carries no code-execution risk (each is markdown — a prompt and
+ * capability surface, not an execution one; an agent role can only ever hold
+ * tools the session already grants, and a workflow only ever spends money the
+ * user watches). This module treats the two very differently:
  *
  * - {@link installPackage} (and {@link updatePackage}, since an update can
  *   introduce or change extension code) never links a single extension file
@@ -48,11 +62,16 @@
  *   skills: the whole install is staged in a scratch directory first and only
  *   materialised into `~/.arcturn/packages/` after any required confirmation is
  *   granted.
- * - `skillsOnly: true` skips extension detection entirely from the linking
- *   step — the extension files still land on disk under
+ * - `skillsOnly: true` (`--skills-only`) skips extension detection entirely
+ *   from the linking step — the extension files still land on disk under
  *   `~/.arcturn/packages/<name>/`, inert, but are never copied or symlinked into
  *   `~/.arcturn/extensions`, so jiti (which only scans that directory) never
  *   loads them and no confirmation is needed.
+ * - Agents and workflows are **never** put behind that gate — doing so would
+ *   train the user to click through the one prompt that matters — but they are
+ *   never installed silently either: {@link formatInstallSummary} names every
+ *   role that landed together with the lane {@link roleDispatch} derives for it
+ *   from its own `tools:` line, and every workflow with its `budgetUsd:` cap.
  * - Package names are validated against `[a-z0-9._-]` and checked to resolve
  *   *inside* `~/.arcturn/packages` before any filesystem write, closing off path
  *   traversal (`../../evil`) both by charset and by an absolute-path
@@ -88,7 +107,12 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { promisify } from "node:util";
+import { loadAgentDefs } from "./agents.js";
 import type { CommandContext, CommandUi, SlashCommand } from "./commands.js";
+import { oneLine } from "./format.js";
+import { loadSkills } from "./skills.js";
+import type { Workflow, WorkflowDispatch } from "./workflow.js";
+import { isWorkflowParseError, parseWorkflow, roleDispatch } from "./workflow.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -114,15 +138,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 /**
  * Every directory the registry reads from or writes to. Mirrors the roots
- * `runtime.ts`/`paths.ts` already scan (`~/.arcturn/skills`, `~/.arcturn/extensions`,
- * `~/.arcturn/themes`, `~/.arcturn/mcp.json`) plus `~/.arcturn/packages`, where installed
- * packages themselves live.
+ * `runtime.ts`/`workflow.ts`/`paths.ts` already scan (`~/.arcturn/skills`,
+ * `~/.arcturn/agents`, `~/.arcturn/workflows`, `~/.arcturn/extensions`,
+ * `~/.arcturn/themes`, `~/.arcturn/mcp.json`) plus `~/.arcturn/packages`, where
+ * installed packages themselves live.
  */
 export interface RegistryPaths {
   /** `~/.arcturn/packages` — one subdirectory per installed package. */
   readonly packagesRoot: string;
   /** `~/.arcturn/skills` — the user-scope root `skills.ts` scans. */
   readonly skillsRoot: string;
+  /** `~/.arcturn/agents` — the user-scope root `loadAgentDefs` scans (runtime.ts). */
+  readonly agentsRoot: string;
+  /** `~/.arcturn/workflows` — the user-scope root `workflowRoots` scans (workflow.ts). */
+  readonly workflowsRoot: string;
   /** `~/.arcturn/extensions` — the user-scope root `extensions.ts` scans. */
   readonly extensionsRoot: string;
   /** `~/.arcturn/themes` — the user-scope root `themes.ts` scans. */
@@ -142,6 +171,8 @@ export function registryPathsFromHome(home: string): RegistryPaths {
   return {
     packagesRoot: join(root, "packages"),
     skillsRoot: join(root, "skills"),
+    agentsRoot: join(root, "agents"),
+    workflowsRoot: join(root, "workflows"),
     extensionsRoot: join(root, "extensions"),
     themesRoot: join(root, "themes"),
     mcpConfigPath: join(root, "mcp.json"),
@@ -418,6 +449,10 @@ const MANIFEST_FILE = "arcturn.json";
 /** What a package's `arcturn.json` may declare, when present. */
 export interface PackageManifestProvides {
   skills?: string[];
+  /** Markdown agent roles. Each entry is a path to one `.md` file. */
+  agents?: string[];
+  /** Numbered-markdown pipelines. Each entry is a path to one `.md` file. */
+  workflows?: string[];
   extensions?: string[];
   themes?: string[];
 }
@@ -468,7 +503,7 @@ async function readManifest(
   if (typeof parsed.version === "string") manifest.version = parsed.version;
   if (isRecord(parsed.provides)) {
     const provides: PackageManifestProvides = {};
-    for (const key of ["skills", "extensions", "themes"] as const) {
+    for (const key of ["skills", "agents", "workflows", "extensions", "themes"] as const) {
       const value = parsed.provides[key];
       if (Array.isArray(value) && value.every((entry) => typeof entry === "string")) {
         provides[key] = value as string[];
@@ -494,6 +529,8 @@ function pickManifestSummary(manifest: PackageManifest): InstallRecord["manifest
 /** What was found in a package root, as paths relative to it. */
 interface DetectedContents {
   skills: string[];
+  agents: string[];
+  workflows: string[];
   extensions: string[];
   themes: string[];
   mcp?: string;
@@ -552,6 +589,29 @@ async function expandProvided(
   return [rel];
 }
 
+/**
+ * Directories whose meaning is fixed by convention, so a flat-markdown package
+ * never re-reads one of them as a root-level skill. `skills` is absent because
+ * the fallback that consults this list only runs when there is no `skills/`.
+ */
+const CONVENTION_DIRS: readonly string[] = ["agents", "workflows", "extensions", "themes"];
+
+/**
+ * List the `.md` files directly inside one convention directory.
+ *
+ * @param root - Package root.
+ * @param dir - Directory name (`agents` or `workflows`).
+ */
+async function detectMarkdownDir(root: string, dir: string): Promise<string[]> {
+  const full = join(root, dir);
+  if (!(await isDirectory(full))) return [];
+  const out: string[] = [];
+  for (const entry of await listDir(full)) {
+    if (entry.endsWith(".md") && (await isFile(join(full, entry)))) out.push(join(dir, entry));
+  }
+  return out;
+}
+
 /** Well-known repository files that are never mistaken for a root-level skill. */
 const NON_SKILL_MARKDOWN = new Set([
   "readme.md",
@@ -564,10 +624,18 @@ const NON_SKILL_MARKDOWN = new Set([
 
 /**
  * Detect what a package provides: an explicit manifest wins field by field,
- * falling back to convention (`skills/`, `extensions/`, `themes/` directories,
- * a root-level `mcp.json`) for anything the manifest didn't declare. A
- * package with no manifest and no `skills/` directory but plain markdown
- * files at its root is treated as a flat set of skills.
+ * falling back to convention (`skills/`, `agents/`, `workflows/`,
+ * `extensions/`, `themes/` directories, a root-level `mcp.json`) for anything
+ * the manifest didn't declare. A package with no manifest and no `skills/`
+ * directory but plain markdown files at its root is treated as a flat set of
+ * skills.
+ *
+ * `agents/` and `workflows/` are `.md`-only, the way `themes/` is `.json`-only
+ * and unlike `skills/`, which also admits a `<name>/SKILL.md` folder: neither
+ * loader has a folder form (an agent has no `$SKILL_DIR`-style assets and a
+ * workflow has no sibling files), so a directory in one of those roots is
+ * something the real loader would skip, and linking it would put a file into a
+ * scanned root that nothing ever reads.
  *
  * @param root - Package root (after any subdir extraction).
  * @param manifest - The package's parsed manifest, if any.
@@ -589,7 +657,9 @@ async function detectContents(
       for (const entry of await listDir(skillsDir)) skills.push(join("skills", entry));
     } else {
       for (const entry of await listDir(root)) {
-        if (["extensions", "themes", MANIFEST_FILE, "mcp.json"].includes(entry)) continue;
+        if (CONVENTION_DIRS.includes(entry) || entry === MANIFEST_FILE || entry === "mcp.json") {
+          continue;
+        }
         if (entry.endsWith(".md")) {
           if (!NON_SKILL_MARKDOWN.has(entry.toLowerCase())) skills.push(entry);
           continue;
@@ -597,6 +667,24 @@ async function detectContents(
         if (await isFile(join(root, entry, "SKILL.md"))) skills.push(entry);
       }
     }
+  }
+
+  const agents: string[] = [];
+  if (manifest?.provides?.agents) {
+    for (const rel of manifest.provides.agents) {
+      agents.push(...(await expandProvided(root, rel, warnings, "agents")));
+    }
+  } else {
+    agents.push(...(await detectMarkdownDir(root, "agents")));
+  }
+
+  const workflows: string[] = [];
+  if (manifest?.provides?.workflows) {
+    for (const rel of manifest.provides.workflows) {
+      workflows.push(...(await expandProvided(root, rel, warnings, "workflows")));
+    }
+  } else {
+    workflows.push(...(await detectMarkdownDir(root, "workflows")));
   }
 
   const extensions: string[] = [];
@@ -627,7 +715,357 @@ async function detectContents(
 
   const mcp = (await isFile(join(root, "mcp.json"))) ? "mcp.json" : undefined;
 
-  return { skills, extensions, themes, mcp };
+  return { skills, agents, workflows, extensions, themes, mcp };
+}
+
+/* Disclosure ------------------------------------------------------------------- */
+
+/**
+ * One agent role, as the real loaders read it.
+ *
+ * {@link PackageDisclosure} is the shape `arcturn inspect` prints and `--json`
+ * emits, and the same shape {@link formatInstallSummary} renders for what an
+ * install just linked. That is the point: what a person reads before installing
+ * and what they are told after installing come from one code path, so the two
+ * can never describe different packages.
+ *
+ * Every field here is *derived*, never copied out of the package's own prose: a
+ * role's lane comes from {@link roleDispatch} reading its `tools:` line, a
+ * workflow's stage count and budget from `parseWorkflow`, a skill's description
+ * from the loader the runtime itself uses.
+ */
+export interface AgentDisclosure {
+  /** Role name, normalized by `loadAgentDefs` exactly as the runtime normalizes it. */
+  name: string;
+  /** First line of its `description:`; `""` when it set none. */
+  description: string;
+  /** The lane {@link roleDispatch} derives from `tools:` — what it can touch. */
+  lane: WorkflowDispatch;
+  /** Declared tools. Absent means the file declared none, which a workflow step refuses to dispatch. */
+  tools?: string[];
+  /** Path inside the package. */
+  path: string;
+}
+
+/** One workflow, as `parseWorkflow` reads it. */
+export interface WorkflowDisclosure {
+  /** Workflow name, normalized by the parser. */
+  name: string;
+  /** First line of its `description:`; `""` when it set none. */
+  description: string;
+  /** Number of stages. */
+  stages: number;
+  /** Number of steps across every stage — a parallel stage contributes more than one. */
+  steps: number;
+  /** The `budgetUsd:` ceiling for a whole run, when the file set one. */
+  budgetUsd?: number;
+  /** Every `@role` the pipeline names, deduplicated, in first-use order. */
+  roles: string[];
+  /** Path inside the package. */
+  path: string;
+  /** Present when the file did not parse; the other fields are then empty, not guesses. */
+  error?: string;
+}
+
+/** One skill, as `loadSkills` reads it. */
+export interface SkillDisclosure {
+  /** Command name, without the leading slash. */
+  name: string;
+  /** First line of its `description:`; `""` when it set none. */
+  description: string;
+  /** Path inside the package. */
+  path: string;
+}
+
+/** One MCP server a package would merge into `~/.arcturn/mcp.json`. */
+export interface McpServerDisclosure {
+  /** Server name — the key it would take in the merged config. */
+  name: string;
+  /** `"stdio"`, `"http"`, or `"unknown"` when the entry names no recognised transport. */
+  transport: string;
+  /** The command (stdio) or URL (http) it would reach — the thing worth reading. */
+  target: string;
+}
+
+/** Everything an install of one source would add, with nothing linked. */
+export interface PackageDisclosure {
+  /** The name the package would be installed under. */
+  name: string;
+  /** The source string exactly as it was given. */
+  source: string;
+  /** How that source was recognised. */
+  sourceKind: SourceKind;
+  /** Resolved clone URL or local path. */
+  location: string;
+  /** The exact commit staged, when the source is (or lives in) a git repository. */
+  commit?: string;
+  /** The package's own `arcturn.json` name/description/version, when it has one. */
+  manifest?: { name?: string; description?: string; version?: string };
+  /** Agent roles, with the lane each would run on. */
+  agents: AgentDisclosure[];
+  /** Workflows, with stage counts and budgets. */
+  workflows: WorkflowDisclosure[];
+  /** Skills, with their first description line. */
+  skills: SkillDisclosure[];
+  /** MCP servers that would be merged into the user's config. */
+  mcpServers: McpServerDisclosure[];
+  /** Executable extension files. Non-empty means installing this runs someone else's code. */
+  extensions: string[];
+  /** Theme files. */
+  themes: string[];
+  /** Non-fatal problems found while reading: a bad manifest, an unparseable file. */
+  warnings: string[];
+}
+
+function byName(a: { name: string }, b: { name: string }): number {
+  return a.name.localeCompare(b.name);
+}
+
+/**
+ * A frontmatter description, collapsed to one line and left **whole**.
+ *
+ * Truncation belongs to the renderer, not to the record: `--json` is the
+ * contract the hub builds its listing pages from, and a description cut at a
+ * terminal's width there would make the page say something the package does
+ * not. {@link formatInspectReport} shortens it for the screen instead.
+ *
+ * @param text - The raw `description:` value.
+ */
+function descriptionLine(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Forward only the loader warnings that are about files we actually asked
+ * about.
+ *
+ * The real loaders take a *directory*, not a file list, so describing a
+ * manifest-declared subset of a directory would otherwise report problems in
+ * that directory's other files — which this package may not even provide. Every
+ * such warning names its file by absolute path, so a substring check is exact.
+ *
+ * @param probe - Warnings the loader produced for the whole directory.
+ * @param wanted - Absolute paths of the files this package actually declares.
+ * @param out - The caller's warning collector.
+ */
+function forwardWarnings(probe: readonly string[], wanted: Iterable<string>, out: string[]): void {
+  const files = [...wanted];
+  for (const warning of probe) {
+    if (files.some((file) => warning.includes(file))) out.push(warning);
+  }
+}
+
+/**
+ * Map each declared entry to the file the real loader would read, so a
+ * loader's `source` can be matched back to the path inside the package.
+ *
+ * @param baseDir - Package root.
+ * @param relPaths - Declared entries, relative to it.
+ * @param folderFile - For skills, `"SKILL.md"`: an entry that is a *directory*
+ *   is read one level deeper. Agents and workflows have no folder form, so
+ *   they pass nothing.
+ */
+async function loaderFiles(
+  baseDir: string,
+  relPaths: readonly string[],
+  folderFile?: string,
+): Promise<Map<string, string>> {
+  const map = new Map<string, string>();
+  for (const rel of relPaths) {
+    const full = resolve(baseDir, rel);
+    if (folderFile !== undefined && (await isDirectory(full))) {
+      map.set(resolve(full, folderFile), rel);
+    } else {
+      map.set(full, rel);
+    }
+  }
+  return map;
+}
+
+/**
+ * Describe agent roles with {@link loadAgentDefs} and {@link roleDispatch} —
+ * the very functions `runtime.ts` and the workflow engine use.
+ *
+ * The lane is derived here rather than restated, because a lane a package
+ * *claims* is worth nothing: the engine reads `tools:` and dispatches on what
+ * it finds there, so that is the only reading a disclosure may show.
+ *
+ * `validToolNames` is deliberately not passed to the loader: an unknown tool
+ * name would be dropped from the list, and a disclosure must show what the file
+ * says rather than a filtered version of it. Dropping could not change the lane
+ * either way — every name {@link roleDispatch} looks for is a built-in.
+ *
+ * @param baseDir - Package root.
+ * @param relPaths - Declared agent files, relative to it.
+ * @param warnings - Collector for non-fatal problems.
+ */
+async function describeAgents(
+  baseDir: string,
+  relPaths: readonly string[],
+  warnings: string[],
+): Promise<AgentDisclosure[]> {
+  if (relPaths.length === 0) return [];
+  const wanted = await loaderFiles(baseDir, relPaths);
+  const out: AgentDisclosure[] = [];
+  const probe: string[] = [];
+  for (const dir of new Set([...wanted.keys()].map((file) => dirname(file)))) {
+    for (const def of await loadAgentDefs([dir], probe)) {
+      const rel = wanted.get(resolve(def.source));
+      if (rel === undefined) continue;
+      out.push({
+        name: def.name,
+        description: descriptionLine(def.description),
+        lane: roleDispatch(def),
+        ...(def.tools === undefined ? {} : { tools: def.tools }),
+        path: rel,
+      });
+    }
+  }
+  forwardWarnings(probe, wanted.keys(), warnings);
+  return out.sort(byName);
+}
+
+/**
+ * Collect a pipeline's `@role` mentions, deduplicated, in first-use order.
+ *
+ * @param workflow - A parsed workflow.
+ */
+function workflowRoles(workflow: Workflow): string[] {
+  const seen = new Set<string>();
+  for (const stage of workflow.stages) {
+    for (const step of stage.steps) {
+      if (step.agent !== undefined) seen.add(step.agent);
+    }
+  }
+  return [...seen];
+}
+
+/**
+ * Describe workflows with `parseWorkflow` — the same strict parser
+ * `discoverWorkflows` runs, so a file this reports as broken is a file the
+ * engine would refuse too.
+ *
+ * @param baseDir - Package root.
+ * @param relPaths - Declared workflow files, relative to it.
+ */
+async function describeWorkflows(
+  baseDir: string,
+  relPaths: readonly string[],
+): Promise<WorkflowDisclosure[]> {
+  const out: WorkflowDisclosure[] = [];
+  for (const rel of relPaths) {
+    const file = resolve(baseDir, rel);
+    const stem = basename(rel, ".md");
+    const broken = (error: string): WorkflowDisclosure => ({
+      name: stem,
+      description: "",
+      stages: 0,
+      steps: 0,
+      roles: [],
+      path: rel,
+      error,
+    });
+    let raw: string;
+    try {
+      raw = await readFile(file, "utf8");
+    } catch (error) {
+      out.push(broken(errorMessage(error)));
+      continue;
+    }
+    const parsed = parseWorkflow(raw, { name: stem, source: file });
+    if (isWorkflowParseError(parsed)) {
+      out.push(broken(parsed.error));
+      continue;
+    }
+    out.push({
+      name: parsed.name,
+      description: descriptionLine(parsed.description),
+      stages: parsed.stages.length,
+      steps: parsed.stages.reduce((total, stage) => total + stage.steps.length, 0),
+      ...(parsed.budgetUsd === undefined ? {} : { budgetUsd: parsed.budgetUsd }),
+      roles: workflowRoles(parsed),
+      path: rel,
+    });
+  }
+  return out.sort(byName);
+}
+
+/**
+ * Describe skills with `loadSkills`, in both shapes it recognises.
+ *
+ * The loader root for an entry is always the directory the **entry** sits in,
+ * never the directory its file sits in: a folder skill `skills/deep` is found
+ * by scanning `skills/`, where `deep` is a directory whose `SKILL.md` supplies
+ * the body and whose *folder name* supplies the name. Handing `skills/deep`
+ * itself to the loader also "works" — it finds `SKILL.md` as a plain file — and
+ * gets the name wrong, calling the skill `skill`. Scanning both and taking
+ * whichever came first therefore renamed every folder skill in the disclosure.
+ *
+ * @param baseDir - Package root.
+ * @param relPaths - Declared skill entries, relative to it.
+ * @param warnings - Collector for non-fatal problems.
+ */
+async function describeSkills(
+  baseDir: string,
+  relPaths: readonly string[],
+  warnings: string[],
+): Promise<SkillDisclosure[]> {
+  if (relPaths.length === 0) return [];
+  const wanted = await loaderFiles(baseDir, relPaths, "SKILL.md");
+  const out: SkillDisclosure[] = [];
+  const probe: string[] = [];
+  const roots = new Set<string>();
+  for (const rel of relPaths) roots.add(dirname(resolve(baseDir, rel)));
+  for (const root of roots) {
+    for (const skill of await loadSkills([root], probe)) {
+      const rel = wanted.get(resolve(skill.source));
+      if (rel === undefined) continue;
+      if (out.some((entry) => entry.path === rel)) continue;
+      out.push({ name: skill.name, description: descriptionLine(skill.description), path: rel });
+    }
+  }
+  forwardWarnings(probe, wanted.keys(), warnings);
+  return out.sort(byName);
+}
+
+/**
+ * Read a package's `mcp.json` for the server names and transports it would
+ * merge into the user's own config.
+ *
+ * @param file - Absolute path of the package's `mcp.json`.
+ * @param warnings - Collector for non-fatal problems.
+ */
+async function describeMcpServers(
+  file: string,
+  warnings: string[],
+): Promise<McpServerDisclosure[]> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await readFile(file, "utf8"));
+  } catch (error) {
+    warnings.push(`${file}: could not be read as JSON (${errorMessage(error)})`);
+    return [];
+  }
+  if (!isRecord(parsed) || !isRecord(parsed.servers)) {
+    warnings.push(`${file}: expected { "servers": { ... } }`);
+    return [];
+  }
+  const out: McpServerDisclosure[] = [];
+  for (const [name, value] of Object.entries(parsed.servers)) {
+    if (!isRecord(value)) {
+      out.push({ name, transport: "unknown", target: "" });
+      continue;
+    }
+    const transport = typeof value.type === "string" ? value.type : "unknown";
+    const url = typeof value.url === "string" ? value.url : undefined;
+    const command = typeof value.command === "string" ? value.command : undefined;
+    const args = Array.isArray(value.args)
+      ? value.args.filter((arg): arg is string => typeof arg === "string")
+      : [];
+    const target = url ?? (command === undefined ? "" : [command, ...args].join(" "));
+    out.push({ name, transport, target });
+  }
+  return out.sort(byName);
 }
 
 /* git plumbing ---------------------------------------------------------------- */
@@ -941,6 +1379,16 @@ const INSTALL_RECORD_FILE = ".arcturn-install.json";
 /** What one installed package actually links into the scanned roots. */
 export interface InstallProvides {
   skills: string[];
+  /**
+   * Agent-role basenames linked into `~/.arcturn/agents`.
+   *
+   * Optional because records written before packages learned agents have no
+   * such field; every reader here treats a missing list as empty rather than
+   * failing to uninstall a package installed by an older build.
+   */
+  agents?: string[];
+  /** Workflow basenames linked into `~/.arcturn/workflows`. Optional for the same reason as {@link InstallProvides.agents}. */
+  workflows?: string[];
   extensions: string[];
   themes: string[];
   mcpServers: string[];
@@ -1021,7 +1469,15 @@ export interface InstallOptions {
   name?: string;
   /** Where the registry reads from and writes to. */
   paths: RegistryPaths;
-  /** Skip extensions entirely: they are copied to disk but never linked, and never executed. */
+  /**
+   * Skip extensions entirely: they are copied to disk but never linked, and
+   * never executed.
+   *
+   * The name predates agents and workflows and is now narrower than it reads —
+   * it means "no executable code", not "skills and nothing else". Agents,
+   * workflows and themes still link under it, because none of them is code and
+   * suppressing them would give the flag a second, unrelated job.
+   */
   skillsOnly?: boolean;
   /**
    * Approves linking any detected extensions. Defaults to `() => false` —
@@ -1050,6 +1506,48 @@ export interface InstallResult {
   record?: InstallRecord;
   /** Non-fatal problems: manifest issues, skipped name collisions, skipped mcp servers. */
   warnings: string[];
+  /**
+   * What the agents and workflows that just landed turn out to be, read back
+   * through the real loaders.
+   *
+   * A role file is not code, so it does not go behind the executable-code gate
+   * — but it *is* a capability surface, and a workflow spends real money. The
+   * install therefore says what arrived: {@link formatInstallSummary} prints
+   * each role's derived lane and each workflow's `budgetUsd:` cap, so nothing
+   * lands unannounced. Absent when the package provided neither.
+   */
+  landed?: { agents: AgentDisclosure[]; workflows: WorkflowDisclosure[] };
+}
+
+/**
+ * Describe the agents and workflows an install just linked.
+ *
+ * Matches each linked *basename* back to the path it came from inside the
+ * package, so the description is of the file on disk. Returns `undefined` when
+ * the package landed neither, so a skills-only install's summary is unchanged.
+ *
+ * @param packageDir - The installed package directory.
+ * @param contents - What was detected, as paths relative to it.
+ * @param provides - What actually linked, as destination basenames.
+ * @param warnings - Collector for non-fatal problems.
+ */
+async function describeLanded(
+  packageDir: string,
+  contents: DetectedContents,
+  provides: InstallProvides,
+  warnings: string[],
+): Promise<{ agents: AgentDisclosure[]; workflows: WorkflowDisclosure[] } | undefined> {
+  const landedPaths = (rels: readonly string[], linked: readonly string[]): string[] => {
+    const names = new Set(linked);
+    return rels.filter((rel) => names.has(basename(rel)));
+  };
+  const agentPaths = landedPaths(contents.agents, provides.agents ?? []);
+  const workflowPaths = landedPaths(contents.workflows, provides.workflows ?? []);
+  if (agentPaths.length === 0 && workflowPaths.length === 0) return undefined;
+  return {
+    agents: await describeAgents(packageDir, agentPaths, warnings),
+    workflows: await describeWorkflows(packageDir, workflowPaths),
+  };
 }
 
 async function materialize(
@@ -1059,29 +1557,29 @@ async function materialize(
   skillsOnly: boolean,
   warnings: string[],
 ): Promise<InstallProvides> {
-  const provides: InstallProvides = { skills: [], extensions: [], themes: [], mcpServers: [] };
-  for (const rel of contents.skills) {
-    const linked = await linkEntry(packageDir, rel, paths.skillsRoot, warnings);
-    if (linked) provides.skills.push(linked);
-  }
-  if (!skillsOnly) {
-    for (const rel of contents.extensions) {
-      const linked = await linkEntry(packageDir, rel, paths.extensionsRoot, warnings);
-      if (linked) provides.extensions.push(linked);
+  /** Link every entry of one kind, dropping the ones that collided. */
+  const linkAll = async (rels: readonly string[], destRoot: string): Promise<string[]> => {
+    const linked: string[] = [];
+    for (const rel of rels) {
+      const name = await linkEntry(packageDir, rel, destRoot, warnings);
+      if (name !== undefined) linked.push(name);
     }
-  }
-  for (const rel of contents.themes) {
-    const linked = await linkEntry(packageDir, rel, paths.themesRoot, warnings);
-    if (linked) provides.themes.push(linked);
-  }
-  if (contents.mcp) {
-    provides.mcpServers = await mergeMcpServers(
-      paths.mcpConfigPath,
-      join(packageDir, contents.mcp),
-      warnings,
-    );
-  }
-  return provides;
+    return linked;
+  };
+
+  const skills = await linkAll(contents.skills, paths.skillsRoot);
+  // Agents and workflows are markdown: a prompt and capability surface, never
+  // an execution one, so they link on exactly the terms skills do — no gate,
+  // and the same refusal to overwrite anything already in the root.
+  const agents = await linkAll(contents.agents, paths.agentsRoot);
+  const workflows = await linkAll(contents.workflows, paths.workflowsRoot);
+  const extensions = skillsOnly ? [] : await linkAll(contents.extensions, paths.extensionsRoot);
+  const themes = await linkAll(contents.themes, paths.themesRoot);
+  const mcpServers = contents.mcp
+    ? await mergeMcpServers(paths.mcpConfigPath, join(packageDir, contents.mcp), warnings)
+    : [];
+
+  return { skills, agents, workflows, extensions, themes, mcpServers };
 }
 
 /**
@@ -1175,6 +1673,11 @@ export async function installPackage(options: InstallOptions): Promise<InstallRe
     }
 
     const provides = await materialize(options.paths, packageDir, contents, skillsOnly, warnings);
+    // Described from what actually LINKED, not from what the package shipped:
+    // an entry dropped for a name collision is not on this machine, and a
+    // summary that named it anyway would be reporting a file the user does not
+    // have.
+    const landed = await describeLanded(packageDir, contents, provides, warnings);
 
     const record: InstallRecord = {
       name,
@@ -1192,7 +1695,14 @@ export async function installPackage(options: InstallOptions): Promise<InstallRe
     };
     await writeInstallRecord(packageDir, record);
 
-    return { installed: true, name, declined: false, record, warnings };
+    return {
+      installed: true,
+      name,
+      declined: false,
+      record,
+      warnings,
+      ...(landed === undefined ? {} : { landed }),
+    };
   } finally {
     await rm(staging, { recursive: true, force: true }).catch(() => {});
   }
@@ -1228,6 +1738,10 @@ export async function listPackages(paths: RegistryPaths): Promise<InstallRecord[
 export interface RemoveResult {
   name: string;
   removedSkills: string[];
+  /** Agent roles unlinked from `~/.arcturn/agents`. */
+  removedAgents: string[];
+  /** Workflows unlinked from `~/.arcturn/workflows`. */
+  removedWorkflows: string[];
   removedExtensions: string[];
   removedThemes: string[];
   removedMcpServers: string[];
@@ -1245,7 +1759,13 @@ export async function removePackage(name: string, paths: RegistryPaths): Promise
   const record = await readInstallRecord(packageDir);
   if (!record) throw new RegistryError(`"${name}" is not installed`);
 
+  // `?? []` throughout: a record written before packages learned agents and
+  // workflows has neither field, and an uninstall must still work on it.
+  const agents = record.provides.agents ?? [];
+  const workflows = record.provides.workflows ?? [];
   for (const skill of record.provides.skills) await unlinkEntry(paths.skillsRoot, skill);
+  for (const agent of agents) await unlinkEntry(paths.agentsRoot, agent);
+  for (const workflow of workflows) await unlinkEntry(paths.workflowsRoot, workflow);
   for (const extension of record.provides.extensions)
     await unlinkEntry(paths.extensionsRoot, extension);
   for (const theme of record.provides.themes) await unlinkEntry(paths.themesRoot, theme);
@@ -1257,6 +1777,8 @@ export async function removePackage(name: string, paths: RegistryPaths): Promise
   return {
     name,
     removedSkills: record.provides.skills,
+    removedAgents: agents,
+    removedWorkflows: workflows,
     removedExtensions: record.provides.extensions,
     removedThemes: record.provides.themes,
     removedMcpServers: record.provides.mcpServers,
@@ -1439,6 +1961,12 @@ export async function updatePackage(name: string, options: UpdateOptions): Promi
     }
 
     for (const skill of record.provides.skills) await unlinkEntry(options.paths.skillsRoot, skill);
+    for (const agent of record.provides.agents ?? []) {
+      await unlinkEntry(options.paths.agentsRoot, agent);
+    }
+    for (const workflow of record.provides.workflows ?? []) {
+      await unlinkEntry(options.paths.workflowsRoot, workflow);
+    }
     for (const extension of record.provides.extensions) {
       await unlinkEntry(options.paths.extensionsRoot, extension);
     }
@@ -1495,15 +2023,201 @@ export async function updateAllPackages(options: UpdateOptions): Promise<UpdateR
   return reports;
 }
 
+/* Inspect ------------------------------------------------------------------------ */
+
+/** How much of a description survives the terminal, before the renderer elides it. */
+const DESCRIPTION_WIDTH = 96;
+
+/** Options for {@link inspectPackage}. */
+export interface InspectOptions {
+  /** Source string: a git URL, a GitHub `owner/repo[/subdir][@ref]` shorthand, or a local path. */
+  source: string;
+  /** Explicit package name; defaults to one derived from the source. */
+  name?: string;
+  /** Where to stage. Only `packagesRoot` is written to, and only transiently. */
+  paths: RegistryPaths;
+  /** Injectable `git` runner. Defaults to real `git` via `child_process`. */
+  exec?: GitExecFn;
+  /** Base directory for resolving a relative local-path source. Defaults to `process.cwd()`. */
+  cwd?: string;
+  /** Base directory for expanding `~` in a local-path source. Defaults to `os.homedir()`. */
+  homeDir?: string;
+}
+
+/**
+ * Stage a source exactly as an install would, read it with the real loaders,
+ * link **nothing**, and return what an install *would* add.
+ *
+ * This is the disclosure half of the install command, and its value comes
+ * entirely from being the same code path: the same {@link resolveSource}, the
+ * same {@link stageSource} (so the same clone, the same ref pinning, the same
+ * subdirectory extraction), the same {@link readManifest} and
+ * {@link detectContents}. A separate "preview" implementation would eventually
+ * disagree with the installer about what a package contains, and the one moment
+ * it mattered would be the moment someone was deciding whether to trust it.
+ *
+ * Staging happens under `packagesRoot` rather than the system temp directory
+ * for the same reason: it is where the install would put it, on the volume the
+ * install would use, so an inspect that succeeds is evidence the install can.
+ * The directory is removed on every path out, including a thrown clone error.
+ *
+ * @param options - See {@link InspectOptions}.
+ */
+export async function inspectPackage(options: InspectOptions): Promise<PackageDisclosure> {
+  const exec = options.exec ?? defaultGitExec;
+  const warnings: string[] = [];
+  const source = resolveSource(options.source, { cwd: options.cwd, homeDir: options.homeDir });
+  const name = options.name ?? source.defaultName;
+
+  await mkdir(options.paths.packagesRoot, { recursive: true });
+  const staging = await mkdtemp(join(options.paths.packagesRoot, ".staging-"));
+  try {
+    const { contentRoot, commit } = await stageSource(
+      source,
+      exec,
+      options.paths.packagesRoot,
+      staging,
+    );
+    const manifest = await readManifest(contentRoot, warnings);
+    const contents = await detectContents(contentRoot, manifest, warnings);
+
+    return {
+      name,
+      source: options.source,
+      sourceKind: source.kind,
+      location: source.location,
+      ...(commit === undefined ? {} : { commit }),
+      ...(manifest ? { manifest: pickManifestSummary(manifest) } : {}),
+      agents: await describeAgents(contentRoot, contents.agents, warnings),
+      workflows: await describeWorkflows(contentRoot, contents.workflows),
+      skills: await describeSkills(contentRoot, contents.skills, warnings),
+      mcpServers: contents.mcp
+        ? await describeMcpServers(join(contentRoot, contents.mcp), warnings)
+        : [],
+      extensions: [...contents.extensions].sort(),
+      themes: [...contents.themes].sort(),
+      warnings,
+    };
+  } finally {
+    await rm(staging, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+/**
+ * Render a {@link PackageDisclosure} for a person to read before deciding.
+ *
+ * Ordered by risk, ascending, so the last thing on screen is the thing that
+ * matters most: what would run as them. The executable-code section is a
+ * banner rather than a list item for the same reason — it is the one section
+ * whose absence is also worth stating, which is why a clean package says so
+ * explicitly instead of leaving a gap where the warning would have been.
+ *
+ * @param disclosure - See {@link inspectPackage}.
+ */
+export function formatInspectReport(disclosure: PackageDisclosure): string[] {
+  const lines: string[] = [`${disclosure.name}  —  ${disclosure.source}`];
+  if (disclosure.manifest?.description) lines.push(`  ${disclosure.manifest.description}`);
+  const version = disclosure.manifest?.version;
+  lines.push(
+    `  ${disclosure.sourceKind}  ${disclosure.commit ? short(disclosure.commit) : "no commit"}` +
+      (version ? `  v${version}` : ""),
+  );
+  lines.push('  nothing has been installed; this is what "arcturn add" would add.');
+
+  if (disclosure.agents.length > 0) {
+    lines.push("", `Agent roles (${disclosure.agents.length})`);
+    for (const agent of disclosure.agents) {
+      lines.push(`  ${agent.name}  [${agent.lane} lane]${formatTools(agent.tools)}`);
+      if (agent.description) lines.push(`    ${oneLine(agent.description, DESCRIPTION_WIDTH)}`);
+    }
+  }
+
+  if (disclosure.workflows.length > 0) {
+    lines.push("", `Workflows (${disclosure.workflows.length})`);
+    for (const workflow of disclosure.workflows) {
+      lines.push(`  ${workflow.name}  ${formatWorkflowFacts(workflow)}`);
+      if (workflow.description) {
+        lines.push(`    ${oneLine(workflow.description, DESCRIPTION_WIDTH)}`);
+      }
+    }
+  }
+
+  if (disclosure.skills.length > 0) {
+    lines.push("", `Skills (${disclosure.skills.length})`);
+    for (const skill of disclosure.skills) {
+      const summary = skill.description
+        ? `  —  ${oneLine(skill.description, DESCRIPTION_WIDTH)}`
+        : "";
+      lines.push(`  /${skill.name}${summary}`);
+    }
+  }
+
+  if (disclosure.themes.length > 0) {
+    lines.push("", `Themes (${disclosure.themes.length})`);
+    for (const theme of disclosure.themes) lines.push(`  ${basename(theme)}`);
+  }
+
+  if (disclosure.mcpServers.length > 0) {
+    lines.push("", `MCP servers (${disclosure.mcpServers.length})`);
+    for (const server of disclosure.mcpServers) {
+      lines.push(
+        `  ${server.name}  [${server.transport}]${server.target ? `  ${server.target}` : ""}`,
+      );
+    }
+  }
+
+  if (disclosure.extensions.length > 0) {
+    lines.push(
+      "",
+      "!! EXECUTABLE CODE !!",
+      "  Installing this package runs the following files with your full",
+      "  permissions. Arcturn will ask again, per install, before linking them.",
+    );
+    for (const file of disclosure.extensions) lines.push(`    ${file}`);
+  } else {
+    lines.push("", "No extensions: this package ships no executable code.");
+  }
+
+  if (disclosure.warnings.length > 0) {
+    lines.push("", "Warnings");
+    for (const warning of disclosure.warnings) lines.push(`  ${warning}`);
+  }
+  return lines;
+}
+
 /* Formatting ------------------------------------------------------------------ */
 
 function describeProvides(provides: InstallProvides): string {
   const parts: string[] = [];
   if (provides.skills.length) parts.push(`${provides.skills.length} skill(s)`);
+  if (provides.agents?.length) parts.push(`${provides.agents.length} agent(s)`);
+  if (provides.workflows?.length) parts.push(`${provides.workflows.length} workflow(s)`);
   if (provides.extensions.length) parts.push(`${provides.extensions.length} extension(s)`);
   if (provides.themes.length) parts.push(`${provides.themes.length} theme(s)`);
   if (provides.mcpServers.length) parts.push(`${provides.mcpServers.length} MCP server(s)`);
   return parts.join(", ");
+}
+
+/** `  tools: read, bash`, or nothing at all when the file declared none. */
+function formatTools(tools: readonly string[] | undefined): string {
+  return tools === undefined || tools.length === 0 ? "" : `  tools: ${tools.join(", ")}`;
+}
+
+/**
+ * The facts a workflow is judged on before it is run: how much of the pipeline
+ * there is, and what it is allowed to spend.
+ *
+ * "no budget cap" is spelled out rather than left blank, because the absence of
+ * a ceiling is the more expensive of the two answers and should not read as
+ * missing information.
+ */
+function formatWorkflowFacts(workflow: WorkflowDisclosure): string {
+  if (workflow.error !== undefined) return `does not parse — ${workflow.error}`;
+  const stages = `${workflow.stages} stage${workflow.stages === 1 ? "" : "s"}`;
+  const steps = `${workflow.steps} step${workflow.steps === 1 ? "" : "s"}`;
+  const budget = workflow.budgetUsd === undefined ? "no budget cap" : `$${workflow.budgetUsd}`;
+  const roles = workflow.roles.length === 0 ? "" : `, roles: ${workflow.roles.join(", ")}`;
+  return `${stages}, ${steps}, ${budget}${roles}`;
 }
 
 function short(commit: string | undefined): string {
@@ -1551,10 +2265,19 @@ export function formatInstallSummary(result: InstallResult): string[] {
   if (record.commit) lines.push(`  commit ${record.commit}`);
   const description = describeProvides(record.provides);
   lines.push(
-    `  ${description || "nothing to link (no skills, extensions, themes or mcp config found)"}`,
+    `  ${description || "nothing to link (no skills, agents, workflows, extensions, themes or mcp config found)"}`,
   );
   if (record.provides.skills.length)
     lines.push(`  skills:      ${record.provides.skills.join(", ")}`);
+  // Roles and workflows get a line each rather than a comma list: the lane and
+  // the budget are the two facts a person needs before the next `/workflow`
+  // run spends their money, and a name alone does not carry either.
+  for (const agent of result.landed?.agents ?? []) {
+    lines.push(`  agent:       ${agent.name}  [${agent.lane} lane]${formatTools(agent.tools)}`);
+  }
+  for (const workflow of result.landed?.workflows ?? []) {
+    lines.push(`  workflow:    ${workflow.name}  ${formatWorkflowFacts(workflow)}`);
+  }
   if (record.provides.extensions.length) {
     lines.push(`  extensions:  ${record.provides.extensions.join(", ")}`);
   }
@@ -1574,6 +2297,10 @@ export function formatInstallSummary(result: InstallResult): string[] {
 export function formatRemoveSummary(result: RemoveResult): string[] {
   const lines = [`Removed "${result.name}"`];
   if (result.removedSkills.length) lines.push(`  skills:      ${result.removedSkills.join(", ")}`);
+  if (result.removedAgents.length) lines.push(`  agents:      ${result.removedAgents.join(", ")}`);
+  if (result.removedWorkflows.length) {
+    lines.push(`  workflows:   ${result.removedWorkflows.join(", ")}`);
+  }
   if (result.removedExtensions.length) {
     lines.push(`  extensions:  ${result.removedExtensions.join(", ")}`);
   }
@@ -2006,4 +2733,125 @@ export async function runUpdateCommand(options: RunUpdateCommandOptions): Promis
     stderr(`arcturn: ${errorMessage(error)}`);
     return 1;
   }
+}
+
+/** Options for {@link runPackagesCommand}. */
+export interface RunPackagesCommandOptions {
+  /** Arguments after `arcturn packages`; none are accepted. */
+  argv: readonly string[];
+  /** Arcturn user directory; defaults to `~/.arcturn`. */
+  home?: string;
+  stdout?: RegistryWriter;
+  stderr?: RegistryWriter;
+}
+
+/**
+ * `arcturn packages` — list what is installed. Exit code `0`, or `2` on a
+ * usage error.
+ *
+ * @param options - See {@link RunPackagesCommandOptions}.
+ */
+export async function runPackagesCommand(options: RunPackagesCommandOptions): Promise<number> {
+  const stdout = options.stdout ?? defaultStdout;
+  const stderr = options.stderr ?? defaultStderr;
+  if (options.argv.length > 0) {
+    stderr(`arcturn: usage: arcturn packages (takes no arguments)`);
+    return 2;
+  }
+  const paths = registryPathsFromHome(options.home ?? defaultHome());
+  for (const line of formatPackageList(await listPackages(paths))) stdout(line);
+  return 0;
+}
+
+interface ParsedInspectArgs {
+  source?: string;
+  name?: string;
+  json: boolean;
+  error?: string;
+}
+
+/** `<source> [--name <name>] [--json]`. */
+function parseInspectArgv(argv: readonly string[]): ParsedInspectArgs {
+  let source: string | undefined;
+  let name: string | undefined;
+  let json = false;
+  for (let i = 0; i < argv.length; i++) {
+    const token = argv[i] as string;
+    if (token === "--name" || token === "-n") {
+      const value = argv[i + 1];
+      if (value === undefined) return { json, error: `${token} needs a value` };
+      name = value;
+      i++;
+    } else if (token === "--json") {
+      json = true;
+    } else if (token.startsWith("-") && token !== "-") {
+      return { json, error: `unknown flag "${token}"` };
+    } else if (source === undefined) {
+      source = token;
+    } else {
+      return { json, error: `unexpected argument "${token}"` };
+    }
+  }
+  return { source, name, json };
+}
+
+/** Options for {@link runInspectCommand}. */
+export interface RunInspectCommandOptions {
+  /** Arguments after `arcturn inspect`, e.g. `["owner/repo", "--json"]`. */
+  argv: readonly string[];
+  /** Working directory for resolving a relative local-path source. Defaults to `process.cwd()`. */
+  cwd?: string;
+  /** Arcturn user directory; only its `packages/` is touched, and only for staging. */
+  home?: string;
+  stdout?: RegistryWriter;
+  stderr?: RegistryWriter;
+  /** Injectable `git` runner, for tests. */
+  exec?: GitExecFn;
+}
+
+/**
+ * `arcturn inspect <source> [--name <name>] [--json]` — stage a package, print
+ * what installing it would add, and install nothing. Exit code `0` on success,
+ * `1` when the source could not be staged, `2` on a usage error.
+ *
+ * `--json` emits the {@link PackageDisclosure} itself, unwrapped and
+ * pretty-printed. It is the machine contract this command exists to provide:
+ * the hub at arcturn.dev renders its listing pages from this shape, and a
+ * future `arcturn search` reads the same one back, so the page a person reads
+ * and the command they run cannot drift apart.
+ *
+ * @param options - See {@link RunInspectCommandOptions}.
+ */
+export async function runInspectCommand(options: RunInspectCommandOptions): Promise<number> {
+  const stdout = options.stdout ?? defaultStdout;
+  const stderr = options.stderr ?? defaultStderr;
+  const parsed = parseInspectArgv(options.argv);
+  if (parsed.error || !parsed.source) {
+    stderr(
+      `arcturn: ${parsed.error ?? "usage: arcturn inspect <source> [--name <name>] [--json]"}`,
+    );
+    return 2;
+  }
+  const paths = registryPathsFromHome(options.home ?? defaultHome());
+  let disclosure: PackageDisclosure;
+  try {
+    disclosure = await inspectPackage({
+      source: parsed.source,
+      ...(parsed.name === undefined ? {} : { name: parsed.name }),
+      paths,
+      ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+      ...(options.exec === undefined ? {} : { exec: options.exec }),
+    });
+  } catch (error) {
+    stderr(`arcturn: ${errorMessage(error)}`);
+    return 1;
+  }
+  if (parsed.json) {
+    stdout(JSON.stringify(disclosure, null, 2));
+    return 0;
+  }
+  // Warnings are part of the disclosure, so they print with it on stdout
+  // rather than being split off to stderr where a piped read would lose them.
+  for (const line of formatInspectReport(disclosure)) stdout(line);
+  return 0;
 }

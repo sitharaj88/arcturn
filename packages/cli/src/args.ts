@@ -11,6 +11,17 @@
  * command (`arcturn auth login <provider>`) rather than a prompt. Quoting still
  * wins — `arcturn "auth login explained"` is a single positional and stays a
  * prompt — and anything after `--` is always prompt text.
+ *
+ * Two families own their *entire* argument list instead, and are dispatched
+ * before the flag loop below ever runs: `mcp`, whose `add` takes a launch
+ * command verbatim after `--`, and the registry verbs (`add`, `remove`,
+ * `packages`, `update`, `inspect`, `new`). The registry verbs are here for the
+ * same reason `mcp` is: `--name`, `--skills-only`, `--yes`, `--json` and
+ * `--user` are flags of *those* commands, not of a session, and the global loop
+ * would reject every one of them as an unknown option. Keeping the argument
+ * list whole also means `registry.ts` and `scaffold.ts` each hold the single
+ * parser for their own flags — the same one their `/add`-family slash commands
+ * use — so `arcturn add` and `/add` cannot drift apart.
  */
 
 import type { McpServerConfig, PermissionMode } from "@arcturn/types";
@@ -100,6 +111,37 @@ export interface ServeCommand {
   readonly kind: "serve";
 }
 
+/**
+ * The package-registry and authoring verbs `arcturn` exposes at the top level.
+ *
+ * `packages`, not `list`: a bare `arcturn list` would read as "list what?", and
+ * the noun is what the RFC 0002 hub calls these things too.
+ */
+export type RegistryVerb = "add" | "remove" | "packages" | "update" | "inspect" | "new";
+
+/** Every registry verb, in help-text order. */
+export const REGISTRY_VERBS: readonly RegistryVerb[] = [
+  "add",
+  "inspect",
+  "packages",
+  "update",
+  "remove",
+  "new",
+];
+
+/**
+ * A parsed registry command. The verb owns everything after it, unparsed —
+ * `registry.ts` and `scaffold.ts` hold the parsers for their own flags.
+ */
+export interface RegistryCliCommand {
+  /** Command family. */
+  readonly kind: "registry";
+  /** Which verb was requested. */
+  readonly verb: RegistryVerb;
+  /** Every argument after the verb, verbatim. */
+  readonly argv: readonly string[];
+}
+
 /** Config file an `mcp add` / `mcp remove` targets. */
 export type McpScope = "user" | "project";
 
@@ -131,7 +173,8 @@ export type CliCommand =
   | AttachCommand
   | BlameCommand
   | BisectCommand
-  | McpCliCommand;
+  | McpCliCommand
+  | RegistryCliCommand;
 
 /** Environment facts that change how arguments validate. */
 export interface ParseArgsOptions {
@@ -240,6 +283,11 @@ export const BISECT_COMMAND_NAME = "bisect";
 
 /** First positional that switches into attach-command parsing. */
 export const ATTACH_COMMAND_NAME = "attach";
+
+/** Narrow an arbitrary word to a {@link RegistryVerb}. */
+export function isRegistryVerb(value: string): value is RegistryVerb {
+  return (REGISTRY_VERBS as readonly string[]).includes(value);
+}
 
 /** Narrow an arbitrary word to an {@link AuthAction}. */
 function isAuthAction(value: string): value is AuthAction {
@@ -551,6 +599,23 @@ export function parseArgs(
     if (!parsed.ok) return { ok: false, error: parsed.error };
     args.command = parsed.parsed.command;
     if (parsed.parsed.cwd !== undefined) args.cwd = parsed.parsed.cwd;
+    args.prompt = "";
+    return { ok: true, args };
+  }
+
+  // The registry verbs own their argument lists too — see the module doc. The
+  // collision with a prompt that opens on one of these words is the same one
+  // `auth`, `serve` and `blame` already accept, and it has the same escape:
+  // quoting makes it one positional, so `arcturn "add logging to server.ts"` is
+  // still a prompt.
+  const verb = argv[0];
+  if (verb !== undefined && isRegistryVerb(verb)) {
+    const rest = argv.slice(1);
+    if (rest.includes("--help") || rest.includes("-h")) {
+      args.help = true;
+      return { ok: true, args };
+    }
+    args.command = { kind: "registry", verb, argv: rest };
     args.prompt = "";
     return { ok: true, args };
   }
@@ -880,6 +945,19 @@ Commands
   mcp remove <name>             Remove a server (--scope if defined in both files).
   mcp auth <name>               Authorize an OAuth HTTP server in the browser.
   mcp logout <name>             Delete the stored OAuth credentials for a server.
+  add <source>                  Install a package — skills, agent roles, workflows,
+                                themes, MCP servers, extensions — from a git URL, an
+                                "owner/repo[/subdir][@ref]" shorthand, or a local path.
+                                --name <name>, --skills-only, --yes.
+  inspect <source>              Stage a source and print what installing it WOULD add
+                                (roles with their lanes, workflows with their budgets,
+                                skills, MCP servers, executable code). Installs
+                                nothing. --json for the machine-readable form.
+  packages                      List installed packages and what each one provides.
+  update [name]                 Re-fetch one package, or every unpinned one.
+  remove <name>                 Uninstall a package and unlink everything it added.
+  new <kind> <name>             Scaffold a skill, agent or workflow file into
+                                <cwd>/.arcturn; --user writes to ~/.arcturn instead.
 
 Options
   -p, --print                   Non-interactive: run to completion and print the
@@ -909,6 +987,10 @@ Configuration
   ~/.arcturn/config.json            User settings and permission rules.
   <cwd>/.arcturn/config.json        Project settings, merged over the user file.
   ~/.arcturn/mcp.json               MCP servers, merged with <cwd>/.arcturn/mcp.json.
+  ~/.arcturn/skills/                Markdown skills, plus <cwd>/.arcturn/skills/.
+  ~/.arcturn/agents/                Agent roles, plus <cwd>/.arcturn/agents/.
+  ~/.arcturn/workflows/             Workflows, plus <cwd>/.arcturn/workflows/.
+  ~/.arcturn/packages/              Packages installed by "arcturn add", linked into the above.
   ~/.arcturn/extensions/            Extension modules (.ts/.js), plus <cwd>/.arcturn/extensions/.
   ~/.arcturn/auth/                  OAuth credentials written by "arcturn auth login".
   ARCTURN_MODEL                     Overrides the configured model.

@@ -224,6 +224,8 @@ precedence.
 - [Lifecycle hooks](/docs/hooks) — run shell commands around tool calls, with veto power.
 - [MCP](/docs/mcp) — connect external tool servers.
 - [Markdown skills](/docs/skills) — add slash commands by dropping a markdown file.
+- [Packages](/docs/packages) — install skills, agent roles and workflows from a repo with
+  `arcturn add`, and read what an install would do before running it.
 - [Sessions](/docs/sessions) — the session tree, branching, and compaction.
 - [Checkpoints & /rewind](/docs/checkpoints) — undo file changes and fork the conversation.
 - [Dry-run mode](/docs/dry-run) — send file mutations to a shadow tree for review first.

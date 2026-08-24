@@ -11,7 +11,7 @@
 // the interactive path — the one whose time-to-first-paint the user feels —
 // must not pay for the ACP host, the WebSocket server, VCR or provenance.
 import type { SessionEntry } from "@arcturn/types";
-import type { CliArgs } from "./args.js";
+import type { CliArgs, RegistryCliCommand } from "./args.js";
 import { loadConfig } from "./config.js";
 import { loadExtensions } from "./extensions.js";
 import { runInteractive } from "./interactive/app.js";
@@ -119,6 +119,10 @@ export async function runCli(args: CliArgs, options: RunCliOptions = {}): Promis
 
   if (args.command?.kind === "attach") {
     return runAttachCommand(args.command.url, args);
+  }
+
+  if (args.command?.kind === "registry") {
+    return runRegistryCommand(args.command);
   }
 
   if (args.command?.kind === "mcp") {
@@ -458,6 +462,74 @@ async function runReplayCommand(
  *   `isLoopbackHost`, the same predicate `resolveServeToken` already uses
  *   for the equivalent no-token refusal.
  */
+/**
+ * Run one of the package-registry or authoring verbs.
+ *
+ * Every implementation already takes `argv` in and an exit code out, with its
+ * IO injectable, because the same functions back the `/add`-family slash
+ * commands inside the TUI; this is the thin shell that hands them the argument
+ * list the parser kept whole and returns their code unchanged. Both modules are
+ * imported lazily, and separately, for the reason the rest of this file is: an
+ * interactive launch must not pay for the registry, and `arcturn new` must not
+ * pay for git.
+ *
+ * The home directory comes from {@link resolveArcturnPaths} rather than each
+ * command's `~/.arcturn` default, so `ARCTURN_HOME` moves an install the way it
+ * moves everything else Arcturn writes.
+ *
+ * @param command - The parsed verb and its arguments.
+ * @returns The process exit code.
+ */
+async function runRegistryCommand(command: RegistryCliCommand): Promise<number> {
+  const { resolveArcturnPaths } = await import("./paths.js");
+  const paths = resolveArcturnPaths();
+  const { cwd, home } = paths;
+
+  const code = await dispatchRegistryVerb(command, cwd, home);
+  // Every one of these verbs is an ordinary English word, so a prompt that was
+  // not quoted lands here rather than on the model, and the usage error it gets
+  // reads like a bug in Arcturn. Exit 2 is exactly the case where that is a
+  // live possibility, so the escape hatch is printed there and only there.
+  if (code === 2) {
+    process.stderr.write(
+      `arcturn: to send this as a prompt instead, quote it: arcturn "${command.verb} ..."\n`,
+    );
+  }
+  return code;
+}
+
+/**
+ * Hand one verb's arguments to its implementation.
+ *
+ * @param command - The parsed verb and its arguments.
+ * @param cwd - Working directory for a relative local-path source.
+ * @param home - Arcturn user directory.
+ */
+async function dispatchRegistryVerb(
+  command: RegistryCliCommand,
+  cwd: string,
+  home: string,
+): Promise<number> {
+  if (command.verb === "new") {
+    const { runNewCommand } = await import("./scaffold.js");
+    return runNewCommand({ argv: command.argv, cwd, home });
+  }
+
+  const registry = await import("./registry.js");
+  switch (command.verb) {
+    case "add":
+      return registry.runAddCommand({ argv: command.argv, cwd, home });
+    case "inspect":
+      return registry.runInspectCommand({ argv: command.argv, cwd, home });
+    case "packages":
+      return registry.runPackagesCommand({ argv: command.argv, home });
+    case "update":
+      return registry.runUpdateCommand({ argv: command.argv, cwd, home });
+    case "remove":
+      return registry.runRemoveCommand({ argv: command.argv, home });
+  }
+}
+
 export function nonLoopbackWarning(
   host: string,
   isLoopback: (host: string) => boolean,

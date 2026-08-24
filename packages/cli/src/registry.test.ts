@@ -5,14 +5,19 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
+import { helpText, parseArgs } from "./args.js";
+import { runCli } from "./cli-main.js";
 import type { CommandUi, SelectOption } from "./commands.js";
 import {
   createRegistryCommands,
+  formatInspectReport,
   formatInstallSummary,
   formatPackageList,
   formatRemoveSummary,
   formatUpdateReport,
+  type GitExecFn,
   type InstallResult,
+  inspectPackage,
   installPackage,
   isValidPackageName,
   listPackages,
@@ -22,6 +27,7 @@ import {
   removePackage,
   resolvePackageDir,
   resolveSource,
+  runInspectCommand,
   updateAllPackages,
   updatePackage,
 } from "./registry.js";
@@ -743,12 +749,16 @@ describe("formatting helpers", () => {
     const lines = formatRemoveSummary({
       name: "x",
       removedSkills: ["a.md"],
+      removedAgents: ["dev.md"],
+      removedWorkflows: ["ship.md"],
       removedExtensions: [],
       removedThemes: [],
       removedMcpServers: [],
     });
     expect(lines[0]).toContain('Removed "x"');
     expect(lines.some((line) => line.includes("a.md"))).toBe(true);
+    expect(lines.some((line) => line.includes("dev.md"))).toBe(true);
+    expect(lines.some((line) => line.includes("ship.md"))).toBe(true);
   });
 
   it("formats every update reason", () => {
@@ -952,5 +962,493 @@ describe("createRegistryCommands", () => {
     const ui = fakeUi();
     await packagesCmd?.run({ runtime, ui, args: "", commands: undefined as never });
     expect(ui.lines.some((line) => line.includes("No packages installed"))).toBe(true);
+  });
+});
+
+/* Agents and workflows (org kits) --------------------------------------------- */
+
+/** A role file whose `tools:` line is what {@link roleDispatch} reads. */
+function roleFile(name: string, tools: string): string {
+  return `---\nname: ${name}\ndescription: ${name} role\ntools: ${tools}\n---\nYou are ${name}.\n`;
+}
+
+/** A two-stage pipeline that `parseWorkflow` accepts as-is. */
+function workflowFile(name: string, budgetUsd?: number): string {
+  const budget = budgetUsd === undefined ? "" : `budgetUsd: ${budgetUsd}\n`;
+  return (
+    `---\nname: ${name}\ndescription: ${name} pipeline\n${budget}---\n` +
+    `1. @dev Do the thing: {{input}}\n2. @reviewer Check it: {{prev}}\n`
+  );
+}
+
+const ORG_KIT = {
+  "agents/dev.md": roleFile("dev", "read, write, bash"),
+  "agents/reviewer.md": roleFile("reviewer", "read, grep, bash"),
+  "agents/scribe.md": roleFile("scribe", "read, grep"),
+  "workflows/ship.md": workflowFile("ship", 12),
+  "workflows/audit.md": workflowFile("audit"),
+};
+
+describe("packages carrying agents and workflows", () => {
+  it("detects agents/ and workflows/ by convention and links them into their roots", async () => {
+    const { url } = await makeGitRepo(ORG_KIT);
+    const paths = await makeRegistry();
+
+    const result = await installPackage({ source: url, name: "kit", paths });
+
+    expect(result.installed).toBe(true);
+    expect(result.record?.provides.agents?.slice().sort()).toEqual([
+      "dev.md",
+      "reviewer.md",
+      "scribe.md",
+    ]);
+    expect(result.record?.provides.workflows?.slice().sort()).toEqual(["audit.md", "ship.md"]);
+    expect(await exists(join(paths.agentsRoot, "dev.md"))).toBe(true);
+    expect(await exists(join(paths.workflowsRoot, "ship.md"))).toBe(true);
+    expect(await isSymlink(join(paths.agentsRoot, "dev.md"))).toBe(true);
+  });
+
+  it("never trips the executable-code gate: markdown is not code", async () => {
+    const { url } = await makeGitRepo(ORG_KIT);
+    const paths = await makeRegistry();
+
+    // A confirmer that throws is the strongest possible statement that it must
+    // not be reached: an org kit is prompt and capability surface, not code.
+    const result = await installPackage({
+      source: url,
+      name: "kit",
+      paths,
+      confirmExecutableCode: () => {
+        throw new Error("the executable-code gate was consulted for markdown");
+      },
+    });
+
+    expect(result.installed).toBe(true);
+    expect(result.declined).toBe(false);
+  });
+
+  it("honours a manifest's provides.agents and provides.workflows", async () => {
+    const { url } = await makeGitRepo({
+      "arcturn.json": JSON.stringify({
+        name: "manifest-kit",
+        provides: { agents: ["roles/dev.md"], workflows: ["pipelines/ship.md"] },
+      }),
+      "roles/dev.md": roleFile("dev", "read, write"),
+      "pipelines/ship.md": workflowFile("ship", 3),
+    });
+    const paths = await makeRegistry();
+
+    const result = await installPackage({ source: url, name: "manifest-kit", paths });
+
+    expect(result.record?.provides.agents).toEqual(["dev.md"]);
+    expect(result.record?.provides.workflows).toEqual(["ship.md"]);
+    expect(await exists(join(paths.agentsRoot, "dev.md"))).toBe(true);
+    expect(await exists(join(paths.workflowsRoot, "ship.md"))).toBe(true);
+  });
+
+  it("never clobbers an agent or workflow the user already had", async () => {
+    const { url } = await makeGitRepo(ORG_KIT);
+    const paths = await makeRegistry();
+    await mkdir(paths.agentsRoot, { recursive: true });
+    await mkdir(paths.workflowsRoot, { recursive: true });
+    await writeFile(join(paths.agentsRoot, "dev.md"), "my own dev role", "utf8");
+    await writeFile(join(paths.workflowsRoot, "ship.md"), "my own ship pipeline", "utf8");
+
+    const result = await installPackage({ source: url, name: "kit", paths });
+
+    expect(result.record?.provides.agents).not.toContain("dev.md");
+    expect(result.record?.provides.workflows).not.toContain("ship.md");
+    expect(result.warnings.some((warning) => warning.includes("dev.md"))).toBe(true);
+    expect(result.warnings.some((warning) => warning.includes("ship.md"))).toBe(true);
+    expect(await readFile(join(paths.agentsRoot, "dev.md"), "utf8")).toBe("my own dev role");
+    expect(await readFile(join(paths.workflowsRoot, "ship.md"), "utf8")).toBe(
+      "my own ship pipeline",
+    );
+  });
+
+  it("unlinks agents and workflows on remove", async () => {
+    const { url } = await makeGitRepo(ORG_KIT);
+    const paths = await makeRegistry();
+    await installPackage({ source: url, name: "kit", paths });
+
+    const removed = await removePackage("kit", paths);
+
+    expect(removed.removedAgents.slice().sort()).toEqual(["dev.md", "reviewer.md", "scribe.md"]);
+    expect(removed.removedWorkflows.slice().sort()).toEqual(["audit.md", "ship.md"]);
+    expect(await exists(join(paths.agentsRoot, "dev.md"))).toBe(false);
+    expect(await exists(join(paths.workflowsRoot, "ship.md"))).toBe(false);
+  });
+
+  it("relinks agents and workflows on update", async () => {
+    const { dir, url } = await makeGitRepo(ORG_KIT);
+    const paths = await makeRegistry();
+    await installPackage({ source: url, name: "kit", paths });
+
+    await rm(join(dir, "agents", "scribe.md"));
+    await writeFiles(dir, { "agents/auditor.md": roleFile("auditor", "read, bash") });
+    await commitAll(dir, "swap a role");
+
+    const report = await updatePackage("kit", { paths });
+
+    expect(report.reason).toBe("updated");
+    expect(await exists(join(paths.agentsRoot, "auditor.md"))).toBe(true);
+    expect(await exists(join(paths.agentsRoot, "scribe.md"))).toBe(false);
+    expect(await exists(join(paths.workflowsRoot, "ship.md"))).toBe(true);
+  });
+
+  it("names each landed agent's derived lane and each workflow's budget in the summary", async () => {
+    const { url } = await makeGitRepo(ORG_KIT);
+    const paths = await makeRegistry();
+
+    const result = await installPackage({ source: url, name: "kit", paths });
+    const summary = formatInstallSummary(result).join("\n");
+
+    // The lane is what the role can touch, derived by the engine's own
+    // roleDispatch — not something the file's prose gets to claim.
+    expect(summary).toMatch(/dev\b[^\n]*\bwrite\b/);
+    expect(summary).toMatch(/reviewer\b[^\n]*\bexec\b/);
+    expect(summary).toMatch(/scribe\b[^\n]*\bread\b/);
+    expect(summary).toMatch(/ship\b[^\n]*\$12/);
+    expect(summary).toContain("audit");
+  });
+});
+
+/* inspectPackage ---------------------------------------------------------------- */
+
+describe("inspectPackage", () => {
+  const FULL_KIT = {
+    ...ORG_KIT,
+    "arcturn.json": JSON.stringify({
+      name: "full-kit",
+      description: "everything at once",
+      version: "2.1.0",
+    }),
+    "skills/greet.md": "---\ndescription: Greets a person by name.\n---\nHello $ARGUMENTS",
+    "skills/deep/SKILL.md": "---\ndescription: A folder skill with assets.\n---\nDeep body",
+    "themes/midnight.json": JSON.stringify({ name: "midnight" }),
+    "extensions/hook.js": "export default function () {}",
+    "mcp.json": JSON.stringify({
+      servers: {
+        docs: { type: "http", url: "https://docs.example/mcp" },
+        local: { type: "stdio", command: "node", args: ["server.js"] },
+      },
+    }),
+  };
+
+  it("stages a source, describes everything in it, and links nothing", async () => {
+    const { url } = await makeGitRepo(FULL_KIT);
+    const paths = await makeRegistry();
+
+    const disclosure = await inspectPackage({ source: url, name: "full-kit", paths });
+
+    expect(disclosure.name).toBe("full-kit");
+    expect(disclosure.commit).toMatch(/^[0-9a-f]{40}$/);
+    expect(disclosure.manifest?.version).toBe("2.1.0");
+
+    expect(disclosure.agents.map((agent) => [agent.name, agent.lane])).toEqual([
+      ["dev", "write"],
+      ["reviewer", "exec"],
+      ["scribe", "read"],
+    ]);
+    expect(disclosure.agents[1]?.tools).toEqual(["read", "grep", "bash"]);
+
+    const ship = disclosure.workflows.find((workflow) => workflow.name === "ship");
+    expect(ship?.stages).toBe(2);
+    expect(ship?.budgetUsd).toBe(12);
+    expect(ship?.roles).toEqual(["dev", "reviewer"]);
+    expect(disclosure.workflows.find((w) => w.name === "audit")?.budgetUsd).toBeUndefined();
+
+    // Both skill shapes: a plain `<name>.md` and a `<name>/SKILL.md` folder,
+    // whose loader root is the folder's parent rather than the folder itself.
+    expect(disclosure.skills).toEqual([
+      { name: "deep", description: "A folder skill with assets.", path: join("skills", "deep") },
+      { name: "greet", description: "Greets a person by name.", path: join("skills", "greet.md") },
+    ]);
+    expect(disclosure.mcpServers).toEqual([
+      { name: "docs", transport: "http", target: "https://docs.example/mcp" },
+      { name: "local", transport: "stdio", target: "node server.js" },
+    ]);
+    expect(disclosure.extensions).toEqual([join("extensions", "hook.js")]);
+    expect(disclosure.themes).toEqual([join("themes", "midnight.json")]);
+
+    // Nothing was linked, and nothing was left behind.
+    expect(await exists(join(paths.agentsRoot, "dev.md"))).toBe(false);
+    expect(await exists(join(paths.workflowsRoot, "ship.md"))).toBe(false);
+    expect(await exists(join(paths.skillsRoot, "greet.md"))).toBe(false);
+    expect(await exists(join(paths.extensionsRoot, "hook.js"))).toBe(false);
+    expect(await exists(join(paths.packagesRoot, "full-kit"))).toBe(false);
+    expect(await exists(paths.mcpConfigPath)).toBe(false);
+    expect(await readdir(paths.packagesRoot)).toEqual([]);
+  });
+
+  it("leaves no staging directory behind when the source cannot be fetched", async () => {
+    const paths = await makeRegistry();
+    // Injected rather than pointed at an unreachable host: the cleanup is what
+    // is under test, and it must not depend on how a machine resolves DNS.
+    const failingGit: GitExecFn = () => Promise.reject(new Error("fatal: repository not found"));
+    await expect(
+      inspectPackage({ source: "https://example.invalid/nope.git", paths, exec: failingGit }),
+    ).rejects.toThrow(RegistryError);
+    expect(await readdir(paths.packagesRoot)).toEqual([]);
+  });
+
+  it("carries the whole description in the data and truncates only when rendering", async () => {
+    // The JSON is a machine contract the hub renders from; a description
+    // silently cut at the terminal's width would make the page a lie about the
+    // package. Truncation belongs to the renderer, not to the record.
+    const long = `Reviews a change ${"very ".repeat(40)}carefully.`;
+    const { url } = await makeGitRepo({
+      "agents/long.md": `---\nname: long\ndescription: ${long}\ntools: read\n---\nbody`,
+    });
+    const paths = await makeRegistry();
+
+    const disclosure = await inspectPackage({ source: url, name: "wordy", paths });
+
+    expect(disclosure.agents[0]?.description).toBe(long);
+    const rendered = formatInspectReport(disclosure).join("\n");
+    expect(rendered).not.toContain(long);
+    expect(rendered).toContain("Reviews a change very");
+  });
+
+  it("reports a workflow that does not parse instead of hiding it", async () => {
+    const { url } = await makeGitRepo({
+      "workflows/broken.md": "---\nname: broken\n---\nno steps",
+    });
+    const paths = await makeRegistry();
+
+    const disclosure = await inspectPackage({ source: url, name: "broken-kit", paths });
+
+    expect(disclosure.workflows[0]?.error).toMatch(/no steps/);
+    expect(disclosure.workflows[0]?.stages).toBe(0);
+  });
+
+  it("prints executable code under a heading nobody can skim past", async () => {
+    const { url } = await makeGitRepo(FULL_KIT);
+    const paths = await makeRegistry();
+
+    const report = formatInspectReport(
+      await inspectPackage({ source: url, name: "full-kit", paths }),
+    ).join("\n");
+
+    expect(report).toContain("EXECUTABLE CODE");
+    expect(report).toContain("hook.js");
+    expect(report).toMatch(/dev\b[^\n]*\bwrite\b/);
+    expect(report).toMatch(/ship\b[^\n]*\$12/);
+    expect(report).toContain("Greets a person by name.");
+    expect(report).toContain("https://docs.example/mcp");
+  });
+
+  it("says plainly when a package carries no executable code", async () => {
+    const { url } = await makeGitRepo(ORG_KIT);
+    const paths = await makeRegistry();
+    const report = formatInspectReport(
+      await inspectPackage({ source: url, name: "kit", paths }),
+    ).join("\n");
+    expect(report).not.toContain("EXECUTABLE CODE");
+    expect(report).toContain("no executable code");
+  });
+});
+
+/* runInspectCommand ------------------------------------------------------------- */
+
+describe("runInspectCommand", () => {
+  it("--json emits the disclosure shape verbatim", async () => {
+    const { url } = await makeGitRepo(ORG_KIT);
+    const home = await scratchDir("arcturn-inspect-home-");
+    const out: string[] = [];
+
+    const code = await runInspectCommand({
+      argv: [url, "--name", "kit", "--json"],
+      home,
+      stdout: (text) => out.push(text),
+      stderr: () => {},
+    });
+
+    expect(code).toBe(0);
+    const parsed = JSON.parse(out.join("\n"));
+    expect(parsed.name).toBe("kit");
+    expect(parsed.agents.map((agent: { lane: string }) => agent.lane)).toEqual([
+      "write",
+      "exec",
+      "read",
+    ]);
+    expect(parsed.workflows.find((w: { name: string }) => w.name === "ship").budgetUsd).toBe(12);
+    expect(parsed.extensions).toEqual([]);
+  });
+
+  it("reports a usage error without a source", async () => {
+    const errs: string[] = [];
+    const code = await runInspectCommand({ argv: [], stderr: (text) => errs.push(text) });
+    expect(code).toBe(2);
+    expect(errs.join("\n")).toContain("usage");
+  });
+});
+
+/* The registry verbs at the shell ------------------------------------------------ */
+
+/**
+ * These go through `parseArgs` -> `runCli` rather than calling the `run*`
+ * functions directly, because the thing at risk is the *wiring*: a verb the
+ * parser hands to the prompt instead of to a command, or an exit code the
+ * dispatcher swallows, is invisible to a unit test of either half.
+ */
+describe("arcturn add | remove | packages | update | inspect", () => {
+  /** Run one command line the way `main.ts` does, against an isolated home. */
+  async function runShell(
+    argv: readonly string[],
+    home: string,
+  ): Promise<{ code: number; out: string; err: string }> {
+    const parsed = parseArgs(argv, { stdinIsTty: false });
+    if (!parsed.ok) throw new Error(`parse failed: ${parsed.error}`);
+    const out: string[] = [];
+    const err: string[] = [];
+    const stdout = process.stdout.write.bind(process.stdout);
+    const stderr = process.stderr.write.bind(process.stderr);
+    const previousHome = process.env.ARCTURN_HOME;
+    process.env.ARCTURN_HOME = home;
+    process.stdout.write = ((chunk: string) => {
+      out.push(String(chunk));
+      return true;
+    }) as typeof process.stdout.write;
+    process.stderr.write = ((chunk: string) => {
+      err.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      const code = await runCli(parsed.args);
+      return { code, out: out.join(""), err: err.join("") };
+    } finally {
+      process.stdout.write = stdout;
+      process.stderr.write = stderr;
+      if (previousHome === undefined) delete process.env.ARCTURN_HOME;
+      else process.env.ARCTURN_HOME = previousHome;
+    }
+  }
+
+  it("parses every verb into a command that owns its own flags", () => {
+    const cases: [string[], string, string[]][] = [
+      [
+        ["add", "owner/repo", "--skills-only", "--yes"],
+        "add",
+        ["owner/repo", "--skills-only", "--yes"],
+      ],
+      [["remove", "kit"], "remove", ["kit"]],
+      [["packages"], "packages", []],
+      [["update"], "update", []],
+      [["inspect", ".", "--json"], "inspect", [".", "--json"]],
+      [["new", "agent", "reviewer", "--user"], "new", ["agent", "reviewer", "--user"]],
+    ];
+    for (const [argv, verb, rest] of cases) {
+      const parsed = parseArgs(argv, { stdinIsTty: false });
+      expect(parsed.ok, argv.join(" ")).toBe(true);
+      if (!parsed.ok) continue;
+      expect(parsed.args.command).toEqual({ kind: "registry", verb, argv: rest });
+      expect(parsed.args.prompt).toBe("");
+    }
+  });
+
+  it("still lets a quoted prompt starting with a verb stay a prompt", () => {
+    const parsed = parseArgs(["add logging to server.ts"], { stdinIsTty: false });
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.args.command).toBeUndefined();
+    expect(parsed.args.prompt).toBe("add logging to server.ts");
+  });
+
+  it("routes add -> packages -> update -> remove, passing each exit code back", async () => {
+    const { url } = await makeGitRepo(ORG_KIT);
+    const home = await scratchDir("arcturn-shell-home-");
+
+    const empty = await runShell(["packages"], home);
+    expect(empty.code).toBe(0);
+    expect(empty.out).toContain("No packages installed");
+
+    const added = await runShell(["add", url, "--name", "kit"], home);
+    expect(added.code, added.err).toBe(0);
+    expect(added.out).toContain('Installed "kit"');
+    expect(added.out).toMatch(/dev\b[^\n]*\bwrite\b/);
+
+    const listed = await runShell(["packages"], home);
+    expect(listed.code).toBe(0);
+    expect(listed.out).toContain("kit");
+
+    const updated = await runShell(["update", "kit"], home);
+    expect(updated.code).toBe(0);
+    expect(updated.out).toContain("up to date");
+
+    const removed = await runShell(["remove", "kit"], home);
+    expect(removed.code).toBe(0);
+    expect(removed.out).toContain('Removed "kit"');
+
+    const again = await runShell(["remove", "kit"], home);
+    expect(again.code).toBe(1);
+    expect(again.err).toContain("not installed");
+  });
+
+  it("routes inspect, including --json, without installing anything", async () => {
+    const { url } = await makeGitRepo(ORG_KIT);
+    const home = await scratchDir("arcturn-shell-home-");
+
+    const report = await runShell(["inspect", url, "--name", "kit"], home);
+    expect(report.code, report.err).toBe(0);
+    expect(report.out).toContain("no executable code");
+
+    const json = await runShell(["inspect", url, "--name", "kit", "--json"], home);
+    expect(json.code).toBe(0);
+    expect(JSON.parse(json.out).agents).toHaveLength(3);
+
+    expect(await exists(join(home, "agents", "dev.md"))).toBe(false);
+  });
+
+  it("returns 2 for a usage error on each verb, and says how to send it as a prompt", async () => {
+    const home = await scratchDir("arcturn-shell-home-");
+    for (const argv of [["add"], ["remove"], ["inspect"], ["packages", "extra"], ["new"]]) {
+      const result = await runShell(argv, home);
+      expect(result.code, argv.join(" ")).toBe(2);
+      // These verbs are ordinary English words, so a usage error is as likely
+      // to be a prompt that was not quoted as it is a real mistake.
+      expect(result.err, argv.join(" ")).toContain(`arcturn "${argv[0]} `);
+    }
+  });
+
+  it("arcturn add fails closed on executable code when stdin is not a terminal", async () => {
+    // The pin: a CI job, a shell pipeline or a spawned process cannot give
+    // informed consent, so an install carrying extensions must install NOTHING
+    // there rather than silently linking someone else's code.
+    const { url } = await makeGitRepo({
+      "skills/greet.md": "hello",
+      "extensions/hook.js": "export default function () {}",
+    });
+    const home = await scratchDir("arcturn-shell-home-");
+    const previousTty = process.stdin.isTTY;
+    Object.defineProperty(process.stdin, "isTTY", { value: false, configurable: true });
+    try {
+      const result = await runShell(["add", url, "--name", "risky"], home);
+      expect(result.code).toBe(1);
+      expect(result.out).toContain("cancelled");
+      expect(await exists(join(home, "packages", "risky"))).toBe(false);
+      expect(await exists(join(home, "extensions", "hook.js"))).toBe(false);
+      expect(await exists(join(home, "skills", "greet.md"))).toBe(false);
+    } finally {
+      Object.defineProperty(process.stdin, "isTTY", {
+        value: previousTty,
+        configurable: true,
+      });
+    }
+  });
+
+  it("--help on a verb is still --help", () => {
+    const parsed = parseArgs(["add", "--help"], { stdinIsTty: false });
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.args.help).toBe(true);
+    expect(parsed.args.command).toBeUndefined();
+  });
+
+  it("lists every verb in the help text", () => {
+    const help = helpText();
+    for (const verb of ["add", "inspect", "packages", "update", "remove", "new"]) {
+      expect(help, verb).toContain(`  ${verb}`);
+    }
   });
 });

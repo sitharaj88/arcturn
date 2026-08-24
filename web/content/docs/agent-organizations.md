@@ -332,6 +332,9 @@ worktree lane as confined by convention plus a good-faith wall, never as sandbox
 ## Related
 
 - [Workflows](/docs/workflows) — the pipeline format, the lanes, and the failure semantics
+- [Packages](/docs/packages) — how an org kit travels: `agents/` and `workflows/` installed
+  together from one source, with `arcturn inspect` showing every role's derived lane
+  before anything is linked
 - [Sub-agents](/docs/sub-agents) — the one-shot, synchronous alternative
 - [Agent teams & background agents](/docs/teams) — `/bg` and `/team`
 - [Permissions](/docs/permissions) — the rule engine the lanes are built on

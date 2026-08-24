@@ -1,0 +1,8 @@
+{
+  "name": "starter-skills",
+  "description": "Three git-shaped skills that refuse to invent what the diff does not show: commit messages, PR descriptions, release notes.",
+  "version": "0.1.0",
+  "provides": {
+    "skills": ["skills/commit-message.md", "skills/pr-description.md", "skills/release-notes.md"]
+  }
+}

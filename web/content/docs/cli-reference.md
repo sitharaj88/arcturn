@@ -56,10 +56,24 @@ my bill on Friday" into "the run stopped."
 |---|---|
 | `arcturn auth login <provider>` | Sign in to a provider with an OAuth subscription |
 | `arcturn auth logout <provider>` · `auth status` | Forget credentials; show who is signed in |
+| `arcturn add <source>` | Install a package of skills, agents, workflows or themes — see [Packages](/docs/packages) |
+| `arcturn inspect <source>` | Stage a package and print what installing it *would* add; installs nothing |
+| `arcturn packages` | List installed packages with their pinned commits |
+| `arcturn update [name]` | Re-fetch one package, or all of them; a package pinned to a ref never moves |
+| `arcturn remove <name>` | Uninstall a package, unlinking exactly what it added |
+| `arcturn new skill\|agent\|workflow <name>` | Scaffold a valid asset file with the frontmatter the parsers require |
 | `arcturn mcp-serve` | Expose Arcturn *as* an MCP server — see [MCP server](/docs/mcp-server) |
 | `arcturn serve` | WebSocket server over the NDJSON protocol — see [Server mode](/docs/server-mode) |
 | `arcturn completions <shell>` | Print a bash, zsh or fish completion script |
 | `arcturn blame` · `arcturn replay` · `arcturn bisect` | Provenance and replay — see [Provenance](/docs/provenance) and [Replay & bisect](/docs/replay-bisect) |
+
+**`arcturn add` never links a package's executable code without being told to.** A package
+carrying `extensions/` stops for a per-install confirmation that names the files, and off
+a TTY — CI, a pipe, a script — it declines rather than assuming consent. `--yes` is how
+you grant that consent up front, and `--skills-only` is how you take the package's
+markdown and leave its code on disk unlinked. `arcturn inspect` is the same resolver with
+the linking taken out: it prints the agent lanes, workflow budgets and executable files an
+install would add, and adds none of them — run it before you reach for `--yes`.
 
 ## Slash commands
 
@@ -102,6 +116,20 @@ session is a tree, so the branch you rewound away from is still there.
 These three are the [dry-run](/docs/dry-run) loop: with `--dry-run`, edits land in a shadow
 copy until you have read them.
 
+### Packages
+
+| Command | What it does |
+|---|---|
+| `/add <source>` | Install a package: `/add <source> [--name x] [--skills-only]` — see [Packages](/docs/packages) |
+| `/packages` | List installed packages |
+| `/remove <name>` | Uninstall a package |
+| `/update [name]` | Re-fetch a package, or every one of them |
+
+The same four operations as `arcturn add|packages|remove|update`, against the same
+`~/.arcturn/packages` and the same fail-closed confirmation for executable code. The
+shell verbs exist so an install can happen in CI or a setup script; the slash commands
+exist so it can happen without leaving a session.
+
 ### Delegation
 
 | Command | What it does |
@@ -130,6 +158,8 @@ itself.
 ## Related
 
 - [Getting started](/docs/getting-started) — installation and first run
+- [Packages](/docs/packages) — what `add`, `inspect`, `update` and `remove` install, and the
+  gate that stands in front of executable code
 - [Configuration](/docs/configuration) — everything settable in `.arcturn/config.json`
 - [Model providers](/docs/providers) — every backend, credentials, and which are verified live
 - [Permissions](/docs/permissions) — what each `--permission-mode` actually grants

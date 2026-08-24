@@ -1,0 +1,18 @@
+{
+  "name": "starter-skills",
+  "kinds": ["skills"],
+  "source": "sitharaj88/arcturn/examples/starter-skills",
+  "description": "Three skills for the writing a repository asks for constantly — a commit message, a pull-request description, and release notes.",
+  "maintainer": {
+    "name": "Sitharaj Seenivasan",
+    "url": "https://sitharaj.in"
+  },
+  "disclosure": {
+    "skills": [
+      { "name": "commit-message" },
+      { "name": "pr-description" },
+      { "name": "release-notes" }
+    ],
+    "executable": false
+  }
+}

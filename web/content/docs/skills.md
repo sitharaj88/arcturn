@@ -168,3 +168,13 @@ Checked into `<project>/.arcturn/skills/review.md`, this wins the name collision
 anyone's personal `~/.arcturn/skills/review.md`, so `/review` means the same thing for
 everyone working in the repo — with a warning (not a silent surprise) telling the
 individual contributor that their personal skill was overridden.
+
+## Related
+
+- [Packages](/docs/packages) — how a skill travels to another machine: a folder of these
+  files, installed with `arcturn add`, the commit pinned and the install recorded.
+  `arcturn add sitharaj88/arcturn/examples/starter-skills` installs three worked ones
+- [Model-invoked skills](/docs/skill-tool) — the same library handed to the model as a
+  tool, why `description:` is load-bearing there, and how project-root skills are treated
+- [Workflows](/docs/workflows) — the sibling feature for a scripted multi-step pipeline,
+  sharing nothing with skills but a discovery pattern

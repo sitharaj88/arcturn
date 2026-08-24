@@ -1,0 +1,78 @@
+{
+  "name": "enterprise-org",
+  "kinds": ["org-kit", "agents", "workflows"],
+  "source": "sitharaj88/arcturn/examples/enterprise-org",
+  "description": "Eleven agent roles and six pipelines that carry a change from charter to merge gate, with the reviewers on lanes that structurally cannot land a patch.",
+  "maintainer": {
+    "name": "Sitharaj Seenivasan",
+    "url": "https://sitharaj.in"
+  },
+  "disclosure": {
+    "agents": [
+      {
+        "name": "architect",
+        "lane": "read",
+        "tools": ["read", "grep", "glob", "ls", "search_code"]
+      },
+      {
+        "name": "developer",
+        "lane": "write",
+        "tools": ["read", "write", "edit", "bash", "grep", "glob", "ls"]
+      },
+      {
+        "name": "docs-writer",
+        "lane": "write",
+        "tools": ["read", "write", "edit", "bash", "grep", "glob", "ls"]
+      },
+      {
+        "name": "pm",
+        "lane": "read",
+        "tools": ["read", "grep", "glob", "ls"]
+      },
+      {
+        "name": "qa-adversarial",
+        "lane": "exec",
+        "tools": ["read", "grep", "glob", "ls", "bash"]
+      },
+      {
+        "name": "qa-functional",
+        "lane": "write",
+        "tools": ["read", "write", "edit", "bash", "grep", "glob", "ls"]
+      },
+      {
+        "name": "release-manager",
+        "lane": "exec",
+        "tools": ["read", "grep", "glob", "ls", "bash"]
+      },
+      {
+        "name": "retro",
+        "lane": "exec",
+        "tools": ["read", "grep", "glob", "ls", "bash"]
+      },
+      {
+        "name": "security-reviewer",
+        "lane": "exec",
+        "tools": ["read", "grep", "glob", "ls", "bash"]
+      },
+      {
+        "name": "tech-lead",
+        "lane": "read",
+        "tools": ["read", "grep", "glob", "ls", "search_code"]
+      },
+      {
+        "name": "ux-reviewer",
+        "lane": "read",
+        "tools": ["read", "grep", "glob", "ls"]
+      }
+    ],
+    "workflows": [
+      { "name": "bug-fix", "stages": 4, "budgetUsd": 15 },
+      { "name": "docs-pass", "stages": 6, "budgetUsd": 12 },
+      { "name": "feature-build", "stages": 4, "budgetUsd": 25 },
+      { "name": "refactor-guard", "stages": 7, "budgetUsd": 30 },
+      { "name": "release-check", "stages": 5, "budgetUsd": 20 },
+      { "name": "security-audit", "stages": 5, "budgetUsd": 20 }
+    ],
+    "executable": false
+  }
+}
