@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { SessionHeader } from "../serve/engine.js";
+import type { ModelCatalogEntry, SessionHeader } from "../serve/engine.js";
 import { chooseSendVerb, escapeCodicons, modelPickItems, sessionPickItems } from "./picker.js";
 
 function header(over: Partial<SessionHeader> = {}): SessionHeader {
@@ -93,10 +93,145 @@ describe("modelPickItems", () => {
     expect(items[0]?.description).toMatch(/current/i);
   });
 
-  it("always ends with a free-text entry, since the protocol exposes no catalog", () => {
+  it("always ends with a free-text entry, even when the engine has a catalog", () => {
     const items = modelPickItems({ observed: ["a/one"] });
     expect(items.at(-1)).toMatchObject({ action: "other" });
     expect(items.at(-1)?.modelId).toBeUndefined();
+  });
+});
+
+function entry(over: Partial<ModelCatalogEntry> = {}): ModelCatalogEntry {
+  return {
+    id: "anthropic/claude-sonnet-5",
+    provider: "anthropic",
+    displayName: "Claude Sonnet 5",
+    contextWindow: 1_000_000,
+    maxOutputTokens: 128_000,
+    cost: { input: 2, output: 10 },
+    apiKeyEnv: "ANTHROPIC_API_KEY",
+    credentials: "present",
+    ...over,
+  };
+}
+
+describe("modelPickItems: the engine catalog", () => {
+  it("offers every model the engine listed", () => {
+    const items = modelPickItems({
+      observed: [],
+      catalog: [entry(), entry({ id: "openai/gpt-5", displayName: "GPT-5" })],
+    });
+    expect(items.filter((i) => i.modelId !== undefined).map((i) => i.modelId)).toEqual([
+      "anthropic/claude-sonnet-5",
+      "openai/gpt-5",
+    ]);
+  });
+
+  it("names the model, and shows the id, context window and price", () => {
+    const [item] = modelPickItems({ observed: [], catalog: [entry()] });
+    expect(item?.label).toBe("Claude Sonnet 5");
+    expect(item?.description).toContain("anthropic/claude-sonnet-5");
+    expect(item?.detail).toContain("1000k ctx");
+    expect(item?.detail).toContain("$2/$10 per Mtok");
+  });
+
+  it("says pricing is unknown rather than printing a free-looking zero", () => {
+    const unpriced = modelPickItems({ observed: [], catalog: [entry({ cost: undefined })] })[0];
+    expect(unpriced?.detail).toContain("pricing unknown");
+    expect(unpriced?.detail).not.toContain("$0");
+    const free = modelPickItems({
+      observed: [],
+      catalog: [entry({ cost: { input: 0, output: 0 } })],
+    })[0];
+    expect(free?.detail).toContain("$0/$0 per Mtok");
+    expect(free?.detail).not.toContain("unknown");
+  });
+
+  it("tells the user which models they actually have credentials for", () => {
+    const [present] = modelPickItems({ observed: [], catalog: [entry()] });
+    expect(present?.detail).toContain("ANTHROPIC_API_KEY set");
+    const [absent] = modelPickItems({
+      observed: [],
+      catalog: [entry({ credentials: "absent" })],
+    });
+    expect(absent?.detail).toContain("ANTHROPIC_API_KEY not set");
+  });
+
+  it("names the variable even when it cannot tell whether the key is there", () => {
+    // Every real `unknown` entry in the catalog — the openai-compatible
+    // providers, seventeen of them — names a variable. Dropping it made those
+    // models unfindable by typing the key they need, which is exactly how
+    // somebody looks for them.
+    const [unknown] = modelPickItems({
+      observed: [],
+      catalog: [
+        entry({ id: "groq/llama-3.3-70b", apiKeyEnv: "GROQ_API_KEY", credentials: "unknown" }),
+      ],
+    });
+    expect(unknown?.detail).toContain("GROQ_API_KEY");
+    expect(unknown?.detail).toContain("credentials unknown");
+  });
+
+  it("puts the models with credentials ahead of the ones without", () => {
+    const items = modelPickItems({
+      observed: [],
+      catalog: [
+        entry({ id: "a/no-key", credentials: "absent" }),
+        entry({ id: "b/has-key", credentials: "present" }),
+      ],
+    });
+    expect(items.filter((i) => i.modelId !== undefined).map((i) => i.modelId)).toEqual([
+      "b/has-key",
+      "a/no-key",
+    ]);
+  });
+
+  it("puts the model in use first and marks it, wherever the catalog listed it", () => {
+    const items = modelPickItems({
+      observed: [],
+      current: "z/last",
+      catalog: [entry({ id: "a/first" }), entry({ id: "z/last" })],
+    });
+    expect(items[0]?.modelId).toBe("z/last");
+    expect(items[0]?.description).toMatch(/current/i);
+  });
+
+  it("puts a model in use that the catalog does not carry first, and marks it", () => {
+    const items = modelPickItems({
+      observed: ["extension/registered"],
+      current: "extension/registered",
+      catalog: [entry()],
+    });
+    expect(items[0]).toMatchObject({ modelId: "extension/registered", description: "current" });
+    expect(items.filter((i) => i.modelId === "extension/registered")).toHaveLength(1);
+  });
+
+  it("keeps ids the session announced but the catalog does not carry", () => {
+    const items = modelPickItems({
+      observed: ["mystery/model"],
+      configured: "configured/model",
+      catalog: [entry()],
+    });
+    const ids = items.filter((i) => i.modelId !== undefined).map((i) => i.modelId);
+    expect(ids).toContain("mystery/model");
+    expect(ids).toContain("configured/model");
+    expect(ids).toContain("anthropic/claude-sonnet-5");
+  });
+
+  it("lists a catalog model once, even when the session also announced it", () => {
+    const items = modelPickItems({
+      observed: ["anthropic/claude-sonnet-5"],
+      catalog: [entry()],
+    });
+    expect(items.filter((i) => i.modelId === "anthropic/claude-sonnet-5")).toHaveLength(1);
+  });
+
+  it("falls back to today's behaviour when the engine has no catalog verb", () => {
+    const items = modelPickItems({ observed: ["a/one"], configured: "b/two" });
+    expect(items.filter((i) => i.modelId !== undefined).map((i) => i.modelId)).toEqual([
+      "a/one",
+      "b/two",
+    ]);
+    expect(items.at(-1)).toMatchObject({ action: "other" });
   });
 });
 
@@ -135,6 +270,24 @@ describe("engine-supplied strings reaching quick-pick fields", () => {
   it("does not let a model id the engine announced render as one", () => {
     const items = modelPickItems({ observed: ["$(verified) totally/safe"] });
     expect(items[0]?.label).toBe("\\$(verified) totally/safe");
+  });
+
+  it("does not let a catalogued model render one, in any rendered field", () => {
+    const items = modelPickItems({
+      observed: [],
+      catalog: [
+        entry({
+          id: "$(verified) totally/safe",
+          displayName: "$(check) Recommended",
+          apiKeyEnv: "$(key) API_KEY",
+        }),
+      ],
+    });
+    expect(items[0]?.label).toBe("\\$(check) Recommended");
+    expect(items[0]?.description).toContain("\\$(verified) totally/safe");
+    expect(items[0]?.detail).toContain("\\$(key) API_KEY");
+    // The id sent back to the engine is never rewritten.
+    expect(items[0]?.modelId).toBe("$(verified) totally/safe");
   });
 
   it("does not let a workspace path render as one", () => {

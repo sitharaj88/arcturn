@@ -13,6 +13,7 @@ import {
   formatModelCatalog,
   formatProviderCatalog,
   ModelResolutionError,
+  modelCatalogEntries,
   registerBundledCatalog,
   resolveModelSpec,
   subagentSystemPrompt,
@@ -54,6 +55,94 @@ describe("formatModelCatalog", () => {
     expect(catalog).toContain("openai/gpt-5.1");
     expect(catalog).toContain("google/gemini-2.5-pro");
     expect(catalog).toContain("per Mtok");
+  });
+});
+
+describe("modelCatalogEntries", () => {
+  it("carries every registered model, with the fields a picker needs", () => {
+    registerBundledCatalog();
+    const entries = modelCatalogEntries({});
+    const sonnet = entries.find((entry) => entry.id === "anthropic/claude-sonnet-4-5");
+    expect(entries.length).toBeGreaterThan(100);
+    expect(sonnet).toMatchObject({
+      id: "anthropic/claude-sonnet-4-5",
+      provider: "anthropic",
+      displayName: "Claude Sonnet 4.5",
+      contextWindow: 200_000,
+      cost: { input: 3, output: 15 },
+      apiKeyEnv: "ANTHROPIC_API_KEY",
+    });
+  });
+
+  it("keeps an unpriced model unpriced rather than reporting it as free", () => {
+    registerBundledCatalog();
+    for (const entry of modelCatalogEntries({})) {
+      const spec = getModel(entry.id);
+      if (spec?.cost === undefined) expect(entry.cost).toBeUndefined();
+      else expect(entry.cost).toEqual(spec.cost);
+    }
+  });
+
+  it("reports credential presence from the environment, and never the key itself", () => {
+    registerBundledCatalog();
+    const withKey = modelCatalogEntries({ ANTHROPIC_API_KEY: "sk-live-secret" });
+    const entry = withKey.find((e) => e.id === "anthropic/claude-sonnet-4-5");
+    expect(entry?.credentials).toBe("present");
+    expect(JSON.stringify(withKey)).not.toContain("sk-live-secret");
+
+    const withoutKey = modelCatalogEntries({});
+    expect(withoutKey.find((e) => e.id === "anthropic/claude-sonnet-4-5")?.credentials).toBe(
+      "absent",
+    );
+  });
+
+  it("says 'unknown' where the environment cannot answer, rather than 'absent'", () => {
+    registerBundledCatalog();
+    // An openai-compatible endpoint may need no key at all (Ollama, vLLM), and
+    // `resolveModelSpec` skips the key check for exactly that provider.
+    const compatible = modelCatalogEntries({}).find(
+      (entry) => entry.provider === "openai-compatible",
+    );
+    expect(compatible?.credentials).toBe("unknown");
+
+    // A spec that names no variable authenticates from ambient credentials
+    // this process cannot inspect.
+    registerModel({
+      id: "ambient/creds",
+      provider: "ambient",
+      model: "creds",
+      displayName: "Ambient",
+      contextWindow: 1_000,
+      maxOutputTokens: 100,
+      capabilities: { tools: true, vision: false, thinking: false, caching: false },
+    });
+    try {
+      const ambient = modelCatalogEntries({}).find((entry) => entry.id === "ambient/creds");
+      expect(ambient?.credentials).toBe("unknown");
+      expect(ambient?.apiKeyEnv).toBeUndefined();
+    } finally {
+      unregisterModel("ambient/creds");
+    }
+  });
+
+  it("mirrors resolveModelSpec: a model whose named variable is unset is 'absent'", () => {
+    registerBundledCatalog();
+    // Bedrock and Vertex do name a variable, even though an AWS profile or
+    // application-default credentials can also authenticate them — and
+    // `resolveModelSpec` refuses to start a session without the variable, so
+    // the catalog reports what the engine will actually do.
+    const bedrock = modelCatalogEntries({}).find((entry) => entry.provider === "bedrock");
+    expect(bedrock?.apiKeyEnv).toBe("AWS_BEARER_TOKEN_BEDROCK");
+    expect(bedrock?.credentials).toBe("absent");
+    expect(() => resolveModelSpec(bedrock?.id ?? "", {})).toThrow(/AWS_BEARER_TOKEN_BEDROCK/);
+  });
+
+  it("is the same source --list-models renders", () => {
+    registerBundledCatalog();
+    const rendered = formatModelCatalog();
+    for (const entry of modelCatalogEntries({})) {
+      expect(rendered).toContain(entry.id);
+    }
   });
 });
 

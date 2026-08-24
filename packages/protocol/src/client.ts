@@ -29,11 +29,16 @@
  * lifetime, and a closed socket is terminal (see `INTEGRATION-protocol-client.md`).
  */
 
-import type { AgentEvent, PermissionDecision, SessionHeader } from "@arcturn/types";
+import type { AgentEvent, ModelCatalog, PermissionDecision, SessionHeader } from "@arcturn/types";
 import { PROTOCOL_VERSION } from "@arcturn/types";
 import { ErrorCode } from "./messages.js";
 import { RequestIdGenerator } from "./request-id.js";
-import { validateClientRequest, validateServerMessage, validateSessionHeader } from "./validate.js";
+import {
+  validateClientRequest,
+  validateModelCatalog,
+  validateServerMessage,
+  validateSessionHeader,
+} from "./validate.js";
 
 /** Default per-request deadline, in milliseconds. */
 export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
@@ -264,6 +269,23 @@ export interface ProtocolClient {
   /** Answer a pending permission request. */
   respondToPermission(sessionId: string, decision: PermissionDecision): Promise<void>;
   /**
+   * Fetch the server's model catalog, for rendering a picker.
+   *
+   * `listModels` is an **optional** verb: it was added after the first
+   * servers shipped, and a server that predates it rejects the request with
+   * `invalidRequest` ("Unknown method") rather than closing the connection.
+   * That rejection is not an error a caller should have to handle, so it is
+   * translated here into `undefined` — "this server has no catalog verb" —
+   * leaving the caller to degrade to whatever it did before. Every other
+   * failure (a real server-side fault, a timeout, a closed socket, an
+   * unusable payload) still rejects, so a broken catalog is never silently
+   * indistinguishable from an old server.
+   *
+   * @returns The catalog, or `undefined` when the server does not implement
+   *   the verb.
+   */
+  listModels(): Promise<ModelCatalog | undefined>;
+  /**
    * Subscribe to server-pushed session events.
    *
    * @returns An unsubscribe function; calling it more than once is harmless.
@@ -385,6 +407,25 @@ class ProtocolClientImpl implements ProtocolClient {
 
   async respondToPermission(sessionId: string, decision: PermissionDecision): Promise<void> {
     await this.#call("permissionDecision", { sessionId, decision });
+  }
+
+  async listModels(): Promise<ModelCatalog | undefined> {
+    let result: unknown;
+    try {
+      result = await this.#call("listModels");
+    } catch (error) {
+      // Only a *server-reported* rejection can mean "I do not know this verb"
+      // — a local validation failure raises a plain ProtocolClientError and
+      // must still surface as the bug it is. `listModels` carries no params,
+      // so on a server that implements it there is nothing left for
+      // `invalidRequest` to describe; a server that answers it that way is
+      // one whose `validateClientRequest` did not recognise the method.
+      if (error instanceof ProtocolRequestError && isUnsupportedMethodCode(error.code)) {
+        return undefined;
+      }
+      throw error;
+    }
+    return parseModelCatalog(result);
   }
 
   onEvent(listener: ProtocolEventListener): () => void {
@@ -666,6 +707,31 @@ function parseSessionList(result: unknown): SessionHeader[] {
     );
   }
   return raw.map((entry, index) => parseSessionHeader(entry, `sessions[${index}]`));
+}
+
+/**
+ * Error codes an older server uses for a method it does not implement.
+ *
+ * `@arcturn/protocol`'s own `validateClientRequest` fails an unrecognised
+ * method with `invalidRequest` and the message `Unknown method: "..."`, and
+ * `ws-server.ts` forwards that verbatim; `unknownMethod` is the code
+ * {@link ErrorCode} reserves for the same condition, so both are read as
+ * "this peer is older than the verb".
+ */
+function isUnsupportedMethodCode(code: string): boolean {
+  return code === ErrorCode.invalidRequest || code === ErrorCode.unknownMethod;
+}
+
+/** Parse a `listModels` result, rejecting anything off-contract. */
+function parseModelCatalog(result: unknown): ModelCatalog {
+  const validation = validateModelCatalog(result);
+  if (!validation.ok) {
+    throw new ProtocolClientError(
+      ClientErrorCode.invalidResponse,
+      `Invalid listModels result: ${validation.error}`,
+    );
+  }
+  return validation.value;
 }
 
 /** Parse and validate one {@link SessionHeader} from a response payload. */

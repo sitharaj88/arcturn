@@ -113,6 +113,15 @@ optional fields were added, both additive/backward-compatible:
   calls for "a configurable timeout, default 5 min → deny", and this is the
   only place to configure it.
 - `resolveModel?: (modelId: string) => ModelSpec` — see above.
+- `modelCatalog?: () => ModelCatalogEntry[] | Promise<ModelCatalogEntry[]>` —
+  what `SessionHost.listModels()` (and therefore the `listModels` wire verb)
+  answers with. Injected for the same reason as `resolveModel`: the catalog
+  lives in `@arcturn/ai`, which this package does not depend on, so the CLI
+  supplies it (`createServeHost` → `modelCatalogEntries()`, the same source
+  `--list-models` renders). Without it the host answers `[]` rather than
+  inventing entries. Whatever the source returns is re-validated against the
+  wire contract on the way out, so a host cannot leak a field the contract
+  does not define — a credential value being the one that matters.
 
 ## `agentFactory` alone must know how to resume a session
 

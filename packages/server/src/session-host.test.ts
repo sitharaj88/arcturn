@@ -1,6 +1,6 @@
 import { isAbsolute, resolve } from "node:path";
 import { Agent, MemorySessionStore } from "@arcturn/core";
-import type { AgentEvent, Tool } from "@arcturn/types";
+import type { AgentEvent, ModelCatalogEntry, Tool } from "@arcturn/types";
 import { describe, expect, it } from "vitest";
 import { SessionHost, SessionHostError } from "./session-host.js";
 import {
@@ -323,5 +323,52 @@ describe("SessionHost", () => {
 
     const runEnd = events.find((e) => e.type === "runEnd");
     expect(runEnd).toBeDefined();
+  });
+});
+
+describe("SessionHost.listModels", () => {
+  const CATALOG: ModelCatalogEntry[] = [
+    {
+      id: "anthropic/claude-sonnet-5",
+      provider: "anthropic",
+      displayName: "Claude Sonnet 5",
+      contextWindow: 1_000_000,
+      maxOutputTokens: 128_000,
+      cost: { input: 2, output: 10 },
+      apiKeyEnv: "ANTHROPIC_API_KEY",
+      credentials: "present",
+    },
+    {
+      id: "local/whatever",
+      provider: "openai-compatible",
+      displayName: "Whatever",
+      contextWindow: 128_000,
+      maxOutputTokens: 8_192,
+      credentials: "unknown",
+    },
+  ];
+
+  it("reports the catalog it was given, pricing gaps and all", async () => {
+    const host = new SessionHost({
+      agentFactory: (opts) =>
+        new Agent({
+          llm: createScriptedLLM([textTurn("hi")]),
+          model: TEST_MODEL,
+          systemPrompt: "You are a test agent.",
+          tools: [],
+          cwd: opts.cwd,
+          sessionId: opts.sessionId,
+        }),
+      defaultCwd: "/tmp/arcturn-test",
+      modelCatalog: () => CATALOG,
+    });
+    const models = await host.listModels();
+    expect(models).toEqual(CATALOG);
+    expect(models[1]?.cost).toBeUndefined();
+  });
+
+  it("reports an empty catalog when no source was wired, rather than inventing one", async () => {
+    const { host } = buildHost(createScriptedLLM([textTurn("hi")]));
+    expect(await host.listModels()).toEqual([]);
   });
 });

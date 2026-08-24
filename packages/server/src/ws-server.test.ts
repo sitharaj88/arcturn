@@ -2,6 +2,7 @@ import { Agent } from "@arcturn/core";
 import type {
   AgentEvent,
   AssistantMessage,
+  ModelCatalogEntry,
   ServerMessage,
   StreamEvent,
   Tool,
@@ -538,5 +539,122 @@ describe("ArcturnServer DoS limits", () => {
         Object.defineProperty(WebSocket.prototype, "bufferedAmount", originalDescriptor);
       }
     }
+  });
+});
+
+describe("ArcturnServer: forward compatibility of new verbs", () => {
+  // The contract every *optional* verb depends on, `listModels` first among
+  // them: a server that does not know a method answers `invalidRequest` and
+  // keeps talking, so a newer client can ask, be told no, and carry on. If
+  // this ever changed to a connection close, every new-client/old-server pair
+  // would break instead of degrading.
+  it("refuses a method it does not know with invalidRequest, and stays usable", async () => {
+    const host = buildSessionHost(createScriptedLLM([textTurn("hi")]));
+    const { url } = await startServer(host);
+    const ws = await connect(url);
+    const messages = collectMessages(ws);
+
+    send(ws, { id: "1", method: "aVerbFromTheFuture" });
+    await waitFor(messages, (m) => responseFor(m, "1") !== undefined);
+    expect(responseFor(messages, "1")).toMatchObject({
+      kind: "response",
+      id: "1",
+      error: { code: "invalidRequest", message: 'Unknown method: "aVerbFromTheFuture"' },
+    });
+
+    send(ws, { id: "2", method: "listSessions" });
+    await waitFor(messages, (m) => responseFor(m, "2") !== undefined);
+    expect(ws.readyState).toBe(WebSocket.OPEN);
+  });
+});
+
+describe("ArcturnServer: listModels", () => {
+  it("answers with the host's model catalog", async () => {
+    const host = new SessionHost({
+      agentFactory: (opts) =>
+        new Agent({
+          llm: createScriptedLLM([textTurn("hi")]),
+          model: TEST_MODEL,
+          systemPrompt: "You are a test agent.",
+          tools: [],
+          cwd: opts.cwd,
+          sessionId: opts.sessionId,
+        }),
+      defaultCwd: "/tmp/arcturn-ws-test",
+      modelCatalog: () => [
+        {
+          id: "anthropic/claude-sonnet-5",
+          provider: "anthropic",
+          displayName: "Claude Sonnet 5",
+          contextWindow: 1_000_000,
+          maxOutputTokens: 128_000,
+          cost: { input: 2, output: 10 },
+          apiKeyEnv: "ANTHROPIC_API_KEY",
+          credentials: "present" as const,
+        },
+      ],
+    });
+    const { url } = await startServer(host);
+    const ws = await connect(url);
+    const messages = collectMessages(ws);
+
+    send(ws, { id: "1", method: "listModels" });
+    await waitFor(messages, (m) => responseFor(m, "1") !== undefined);
+
+    expect(responseFor(messages, "1")).toMatchObject({
+      kind: "response",
+      id: "1",
+      result: {
+        models: [
+          {
+            id: "anthropic/claude-sonnet-5",
+            displayName: "Claude Sonnet 5",
+            contextWindow: 1_000_000,
+            cost: { input: 2, output: 10 },
+            apiKeyEnv: "ANTHROPIC_API_KEY",
+            credentials: "present",
+          },
+        ],
+      },
+    });
+  });
+
+  it("never puts a credential value on the wire, only the variable's name", async () => {
+    const host = new SessionHost({
+      agentFactory: (opts) =>
+        new Agent({
+          llm: createScriptedLLM([textTurn("hi")]),
+          model: TEST_MODEL,
+          systemPrompt: "You are a test agent.",
+          tools: [],
+          cwd: opts.cwd,
+          sessionId: opts.sessionId,
+        }),
+      defaultCwd: "/tmp/arcturn-ws-test",
+      modelCatalog: () => [
+        {
+          id: "anthropic/claude-sonnet-5",
+          provider: "anthropic",
+          displayName: "Claude Sonnet 5",
+          contextWindow: 1_000_000,
+          maxOutputTokens: 128_000,
+          apiKeyEnv: "ANTHROPIC_API_KEY",
+          credentials: "present" as const,
+          // A host that wrongly hands over a secret must not have it forwarded.
+          apiKey: "sk-live-should-never-ship",
+        } as ModelCatalogEntry,
+      ],
+    });
+    const { url } = await startServer(host);
+    const ws = await connect(url);
+    const messages = collectMessages(ws);
+
+    send(ws, { id: "1", method: "listModels" });
+    await waitFor(messages, (m) => responseFor(m, "1") !== undefined);
+
+    expect(responseFor(messages, "1")).toMatchObject({
+      result: { models: [{ id: "anthropic/claude-sonnet-5", apiKeyEnv: "ANTHROPIC_API_KEY" }] },
+    });
+    expect(JSON.stringify(responseFor(messages, "1"))).not.toContain("sk-live-should-never-ship");
   });
 });

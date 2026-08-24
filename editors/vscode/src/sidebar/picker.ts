@@ -13,15 +13,33 @@
  * ### Models
  *
  * RFC 0004 §1 describes the model picker as a "quick-pick fed by the session's
- * catalog". **The protocol has no catalog verb.** `ProtocolClient` is
- * `authenticate`, `listSessions`, `createSession`, `openSession`, `prompt`,
- * `steer`, `abort`, `setModel`, `respondToPermission`, `onEvent`, `close` —
- * and §0 is explicit that a sidebar feature needing a verb this list lacks is
- * an engine RFC, not an extension hack. So the picker is fed from what the
- * client can honestly know: model ids the engine itself announced on this
- * session's stream, the workspace's configured default, and a free-text entry
- * for anything else. `setModel` then validates the id server-side, which is
- * where that validation belongs anyway.
+ * catalog". The protocol had no catalog verb when this file was first written,
+ * so the picker ran on ids the engine happened to announce plus free text —
+ * on a fresh session, nearly nothing. §0's rule ("a sidebar feature needing a
+ * verb this list lacks is an engine RFC, not an extension hack") was followed
+ * rather than routed around: `listModels` was added to the wire, and the
+ * picker now renders the engine's real catalog — the same models
+ * `arcturn --list-models` prints, with context window, price and whether the
+ * server holds a credential for them.
+ *
+ * Three things survive from the old design, and all three still earn their
+ * place:
+ *
+ * - **The free-text row.** The catalog lists what is *registered*; an
+ *   extension may register more, and `setModel` validates the id server-side
+ *   anyway, which is where that validation belongs.
+ * - **`arcturn.defaultModel` and the ids seen on this session's stream.** A
+ *   model the session is actually using belongs in the list whether or not
+ *   the catalog carries it.
+ * - **Working with no catalog at all.** `listModels` is an optional verb: an
+ *   older engine rejects it and `ProtocolClient.listModels` resolves
+ *   `undefined`, at which point this builder degrades silently to exactly the
+ *   behaviour it had before — observed ids, the configured default, free text.
+ *
+ * Pricing is reported the way the engine reports it: an entry with no `cost`
+ * has an *unknown* price, which is not `$0`. Printing a free-looking zero for
+ * a model nobody has published a rate for is the silent wrong answer this
+ * codebase keeps refusing to give, so those rows say "pricing unknown".
  *
  * ### Why labels are escaped
  *
@@ -36,7 +54,7 @@
  * and stay live.
  */
 
-import type { SessionHeader } from "../serve/engine.js";
+import type { ModelCatalogEntry, SessionHeader } from "../serve/engine.js";
 
 /**
  * One row of the sessions quick-pick.
@@ -135,12 +153,18 @@ export interface ModelPickItem {
   action: "model" | "other";
   label: string;
   description?: string;
+  detail?: string;
   /** Present only on a `"model"` row. */
   modelId?: string;
 }
 
 /** Options for {@link modelPickItems}. */
 export interface ModelPickOptions {
+  /**
+   * The engine's catalog, from `listModels`. Absent when the engine predates
+   * the verb — the picker then behaves exactly as it did before it existed.
+   */
+  catalog?: readonly ModelCatalogEntry[];
   /** Model ids seen on this session's stream, oldest first. */
   observed: readonly string[];
   /** `arcturn.defaultModel`, when the workspace sets one. */
@@ -149,28 +173,111 @@ export interface ModelPickOptions {
   current?: string;
 }
 
+/** `1000k ctx` — the same rounding `arcturn --list-models` prints. */
+function formatContext(tokens: number): string {
+  return `${Math.round(tokens / 1000)}k ctx`;
+}
+
+/**
+ * Price per million tokens, or the honest absence of one.
+ *
+ * `cost: undefined` is "nobody published a rate", not "free"; a genuinely free
+ * model reports `{ input: 0, output: 0 }` and prints as `$0/$0`.
+ */
+function formatCost(entry: ModelCatalogEntry): string {
+  return entry.cost === undefined
+    ? "pricing unknown"
+    : `$${entry.cost.input}/$${entry.cost.output} per Mtok`;
+}
+
+/**
+ * What the engine knows about this model's credential.
+ *
+ * `"unknown"` is reported as "credentials unknown", never as "not set": the
+ * engine says it cannot tell (ambient AWS/Google credentials, or a local
+ * endpoint that needs no key), and turning that into a warning would tell the
+ * user they cannot use a model they can.
+ */
+function formatCredentials(entry: ModelCatalogEntry): string {
+  const name = entry.apiKeyEnv === undefined ? undefined : escapeCodicons(entry.apiKeyEnv);
+  switch (entry.credentials) {
+    case "present":
+      return name === undefined ? "credentials found" : `${name} set`;
+    case "absent":
+      return name === undefined ? "no credentials found" : `${name} not set`;
+    default:
+      // The variable name belongs here too: it is what a user types to find the
+      // models that need it, and every real "unknown" entry in the catalog
+      // (the openai-compatible providers) names one.
+      return name === undefined ? "credentials unknown" : `${name}: credentials unknown`;
+  }
+}
+
+/** Build one catalogued row. Every engine-supplied string is escaped on the way in. */
+function catalogItem(entry: ModelCatalogEntry, current: string | undefined): ModelPickItem {
+  const id = escapeCodicons(entry.id);
+  return {
+    action: "model",
+    label: escapeCodicons(entry.displayName),
+    description: entry.id === current ? `${id} · current` : id,
+    detail: `${formatContext(entry.contextWindow)} · ${formatCost(entry)} · ${formatCredentials(entry)}`,
+    modelId: entry.id,
+  };
+}
+
 /**
  * Build the model quick-pick.
  *
+ * Order is what makes a 135-row catalog usable: the model in use first, then
+ * the models this server actually holds a credential for, then the rest of the
+ * catalog, then any id the session or the workspace config named that the
+ * catalog does not carry. A free-text row always ends the list.
+ *
  * @param options - See {@link ModelPickOptions}.
- * @returns Most recently seen first, always ending with a free-text row.
+ * @returns Rows in that order, always ending with a free-text row.
  */
 export function modelPickItems(options: ModelPickOptions): ModelPickItem[] {
-  const ids: string[] = [];
+  const catalog = options.catalog ?? [];
+  const current = options.current === "" ? undefined : options.current;
+
+  const inCatalog = new Set(catalog.map((entry) => entry.id));
+  const currentEntry = catalog.find((entry) => entry.id === current);
+  const rest = catalog.filter((entry) => entry.id !== current);
+
+  const items: ModelPickItem[] = [];
+  if (currentEntry) items.push(catalogItem(currentEntry, current));
+  else if (current !== undefined) {
+    // In use but not in the catalog (an extension-registered model, or an
+    // engine with no catalog verb at all): still the first row, still marked.
+    items.push({
+      action: "model",
+      label: escapeCodicons(current),
+      description: "current",
+      modelId: current,
+    });
+  }
+  for (const entry of rest) {
+    if (entry.credentials === "present") items.push(catalogItem(entry, current));
+  }
+  for (const entry of rest) {
+    if (entry.credentials !== "present") items.push(catalogItem(entry, current));
+  }
+
+  // Ids the catalog does not carry: what the engine announced on this
+  // session's stream (most recent first) and the configured default. The
+  // model in use is already the first row, catalogued or not. Without a
+  // catalog these are the whole list — the behaviour this picker had before
+  // `listModels` existed.
+  const seen = new Set(inCatalog);
+  if (current !== undefined) seen.add(current);
   const push = (id: string | undefined): void => {
-    if (id === undefined || id === "" || ids.includes(id)) return;
-    ids.push(id);
+    if (id === undefined || id === "" || seen.has(id)) return;
+    seen.add(id);
+    items.push({ action: "model", label: escapeCodicons(id), modelId: id });
   };
   for (const id of [...options.observed].reverse()) push(id);
   push(options.configured);
-  push(options.current);
 
-  const items: ModelPickItem[] = ids.map((id) => ({
-    action: "model" as const,
-    label: escapeCodicons(id),
-    modelId: id,
-    ...(id === options.current ? { description: "current" } : {}),
-  }));
   items.push({ action: "other", label: "$(edit) Enter a model id…" });
   return items;
 }

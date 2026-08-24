@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   validateClientRequest,
+  validateModelCatalog,
   validatePermissionDecision,
   validatePermissionRule,
   validateServerMessage,
@@ -47,6 +48,7 @@ describe("validateClientRequest: accepts every method", () => {
       },
     ],
     ["setModel", { id: "1", method: "setModel", params: { sessionId: "s1", model: "opus" } }],
+    ["listModels", { id: "1", method: "listModels" }],
   ];
 
   it.each(cases)("%s", (_name, value) => {
@@ -264,5 +266,74 @@ describe("validateSessionHeader", () => {
       createdAt: "yesterday",
     });
     expect(result.ok).toBe(false);
+  });
+});
+
+describe("validateModelCatalog", () => {
+  const entry = {
+    id: "anthropic/claude-sonnet-5",
+    provider: "anthropic",
+    displayName: "Claude Sonnet 5",
+    contextWindow: 1_000_000,
+    maxOutputTokens: 128_000,
+    cost: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
+    apiKeyEnv: "ANTHROPIC_API_KEY",
+    credentials: "present",
+  };
+
+  it("accepts a catalog and preserves every documented field", () => {
+    const result = validateModelCatalog({ models: [entry] });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.models[0]).toEqual(entry);
+  });
+
+  it("accepts a bare array, like listSessions does", () => {
+    const result = validateModelCatalog([entry]);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.models).toHaveLength(1);
+  });
+
+  it("keeps an unpriced model distinguishable from a free one", () => {
+    const result = validateModelCatalog({
+      models: [
+        {
+          id: "a/unpriced",
+          provider: "a",
+          displayName: "Unpriced",
+          contextWindow: 8_000,
+          credentials: "unknown",
+        },
+        {
+          id: "a/free",
+          provider: "a",
+          displayName: "Free",
+          contextWindow: 8_000,
+          cost: { input: 0, output: 0 },
+          credentials: "unknown",
+        },
+      ],
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.models[0]?.cost).toBeUndefined();
+    expect(result.value.models[1]?.cost).toEqual({ input: 0, output: 0 });
+  });
+
+  it("drops any field the contract does not define, so a leaked secret cannot ride along", () => {
+    const result = validateModelCatalog({
+      models: [{ ...entry, apiKey: "sk-live-do-not-ship", token: "t" }],
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(JSON.stringify(result.value)).not.toContain("sk-live-do-not-ship");
+    expect(Object.hasOwn(result.value.models[0] as object, "apiKey")).toBe(false);
+  });
+
+  it("rejects entries that are not the documented shape", () => {
+    expect(validateModelCatalog({ models: "nope" }).ok).toBe(false);
+    expect(validateModelCatalog({ models: [null] }).ok).toBe(false);
+    expect(validateModelCatalog({ models: [{ ...entry, contextWindow: "big" }] }).ok).toBe(false);
+    expect(validateModelCatalog({ models: [{ ...entry, credentials: "maybe" }] }).ok).toBe(false);
+    expect(validateModelCatalog({ models: [{ ...entry, cost: { input: 1 } }] }).ok).toBe(false);
   });
 });

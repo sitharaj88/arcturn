@@ -19,7 +19,12 @@
 
 import { buildServeArgs, cliInvocation, type ResolvedCliLike } from "../serve/args.js";
 import { connectToServe, type SocketFactory } from "../serve/connect.js";
-import type { ProtocolClient, SessionHeader, WebSocketLike } from "../serve/engine.js";
+import type {
+  ModelCatalogEntry,
+  ProtocolClient,
+  SessionHeader,
+  WebSocketLike,
+} from "../serve/engine.js";
 import { createRedactor } from "../serve/redact.js";
 import { type ServeProcess, type SpawnLike, startServeProcess } from "../serve/supervisor.js";
 import {
@@ -69,6 +74,12 @@ export interface EngineSession {
   restart(): Promise<void>;
   /** Every session the engine knows about. */
   listSessions(): Promise<SessionHeader[]>;
+  /**
+   * The engine's model catalog, or `undefined` when this engine is older than
+   * the `listModels` verb (see `ProtocolClient.listModels`). Callers render
+   * the fallback picker on `undefined` rather than showing an error.
+   */
+  listModels(): Promise<ModelCatalogEntry[] | undefined>;
   /** Attach to an existing session. */
   openSession(sessionId: string): Promise<void>;
   /** Create and attach to a fresh session. */
@@ -272,6 +283,9 @@ export function createEngineSession(options: EngineSessionOptions): EngineSessio
       await start();
     },
     listSessions: () => requireClient().listSessions(),
+    async listModels(): Promise<ModelCatalogEntry[] | undefined> {
+      return (await requireClient().listModels())?.models;
+    },
     async openSession(sessionId: string): Promise<void> {
       attach(await requireClient().openSession(sessionId));
     },

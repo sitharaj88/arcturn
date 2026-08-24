@@ -248,9 +248,24 @@ around in the extension per the one-engine rule and owed a proper fix here:
 - `arcturn serve` accepts the auth token only on argv (visible in `ps`) and
   echoes it on its own stdout attach hint. Add `--token-fd` or an env var,
   and stop printing the secret the flag exists to protect.
-- No `listModels` protocol verb: a client cannot render the model catalog
-  without inventing one, so the extension's picker runs on announced ids
-  plus free text.
+
+**Done (2026-08-25): the `listModels` protocol verb.** The gap that used to sit
+here — "a client cannot render the model catalog without inventing one, so the
+extension's picker runs on announced ids plus free text" — is closed. The wire
+carries a `listModels` request answering `{ models: [...] }`, one entry per
+registered model with id, display name, context window, pricing, the *name* of
+its API-key variable and a three-valued `credentials` flag; `arcturn serve`
+sources it from the same `modelCatalogEntries()` that `--list-models` prints,
+so there is no second list to drift. Two honesty rules are on the wire, not
+just in the renderer: an absent `cost` means the price is unknown and not
+`$0`, and `credentials: "unknown"` ("the server cannot tell" — ambient AWS or
+Google credentials, or a keyless local endpoint) is distinct from `"absent"`.
+The key value itself never leaves the server. `PROTOCOL_VERSION` stays at `1`:
+the verb is additive and optional, an older server rejects it with an ordinary
+`invalidRequest` that `ProtocolClient.listModels()` turns into `undefined`, and
+the VS Code picker degrades to exactly its old behaviour on that. A bump would
+instead have severed every existing pair, since `SessionHeader.version` is
+validated as `1` at both ends.
 
 Contracts v2 (from packages/ai/NOTES.md): optional thinking `signature` on StreamEvent
 and ToolCallContent — needed for full reasoning continuity on Gemini tool turns and to

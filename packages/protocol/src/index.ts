@@ -30,6 +30,9 @@ export type {
 } from "./validate.js";
 export {
   validateClientRequest,
+  validateModelCatalog,
+  validateModelCatalogEntry,
+  validateModelCost,
   validatePermissionDecision,
   validatePermissionRule,
   validateServerMessage,

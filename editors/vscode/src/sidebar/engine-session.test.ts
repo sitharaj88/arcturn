@@ -277,6 +277,46 @@ describe("createEngineSession", () => {
     expect(headers.map((header) => header.sessionId)).toEqual(["s1"]);
   });
 
+  it("lists the engine's model catalog through the protocol", async () => {
+    const h = harness();
+    await started(h);
+    h.socket.autoRespond = (frame) =>
+      frame.method === "listModels"
+        ? {
+            models: [
+              {
+                id: "anthropic/claude-sonnet-5",
+                provider: "anthropic",
+                displayName: "Claude Sonnet 5",
+                contextWindow: 1_000_000,
+                credentials: "present",
+              },
+            ],
+          }
+        : {};
+    const models = await h.session.listModels();
+    expect(models?.map((model) => model.id)).toEqual(["anthropic/claude-sonnet-5"]);
+  });
+
+  it("reports no catalog, rather than failing, against an engine without the verb", async () => {
+    const h = harness();
+    await started(h);
+    const socket = h.socket;
+    socket.autoRespond = (frame) => {
+      if (frame.method !== "listModels") return {};
+      // What an engine older than the verb answers; see ws-server.ts.
+      queueMicrotask(() =>
+        socket.emit({
+          kind: "response",
+          id: frame.id,
+          error: { code: "invalidRequest", message: 'Unknown method: "listModels"' },
+        }),
+      );
+      return undefined;
+    };
+    await expect(h.session.listModels()).resolves.toBeUndefined();
+  });
+
   it("dispose kills the child, closes the client and disposes the controller", async () => {
     const h = harness();
     await started(h);

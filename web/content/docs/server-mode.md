@@ -111,6 +111,7 @@ Every message is one of two shapes:
 { "id": "6", "method": "abort", "params": { "sessionId": "sess_abc" } }
 { "id": "7", "method": "permissionDecision", "params": { "sessionId": "sess_abc", "decision": { "requestId": "req_1", "behavior": "allow" } } }
 { "id": "8", "method": "setModel", "params": { "sessionId": "sess_abc", "model": "openai/gpt-4o" } }
+{ "id": "9", "method": "listModels" }
 ```
 
 ```json
@@ -147,6 +148,65 @@ A typical session, client-initiated:
 4. `{ method: "steer", params: { sessionId, text } }` injects a message mid-run, exactly
    like `agent.steer()` locally.
 5. `{ method: "abort", params: { sessionId } }` cancels the in-flight run.
+
+## The model catalog
+
+`listModels` answers with every model this server can be switched to — the same catalog
+`arcturn --list-models` prints, from the same source. It takes no params and touches no
+session: the catalog belongs to the server, not to a conversation. It exists so a client
+can render a real model picker instead of guessing from the ids one session happened to
+announce.
+
+```json
+// Client → server
+{ "id": "9", "method": "listModels" }
+
+// Server → client
+{
+  "kind": "response",
+  "id": "9",
+  "result": {
+    "models": [
+      {
+        "id": "anthropic/claude-sonnet-5",
+        "provider": "anthropic",
+        "displayName": "Claude Sonnet 5",
+        "contextWindow": 1000000,
+        "maxOutputTokens": 128000,
+        "cost": { "input": 2, "output": 10, "cacheRead": 0.2, "cacheWrite": 2.5 },
+        "apiKeyEnv": "ANTHROPIC_API_KEY",
+        "credentials": "present"
+      }
+    ]
+  }
+}
+```
+
+`id` is what `setModel` accepts. `cost` is USD per million tokens, and **its absence means
+the price is unknown, not zero** — a model that genuinely costs nothing reports
+`{ "input": 0, "output": 0 }`, and a model nobody has published a rate for reports no
+`cost` at all. Rendering the missing case as `$0.00` tells the user something false; say
+"pricing unknown" instead, which is exactly what `--list-models` prints.
+
+`credentials` is three-valued, because a picker is only useful if it can say which models
+you can actually run:
+
+| Value | Meaning |
+| --- | --- |
+| `"present"` | The server found a key for this model in its own environment. |
+| `"absent"` | The model names an environment variable and it is not set — the server would refuse to start a session on it. |
+| `"unknown"` | The server cannot tell from the environment alone: the model names no variable (ambient AWS or Google credentials), or it is an `openai-compatible` endpoint that may need no key at all. |
+
+`apiKeyEnv` is the *name* of that variable, so a client can tell the user what to set. The
+value is never on the wire, and the entry carries nothing else: `@arcturn/protocol`'s
+`validateModelCatalog` copies out only the fields above, at both ends.
+
+`listModels` is **optional and additive**. A server built before it existed answers
+`{ "code": "invalidRequest", "message": "Unknown method: \"listModels\"" }` and keeps the
+connection open, so `ProtocolClient.listModels()` translates that one rejection into
+`undefined` — "this server has no catalog" — and a client degrades to whatever it did
+before. Every other failure still rejects, so a broken catalog is never mistaken for an
+old server. Adding it did **not** bump `PROTOCOL_VERSION`; see [Versioning](#versioning).
 
 ## Reconnecting
 
@@ -192,6 +252,14 @@ hostname or a reverse-proxy name can't be guessed from the bind address.
 changes in a way old clients can't safely ignore. A server and client should agree on it
 during connection setup; a server built against a newer protocol version should be
 prepared to reject or degrade for an older client rather than silently misbehave.
+
+Adding an *optional* verb is not such a change, and `listModels` did not bump it. An older
+server rejects the new verb with an ordinary `invalidRequest` response the newer client
+handles, and an older client simply never sends it — both halves keep working. A bump, by
+contrast, breaks in both directions: `SessionHeader.version` is stamped `1` and validated
+as `1`, and the protocol client raises `ProtocolVersionMismatchError` for any header or
+handshake advertising a different number. Raising it to announce a feature neither side
+needs to negotiate would sever every existing client/server pair.
 
 ## Known limitation: shared tools and checkpoints
 

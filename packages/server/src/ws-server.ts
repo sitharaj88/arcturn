@@ -363,6 +363,8 @@ export class ArcturnServer {
       case "setModel":
         this.#sessionHost.setModel(request.params.sessionId, request.params.model);
         return { ok: true };
+      case "listModels":
+        return { models: await this.#sessionHost.listModels() };
       default:
         return exhaustiveCheck(request);
     }

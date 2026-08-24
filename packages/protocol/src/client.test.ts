@@ -173,6 +173,7 @@ describe("createProtocolClient: request framing", () => {
     void client.abort("s1");
     void client.setModel("s1", "haiku");
     void client.respondToPermission("s1", { requestId: "r1", behavior: "allow" });
+    void client.listModels();
     await flush();
 
     expect(
@@ -189,6 +190,7 @@ describe("createProtocolClient: request framing", () => {
         method: "permissionDecision",
         params: { sessionId: "s1", decision: { requestId: "r1", behavior: "allow" } },
       },
+      { method: "listModels", params: undefined },
     ]);
     // Ids are unique per request.
     const ids = socket.frames().map((frame) => frame.id);
@@ -739,5 +741,78 @@ describe("WebSocketLike", () => {
     // The assertion that matters is the assignment type-checking at all.
     const ws = { close: vi.fn(), send: vi.fn(), on: vi.fn() } as unknown as WsWebSocket;
     expect(accept(ws)).toBe(ws);
+  });
+});
+
+describe("createProtocolClient: listModels", () => {
+  const ENTRY = {
+    id: "anthropic/claude-sonnet-5",
+    provider: "anthropic",
+    displayName: "Claude Sonnet 5",
+    contextWindow: 1_000_000,
+    maxOutputTokens: 128_000,
+    cost: { input: 2, output: 10 },
+    apiKeyEnv: "ANTHROPIC_API_KEY",
+    credentials: "present",
+  } as const;
+
+  it("returns the server's catalog", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.listModels();
+    await flush();
+    socket.respondOk(0, { models: [ENTRY] });
+
+    const catalog = await promise;
+    expect(catalog?.models).toEqual([ENTRY]);
+  });
+
+  it("accepts a bare array, like listSessions does", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.listModels();
+    await flush();
+    socket.respondOk(0, [ENTRY]);
+
+    expect((await promise)?.models).toHaveLength(1);
+  });
+
+  it("degrades to undefined against an old server that does not know the verb", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.listModels();
+    await flush();
+    // Exactly what packages/server/src/ws-server.ts answers today for a method
+    // its `validateClientRequest` does not recognise.
+    socket.respondError(0, ErrorCode.invalidRequest, 'Unknown method: "listModels"');
+
+    await expect(promise).resolves.toBeUndefined();
+  });
+
+  it("still rejects when the server fails the call for a real reason", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.listModels();
+    await flush();
+    socket.respondError(0, ErrorCode.internal, "catalog blew up");
+
+    const error = await rejection<ProtocolRequestError>(promise);
+    expect(error.code).toBe(ErrorCode.internal);
+  });
+
+  it("rejects a catalog payload that is not the documented shape", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.listModels();
+    await flush();
+    socket.respondOk(0, { models: [{ id: "a/b" }] });
+
+    const error = await rejection(promise);
+    expect(error.code).toBe(ClientErrorCode.invalidResponse);
   });
 });

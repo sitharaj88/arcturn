@@ -114,6 +114,7 @@ export {
   formatModelCatalog,
   formatProviderCatalog,
   ModelResolutionError,
+  modelCatalogEntries,
   registerBundledCatalog,
   resolveModelSpec,
   type SessionMetrics,

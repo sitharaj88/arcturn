@@ -252,14 +252,30 @@ export function activateSidebar(
         const controller = session.controller;
         if (controller === undefined) return;
         const configured = vscode.workspace.getConfiguration("arcturn").get<string>("defaultModel");
+        // `listModels` is an optional verb: an older engine answers
+        // `undefined`, and anything else that goes wrong here is a
+        // diagnostic, not a reason to deny the user a picker. Either way the
+        // catalog is simply absent and the pre-catalog rows still render.
+        const catalog = await session.listModels().catch((error: unknown) => {
+          log(
+            `sidebar: model catalog unavailable: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          return undefined;
+        });
         const items = modelPickItems({
+          ...(catalog === undefined ? {} : { catalog }),
           observed: controller.observedModels,
           ...(configured === undefined || configured === "" ? {} : { configured }),
           ...(controller.state.model === undefined ? {} : { current: controller.state.model }),
         });
         const picked = await vscode.window.showQuickPick(items, {
           title: "Arcturn model",
-          placeHolder: "Switch the model for this session",
+          placeHolder:
+            catalog === undefined
+              ? "Switch the model for this session"
+              : `Switch the model for this session (${catalog.length} available)`,
+          matchOnDescription: true,
+          matchOnDetail: true,
         });
         if (picked === undefined) return;
         const modelId =

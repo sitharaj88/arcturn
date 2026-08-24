@@ -6,9 +6,11 @@
 
 import { resolve, sep } from "node:path";
 import { type Agent, createSessionId } from "@arcturn/core";
+import { validateModelCatalog } from "@arcturn/protocol";
 import type {
   AgentEvent,
   AgentEventListener,
+  ModelCatalogEntry,
   ModelSpec,
   PermissionDecision,
   PermissionPrompt,
@@ -76,6 +78,21 @@ export interface SessionHostOptions {
    */
   resolveModel?: (modelId: string) => ModelSpec;
   /**
+   * Source of the model catalog {@link SessionHost.listModels} answers with.
+   *
+   * Injected for the same reason as {@link SessionHostOptions.resolveModel}:
+   * the catalog lives in `@arcturn/ai`, and this package does not depend on
+   * it — the CLI, which owns model registration, supplies the real one (see
+   * `createServeHost` and `modelCatalogEntries` in `@arcturn/cli`). Omitted,
+   * the host reports an empty catalog rather than inventing entries it has no
+   * way to know about.
+   *
+   * Whatever this returns is re-validated against the wire contract before it
+   * leaves the host, so an entry can never carry a field the contract does
+   * not define — a credential *value* being the one that matters.
+   */
+  modelCatalog?: () => ModelCatalogEntry[] | Promise<ModelCatalogEntry[]>;
+  /**
    * Maximum number of concurrently *live* sessions this host will hold (each
    * one is a full agent: LLM connection, tool set, in-memory history).
    * Without a cap, a client could `createSession` in a loop and exhaust
@@ -117,6 +134,7 @@ export class SessionHost {
   readonly #cwdRoot: string;
   readonly #permissionTimeoutMs: number;
   readonly #resolveModel: (modelId: string) => ModelSpec;
+  readonly #modelCatalog: (() => ModelCatalogEntry[] | Promise<ModelCatalogEntry[]>) | undefined;
   readonly #maxSessions: number;
   readonly #sessions = new Map<string, LiveSession>();
 
@@ -134,6 +152,7 @@ export class SessionHost {
     this.#cwdRoot = resolve(options.cwdRoot ?? options.defaultCwd);
     this.#permissionTimeoutMs = options.permissionTimeoutMs ?? DEFAULT_PERMISSION_TIMEOUT_MS;
     this.#resolveModel = options.resolveModel ?? defaultResolveModel;
+    this.#modelCatalog = options.modelCatalog;
     this.#maxSessions = options.maxSessions ?? DEFAULT_MAX_SESSIONS;
   }
 
@@ -187,6 +206,30 @@ export class SessionHost {
     return [...this.#sessions.values()]
       .map((session) => session.header)
       .sort((a, b) => b.createdAt - a.createdAt);
+  }
+
+  /**
+   * Every model a client may pass to {@link SessionHost.setModel}.
+   *
+   * Not session-scoped: the catalog is a property of the server. Sourced from
+   * {@link SessionHostOptions.modelCatalog} and normalized against the wire
+   * contract on the way out — unknown fields are dropped, so a host that
+   * hands over more than the contract defines cannot leak it to a client.
+   *
+   * @returns The catalog, or `[]` when no source was wired.
+   * @throws When the wired source returns entries that are not valid
+   *   {@link ModelCatalogEntry} values. That is a wiring bug in the host
+   *   process, and reporting it beats quietly serving a truncated catalog a
+   *   user would read as "these are all the models there are".
+   */
+  async listModels(): Promise<ModelCatalogEntry[]> {
+    if (!this.#modelCatalog) return [];
+    const entries = await this.#modelCatalog();
+    const validation = validateModelCatalog({ models: entries });
+    if (!validation.ok) {
+      throw new Error(`Model catalog is not a valid wire payload: ${validation.error}`);
+    }
+    return validation.value.models;
   }
 
   /**

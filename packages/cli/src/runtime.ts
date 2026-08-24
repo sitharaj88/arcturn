@@ -53,6 +53,8 @@ import type {
   AgentEvent,
   AgentEventListener,
   LLMClient,
+  ModelCatalogEntry,
+  ModelCredentialStatus,
   ModelSpec,
   PermissionDecision,
   PermissionMode,
@@ -227,9 +229,71 @@ export function resolveModelSpec(id: string, env: EnvMap = process.env): ModelSp
   return spec;
 }
 
+/**
+ * The registered model catalog, in the shape the wire protocol carries.
+ *
+ * One source, two renderings: {@link formatModelCatalog} prints these entries
+ * for `--list-models`, and `arcturn serve` answers the `listModels` verb with
+ * them (see `createServeHost`), so a remote picker sees exactly the models the
+ * CLI would list — no second list to drift.
+ *
+ * Two honesty rules are carried over from the printed catalog:
+ *
+ * - **`cost` absent means the price is unknown**, never zero. A model that
+ *   really is free reports `{ input: 0, output: 0 }`. `--list-models` prints
+ *   "pricing unknown" for the absent case for the same reason.
+ * - **`credentials` is three-valued** (see {@link credentialStatus}), because
+ *   "the server could not tell" is not "you have no key".
+ *
+ * The environment is read only to answer *whether* a key is present; no key
+ * value is ever placed in an entry.
+ *
+ * @param env - Environment consulted for key presence. Defaults to `process.env`.
+ */
+export function modelCatalogEntries(env: EnvMap = process.env): ModelCatalogEntry[] {
+  return listModels().map((spec) => toCatalogEntry(spec, env));
+}
+
+function toCatalogEntry(spec: ModelSpec, env: EnvMap): ModelCatalogEntry {
+  return {
+    id: spec.id,
+    provider: spec.provider,
+    displayName: spec.displayName,
+    contextWindow: spec.contextWindow,
+    maxOutputTokens: spec.maxOutputTokens,
+    ...(spec.cost === undefined ? {} : { cost: spec.cost }),
+    ...(spec.apiKeyEnv === undefined ? {} : { apiKeyEnv: spec.apiKeyEnv }),
+    credentials: credentialStatus(spec, env),
+  };
+}
+
+/**
+ * Whether this environment holds the credential `spec` authenticates with.
+ *
+ * Mirrors {@link resolveModelSpec}'s own rule for what counts as "needs a
+ * key", so the catalog and the thing that actually refuses to start a session
+ * agree. `"unknown"` covers the two cases an environment scan cannot answer:
+ * a spec that names no variable authenticates from ambient credentials this
+ * process cannot inspect, and an `openai-compatible` endpoint may legitimately
+ * need no key at all (Ollama, vLLM, a local gateway) — `resolveModelSpec`
+ * skips the key check for exactly that provider. Reporting either as
+ * `"absent"` would tell a user they cannot use a model they can.
+ *
+ * Bedrock and Vertex are *not* in that bucket: their specs do name a variable
+ * (`AWS_BEARER_TOKEN_BEDROCK`, `GOOGLE_APPLICATION_CREDENTIALS`), and
+ * `resolveModelSpec` refuses to start a session without it, so an unset one
+ * is reported `"absent"` — which is what the engine will actually do, even
+ * though an AWS profile alone can reach the service.
+ */
+function credentialStatus(spec: ModelSpec, env: EnvMap): ModelCredentialStatus {
+  if (resolveApiKey(spec, { env })) return "present";
+  if (spec.provider === "openai-compatible" || spec.apiKeyEnv === undefined) return "unknown";
+  return "absent";
+}
+
 /** Render the model catalog for `--list-models` and error messages. */
 export function formatModelCatalog(): string {
-  const models = listModels();
+  const models = modelCatalogEntries();
   const width = models.reduce((max, model) => Math.max(max, model.id.length), 0);
   const lines = ["Available models:"];
   for (const model of models) {

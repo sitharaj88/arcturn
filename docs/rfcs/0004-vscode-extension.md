@@ -49,6 +49,14 @@ shipped and the extension builds against it verbatim — `authenticate`,
 a sidebar feature that needs a verb this list lacks is an engine RFC, not an
 extension hack.
 
+> **Amendment (2026-08-25).** The model picker below was the first feature to
+> hit that rule, and it was resolved the way this section prescribes: the
+> engine gained a `listModels` verb (see
+> [Server mode](/docs/server-mode#the-model-catalog)), and the list above is
+> now that list plus `listModels`. The verb is optional — an engine that
+> predates it answers `invalidRequest` and the client resolves `undefined` —
+> so the extension still runs against an older `arcturn serve`.
+
 - **Server lifecycle.** The extension spawns `arcturn serve` per workspace on
   a loopback ephemeral port with a generated token, hands the token to the
   client via the URL fragment, and never writes it to logs, settings or
@@ -64,7 +72,9 @@ extension hack.
 - **Cost in the status bar.** Live session spend from usage events, honest per
   RFC-current behavior: `$0.42`, `$0.42+` when partly priced, `n/a` when the
   model publishes no pricing. Click → a cost breakdown quick-pick.
-- **Model picker.** Quick-pick fed by the session's catalog; switch via
+- **Model picker.** Quick-pick fed by the engine's catalog (`listModels`) —
+  context window, price and credential presence per row — plus any model the
+  session announced, `arcturn.defaultModel`, and a free-text entry; switch via
   `setModel`.
 - **Sessions view.** `listSessions` for this cwd; open, resume, or start new.
 

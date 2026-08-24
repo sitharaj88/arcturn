@@ -10,6 +10,10 @@
 import type {
   AgentEvent,
   ClientRequest,
+  ModelCatalog,
+  ModelCatalogEntry,
+  ModelCost,
+  ModelCredentialStatus,
   PermissionDecision,
   PermissionRule,
   ServerMessage,
@@ -38,6 +42,7 @@ const CLIENT_METHODS = [
   "abort",
   "permissionDecision",
   "setModel",
+  "listModels",
 ] as const;
 
 const SERVER_KINDS = ["response", "event", "sessions"] as const;
@@ -143,6 +148,10 @@ export function validateClientRequest(value: unknown): ClientRequestValidation {
         method: "setModel",
         params: { sessionId: params.sessionId, model: params.model },
       });
+    }
+    case "listModels": {
+      // No params: the catalog is a property of the server, not of a session.
+      return ok<ClientRequest>({ id, method: "listModels" });
     }
     default:
       return exhaustiveCheck(method as never, `Unknown method: "${method}"`);
@@ -306,6 +315,98 @@ export function validateSessionHeader(value: unknown): ValidationResult<SessionH
     ...(value.title !== undefined ? { title: value.title } : {}),
   };
   return { ok: true, value: header };
+}
+
+const CREDENTIAL_STATUSES = ["present", "absent", "unknown"] as const;
+
+/** Validate a {@link ModelCost} value: USD per million tokens. */
+export function validateModelCost(value: unknown): ValidationResult<ModelCost> {
+  if (!isRecord(value)) return fail("ModelCost must be an object");
+  if (!isNumber(value.input)) return fail("ModelCost.input must be a number");
+  if (!isNumber(value.output)) return fail("ModelCost.output must be a number");
+  for (const key of ["cacheRead", "cacheWrite"] as const) {
+    if (value[key] !== undefined && !isNumber(value[key])) {
+      return fail(`ModelCost.${key} must be a number when present`);
+    }
+  }
+  const cost: ModelCost = { input: value.input, output: value.output };
+  if (value.cacheRead !== undefined) cost.cacheRead = value.cacheRead as number;
+  if (value.cacheWrite !== undefined) cost.cacheWrite = value.cacheWrite as number;
+  return { ok: true, value: cost };
+}
+
+/**
+ * Validate one {@link ModelCatalogEntry}.
+ *
+ * Fields are copied out one by one rather than spread: anything the contract
+ * does not define is dropped here, so a server that puts something extra on
+ * the wire — a credential value being the case that matters — cannot have it
+ * ride along into a client that renders the entry.
+ *
+ * An absent `cost` is preserved as absent. It means "nobody published a
+ * price", which is not `{ input: 0, output: 0 }`; see
+ * {@link ModelCatalogEntry.cost}.
+ */
+export function validateModelCatalogEntry(value: unknown): ValidationResult<ModelCatalogEntry> {
+  if (!isRecord(value)) return fail("ModelCatalogEntry must be an object");
+  if (!isString(value.id)) return fail("ModelCatalogEntry.id must be a string");
+  if (!isString(value.provider)) return fail("ModelCatalogEntry.provider must be a string");
+  if (!isString(value.displayName)) return fail("ModelCatalogEntry.displayName must be a string");
+  if (!isNumber(value.contextWindow)) {
+    return fail("ModelCatalogEntry.contextWindow must be a number");
+  }
+  if (value.maxOutputTokens !== undefined && !isNumber(value.maxOutputTokens)) {
+    return fail("ModelCatalogEntry.maxOutputTokens must be a number when present");
+  }
+  if (value.apiKeyEnv !== undefined && !isString(value.apiKeyEnv)) {
+    return fail("ModelCatalogEntry.apiKeyEnv must be a string when present");
+  }
+  if (
+    !isString(value.credentials) ||
+    !(CREDENTIAL_STATUSES as readonly string[]).includes(value.credentials)
+  ) {
+    return fail('ModelCatalogEntry.credentials must be one of "present" | "absent" | "unknown"');
+  }
+  let cost: ModelCost | undefined;
+  if (value.cost !== undefined) {
+    const costResult = validateModelCost(value.cost);
+    if (!costResult.ok) return fail(`ModelCatalogEntry.cost invalid: ${costResult.error}`);
+    cost = costResult.value;
+  }
+  const entry: ModelCatalogEntry = {
+    id: value.id,
+    provider: value.provider,
+    displayName: value.displayName,
+    contextWindow: value.contextWindow,
+    credentials: value.credentials as ModelCredentialStatus,
+    ...(value.maxOutputTokens === undefined
+      ? {}
+      : { maxOutputTokens: value.maxOutputTokens as number }),
+    ...(cost === undefined ? {} : { cost }),
+    ...(value.apiKeyEnv === undefined ? {} : { apiKeyEnv: value.apiKeyEnv }),
+  };
+  return { ok: true, value: entry };
+}
+
+/**
+ * Validate a `listModels` result.
+ *
+ * The server answers `{ models: [...] }`; a bare array is also accepted, the
+ * same latitude {@link ProtocolClient.listSessions}'s payload parser gives a
+ * leaner server variant.
+ */
+export function validateModelCatalog(value: unknown): ValidationResult<ModelCatalog> {
+  const raw = Array.isArray(value) ? value : isRecord(value) ? value.models : undefined;
+  if (!Array.isArray(raw)) {
+    return fail('ModelCatalog must be an array of entries or an object with a "models" array');
+  }
+  const models: ModelCatalogEntry[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const entryResult = validateModelCatalogEntry(raw[i]);
+    if (!entryResult.ok) return fail(`models[${i}] invalid: ${entryResult.error}`);
+    models.push(entryResult.value);
+  }
+  return { ok: true, value: { models } };
 }
 
 // ---------------------------------------------------------------------------

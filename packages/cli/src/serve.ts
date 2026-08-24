@@ -56,6 +56,8 @@ import {
   type ArcturnRuntime,
   buildRuntime,
   compactionOptionsFor,
+  modelCatalogEntries,
+  registerBundledCatalog,
   resolveModelSpec,
 } from "./runtime.js";
 import { startWebClientServer, type WebClientServer, webClientOrigins } from "./web/server.js";
@@ -264,6 +266,14 @@ export function createServeHost(
     agentFactory: (opts) => buildServedAgent(runtime, opts, options.maxCostUsd),
     sessionStore: runtime.store,
     defaultCwd: runtime.cwd,
+    // The `listModels` verb answers from the same catalog `--list-models`
+    // prints — `registerBundledCatalog` first, so the presets are in it, and
+    // it is idempotent. Re-read on every call rather than snapshotted: an
+    // extension may register a model after the server is already up.
+    modelCatalog: () => {
+      registerBundledCatalog();
+      return modelCatalogEntries(runtime.env);
+    },
   });
 }
 

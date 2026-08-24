@@ -21,8 +21,10 @@ client — a web UI, a mobile app, or another process driving an `arcturn serve`
   response builders.
 - `nextRequestId`, `RequestIdGenerator` — request id generation.
 - `validateClientRequest`, `validateServerMessage`, `validatePermissionDecision`,
-  `validatePermissionRule`, `validateSessionHeader` — runtime validation for every frame
-  crossing the wire.
+  `validatePermissionRule`, `validateSessionHeader`, `validateModelCatalog`,
+  `validateModelCatalogEntry`, `validateModelCost` — runtime validation for every frame
+  crossing the wire. The catalog validators copy out only the fields the contract
+  defines, so nothing extra a peer sends (a credential value, say) reaches a renderer.
 
 ## Install
 

@@ -10,6 +10,30 @@ CLI, the SDK, or the wire protocol.
 
 ## [Unreleased]
 
+### Added
+
+- **`listModels` on the wire protocol.** A client can now ask a server for its
+  model catalog — the same models `arcturn --list-models` prints, from the same
+  source — instead of guessing from the ids one session happened to announce.
+  The response carries, per model, its id, display name, provider, context
+  window, max output tokens, pricing, the *name* of the environment variable it
+  authenticates with, and whether that credential is present. Two distinctions
+  are preserved on the wire rather than papered over: a model with no published
+  price has no `cost` field at all (`$0` is reserved for models that really are
+  free), and `credentials` is `"present" | "absent" | "unknown"`, where
+  `"unknown"` means the server genuinely cannot tell — ambient AWS or Google
+  credentials, or a local OpenAI-compatible endpoint that needs no key. **The
+  key value itself is never sent.** The verb is additive and optional:
+  `PROTOCOL_VERSION` stays at `1`, an older server rejects the call with an
+  ordinary `invalidRequest`, and `ProtocolClient.listModels()` turns that one
+  rejection into `undefined` so a newer client degrades instead of failing.
+- **The VS Code model picker is populated.** It now lists the engine's whole
+  catalog with context window, price and credential status per row, models you
+  hold a key for first, the model in use pinned to the top — and still keeps
+  `arcturn.defaultModel`, the ids the session announced, and the free-text
+  entry. Against an engine without `listModels` it silently behaves exactly as
+  it did before.
+
 ### Removed
 
 - **Subscription (OAuth) sign-in — `arcturn auth login`, `auth logout` and

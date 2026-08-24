@@ -3,9 +3,12 @@ import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { JsonlSessionStore } from "@arcturn/core";
+import { createProtocolClient } from "@arcturn/protocol";
 import { ArcturnServer } from "@arcturn/server";
 import type { AgentEvent, ModelSpec } from "@arcturn/types";
 import { afterEach, describe, expect, it } from "vitest";
+import { WebSocket } from "ws";
+import { formatModelCatalog } from "./runtime.js";
 import {
   createServeHost,
   formatServeUrl,
@@ -173,6 +176,34 @@ describe("createServeHost", () => {
   });
 });
 
+describe("createServeHost: the model catalog", () => {
+  it("serves the engine's real catalog over listModels", async () => {
+    const runtime = await fakeRuntime();
+    const host = createServeHost(runtime);
+
+    const models = await host.listModels();
+    expect(models.length).toBeGreaterThan(100);
+    expect(models.map((model) => model.id)).toContain("anthropic/claude-sonnet-4-5");
+    expect(models.find((model) => model.id === "anthropic/claude-sonnet-4-5")).toMatchObject({
+      displayName: "Claude Sonnet 4.5",
+      contextWindow: 200_000,
+      cost: { input: 3, output: 15 },
+      apiKeyEnv: "ANTHROPIC_API_KEY",
+    });
+  });
+
+  it("puts no credential value on the catalog it serves", async () => {
+    const runtime = await fakeRuntime({ env: { ANTHROPIC_API_KEY: "sk-live-secret" } });
+    const host = createServeHost(runtime);
+
+    const models = await host.listModels();
+    expect(JSON.stringify(models)).not.toContain("sk-live-secret");
+    expect(models.find((model) => model.id === "anthropic/claude-sonnet-4-5")?.credentials).toBe(
+      "present",
+    );
+  });
+});
+
 describe("createServeHost + ArcturnServer", () => {
   it("starts on 127.0.0.1:0, accepts a connection, and stops cleanly", async () => {
     const runtime = await fakeRuntime();
@@ -203,6 +234,42 @@ describe("createServeHost + ArcturnServer", () => {
         socket.once("error", reject);
       }),
     ).rejects.toThrow();
+  });
+});
+
+describe("listModels end-to-end: real server, real client, real catalog", () => {
+  it("hands a connected client the catalog --list-models would print", async () => {
+    const runtime = await fakeRuntime({ env: { OPENAI_API_KEY: "sk-live-secret" } });
+    const sessionHost = createServeHost(runtime);
+    const server = new ArcturnServer({ sessionHost });
+    servers.push(server);
+    const port = await server.start({ host: "127.0.0.1", port: 0 });
+
+    const socket = new WebSocket(`ws://127.0.0.1:${port}`);
+    const client = createProtocolClient(socket);
+    try {
+      const catalog = await client.listModels();
+      expect(catalog).toBeDefined();
+      const models = catalog?.models ?? [];
+      expect(models.length).toBeGreaterThan(100);
+
+      const sonnet = models.find((model) => model.id === "anthropic/claude-sonnet-4-5");
+      expect(sonnet).toMatchObject({
+        displayName: "Claude Sonnet 4.5",
+        contextWindow: 200_000,
+        cost: { input: 3, output: 15 },
+        apiKeyEnv: "ANTHROPIC_API_KEY",
+        credentials: "absent",
+      });
+      // The key that *is* set is reported as present — by name, never by value.
+      expect(models.find((model) => model.id === "openai/gpt-5.1")?.credentials).toBe("present");
+      expect(JSON.stringify(models)).not.toContain("sk-live-secret");
+      // Every id the CLI prints is on the wire, and vice versa.
+      const printed = formatModelCatalog();
+      for (const model of models) expect(printed).toContain(model.id);
+    } finally {
+      client.close();
+    }
   });
 });
 

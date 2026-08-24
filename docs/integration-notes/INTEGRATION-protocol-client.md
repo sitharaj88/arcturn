@@ -27,8 +27,15 @@ const stop = client.onEvent((sessionId, event) => render(event));
 await client.prompt(header.sessionId, "explain this repo");
 await client.steer(id, "…"); await client.abort(id); await client.setModel(id, "opus");
 await client.respondToPermission(id, { requestId, behavior: "allow" });
+const catalog = await client.listModels();         // ModelCatalog | undefined
 stop(); client.close();
 ```
+
+`listModels` is the one **optional** verb: a server older than it answers
+`invalidRequest` ("Unknown method"), which this client translates into
+`undefined` — "no catalog here" — so a caller degrades instead of failing.
+Every other failure still rejects. `PROTOCOL_VERSION` was deliberately not
+bumped for it; see `web/content/docs/server-mode.md`.
 
 Every call resolves from the matching `response` frame and rejects with a
 typed error: `ProtocolRequestError` (server `ErrorCode`), `ProtocolTimeoutError`
