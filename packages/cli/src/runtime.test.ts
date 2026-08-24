@@ -284,6 +284,52 @@ describe("buildRuntime", () => {
     expect(runtime.metrics.turns).toBe(1);
     expect(runtime.metrics.usage.outputTokens).toBe(500);
     expect(runtime.metrics.costUsd).toBeGreaterThan(0);
+    // Every turn was priced, so the total is the whole truth.
+    expect(runtime.metrics.unpricedTurns).toBe(0);
+    await runtime.dispose();
+  });
+
+  it("marks the total incomplete when a turn cannot be priced", async () => {
+    // A model with no published pricing spends real money that arcturn cannot
+    // see. Folding that into the running total as a zero turns "we do not
+    // know" into "this was free", which is the one answer that is certainly
+    // wrong — so the unknown is counted instead.
+    registerModel({
+      id: "test/unpriced",
+      provider: "openai-compatible",
+      model: "unpriced-1",
+      displayName: "Unpriced Test Model",
+      contextWindow: 128_000,
+      maxOutputTokens: 8_192,
+      capabilities: { tools: true, vision: false, thinking: false, caching: false },
+    });
+    const scratch = await makeScratch();
+    const runtime = await buildTestRuntime(
+      scratch,
+      [{ text: "the answer", usage: { inputTokens: 1_000, outputTokens: 500 } }],
+      { model: "test/unpriced" },
+    );
+    await runtime.agent.prompt("question");
+    expect(runtime.metrics.turns).toBe(1);
+    expect(runtime.metrics.usage.outputTokens).toBe(500);
+    expect(runtime.metrics.costUsd).toBe(0);
+    expect(runtime.metrics.unpricedTurns).toBe(1);
+    await runtime.dispose();
+    unregisterModel("test/unpriced");
+  });
+
+  it("records spend from outside the agent, and unknown spend as unknown", async () => {
+    const scratch = await makeScratch();
+    const runtime = await buildTestRuntime(scratch);
+    runtime.recordExternalCost(0.25);
+    expect(runtime.metrics.costUsd).toBeCloseTo(0.25, 6);
+    expect(runtime.metrics.unpricedTurns).toBe(0);
+    // `/team` and `/scout` hand an unpriced turn through as `undefined` rather
+    // than as `0`: a zero is dropped on the floor by the guard above, leaving
+    // no trace that the work ran at all.
+    runtime.recordExternalCost(undefined);
+    expect(runtime.metrics.costUsd).toBeCloseTo(0.25, 6);
+    expect(runtime.metrics.unpricedTurns).toBe(1);
     await runtime.dispose();
   });
 

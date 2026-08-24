@@ -53,7 +53,7 @@ import {
 import { TranscriptFormatter } from "../display.js";
 import {
   contextPercent,
-  formatCost,
+  formatCostTotal,
   formatDuration,
   formatTokens,
   relativeAge,
@@ -63,7 +63,7 @@ import { type GlyphSet, resolveGlyphs } from "../glyphs.js";
 import { WORDMARK_WIDTH } from "../logo.js";
 import { createFileMentionSource, expandMentions, type FileMentionSource } from "../mentions.js";
 import { version } from "../meta.js";
-import type { ArcturnRuntime } from "../runtime.js";
+import type { ArcturnRuntime, SessionMetrics } from "../runtime.js";
 import { resolveTheme } from "../themes.js";
 import {
   type SubagentStatus,
@@ -854,12 +854,28 @@ export class InteractiveApp {
         ...this.#gitSegments(),
       ],
       right: [
-        { text: formatCost(runtime.metrics.costUsd) },
+        this.#costSegment(runtime.metrics),
         this.#contextSegment(tokens, runtime.model.contextWindow),
       ],
     });
     this.#formatter.setWidth(this.#width());
     this.#tui.requestRender();
+  }
+
+  /**
+   * The spend segment.
+   *
+   * A model that publishes no per-token price still spends money, so the
+   * total is at best a floor and at worst nothing at all — never `$0.00`,
+   * which an operator reads as "this run was free". With nothing priced the
+   * segment names itself, because a bare "n/a" sitting between the model name
+   * and "ctx 41%" does not say *what* is unknown; in every other state the
+   * dollar sign does that job.
+   */
+  #costSegment(metrics: SessionMetrics): { text: string } {
+    const complete = metrics.unpricedTurns === 0;
+    if (!complete && metrics.costUsd <= 0) return { text: "cost n/a" };
+    return { text: formatCostTotal(metrics.costUsd, complete) };
   }
 
   /**

@@ -71,7 +71,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import type { AgentEvent } from "@arcturn/types";
-import { formatCost } from "./format.js";
+import { formatCost, formatCostTotal } from "./format.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -746,10 +746,14 @@ export function formatScoutReport(
   if (count === 0) return "Scouting report: no approaches were explored.";
 
   const totalCost = report.results.reduce((sum, result) => sum + (result.costUsd ?? 0), 0);
+  // Each scout line below already says "cost unknown" where it applies; the
+  // total has to agree with them. Summing the unknowns as zero made three
+  // unpriced scouts read as "total $0.00", i.e. free.
+  const unpriced = report.results.filter((result) => result.costUsd === undefined).length;
   const lines: string[] = [
     `Scouting report — ${count} approach${count === 1 ? "" : "es"}, ` +
       `deadline ${formatSeconds(report.deadlineMs)}, elapsed ${formatSeconds(report.durationMs)}, ` +
-      `total ${formatCost(totalCost)}`,
+      `total ${formatCostTotal(totalCost, unpriced === 0)}`,
     "",
   ];
 

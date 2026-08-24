@@ -97,6 +97,7 @@ export {
   type ProviderPreset,
   presetSpec,
   registerPresetModels,
+  subscriptionPlanFor,
 } from "./presets.js";
 export {
   ANTHROPIC_THINKING_BUDGETS,

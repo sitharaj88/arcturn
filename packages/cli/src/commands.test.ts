@@ -1,3 +1,4 @@
+import { registerModel, unregisterModel } from "@arcturn/ai";
 import type { PermissionMode } from "@arcturn/types";
 import { describe, expect, it } from "vitest";
 import {
@@ -345,6 +346,34 @@ describe("built-in commands", () => {
     expect(text).toContain("2.0k");
     expect(text).toContain("cost       $");
     await runtime.dispose();
+  });
+
+  it("/cost never reports $0.00 for a model with no published pricing", async () => {
+    // The bug this pins: an unpriced model made every cost surface read
+    // "$0.00", i.e. "free", when the truth was "unknown".
+    registerModel({
+      id: "test/unpriced-cost-cmd",
+      provider: "openai-compatible",
+      model: "unpriced-1",
+      displayName: "Unpriced Test Model",
+      contextWindow: 128_000,
+      maxOutputTokens: 8_192,
+      capabilities: { tools: true, vision: false, thinking: false, caching: false },
+    });
+    const scratch = await makeScratch();
+    const runtime = await buildTestRuntime(
+      scratch,
+      [{ text: "hi", usage: { inputTokens: 2_000, outputTokens: 1_000 } }],
+      { model: "test/unpriced-cost-cmd" },
+    );
+    await runtime.agent.prompt("hello");
+    const { ui } = await run(runtime, "/cost");
+    const text = ui.lines.join("\n");
+    expect(text).not.toContain("$0.00");
+    expect(text).toContain("cost       n/a");
+    expect(text).toContain("publishes no per-token pricing");
+    await runtime.dispose();
+    unregisterModel("test/unpriced-cost-cmd");
   });
 
   it("/compact refuses while running and reports the saving otherwise", async () => {

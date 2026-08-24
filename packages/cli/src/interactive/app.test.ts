@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { registerModel, unregisterModel } from "@arcturn/ai";
 import {
   ColorLevel,
   darkTheme,
@@ -400,6 +401,32 @@ describe("InteractiveApp", () => {
     expect(frame).toContain("arcturn");
     expect(frame).toContain("Claude Sonnet 4.5");
     expect(frame).toMatch(/ctx \d+%/);
+  });
+
+  it("never shows $0.00 in the footer for a model with no published pricing", async () => {
+    // The reported bug: a session on an unpriced model sat at "$0.00" for its
+    // whole life, which reads as "this is free" rather than "arcturn cannot
+    // price this". Nothing about the spend is known, so the footer says so.
+    registerModel({
+      id: "test/unpriced-footer",
+      provider: "openai-compatible",
+      model: "unpriced-1",
+      displayName: "Unpriced Test Model",
+      contextWindow: 128_000,
+      maxOutputTokens: 8_192,
+      capabilities: { tools: true, vision: false, thinking: false, caching: false },
+    });
+    const h = await harness([{ text: "hi", usage: { inputTokens: 5_000, outputTokens: 1_000 } }], {
+      model: "test/unpriced-footer",
+    });
+    h.terminal.injectInput(`hello${ENTER}`);
+    await waitFor(() => h.runtime.metrics.turns > 0, { label: "the turn to be recorded" });
+    await waitFor(
+      () => stripAnsi(h.app.tui.buildFrame(80, 24).lines.join("\n")).includes("cost n/a"),
+      { label: "an honest cost segment" },
+    );
+    expect(stripAnsi(h.app.tui.buildFrame(80, 24).lines.join("\n"))).not.toContain("$0.00");
+    unregisterModel("test/unpriced-footer");
   });
 
   it("clears the transcript and starts a new session on /clear", async () => {

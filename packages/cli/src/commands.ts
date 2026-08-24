@@ -9,7 +9,7 @@
 
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { listModels, listPresets, refreshCatalog } from "@arcturn/ai";
+import { listModels, listPresets, refreshCatalog, subscriptionPlanFor } from "@arcturn/ai";
 import { getTheme, setTheme } from "@arcturn/tui";
 import type { PermissionMode, PermissionRule } from "@arcturn/types";
 import { createBackgroundAgentCommands } from "./background-agents.js";
@@ -17,7 +17,14 @@ import { permissionModes, persistPermissionRule, persistSetting } from "./config
 import { estimateCost, formatEstimate } from "./cost-preview.js";
 import { exportHtml, exportMarkdown, suggestExportFilename } from "./export.js";
 import type { ExtensionCommand } from "./extensions.js";
-import { formatCost, formatTokens, oneLine, TODO_MARKS, totalTokens } from "./format.js";
+import {
+  formatCost,
+  formatCostTotal,
+  formatTokens,
+  oneLine,
+  TODO_MARKS,
+  totalTokens,
+} from "./format.js";
 import { createGitCommands } from "./git.js";
 import { createOrgMemoryCommands } from "./org-memory.js";
 import { formatSuggestion } from "./policy-learn.js";
@@ -405,7 +412,9 @@ export function createBuiltInCommands(): SlashCommand[] {
           }
           // Scouts spend real money outside the main agent's event stream, so
           // fold it back or `--max-cost` and `/cost` silently under-report.
-          for (const result of report.results) runtime.recordExternalCost(result.costUsd ?? 0);
+          // No `?? 0`: a scout that ran on an unpriced model has an unknown
+          // cost, and the runtime records that as unknown rather than as free.
+          for (const result of report.results) runtime.recordExternalCost(result.costUsd);
           ui.print(formatScoutReport(report).split("\n"));
         } catch (error) {
           ui.notice("error", error instanceof Error ? error.message : String(error));
@@ -764,7 +773,33 @@ export function createBuiltInCommands(): SlashCommand[] {
           );
           return;
         }
-        const { usage, costUsd, turns } = runtime.metrics;
+        const { usage, costUsd, turns, unpricedTurns } = runtime.metrics;
+        const limit =
+          runtime.costLimitUsd > 0 ? ` / ${formatCost(runtime.costLimitUsd)} limit` : "";
+        // Spend arcturn could not see is worth a sentence, not a silent zero:
+        // say why it is missing, and do not let the ceiling look like it is
+        // guarding money it never sees.
+        const unpricedNotes: string[] = [];
+        if (unpricedTurns > 0) {
+          const count = `${unpricedTurns} turn${unpricedTurns === 1 ? "" : "s"}`;
+          const plan = subscriptionPlanFor(runtime.model.id);
+          // Name the session model only when it is the one without a price. A
+          // priced session can still collect unpriced turns from a routed
+          // sub-agent or a scout, and blaming the wrong model is its own wrong
+          // answer.
+          const why =
+            plan !== undefined
+              ? `billed by your ${plan} subscription, not per token`
+              : runtime.model.cost === undefined
+                ? `${runtime.model.displayName} publishes no per-token pricing`
+                : "ran on a model with no published pricing";
+          unpricedNotes.push(`  unpriced   ${count} — ${why}`);
+          if (runtime.costLimitUsd > 0) {
+            unpricedNotes.push(
+              "             the limit only counts priced turns; it cannot see this spend",
+            );
+          }
+        }
         ui.print([
           `Session ${runtime.agent.sessionId}`,
           `  model      ${runtime.model.displayName} (${runtime.model.id})`,
@@ -773,7 +808,8 @@ export function createBuiltInCommands(): SlashCommand[] {
           `  output     ${formatTokens(usage.outputTokens)}`,
           `  cache      ${formatTokens(usage.cacheReadTokens)} read · ${formatTokens(usage.cacheWriteTokens)} write`,
           `  total      ${formatTokens(totalTokens(usage))}`,
-          `  cost       ${formatCost(costUsd)}${runtime.costLimitUsd > 0 ? ` / ${formatCost(runtime.costLimitUsd)} limit` : ""}`,
+          `  cost       ${formatCostTotal(costUsd, unpricedTurns === 0)}${limit}`,
+          ...unpricedNotes,
           `  context    ${formatTokens(runtime.agent.estimatedTokens)} / ${formatTokens(runtime.model.contextWindow)}`,
         ]);
       },

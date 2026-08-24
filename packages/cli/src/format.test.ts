@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   contextPercent,
   formatCost,
+  formatCostTotal,
   formatDuration,
   formatTodos,
   formatTokens,
@@ -28,6 +29,25 @@ describe("formatCost", () => {
     expect(formatCost(0)).toBe("$0.00");
     expect(formatCost(0.0034)).toBe("$0.0034");
     expect(formatCost(1.239)).toBe("$1.24");
+  });
+});
+
+describe("formatCostTotal", () => {
+  it("renders a complete total exactly like formatCost", () => {
+    expect(formatCostTotal(0, true)).toBe("$0.00");
+    expect(formatCostTotal(0.0034, true)).toBe("$0.0034");
+    expect(formatCostTotal(1.239, true)).toBe("$1.24");
+  });
+
+  it("says n/a when nothing could be priced", () => {
+    // "$0.00" here would read as "this session was free" when the truth is
+    // "this model publishes no price".
+    expect(formatCostTotal(0, false)).toBe("n/a");
+  });
+
+  it("marks a partly priced total as a floor", () => {
+    expect(formatCostTotal(1.239, false)).toBe("$1.24+");
+    expect(formatCostTotal(0.0034, false)).toBe("$0.0034+");
   });
 });
 

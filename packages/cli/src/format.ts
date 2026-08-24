@@ -26,6 +26,25 @@ export function formatCost(usd: number): string {
 }
 
 /**
+ * A session total that may be missing the cost of turns nobody could price.
+ *
+ * Some models publish no per-token rate, and some endpoints are billed by a
+ * plan instead. Those turns still spend real money; arcturn just cannot see
+ * how much. Running them through {@link formatCost} would print `$0.00` — the
+ * one answer that is certainly wrong, because it reads as "this was free"
+ * rather than "this is not known". So an all-unknown total says `n/a`, and a
+ * partly known one is marked as the floor it actually is (`$1.24+`).
+ *
+ * @param usd - Dollars that *could* be priced.
+ * @param complete - `false` when at least one turn's cost was unknown.
+ */
+export function formatCostTotal(usd: number, complete: boolean): string {
+  if (complete) return formatCost(usd);
+  if (!Number.isFinite(usd) || usd <= 0) return "n/a";
+  return `${formatCost(usd)}+`;
+}
+
+/**
  * Elapsed wall time as `4s`, `1m12s` or `1h04m`.
  *
  * @param ms - Duration in milliseconds.

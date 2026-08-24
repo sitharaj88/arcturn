@@ -768,6 +768,39 @@ describe("TeamManager dispatch", () => {
     expect(status.costUsd).toBeCloseTo(0.6);
   });
 
+  it("counts turns nobody could price instead of billing them at zero", async () => {
+    // `/team` folds its total into the session, so a team that swallowed the
+    // unknown here would reintroduce the "$0.00 means free" bug through the
+    // team door: the member ledger has to carry the gap, not flatten it.
+    const { manager } = await harness({ plan: scriptedPlanner([twoWay]) }, (brief) =>
+      brief.id === "a"
+        ? new FakeAgent({
+            run: async (agent) => {
+              agent.emit({ type: "turnEnd", turnIndex: 0, usage: usage(0.25) });
+              agent.emit({ type: "turnEnd", turnIndex: 1, usage: usage() });
+            },
+            text: "half priced",
+          })
+        : new FakeAgent({
+            run: async (agent) => {
+              agent.emit({ type: "turnEnd", turnIndex: 0, usage: usage() });
+            },
+            text: "not priced at all",
+          }),
+    );
+    const status = await manager.start("go");
+    expect(status.members[0]?.costUsd).toBeCloseTo(0.25);
+    expect(status.members[0]?.unpricedTurns).toBe(1);
+    expect(status.members[1]?.costUsd).toBe(0);
+    expect(status.members[1]?.unpricedTurns).toBe(1);
+    expect(status.costUsd).toBeCloseTo(0.25);
+    expect(status.unpricedTurns).toBe(2);
+    // The total is a floor, and the report says so rather than printing it flat.
+    const report = formatTeamReport(status);
+    expect(report).toContain("$0.25+");
+    expect(report).toContain("n/a");
+  });
+
   it("aborts a member that blows through its turn ceiling", async () => {
     const { manager, spawned } = await harness(
       { plan: scriptedPlanner([twoWay]), maxTurnsPerMember: 2 },
@@ -1409,7 +1442,10 @@ describe("/team command", () => {
   ]);
   const DIFF = "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@\n+one\n";
 
-  async function commandHarness(diff = DIFF): Promise<{
+  async function commandHarness(
+    diff = DIFF,
+    makeAgent?: (brief: TeamMemberBrief) => FakeAgent,
+  ): Promise<{
     run: (args: string) => Promise<FakeUi>;
     manager: TeamManager;
     git: FakeGit;
@@ -1422,16 +1458,18 @@ describe("/team command", () => {
       dir,
       repoRoot: "/repo",
       plan: scriptedPlanner([twoWay]),
-      spawn: (brief) => new FakeAgent({ text: `${brief.id} finished` }),
+      spawn: (brief) => makeAgent?.(brief) ?? new FakeAgent({ text: `${brief.id} finished` }),
       execFn: git.execFn,
     });
     const [command] = createTeamCommands({ manager: () => manager });
     // A team's members bill against their own agents, so the command folds
     // their spend back into the session. The fake has to implement what the
     // command actually calls, and recording it lets the tests assert it.
-    const externalCosts: number[] = [];
+    // `undefined` is part of the contract now: it is how a turn nobody could
+    // price reaches the session, so the fake has to be able to receive it.
+    const externalCosts: (number | undefined)[] = [];
     const runtime = {
-      recordExternalCost: (costUsd: number) => {
+      recordExternalCost: (costUsd: number | undefined) => {
         externalCosts.push(costUsd);
       },
     } as unknown as ArcturnRuntime;
@@ -1446,6 +1484,25 @@ describe("/team command", () => {
       },
     };
   }
+
+  it("tells the session about team turns it could not price", async () => {
+    // `recordExternalCost(0)` early-returns, so an all-unpriced team used to
+    // leave the session metrics untouched — the footer then swore the session
+    // had spent nothing while a whole team ran. Report the unknowns instead.
+    const { run, externalCosts } = await commandHarness(
+      DIFF,
+      () =>
+        new FakeAgent({
+          run: async (agent) => {
+            agent.emit({ type: "turnEnd", turnIndex: 0, usage: usage() });
+          },
+          text: "done, price unknown",
+        }),
+    );
+    const ui = await run("split the work");
+    expect(externalCosts).toContain(undefined);
+    expect(ui.lines.join("\n")).not.toContain("$0.00");
+  });
 
   it("exposes one command with a usage string", () => {
     const [command] = createTeamCommands();

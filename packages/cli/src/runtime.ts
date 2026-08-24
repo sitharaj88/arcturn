@@ -134,8 +134,25 @@ export interface SessionMetrics {
   turns: number;
   /** Summed token usage. */
   usage: Usage;
-  /** Summed cost in USD, best effort. */
+  /**
+   * Summed cost in USD of the turns that could be priced.
+   *
+   * Turns nobody could price contribute nothing here — see
+   * {@link SessionMetrics.unpricedTurns}. Keep reading this as a number: the
+   * `--max-cost` ceiling compares against it, and a ceiling that cannot see
+   * unpriced spend must still enforce the spend it *can* see.
+   */
   costUsd: number;
+  /**
+   * Turns whose cost was unknowable — an unpriced model, or a plan endpoint
+   * with no per-token rate at all.
+   *
+   * Non-zero means {@link SessionMetrics.costUsd} is a floor, not the total.
+   * Display layers must say so rather than printing the floor as if it were
+   * the answer; `$0.00` for an unpriced model reads as "free", which is the
+   * silent wrong answer this counter exists to prevent.
+   */
+  unpricedTurns: number;
 }
 
 /** Tool names Arcturn ships with; extensions may not shadow them. */
@@ -432,7 +449,7 @@ export class ArcturnRuntime {
   /** Active cost ceiling in USD, `0` when disabled. */
   costLimitUsd = 0;
   /** Running token/cost totals for the live session. */
-  metrics: SessionMetrics = { turns: 0, usage: emptyUsage(), costUsd: 0 };
+  metrics: SessionMetrics = { turns: 0, usage: emptyUsage(), costUsd: 0, unpricedTurns: 0 };
 
   /** The LLM client shared by the agent and its sub-agents. */
   readonly llm: LLMClient;
@@ -921,11 +938,16 @@ export class ArcturnRuntime {
     const childModel = model;
     child.subscribe((event) => {
       if (event.type !== "turnEnd") return;
-      const cost = event.usage.costUsd ?? calculateCostUsd(childModel, event.usage) ?? 0;
+      // `undefined` is not zero: an unpriced child model spent money we cannot
+      // name. It adds nothing to the dollar total — the ceiling still enforces
+      // the spend it can see — and is counted instead, so the displays can
+      // admit the gap rather than reporting the floor as the answer.
+      const cost = event.usage.costUsd ?? calculateCostUsd(childModel, event.usage);
       this.metrics = {
         ...this.metrics,
         usage: addUsage(this.metrics.usage, event.usage),
-        costUsd: this.metrics.costUsd + cost,
+        costUsd: this.metrics.costUsd + (cost ?? 0),
+        unpricedTurns: this.metrics.unpricedTurns + (cost === undefined ? 1 : 0),
       };
     });
     return child;
@@ -1042,9 +1064,16 @@ export class ArcturnRuntime {
    * Fold spend that happened outside the main agent (scouts) into the
    * session's running total, so `--max-cost` and `/cost` stay honest.
    *
-   * @param costUsd - Dollars spent elsewhere.
+   * @param costUsd - Dollars spent elsewhere, or `undefined` when the work ran
+   *   on a model nobody could price. Pass the unknown through rather than
+   *   coercing it to `0`: the total then stays a floor that says so, instead
+   *   of a figure that quietly claims the work was free.
    */
-  recordExternalCost(costUsd: number): void {
+  recordExternalCost(costUsd: number | undefined): void {
+    if (costUsd === undefined) {
+      this.metrics = { ...this.metrics, unpricedTurns: this.metrics.unpricedTurns + 1 };
+      return;
+    }
     if (!Number.isFinite(costUsd) || costUsd <= 0) return;
     this.metrics = { ...this.metrics, costUsd: this.metrics.costUsd + costUsd };
   }
@@ -1392,7 +1421,7 @@ export class ArcturnRuntime {
     if (this.#openProvenance) this.setProvenanceOpener(this.#openProvenance, next.sessionId);
     this.#detach?.();
     this.agent = next;
-    this.metrics = { turns: 0, usage: emptyUsage(), costUsd: 0 };
+    this.metrics = { turns: 0, usage: emptyUsage(), costUsd: 0, unpricedTurns: 0 };
     this.#attach(next);
   }
 
@@ -1481,7 +1510,10 @@ export class ArcturnRuntime {
     }
     if (event.type === "turnEnd") {
       const priced = this.#answeringModel ?? this.model;
-      const cost = event.usage.costUsd ?? calculateCostUsd(priced, event.usage) ?? 0;
+      // Absent, not zero — see `SessionMetrics.unpricedTurns`. Folding an
+      // unknown into the running total as `0` is what made an unpriced model
+      // show a session-long "$0.00" in the footer.
+      const cost = event.usage.costUsd ?? calculateCostUsd(priced, event.usage);
       // A consensus panel spends once per member, but only the primary's
       // usage reaches this event. Scaling by the CONFIGURED panel size
       // over-charges every turn `sampleRate` skipped, so the multiplier comes
@@ -1490,18 +1522,25 @@ export class ArcturnRuntime {
       // is an approximation the verdict cannot improve on.
       const panelExtra = this.#pendingPanelCostUsd;
       this.#pendingPanelCostUsd = 0;
-      const spent = cost + panelExtra;
+      const spent = (cost ?? 0) + panelExtra;
       this.metrics = {
         turns: this.metrics.turns + 1,
         usage: addUsage(this.metrics.usage, event.usage),
         costUsd: this.metrics.costUsd + spent,
+        unpricedTurns: this.metrics.unpricedTurns + (cost === undefined ? 1 : 0),
       };
-      this.recentTurns.push({
-        inputTokens: event.usage.inputTokens,
-        outputTokens: event.usage.outputTokens,
-        costUsd: spent,
-      });
-      if (this.recentTurns.length > RECENT_TURN_SAMPLES) this.recentTurns.shift();
+      // Only priced turns become forecast samples. A zero-dollar sample from
+      // an unpriced turn would drag `/cost preview`'s median toward "free";
+      // leaving the history empty instead lets the estimator fall back to
+      // model pricing, which knows how to say "price unknown".
+      if (cost !== undefined) {
+        this.recentTurns.push({
+          inputTokens: event.usage.inputTokens,
+          outputTokens: event.usage.outputTokens,
+          costUsd: spent,
+        });
+        if (this.recentTurns.length > RECENT_TURN_SAMPLES) this.recentTurns.shift();
+      }
     }
     this.extensions.dispatch(event);
     for (const listener of [...this.#listeners]) {

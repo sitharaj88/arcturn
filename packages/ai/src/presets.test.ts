@@ -113,6 +113,18 @@ describe("registerPresetModels", () => {
     }
   });
 
+  it("prices the Z.AI general API and leaves the coding plan unpriced", () => {
+    registerPresetModels();
+    // The pay-as-you-go endpoint bills per token, so it must carry a price:
+    // without one every cost surface shows "unknown" for a model Z.AI
+    // publishes a rate card for.
+    const api = getModel("zai-api/glm-5.2");
+    expect(api?.cost).toEqual({ input: 1.4, output: 4.4, cacheRead: 0.26 });
+    // The coding plan is a subscription. There is no per-token price to
+    // report, and inventing one would be worse than admitting it.
+    expect(getModel("zai/glm-5.3")?.cost).toBeUndefined();
+  });
+
   it("only ever registers models under a known preset", () => {
     for (const spec of registerPresetModels()) {
       const preset = spec.id.split("/")[0] ?? "";

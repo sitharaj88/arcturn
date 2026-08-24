@@ -634,6 +634,19 @@ describe("formatScoutReport", () => {
     expect(text).toContain('Re-run "worker-pool"');
   });
 
+  it("does not total unpriced scouts as if they were free", () => {
+    // The per-scout lines already say "cost unknown"; the header summed them
+    // as zero, so three scouts on an unpriced model read as "total $0.00".
+    const mixed = formatScoutReport(
+      report([result({ name: "priced", costUsd: 0.0042 }), result({ name: "unpriced" })]),
+    );
+    expect(mixed).toContain("total $0.0042+");
+
+    const nothingPriced = formatScoutReport(report([result({ name: "a" }), result({ name: "b" })]));
+    expect(nothingPriced).toContain("total n/a");
+    expect(nothingPriced).not.toContain("$0.00");
+  });
+
   it("lists warnings and admits when nothing finished", () => {
     const text = formatScoutReport(
       report([result({ status: "timeout" })], ["worktree remove failed for /tmp/x"]),

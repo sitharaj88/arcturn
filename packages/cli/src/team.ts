@@ -68,7 +68,7 @@ import { contentText, createSessionId, DEFAULT_READ_ONLY_TOOLS, errorText } from
 import type { AgentEvent, ModelSpec, Tool, Usage } from "@arcturn/types";
 import type { AgentDef } from "./agents.js";
 import type { CommandContext, CommandUi, SlashCommand } from "./commands.js";
-import { formatCost, formatDuration, oneLine } from "./format.js";
+import { formatCost, formatCostTotal, formatDuration, oneLine } from "./format.js";
 import type { ArcturnRuntime } from "./runtime.js";
 import { createWorktree, type ExecFn, type GitExecResult, type Worktree } from "./scouts.js";
 
@@ -944,8 +944,21 @@ export interface TeamMemberStatus {
   readonly merged: boolean;
   /** `true` once the user threw this member's work away. */
   readonly discarded: boolean;
-  /** Best-effort USD cost of this member's turns. */
+  /**
+   * USD cost of this member's turns that could be priced.
+   *
+   * A floor, not a bill, whenever {@link TeamMemberStatus.unpricedTurns} is
+   * non-zero.
+   */
   readonly costUsd: number;
+  /**
+   * Turns this member ran on a model nobody could price.
+   *
+   * The team's spend reaches the session through `recordExternalCost`, so
+   * flattening an unknown to `0` here would put a fabricated "free" into
+   * `/cost` and the footer by way of `/team`.
+   */
+  readonly unpricedTurns: number;
   /** Turns the member completed. */
   readonly turns: number;
   /** Tool calls the member made. */
@@ -972,8 +985,10 @@ export interface TeamStatus {
   readonly createdAt: number;
   /** Wall time since dispatch, in ms. */
   readonly elapsedMs: number;
-  /** Summed member cost in USD. */
+  /** Summed member cost in USD, counting only turns that could be priced. */
   readonly costUsd: number;
+  /** Summed member turns that could not be priced; non-zero makes `costUsd` a floor. */
+  readonly unpricedTurns: number;
   /** Members, in dispatch order. */
   readonly members: readonly TeamMemberStatus[];
   /** Non-fatal problems: plan repairs, failed cleanups, budget cutoffs. */
@@ -996,6 +1011,8 @@ interface StoredMember {
   merged: boolean;
   discarded: boolean;
   costUsd: number;
+  /** Optional: records written before unpriced turns were tracked have none. */
+  unpricedTurns?: number;
   turns: number;
   toolCalls: number;
   startedAt?: number;
@@ -1106,8 +1123,14 @@ export interface TeamManagerOptions {
   maxMembers?: number;
   /** Fewest members a plan may produce. Default {@link MIN_TEAM_MEMBERS}. */
   minMembers?: number;
-  /** Prices a turn when the provider did not. Default: `usage.costUsd ?? 0`. */
-  costOf?: (usage: Usage) => number;
+  /**
+   * Prices a turn when the provider did not. Default: `usage.costUsd`.
+   *
+   * Return `undefined` when the turn cannot be priced at all — the manager
+   * counts it rather than billing it at zero, so nothing downstream reports an
+   * unpriced model as free.
+   */
+  costOf?: (usage: Usage) => number | undefined;
   /** Injectable process spawner, shared by worktrees, diffs and merges. */
   execFn?: ExecFn;
   /** Per-`git`-spawn timeout in ms. Default `15000`. */
@@ -1173,7 +1196,7 @@ export class TeamManager {
   #roles: ReadonlyMap<string, TeamRole>;
   #concurrency: number;
   #maxCostUsd: number;
-  #costOf: (usage: Usage) => number;
+  #costOf: (usage: Usage) => number | undefined;
   #execFn: ExecFn;
 
   readonly #records = new Map<string, StoredTeam>();
@@ -1199,7 +1222,7 @@ export class TeamManager {
     );
     this.#maxMembers = Math.max(1, Math.floor(options.maxMembers ?? MAX_TEAM_MEMBERS));
     this.#minMembers = Math.max(1, Math.floor(options.minMembers ?? MIN_TEAM_MEMBERS));
-    this.#costOf = options.costOf ?? ((usage) => usage.costUsd ?? 0);
+    this.#costOf = options.costOf ?? ((usage) => usage.costUsd);
     this.#execFn = options.execFn ?? defaultExecFn;
     this.#gitTimeoutMs = options.gitTimeoutMs ?? GIT_TIMEOUT_MS;
     this.#now = options.now ?? Date.now;
@@ -1232,7 +1255,7 @@ export class TeamManager {
     roles?: ReadonlyMap<string, TeamRole>;
     concurrency?: number;
     maxCostUsd?: number;
-    costOf?: (usage: Usage) => number;
+    costOf?: (usage: Usage) => number | undefined;
     execFn?: ExecFn;
   }): void {
     if (defaults.spawn) this.#spawn = defaults.spawn;
@@ -1343,6 +1366,7 @@ export class TeamManager {
       merged: false,
       discarded: false,
       costUsd: 0,
+      unpricedTurns: 0,
       turns: 0,
       toolCalls: 0,
     }));
@@ -1827,7 +1851,12 @@ export class TeamManager {
         if (event.type === "toolStart") member.toolCalls++;
         if (event.type !== "turnEnd") return;
         member.turns++;
-        member.costUsd += this.#costOf(event.usage);
+        // An unpriced turn adds nothing to the running dollar figure — the
+        // team ceiling below still enforces every dollar it can see — and is
+        // counted instead, so the report and the session can both admit it.
+        const spent = this.#costOf(event.usage);
+        if (spent === undefined) member.unpricedTurns = (member.unpricedTurns ?? 0) + 1;
+        else member.costUsd += spent;
         const total = record.members.reduce((sum, entry) => sum + entry.costUsd, 0);
         if (maxCostUsd > 0 && total >= maxCostUsd) {
           cutoff(
@@ -2047,6 +2076,7 @@ export class TeamManager {
       createdAt: record.createdAt,
       elapsedMs: Math.max(0, end - start),
       costUsd: members.reduce((sum, member) => sum + member.costUsd, 0),
+      unpricedTurns: members.reduce((sum, member) => sum + member.unpricedTurns, 0),
       members,
       warnings: [...record.warnings],
     };
@@ -2067,6 +2097,10 @@ export class TeamManager {
       merged: member.merged,
       discarded: member.discarded,
       costUsd: member.costUsd,
+      // Records written before this was tracked have none; they are not
+      // retroactively "fully priced", but they are also not re-runnable, and
+      // reading a missing counter as zero keeps an old record readable.
+      unpricedTurns: member.unpricedTurns ?? 0,
       turns: member.turns,
       toolCalls: member.toolCalls,
       elapsedMs: start === 0 ? 0 : Math.max(0, end - start),
@@ -2120,6 +2154,7 @@ export class TeamManager {
       if (typeof record?.id !== "string" || !Array.isArray(record.members)) continue;
       record.warnings ??= [];
       record.roles ??= [];
+      for (const member of record.members) member.unpricedTurns ??= 0;
       // A fresh manager has no live handle for anything it did not itself
       // launch: a record still running here belongs to a process that is gone.
       if (record.status === "running" || record.status === "planning") {
@@ -2225,8 +2260,15 @@ export function createTeamSpawn(runtime: ArcturnRuntime): TeamSpawn {
   };
 }
 
-function costOfFor(model: ModelSpec): (usage: Usage) => number {
-  return (usage) => usage.costUsd ?? calculateCostUsd(model, usage) ?? 0;
+/**
+ * Price a member's turn from the model that served it.
+ *
+ * Returns `undefined` — never `0` — when neither the provider nor the catalog
+ * can price the turn. Zero is a real amount an operator would act on; the
+ * absence has to stay an absence all the way to the display.
+ */
+function costOfFor(model: ModelSpec): (usage: Usage) => number | undefined {
+  return (usage) => usage.costUsd ?? calculateCostUsd(model, usage);
 }
 
 /**
@@ -2282,7 +2324,10 @@ function formatStat(stat: DiffStat): string {
 function formatMemberLine(member: TeamMemberStatus): string {
   const parts = [`  ${MEMBER_MARK[member.status]} ${member.id} [${member.role}] ${member.status}`];
   if (member.status !== "queued" && member.status !== "running") {
-    parts.push(formatStat(member.diffStat), formatCost(member.costUsd));
+    parts.push(
+      formatStat(member.diffStat),
+      formatCostTotal(member.costUsd, member.unpricedTurns === 0),
+    );
   }
   return parts.join(" · ");
 }
@@ -2308,7 +2353,7 @@ export function formatTeamReport(status: TeamStatus, options?: { excerptLines?: 
   const lines: string[] = [
     `Team ${status.id} — ${status.status} · ${status.members.length} member` +
       `${status.members.length === 1 ? "" : "s"} · ${formatDuration(status.elapsedMs)} · ` +
-      formatCost(status.costUsd),
+      formatCostTotal(status.costUsd, status.unpricedTurns === 0),
     `  goal: ${oneLine(status.goal, 88)}`,
   ];
   if (status.notes) lines.push(`  supervisor: ${oneLine(status.notes, 88)}`);
@@ -2328,7 +2373,8 @@ export function formatTeamReport(status: TeamStatus, options?: { excerptLines?: 
     lines.push(
       `    diff: ${formatStat(member.diffStat)} · ${member.turns} turn` +
         `${member.turns === 1 ? "" : "s"} · ${member.toolCalls} tool call` +
-        `${member.toolCalls === 1 ? "" : "s"} · ${formatCost(member.costUsd)}`,
+        `${member.toolCalls === 1 ? "" : "s"} · ` +
+        formatCostTotal(member.costUsd, member.unpricedTurns === 0),
     );
     if (member.patchFile) lines.push(`    patch: ${member.patchFile}`);
     if (member.error) lines.push(`    note: ${member.error}`);
@@ -2508,7 +2554,8 @@ function statusRun(manager: TeamManager, ui: CommandUi, id?: string): void {
         (row) =>
           `  ${row.id.padEnd(width)}  ${row.status.padEnd(11)}  ` +
           `${String(row.members.length).padStart(2)} members  ` +
-          `${formatCost(row.costUsd).padEnd(9)}  ${oneLine(row.goal, 50)}`,
+          `${formatCostTotal(row.costUsd, row.unpricedTurns === 0).padEnd(9)}  ` +
+          `${oneLine(row.goal, 50)}`,
       ),
     ]);
     return;
@@ -2560,6 +2607,13 @@ async function dispatchRun(
     // invisible to /cost and to --max-cost — the session could burn the team
     // ceiling several times over and still look untouched.
     runtime.recordExternalCost(status.costUsd);
+    // Turns the team could not price are reported as unknown, one apiece. A
+    // team that priced nothing sums to `0`, which `recordExternalCost` ignores
+    // — so without this the session would show no trace of a team that ran,
+    // and the footer would keep claiming nothing had been spent.
+    for (let index = 0; index < status.unpricedTurns; index++) {
+      runtime.recordExternalCost(undefined);
+    }
     ui.print(formatTeamReport(status));
     if (status.status === "failed") {
       ui.notice("error", "The supervisor could not decompose that goal into disjoint subtasks.");

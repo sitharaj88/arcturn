@@ -48,6 +48,15 @@ export interface ProviderPreset {
   readonly docsUrl?: string;
   /** Names of sibling presets covering another region or plan of this same service. */
   readonly regionalVariants?: readonly string[];
+  /**
+   * This endpoint is billed by a plan, not by the token.
+   *
+   * Set it and the models under this preset stay unpriced on purpose: there is
+   * no per-token rate to report, so anything arcturn printed would be made up.
+   * Cost surfaces read this to say "your plan covers it" instead of showing a
+   * dollar figure that does not exist.
+   */
+  readonly subscription?: boolean;
 }
 
 /**
@@ -153,6 +162,7 @@ export const PROVIDER_PRESETS: Readonly<Record<string, ProviderPreset>> = Object
     protocol: "openai",
     docsUrl: "https://docs.z.ai",
     regionalVariants: ["zai-cn", "zai-api"],
+    subscription: true,
   },
   "zai-api": {
     label: "Z.AI (general API)",
@@ -169,6 +179,7 @@ export const PROVIDER_PRESETS: Readonly<Record<string, ProviderPreset>> = Object
     protocol: "openai",
     docsUrl: "https://open.bigmodel.cn/dev/api",
     regionalVariants: ["zai", "zai-api"],
+    subscription: true,
   },
   qwen: {
     label: "Qwen Token Plan",
@@ -393,6 +404,22 @@ export function presetSpec(
   return spec;
 }
 
+/**
+ * The plan that covers a model id, when its preset is subscription-billed.
+ *
+ * Use it before telling anyone what a session cost: on a plan endpoint the
+ * honest answer is "your plan covers it", not a dollar figure — and certainly
+ * not $0.00, which reads as "free" rather than "not billed per token".
+ *
+ * @param id - A catalog id such as `zai/glm-5.3`.
+ * @returns The plan's label, or `undefined` when the model is billed per token
+ *   (or is not a preset model at all).
+ */
+export function subscriptionPlanFor(id: string): string | undefined {
+  const preset = PROVIDER_PRESETS[id.split("/")[0] ?? ""];
+  return preset?.subscription === true ? preset.label : undefined;
+}
+
 /** Capability/context/pricing facts for one curated model within a preset. */
 interface CuratedModel {
   readonly model: string;
@@ -414,9 +441,11 @@ const TOOLS_VISION_THINK: ModelCapabilities = { ...TOOLS, vision: true, thinking
  * Sourced from each provider's public model documentation, not from the reference harness's
  * generated `*.models.ts` catalogs (those read from a `data/*.json` file that
  * is gitignored in the reference checkout and was not available to source
- * from). Pricing is omitted throughout: none could be confirmed confidently
- * against a current, authoritative source, and a wrong price is worse than an
- * absent one.
+ * from). Pricing is carried only where it was confirmed against the
+ * provider's own current rate card (each such block cites its source and the
+ * date it was read); everywhere else it stays absent, because a wrong price is
+ * worse than an admitted unknown. Absent pricing is not free — see
+ * `formatCostTotal` in the CLI, which renders it as "n/a" rather than $0.00.
  */
 const CURATED_MODELS: Readonly<Record<string, readonly CuratedModel[]>> = Object.freeze({
   groq: [
@@ -557,6 +586,10 @@ const CURATED_MODELS: Readonly<Record<string, readonly CuratedModel[]>> = Object
   // Coding-plan lineup as of 2026-08: GLM-5.3 (launched 2026-08-14), GLM-5
   // Turbo and GLM-4.7; requests for GLM-5.2/5.1 are auto-routed to 5.3 on this
   // endpoint, so they are not listed here. GLM-4.6 is kept for older plans.
+  //
+  // Deliberately unpriced: the coding plan is a subscription, so a per-token
+  // cost for these is not a number that exists — your plan covers the turn
+  // whatever it weighed. See the `subscription` flag on the preset.
   zai: [
     {
       model: "glm-5.3",
@@ -593,6 +626,13 @@ const CURATED_MODELS: Readonly<Record<string, readonly CuratedModel[]>> = Object
   // absent: as of 2026-08-18 its general-API access is still rolling out
   // (coding plan only) — it can be used by id once Z.AI lists it, since preset
   // model ids pass through verbatim.
+  //
+  // Prices below are USD per million tokens, read from Z.AI's own rate card at
+  // https://docs.z.ai/guides/overview/pricing on 2026-08-24. `cacheRead` is
+  // Z.AI's "cached input" column; they publish no separate cache-write rate,
+  // so that field is left off and `calculateCostUsd` falls back to the input
+  // rate for it. Re-check the page before trusting these for billing — a rate
+  // card is a moving target, and a stale price is a quiet wrong answer.
   "zai-api": [
     {
       model: "glm-5.3",
@@ -600,6 +640,7 @@ const CURATED_MODELS: Readonly<Record<string, readonly CuratedModel[]>> = Object
       contextWindow: 1_000_000,
       maxOutputTokens: 128_000,
       capabilities: TOOLS_THINK,
+      cost: { input: 1.4, output: 4.4, cacheRead: 0.26 },
     },
     {
       model: "glm-5.1",
@@ -607,6 +648,7 @@ const CURATED_MODELS: Readonly<Record<string, readonly CuratedModel[]>> = Object
       contextWindow: 1_000_000,
       maxOutputTokens: 128_000,
       capabilities: TOOLS_THINK,
+      cost: { input: 1.4, output: 4.4, cacheRead: 0.26 },
     },
     {
       model: "glm-5",
@@ -614,6 +656,7 @@ const CURATED_MODELS: Readonly<Record<string, readonly CuratedModel[]>> = Object
       contextWindow: 1_000_000,
       maxOutputTokens: 128_000,
       capabilities: TOOLS_THINK,
+      cost: { input: 1, output: 3.2, cacheRead: 0.2 },
     },
     {
       model: "glm-5.2",
@@ -621,6 +664,7 @@ const CURATED_MODELS: Readonly<Record<string, readonly CuratedModel[]>> = Object
       contextWindow: 1_000_000,
       maxOutputTokens: 128_000,
       capabilities: TOOLS_THINK,
+      cost: { input: 1.4, output: 4.4, cacheRead: 0.26 },
     },
     {
       model: "glm-5-turbo",
@@ -628,6 +672,7 @@ const CURATED_MODELS: Readonly<Record<string, readonly CuratedModel[]>> = Object
       contextWindow: 200_000,
       maxOutputTokens: 128_000,
       capabilities: TOOLS_THINK,
+      cost: { input: 1.2, output: 4, cacheRead: 0.24 },
     },
     {
       model: "glm-4.7",
@@ -635,13 +680,18 @@ const CURATED_MODELS: Readonly<Record<string, readonly CuratedModel[]>> = Object
       contextWindow: 200_000,
       maxOutputTokens: 128_000,
       capabilities: TOOLS_THINK,
+      cost: { input: 0.6, output: 2.2, cacheRead: 0.11 },
     },
     {
       model: "glm-4.7-flash",
+      // Zero here is a published price, not a missing one: Z.AI lists this
+      // tier as free, so "$0.00" is the honest total rather than a stand-in
+      // for "unknown".
       displayName: "GLM-4.7 Flash (free)",
       contextWindow: 200_000,
       maxOutputTokens: 128_000,
       capabilities: TOOLS_THINK,
+      cost: { input: 0, output: 0, cacheRead: 0 },
     },
     {
       model: "glm-4.6",
@@ -649,6 +699,7 @@ const CURATED_MODELS: Readonly<Record<string, readonly CuratedModel[]>> = Object
       contextWindow: 200_000,
       maxOutputTokens: 128_000,
       capabilities: TOOLS_THINK,
+      cost: { input: 0.6, output: 2.2, cacheRead: 0.11 },
     },
   ],
   qwen: [
