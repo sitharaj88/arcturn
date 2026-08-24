@@ -1,7 +1,7 @@
 /** The `grep` built-in tool: pure-JS recursive regex content search. */
 
 import type { Dirent } from "node:fs";
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { Tool, ToolResult } from "@arcturn/types";
 import { glob as tinyGlob } from "tinyglobby";
@@ -45,6 +45,15 @@ async function collectFiles(
   globPattern: string | undefined,
   signal: AbortSignal,
 ): Promise<string[]> {
+  try {
+    // A file path names exactly what to search. Without this, walk() calls
+    // readdir on it, swallows ENOTDIR, and reports "no matches" — a silent
+    // false negative a model reads as evidence of absence. Found by a live
+    // watched-fire run in wave 3. A glob cannot narrow a single named file.
+    if ((await stat(root)).isFile()) return [root];
+  } catch {
+    // Missing paths keep their old answer: walk() finds nothing.
+  }
   if (globPattern) {
     return tinyGlob(globPattern, {
       cwd: root,
@@ -84,7 +93,7 @@ export function createGrepTool(): Tool {
           path: {
             type: "string",
             description:
-              "Directory to search, absolute or relative to the working directory. Defaults to cwd.",
+              "File or directory to search, absolute or relative to the working directory. Defaults to cwd.",
           },
           glob: {
             type: "string",

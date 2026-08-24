@@ -1,0 +1,20 @@
+cloud-posture-review  —  ./examples/cloud-posture-review
+  Two roles, one pipeline and one skill for read-only cloud posture and IAM review, where a check that could not run is NOT-CHECKED with its reason and never a PASS.
+  local-path  36418a541a56  v0.1.0
+  nothing has been installed; this is what "arcturn add" would add.
+
+Agent roles (2)
+  iam-least-privilege-analyst  [exec lane]  tools: read, grep, glob, ls, bash
+    Proposes permission narrowings only from observed access data, cites the lookback window on eve…
+  posture-scanner  [exec lane]  tools: read, grep, glob, ls, bash
+    Runs read-only posture checks and reports every check that did not run as NOT-CHECKED with its …
+
+Workflows (1)
+  posture-review  5 stages, 6 steps, $20, roles: posture-scanner, iam-least-privilege-analyst
+    Establish the principal and the scope or halt, run the configuration and identity surfaces in p…
+
+Skills (1)
+  /exposure-check  —  Answers whether a resource is reachable from the internet using only what an API returned, list…
+
+No extensions: this package ships no executable code.
+EXIT=0

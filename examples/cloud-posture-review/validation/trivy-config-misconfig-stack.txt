@@ -1,0 +1,372 @@
+2026-08-24T16:48:25+05:30	INFO	[misconfig] Misconfiguration scanning is enabled
+2026-08-24T16:48:25+05:30	INFO	[checks-client] Using existing checks from cache	path="/Users/sitharaj/Library/Caches/trivy/policy/content"
+2026-08-24T16:48:25+05:30	INFO	[terraform scanner] Scanning root module	file_path="."
+2026-08-24T16:48:25+05:30	INFO	Detected config files	num=2
+
+Report Summary
+
+┌─────────┬───────────┬───────────────────┐
+│ Target  │   Type    │ Misconfigurations │
+├─────────┼───────────┼───────────────────┤
+│ .       │ terraform │         0         │
+├─────────┼───────────┼───────────────────┤
+│ main.tf │ terraform │        19         │
+└─────────┴───────────┴───────────────────┘
+Legend:
+- '-': Not scanned
+- '0': Clean (no security findings detected)
+
+
+main.tf (terraform)
+===================
+Tests: 19 (SUCCESSES: 0, FAILURES: 19)
+Failures: 19 (UNKNOWN: 0, LOW: 4, MEDIUM: 4, HIGH: 10, CRITICAL: 1)
+
+AWS-0077 (MEDIUM): Instance has very low backup retention period.
+════════════════════════════════════════
+RDS backup retention for clusters defaults to 1 day, this may not be enough to identify and respond to an issue. Backup retention periods should be set to a period that is a balance on cost and limiting risk.
+
+
+See https://avd.aquasec.com/misconfig/aws-0077
+────────────────────────────────────────
+ main.tf:67
+   via main.tf:58-70 (aws_db_instance.reporting)
+────────────────────────────────────────
+  58   resource "aws_db_instance" "reporting" {
+  ..   
+  67 [   backup_retention_period    = 0
+  ..   
+  70   }
+────────────────────────────────────────
+
+
+AWS-0080 (HIGH): Instance does not have storage encryption enabled.
+════════════════════════════════════════
+Encryption should be enabled for an RDS Database instances.
+When enabling encryption by setting the kms_key_id.
+
+
+See https://avd.aquasec.com/misconfig/aws-0080
+────────────────────────────────────────
+ main.tf:66
+   via main.tf:58-70 (aws_db_instance.reporting)
+────────────────────────────────────────
+  58   resource "aws_db_instance" "reporting" {
+  ..   
+  66 [   storage_encrypted          = false
+  ..   
+  70   }
+────────────────────────────────────────
+
+
+AWS-0086 (HIGH): No public access block so not blocking public acls
+════════════════════════════════════════
+S3 buckets should block public ACLs on buckets and any objects they contain. By blocking, PUTs with fail if the object has any public ACL a.
+
+
+See https://avd.aquasec.com/misconfig/aws-0086
+────────────────────────────────────────
+ main.tf:48-50
+────────────────────────────────────────
+  48 ┌ resource "aws_s3_bucket" "artifacts" {
+  49 │   bucket = "posture-fixture-artifacts"
+  50 └ }
+────────────────────────────────────────
+
+
+AWS-0087 (HIGH): No public access block so not blocking public policies
+════════════════════════════════════════
+S3 bucket policy should have block public policy to prevent users from putting a policy that enable public access.
+
+
+See https://avd.aquasec.com/misconfig/aws-0087
+────────────────────────────────────────
+ main.tf:48-50
+────────────────────────────────────────
+  48 ┌ resource "aws_s3_bucket" "artifacts" {
+  49 │   bucket = "posture-fixture-artifacts"
+  50 └ }
+────────────────────────────────────────
+
+
+AWS-0089 (LOW): Bucket has logging disabled
+════════════════════════════════════════
+Ensures S3 bucket logging is enabled for S3 buckets
+
+See https://avd.aquasec.com/misconfig/aws-0089
+────────────────────────────────────────
+ main.tf:48-50
+────────────────────────────────────────
+  48 ┌ resource "aws_s3_bucket" "artifacts" {
+  49 │   bucket = "posture-fixture-artifacts"
+  50 └ }
+────────────────────────────────────────
+
+
+AWS-0090 (MEDIUM): Bucket does not have versioning enabled
+════════════════════════════════════════
+Versioning in Amazon S3 is a means of keeping multiple variants of an object in the same bucket.
+
+You can use the S3 Versioning feature to preserve, retrieve, and restore every version of every object stored in your buckets.
+
+With versioning you can recover more easily from both unintended user actions and application failures.
+
+When you enable versioning, also keep in mind the potential costs of storing noncurrent versions of objects. To help manage those costs, consider setting up an S3 Lifecycle configuration.
+
+
+See https://avd.aquasec.com/misconfig/aws-0090
+────────────────────────────────────────
+ main.tf:48-50
+────────────────────────────────────────
+  48 ┌ resource "aws_s3_bucket" "artifacts" {
+  49 │   bucket = "posture-fixture-artifacts"
+  50 └ }
+────────────────────────────────────────
+
+
+AWS-0091 (HIGH): No public access block so not blocking public acls
+════════════════════════════════════════
+S3 buckets should ignore public ACLs on buckets and any objects they contain. By ignoring rather than blocking, PUT calls with public ACLs will still be applied but the ACL will be ignored.
+
+
+See https://avd.aquasec.com/misconfig/aws-0091
+────────────────────────────────────────
+ main.tf:48-50
+────────────────────────────────────────
+  48 ┌ resource "aws_s3_bucket" "artifacts" {
+  49 │   bucket = "posture-fixture-artifacts"
+  50 └ }
+────────────────────────────────────────
+
+
+AWS-0092 (HIGH): Bucket has a public ACL: "public-read"
+════════════════════════════════════════
+Buckets should not have ACLs that allow public access
+
+
+See https://avd.aquasec.com/misconfig/aws-0092
+────────────────────────────────────────
+ main.tf:54
+   via main.tf:52-55 (aws_s3_bucket_acl.artifacts)
+────────────────────────────────────────
+  52   resource "aws_s3_bucket_acl" "artifacts" {
+  53     bucket = aws_s3_bucket.artifacts.id
+  54 [   acl    = "public-read"
+  55   }
+────────────────────────────────────────
+
+
+AWS-0093 (HIGH): No public access block so not restricting public buckets
+════════════════════════════════════════
+S3 buckets should restrict public policies for the bucket. By enabling, the restrict_public_buckets, only the bucket owner and AWS Services can access if it has a public policy.
+
+
+See https://avd.aquasec.com/misconfig/aws-0093
+────────────────────────────────────────
+ main.tf:48-50
+────────────────────────────────────────
+  48 ┌ resource "aws_s3_bucket" "artifacts" {
+  49 │   bucket = "posture-fixture-artifacts"
+  50 └ }
+────────────────────────────────────────
+
+
+AWS-0094 (LOW): Bucket does not have a corresponding public access block.
+════════════════════════════════════════
+The "block public access" settings in S3 override individual policies that apply to a given bucket, meaning that all public access can be controlled in one central types for that bucket. It is therefore good practice to define these settings for each bucket in order to clearly define the public access that can be allowed for it.
+
+
+See https://avd.aquasec.com/misconfig/aws-0094
+────────────────────────────────────────
+ main.tf:48-50
+────────────────────────────────────────
+  48 ┌ resource "aws_s3_bucket" "artifacts" {
+  49 │   bucket = "posture-fixture-artifacts"
+  50 └ }
+────────────────────────────────────────
+
+
+AWS-0104 (CRITICAL): Security group rule allows unrestricted egress to any IP address.
+════════════════════════════════════════
+Opening up ports to connect out to the public internet is generally to be avoided. You should restrict access to IP addresses or ranges that are explicitly required where possible.
+
+
+See https://avd.aquasec.com/misconfig/aws-0104
+────────────────────────────────────────
+ main.tf:43
+   via main.tf:39-44 (egress)
+    via main.tf:18-45 (aws_security_group.bastion)
+────────────────────────────────────────
+  18   resource "aws_security_group" "bastion" {
+  ..   
+  43 [     cidr_blocks = ["0.0.0.0/0"]
+  ..   
+  45   }
+────────────────────────────────────────
+
+
+AWS-0107 (HIGH): Security group rule allows unrestricted ingress from any IP address.
+════════════════════════════════════════
+Security groups provide stateful filtering of ingress and egress network traffic to AWS
+resources. It is recommended that no security group allows unrestricted ingress access to
+remote server administration ports, such as SSH to port 22 and RDP to port 3389.
+
+
+See https://avd.aquasec.com/misconfig/aws-0107
+────────────────────────────────────────
+ main.tf:36
+   via main.tf:31-37 (ingress)
+    via main.tf:18-45 (aws_security_group.bastion)
+────────────────────────────────────────
+  18   resource "aws_security_group" "bastion" {
+  ..   
+  36 [     cidr_blocks = ["0.0.0.0/0"]
+  ..   
+  45   }
+────────────────────────────────────────
+
+
+AWS-0107 (HIGH): Security group rule allows unrestricted ingress from any IP address.
+════════════════════════════════════════
+Security groups provide stateful filtering of ingress and egress network traffic to AWS
+resources. It is recommended that no security group allows unrestricted ingress access to
+remote server administration ports, such as SSH to port 22 and RDP to port 3389.
+
+
+See https://avd.aquasec.com/misconfig/aws-0107
+────────────────────────────────────────
+ main.tf:28
+   via main.tf:23-29 (ingress)
+    via main.tf:18-45 (aws_security_group.bastion)
+────────────────────────────────────────
+  18   resource "aws_security_group" "bastion" {
+  ..   
+  28 [     cidr_blocks = ["0.0.0.0/0"]
+  ..   
+  45   }
+────────────────────────────────────────
+
+
+AWS-0124 (LOW): Security group rule does not have a description.
+════════════════════════════════════════
+Security group rules should include a description for auditing purposes.
+
+Simplifies auditing, debugging, and managing security groups.
+
+
+See https://avd.aquasec.com/misconfig/aws-0124
+────────────────────────────────────────
+ main.tf:39-44
+   via main.tf:18-45 (aws_security_group.bastion)
+────────────────────────────────────────
+  18   resource "aws_security_group" "bastion" {
+  ..   
+  39 ┌   egress {
+  40 │     from_port   = 0
+  41 │     to_port     = 0
+  42 │     protocol    = "-1"
+  43 │     cidr_blocks = ["0.0.0.0/0"]
+  44 └   }
+  45   }
+────────────────────────────────────────
+
+
+AWS-0132 (HIGH): Bucket does not encrypt data with a customer managed key.
+════════════════════════════════════════
+Encryption using AWS keys provides protection for your S3 buckets. To gain greater control over encryption, such as key rotation, access policies, and auditability, use customer managed keys (CMKs) with SSE-KMS.
+Note that SSE-KMS is not supported for S3 server access logging destination buckets; in such cases, use SSE-S3 instead.
+
+
+See https://avd.aquasec.com/misconfig/aws-0132
+────────────────────────────────────────
+ main.tf:48-50
+────────────────────────────────────────
+  48 ┌ resource "aws_s3_bucket" "artifacts" {
+  49 │   bucket = "posture-fixture-artifacts"
+  50 └ }
+────────────────────────────────────────
+
+
+AWS-0133 (LOW): Instance does not have performance insights enabled.
+════════════════════════════════════════
+Enabling Performance insights allows for greater depth in monitoring data.
+For example, information about active sessions could help diagose a compromise or assist in the investigation
+
+
+See https://avd.aquasec.com/misconfig/aws-0133
+────────────────────────────────────────
+ main.tf:58-70
+────────────────────────────────────────
+  58 ┌ resource "aws_db_instance" "reporting" {
+  59 │   identifier                 = "posture-fixture-reporting"
+  60 │   allocated_storage          = 20
+  61 │   engine                     = "postgres"
+  62 │   instance_class             = "db.t3.micro"
+  63 │   username                   = "postgres"
+  64 │   password                   = "hunter2-fixture-not-a-real-secret"
+  65 │   publicly_accessible        = true
+  66 └   storage_encrypted          = false
+  ..   
+────────────────────────────────────────
+
+
+AWS-0176 (MEDIUM): Instance does not have IAM Authentication enabled
+════════════════════════════════════════
+Ensure IAM Database Authentication is enabled for RDS database instances to manage database access
+
+See https://avd.aquasec.com/misconfig/aws-0176
+────────────────────────────────────────
+ main.tf:58-70
+────────────────────────────────────────
+  58 ┌ resource "aws_db_instance" "reporting" {
+  59 │   identifier                 = "posture-fixture-reporting"
+  60 │   allocated_storage          = 20
+  61 │   engine                     = "postgres"
+  62 │   instance_class             = "db.t3.micro"
+  63 │   username                   = "postgres"
+  64 │   password                   = "hunter2-fixture-not-a-real-secret"
+  65 │   publicly_accessible        = true
+  66 └   storage_encrypted          = false
+  ..   
+────────────────────────────────────────
+
+
+AWS-0177 (MEDIUM): Instance does not have Deletion Protection enabled
+════════════════════════════════════════
+Ensure deletion protection is enabled for RDS database instances.
+
+See https://avd.aquasec.com/misconfig/aws-0177
+────────────────────────────────────────
+ main.tf:58-70
+────────────────────────────────────────
+  58 ┌ resource "aws_db_instance" "reporting" {
+  59 │   identifier                 = "posture-fixture-reporting"
+  60 │   allocated_storage          = 20
+  61 │   engine                     = "postgres"
+  62 │   instance_class             = "db.t3.micro"
+  63 │   username                   = "postgres"
+  64 │   password                   = "hunter2-fixture-not-a-real-secret"
+  65 │   publicly_accessible        = true
+  66 └   storage_encrypted          = false
+  ..   
+────────────────────────────────────────
+
+
+AWS-0180 (HIGH): Instance has Public Access enabled
+════════════════════════════════════════
+Ensures RDS instances and RDS Cluster instances are not launched into the public cloud.
+
+See https://avd.aquasec.com/misconfig/aws-0180
+────────────────────────────────────────
+ main.tf:65
+   via main.tf:58-70 (aws_db_instance.reporting)
+────────────────────────────────────────
+  58   resource "aws_db_instance" "reporting" {
+  ..   
+  65 [   publicly_accessible        = true
+  ..   
+  70   }
+────────────────────────────────────────
+
+
+EXIT=0

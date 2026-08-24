@@ -1,0 +1,25 @@
+$ trivy config ./fixtures/no-such-scope
+2026-08-24T16:48:41+05:30	INFO	[misconfig] Misconfiguration scanning is enabled
+2026-08-24T16:48:41+05:30	INFO	[checks-client] Using existing checks from cache	path="/Users/sitharaj/Library/Caches/trivy/policy/content"
+2026-08-24T16:48:41+05:30	FATAL	Fatal error	run error: fs scan error: scan error: scan failed: failed analysis: analyze with traversal: walk dir error: unknown error with fixtures/no-such-scope: lstat fixtures/no-such-scope: no such file or directory
+EXIT=1
+
+$ mkdir -p /tmp/cpr-unreadable && chmod 000 /tmp/cpr-unreadable
+$ trivy config /tmp/cpr-unreadable-scope
+2026-08-24T16:48:41+05:30	INFO	[misconfig] Misconfiguration scanning is enabled
+2026-08-24T16:48:41+05:30	INFO	[checks-client] Using existing checks from cache	path="/Users/sitharaj/Library/Caches/trivy/policy/content"
+2026-08-24T16:48:42+05:30	INFO	Detected config files	num=0
+2026-08-24T16:48:42+05:30	WARN	[report] Supported files for scanner(s) not found.	scanners=[misconfig]
+
+Report Summary
+
+┌────────┬──────┬───────────────────┐
+│ Target │ Type │ Misconfigurations │
+├────────┼──────┼───────────────────┤
+│   -    │  -   │         -         │
+└────────┴──────┴───────────────────┘
+Legend:
+- '-': Not scanned
+- '0': Clean (no security findings detected)
+
+EXIT=0

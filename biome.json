@@ -13,7 +13,8 @@
       "!web/.next",
       "!web/out",
       "!web/public",
-      "!design"
+      "!design",
+      "!examples/*/validation/fixtures"
     ]
   },
   "formatter": {

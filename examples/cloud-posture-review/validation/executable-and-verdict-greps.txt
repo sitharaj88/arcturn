@@ -1,0 +1,18 @@
+$ find . -type f \( -name '*.js' -o -name '*.ts' -o -name '*.sh' -o -name '*.py' \) -o -type d -name extensions
+EXIT=0  (no output: no executable file, no extensions/)
+
+$ find . -type f -perm +111
+EXIT=0  (no output: no file carries an executable bit)
+
+$ grep -rn 'APPROVED' agents skills workflows arcturn.json
+EXIT=1  (1 = no match in any asset body)
+
+$ grep -rln 'APPROVED' .
+README.md
+validation/TRANSCRIPTS.md
+EXIT=0  (the two docs that assert the token's absence, and nothing else)
+
+$ grep -rh 'VERDICT: ' agents | sort -u
+- `VERDICT: ADVISORY` and nothing else.
+- `VERDICT: ADVISORY` and nothing else. Nothing was applied.
+VERDICT: ADVISORY

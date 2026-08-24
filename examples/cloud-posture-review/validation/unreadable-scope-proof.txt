@@ -1,0 +1,10 @@
+$ ls -ld /tmp/cpr-unreadable-scope/inner
+d---------  3 sitharaj  wheel  96 Aug 24 16:48 /tmp/cpr-unreadable-scope/inner
+EXIT=0
+
+$ ls /tmp/cpr-unreadable-scope/inner
+ls: /tmp/cpr-unreadable-scope/inner: Permission denied
+EXIT=1
+
+$ trivy config --exit-code 1 /tmp/cpr-unreadable-scope  # even the failure flag does not fire
+EXIT=0

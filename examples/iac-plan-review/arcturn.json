@@ -1,0 +1,10 @@
+{
+  "name": "iac-plan-review",
+  "description": "One role, one pipeline and two skills for infrastructure change review that refuses to review a plan it did not produce, and treats the plan itself as code execution.",
+  "version": "0.1.0",
+  "provides": {
+    "agents": ["agents/terraform-plan-reviewer.md"],
+    "skills": ["skills/plan-explain.md", "skills/drift-report.md"],
+    "workflows": ["workflows/iac-change-review.md"]
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "cloud-posture-review",
+  "description": "Two roles, one pipeline and one skill for read-only cloud posture and IAM review, where a check that could not run is NOT-CHECKED with its reason and never a PASS.",
+  "version": "0.1.0",
+  "provides": {
+    "agents": ["agents/posture-scanner.md", "agents/iam-least-privilege-analyst.md"],
+    "skills": ["skills/exposure-check.md"],
+    "workflows": ["workflows/posture-review.md"]
+  }
+}

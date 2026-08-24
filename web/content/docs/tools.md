@@ -187,7 +187,7 @@ Pure-JS recursive regex content search — no dependency on system `grep`.
 | Parameter | Type | Required | Notes |
 |---|---|---|---|
 | `pattern` | string | yes | JavaScript regex source, no surrounding slashes. |
-| `path` | string | no | Directory to search. Defaults to cwd. |
+| `path` | string | no | File or directory to search. Defaults to cwd. |
 | `glob` | string | no | Restrict which files are searched, e.g. `**/*.ts`. |
 | `caseInsensitive` | boolean | no | |
 | `contextLines` | number | no | Lines of context before/after each match. Default 0. |

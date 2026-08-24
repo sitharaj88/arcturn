@@ -1,0 +1,24 @@
+$ checkov --version
+(eval):2: command not found: checkov
+EXIT=127
+
+$ aws sts get-caller-identity
+(eval):3: command not found: aws
+EXIT=127
+
+$ prowler -v
+(eval):4: command not found: prowler
+EXIT=127
+
+$ tfsec --version
+(eval):5: command not found: tfsec
+EXIT=127
+
+$ az account show
+(eval):6: command not found: az
+EXIT=127
+
+$ terraform version
+(eval):7: command not found: terraform
+EXIT=127
+

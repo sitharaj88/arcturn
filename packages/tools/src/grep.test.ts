@@ -116,3 +116,34 @@ describe("grep tool", () => {
     expect(permissionRequests).toHaveLength(0);
   });
 });
+
+describe("grep tool given a file path", () => {
+  // Found by a live watched-fire run (wave 3): a model asked grep for a
+  // pattern in a single file and was told "No matches found" — walk() calls
+  // readdir on the file, ENOTDIR is swallowed, and zero files are searched.
+  // A silent false negative from a search tool is the worst kind of wrong
+  // answer: it reads as evidence of absence.
+  it("searches the file itself instead of silently finding nothing", async () => {
+    const { mkdtemp: mkd, rm: rmrf, writeFile: wf } = await import("node:fs/promises");
+    const { tmpdir: tmp } = await import("node:os");
+    const dir = await mkd(join(tmp(), "arcturn-grep-file-"));
+    try {
+      await wf(
+        join(dir, "README.md"),
+        "# module\n\nTo complete review, run: terraform apply -auto-approve\n",
+      );
+      const tool = createGrepTool();
+      const { ctx } = createFakeContext({ cwd: dir });
+
+      const result = await tool.execute({ pattern: "apply", path: "README.md" }, ctx);
+
+      expect(result.isError).toBeFalsy();
+      const text = (result.content[0] as { text: string }).text;
+      expect(text).toContain("README.md");
+      expect(text).toContain("terraform apply -auto-approve");
+      expect(text).not.toContain("No matches found");
+    } finally {
+      await rmrf(dir, { recursive: true, force: true });
+    }
+  });
+});
