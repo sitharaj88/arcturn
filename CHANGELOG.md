@@ -12,6 +12,49 @@ CLI, the SDK, or the wire protocol.
 
 Nothing yet.
 
+## [0.2.0] — 2026-08-24
+
+### The package ecosystem
+
+- **`arcturn add`, `inspect`, `packages`, `update` and `remove`** manage
+  packages of skills, agent roles, workflows, themes and MCP servers from a
+  git URL, an `owner/repo[/subdir][@ref]` shorthand, or a local path. Installs
+  are staged, commit-pinned, and linked file by file; `remove` unlinks exactly
+  what `add` added. Executable code never links without a per-install
+  confirmation that names the files, and off a TTY it declines rather than
+  assuming consent.
+- **`arcturn inspect` is disclosure before trust**: the same resolver as
+  `add` with the linking taken out. It prints the agent lanes the engine
+  would derive, workflow budgets, skills and executable files an install
+  would add — and adds none of them. `--json` emits the machine-readable
+  disclosure the hub is built from.
+- **`arcturn new skill|agent|workflow`** scaffolds an asset file that
+  round-trips through the real parsers, so the frontmatter is right on the
+  first save.
+- **A curated pack catalog** ships in the repository under `examples/` and is
+  published at arcturn.dev/hub — seven packs, thirty-two assets, each built
+  around a refusal that was watched firing against real fixtures before it
+  shipped.
+
+### Fixed
+
+- **`grep` handed a file path answered "No matches found"** — the walker
+  swallowed `ENOTDIR` and searched nothing, a silent false negative a model
+  reads as evidence of absence. A file root now searches that file. Found by
+  a live validation run, not by the 4,300-test suite — recorded accordingly.
+- **Unknown cost rendered as `$0.00`.** Model entries with no published
+  pricing folded to zero at every accumulation point, so the footer and
+  `/cost` claimed a session was free when the truth was "unpriced". The
+  session now counts unpriced turns; totals render as `$1.24` only when
+  complete, `$1.24+` when partly priced, and `n/a` when nothing was — in the
+  footer, `/cost`, `/team` and scout reports. `--max-cost` enforcement is
+  unchanged: the cap still counts every dollar it can observe, and `/cost`
+  now says so.
+- **Z.AI general-API models are priced** from the provider's published rate
+  card, quoted in the source with its retrieval date. The coding-plan presets
+  stay unpriced on purpose — they are subscriptions, and a per-token price is
+  not a number that exists; `/cost` says which plan covers them instead.
+
 ## [0.1.0] — 2026-08-23
 
 The first public release. Arcturn is a coding agent you run in a terminal and
@@ -146,5 +189,6 @@ servers unspawnable because npm ships them as `.cmd` shims. All fixed, with the
 matrix as referee. Shell resolution, path handling and case sensitivity are
 resolved per platform at runtime.
 
-[Unreleased]: https://github.com/sitharaj88/arcturn/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/sitharaj88/arcturn/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/sitharaj88/arcturn/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/sitharaj88/arcturn/releases/tag/v0.1.0
