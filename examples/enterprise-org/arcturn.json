@@ -1,0 +1,28 @@
+{
+  "name": "enterprise-org",
+  "description": "An eleven-role, six-pipeline agent organization: plan, build, review and release with evidence packets, three dispatch lanes, and human gates.",
+  "version": "0.1.0",
+  "provides": {
+    "agents": [
+      "architect.md",
+      "developer.md",
+      "docs-writer.md",
+      "pm.md",
+      "qa-adversarial.md",
+      "qa-functional.md",
+      "release-manager.md",
+      "retro.md",
+      "security-reviewer.md",
+      "tech-lead.md",
+      "ux-reviewer.md"
+    ],
+    "workflows": [
+      "bug-fix.md",
+      "docs-pass.md",
+      "feature-build.md",
+      "refactor-guard.md",
+      "release-check.md",
+      "security-audit.md"
+    ]
+  }
+}
