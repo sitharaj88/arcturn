@@ -15,3 +15,8 @@ coverage/
 # Eval run artifacts (real API runs; regenerate with `arcturn-evals run`)
 runs/
 *.vsix
+
+# VS Code integration-test harness (editors/vscode): downloaded editors,
+# isolated profiles, generated fixture workspaces, and the compiled test files.
+.vscode-test/
+editors/vscode/out/

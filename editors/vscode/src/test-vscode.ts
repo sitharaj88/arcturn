@@ -67,12 +67,16 @@ export interface FakeState {
   /** Listeners for `window.onDidEndTerminalShellExecution`. */
   shellExecutionEndHandlers: ((event: { terminal: FakeTerminal }) => void)[];
   /**
-   * Whether this host exposes shell integration at all. VS Code gained
-   * `onDidEndTerminalShellExecution` in 1.93 and the extension declares
-   * `engines.vscode: ^1.90.0`, so the absent case is a real host, not a
-   * hypothetical one.
+   * Which of the three real host shapes to present.
+   *
+   * The third one is the one that cost us a shipping bug. `typeof x ===
+   * "function"` is not a capability check on VS Code: an API that is still a
+   * *proposal* is present on `window`, is a function, and throws the moment
+   * it is called unless the manifest opted into the proposal. Modelling only
+   * "callable" and "missing" is what let a feature detection that could not
+   * possibly work pass its unit tests.
    */
-  shellIntegrationSupported: boolean;
+  shellIntegration: "available" | "absent" | "proposal-gated";
   disposed: number;
 }
 
@@ -98,7 +102,7 @@ export const fake: FakeState = {
   closeHandlers: [],
   configChangeHandlers: [],
   shellExecutionEndHandlers: [],
-  shellIntegrationSupported: true,
+  shellIntegration: "available",
   disposed: 0,
 };
 
@@ -116,7 +120,7 @@ export function resetFake(): void {
   fake.closeHandlers = [];
   fake.configChangeHandlers = [];
   fake.shellExecutionEndHandlers = [];
-  fake.shellIntegrationSupported = true;
+  fake.shellIntegration = "available";
   fake.disposed = 0;
 }
 
@@ -226,10 +230,19 @@ export function createFakeVscode(): Record<string, unknown> {
         fake.terminals.push(terminal);
         return terminal;
       },
-      // Exposed as a getter so a test can take it away and exercise the
-      // older-host path without rebuilding the whole module mock.
+      // Exposed as a getter so a test can change the host shape between cases
+      // without rebuilding the whole module mock.
       get onDidEndTerminalShellExecution() {
-        if (!fake.shellIntegrationSupported) return undefined;
+        if (fake.shellIntegration === "absent") return undefined;
+        if (fake.shellIntegration === "proposal-gated") {
+          // Word for word what VS Code 1.90-1.92 throws: the property is
+          // there, it is a function, and calling it is fatal.
+          return () => {
+            throw new Error(
+              "Extension 'sitharaj88.arcturn-vscode' CANNOT use API proposal: terminalShellIntegration.",
+            );
+          };
+        }
         return (handler: (event: { terminal: FakeTerminal }) => void) => {
           fake.shellExecutionEndHandlers.push(handler);
           return new FakeDisposable(() => {

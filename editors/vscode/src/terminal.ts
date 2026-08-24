@@ -23,14 +23,42 @@
  *   Where it does fire, the tab is unusable and must be abandoned.
  * - `window.onDidEndTerminalShellExecution` fires when a **command** the shell
  *   ran finishes — which is precisely "the TUI exited". This is the signal
- *   that closes the hole. It needs shell integration active in that terminal,
- *   so it is absent on VS Code before 1.93 (the extension supports back to
- *   1.90) and in shells VS Code cannot instrument. It is feature-detected.
+ *   that closes the hole, and it is why `engines.vscode` is `^1.93.0`: the
+ *   API was a *proposal* before that.
  *
- * When neither signal is available we do not guess, and we do not need to:
- * `mentions.ts` guarantees the text is inert whatever ends up reading it, so
- * the worst case degrades from command execution to a useless line at a
- * prompt. Defence in depth, with the depth stated rather than implied.
+ * ## `typeof` is not a capability check on VS Code
+ *
+ * A proposed API is not missing. On 1.90-1.92 `onDidEndTerminalShellExecution`
+ * is present on `window`, `typeof` reports `"function"`, and **calling** it
+ * throws `CANNOT use API proposal: terminalShellIntegration` unless the
+ * manifest opted in. A `typeof` guard sails straight past that, and because
+ * this hub is constructed while `activate()` is still assembling its
+ * dependencies — before a single `registerCommand` — the throw did not
+ * degrade one feature, it made the entire extension inert.
+ *
+ * So the subscription is attempted inside a `try`. The engine floor is now
+ * 1.93 and that is the real fix, but forks (Cursor, Windsurf, VSCodium) and
+ * future proposal churn can reproduce exactly this present-but-gated shape,
+ * and total activation failure is the worst available response to losing an
+ * *optional* signal.
+ *
+ * ## What we do when the signal is missing
+ *
+ * We do not fall back to "assume the engine is live" — that is precisely the
+ * assumption the signal was added to remove. Liveness becomes `"unknown"`,
+ * and the two operations are treated differently because their risks differ:
+ *
+ * - `open` only focuses a terminal. It types nothing, so it has nothing to
+ *   prove, and re-launching there would submit a junk prompt to a live TUI
+ *   every time the keybinding is pressed.
+ * - `sendInput` types. That is the operation that was exploitable, so it
+ *   re-launches and settles first, and never types into a terminal it cannot
+ *   vouch for. On a signal-less host that costs one junk prompt per mention
+ *   if the engine was in fact still running — loud, visible, and cheap next
+ *   to typing at a shell prompt.
+ *
+ * `mentions.ts` independently guarantees the text is inert whatever reads it.
+ * That is the second layer, not the excuse for skipping this one.
  */
 
 import * as vscode from "vscode";
@@ -49,11 +77,12 @@ import { buildLaunchCommand, launchArgs } from "./launch.js";
 const LAUNCH_SETTLE_MS = 700;
 
 /**
- * The slice of `window` that only newer hosts have.
+ * The slice of `window` a host may not honour.
  *
- * `@types/vscode` is resolved at the latest version while `engines.vscode` is
- * `^1.90.0`, so the compiler will happily let us call an API that does not
- * exist at runtime. Restating it as optional is what forces the check.
+ * `@types/vscode` resolves to the latest version regardless of what
+ * `engines.vscode` promises, so the compiler will happily let us call an API
+ * the running editor refuses. Restating it as optional is what forces a
+ * guard; the `try` around the call is what makes the guard sufficient.
  */
 interface ShellIntegrationWindow {
   onDidEndTerminalShellExecution?: (
@@ -102,10 +131,18 @@ function keyFor(folder: vscode.WorkspaceFolder | undefined): string {
   return folder === undefined ? " no-folder" : folder.uri.toString();
 }
 
-/** A terminal we opened, and whether the engine is still the thing reading it. */
+/**
+ * What we know about whether the engine is still reading a terminal.
+ *
+ * `"unknown"` is a first-class answer, not a synonym for `"running"`. It is
+ * what an honest hub reports on a host that gives it no signal.
+ */
+type EngineLiveness = "running" | "exited" | "unknown";
+
+/** A terminal we opened, and what we know about the engine inside it. */
 interface TerminalEntry {
   readonly terminal: vscode.Terminal;
-  engineRunning: boolean;
+  liveness: EngineLiveness;
 }
 
 export function createTerminalHub(options: TerminalHubOptions = {}): TerminalHub {
@@ -119,19 +156,29 @@ export function createTerminalHub(options: TerminalHubOptions = {}): TerminalHub
     }
   });
 
-  // Feature-detected: see ShellIntegrationWindow. Called through the window
-  // object so the event keeps its `this`.
+  // Called through the window object so the event keeps its `this`, and
+  // inside a `try` because `typeof` cannot tell a live API from a gated one.
   const host = vscode.window as ShellIntegrationWindow;
-  const shellSubscription =
-    typeof host.onDidEndTerminalShellExecution === "function"
-      ? host.onDidEndTerminalShellExecution((event) => {
-          for (const entry of entries.values()) {
-            // The command that finished is the engine, or something the user
-            // ran after it. Either way the engine is no longer in front.
-            if (entry.terminal === event.terminal) entry.engineRunning = false;
-          }
-        })
-      : undefined;
+  let shellSubscription: vscode.Disposable | undefined;
+  let livenessObservable = false;
+  if (typeof host.onDidEndTerminalShellExecution === "function") {
+    try {
+      shellSubscription = host.onDidEndTerminalShellExecution((event) => {
+        for (const entry of entries.values()) {
+          // The command that finished is the engine, or something the user
+          // ran after it. Either way the engine is no longer in front.
+          if (entry.terminal === event.terminal) entry.liveness = "exited";
+        }
+      });
+      livenessObservable = true;
+    } catch {
+      // A host that has the property but refuses the call. Losing the signal
+      // is survivable; failing to activate is not. `sendInput` compensates by
+      // never trusting a terminal it did not just launch.
+      shellSubscription = undefined;
+      livenessObservable = false;
+    }
+  }
 
   function createTerminal(folder: vscode.WorkspaceFolder | undefined): vscode.Terminal {
     const multiRoot = (vscode.workspace.workspaceFolders?.length ?? 0) > 1;
@@ -149,16 +196,21 @@ export function createTerminalHub(options: TerminalHubOptions = {}): TerminalHub
   }
 
   /**
-   * Hand back a terminal with the engine running in it, and say whether we had
-   * to start it.
+   * Hand back a terminal for this folder, and say whether we had to launch the
+   * engine into it.
    *
    * `launched` drives the settle delay, and it is true for a re-launch as well
    * as a first launch: a terminal that has just been handed the launch line is
    * equally unsettled whichever way it got there.
+   *
+   * @param mustBeLive - True when the caller is about to type into it. An
+   *   `"unknown"` terminal is good enough to focus and not good enough to
+   *   type into; see the module doc.
    */
   function acquire(
     folder: vscode.WorkspaceFolder | undefined,
     cli: CliLocation,
+    mustBeLive: boolean,
   ): { terminal: vscode.Terminal; launched: boolean } {
     const key = keyFor(folder);
     const existing = entries.get(key);
@@ -168,16 +220,20 @@ export function createTerminalHub(options: TerminalHubOptions = {}): TerminalHub
     }
 
     const live = entries.get(key);
-    if (live?.engineRunning) {
+    const reusable =
+      live !== undefined &&
+      (live.liveness === "running" || (live.liveness === "unknown" && !mustBeLive));
+    if (reusable && live !== undefined) {
       live.terminal.show();
       return { terminal: live.terminal, launched: false };
     }
 
-    // Either there is no terminal, or there is one sitting at a shell prompt
-    // because the engine exited. Re-use the tab in the second case so the
-    // user does not accumulate one per mention, but re-launch into it.
-    const entry: TerminalEntry = live ?? { terminal: createTerminal(folder), engineRunning: false };
-    entry.engineRunning = true;
+    // Either there is no terminal, or there is one we cannot vouch for. Re-use
+    // the tab in the second case so the user does not accumulate one per
+    // mention, but re-launch into it.
+    const entry: TerminalEntry = live ?? { terminal: createTerminal(folder), liveness: "unknown" };
+    // Only claim "running" where something could tell us otherwise later.
+    entry.liveness = livenessObservable ? "running" : "unknown";
     entries.set(key, entry);
     launchInto(entry.terminal, cli);
     return { terminal: entry.terminal, launched: true };
@@ -185,10 +241,10 @@ export function createTerminalHub(options: TerminalHubOptions = {}): TerminalHub
 
   return {
     open(folder, cli) {
-      return acquire(folder, cli).terminal;
+      return acquire(folder, cli, false).terminal;
     },
     async sendInput(folder, cli, text) {
-      const { terminal, launched } = acquire(folder, cli);
+      const { terminal, launched } = acquire(folder, cli, true);
       if (launched) await sleep(LAUNCH_SETTLE_MS);
       terminal.show();
       // `addNewLine: false` is the whole contract: the extension supplies the

@@ -97,7 +97,11 @@ tells the agent where to look; it does not yet narrow what gets injected.
 
 ## Requirements
 
-- VS Code 1.90 or newer.
+- VS Code 1.93 or newer. That floor is load-bearing, not aspirational:
+  `onDidEndTerminalShellExecution` is how the extension knows the agent is
+  still the thing reading its terminal before it types into one, and that API
+  was a proposal until 1.93. The extension previously claimed 1.90 and was
+  simply inert there.
 - Node.js 20+ on the machine that runs the engine (the extension runs in the
   workspace host, so on a remote or dev container that means *there*, not on
   your laptop).

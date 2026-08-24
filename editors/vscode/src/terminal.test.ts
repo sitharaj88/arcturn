@@ -223,7 +223,7 @@ describe("a reused terminal is not assumed to still be running the engine", () =
     // VS Code before 1.93, or a shell VS Code cannot instrument. We lose the
     // signal, not the feature: reuse still works, and the mention text is
     // inert by construction whatever ends up reading it.
-    fake.shellIntegrationSupported = false;
+    fake.shellIntegration = "absent";
     fake.workspaceFolders = [fakeFolder("/work/repo", "repo")];
     const hub = createTerminalHub(noWait);
     const folder = fake.workspaceFolders[0] as never;
@@ -244,5 +244,104 @@ describe("a reused terminal is not assumed to still be running the engine", () =
     expect(fake.shellExecutionEndHandlers).toHaveLength(1);
     hub.dispose();
     expect(fake.shellExecutionEndHandlers).toHaveLength(0);
+  });
+});
+
+describe("a host where shell integration is present but gated", () => {
+  // VS Code 1.90-1.92. `terminalShellIntegration` was a proposal there: the
+  // property is on `window`, `typeof` says "function", and calling it throws
+  // unless package.json opted into the proposal. A `typeof` check is therefore
+  // not a capability check, and this suite could not say so until the fake
+  // grew the third state.
+  it("builds the hub instead of throwing out of the constructor", () => {
+    fake.shellIntegration = "proposal-gated";
+
+    expect(() => createTerminalHub(noWait)).not.toThrow();
+  });
+
+  it("still opens and launches a terminal", () => {
+    fake.shellIntegration = "proposal-gated";
+    fake.workspaceFolders = [fakeFolder("/work/repo", "repo")];
+    const hub = createTerminalHub(noWait);
+
+    hub.open(fake.workspaceFolders[0] as never, cli);
+
+    expect(fake.terminals).toHaveLength(1);
+    expect(fake.terminals[0]?.sent).toEqual([{ text: "/usr/local/bin/arcturn", addNewLine: true }]);
+    hub.dispose();
+  });
+
+  it("disposes cleanly having never subscribed", () => {
+    fake.shellIntegration = "proposal-gated";
+    const hub = createTerminalHub(noWait);
+
+    expect(() => hub.dispose()).not.toThrow();
+  });
+});
+
+describe("with no liveness signal, typing takes the conservative path", () => {
+  // Losing the signal must not silently re-enable the assumption the signal
+  // was added to remove. Focusing a terminal is harmless and stays cheap;
+  // *typing* into one is the operation that was exploitable, so that is the
+  // one that has to prove the engine is listening.
+  for (const shape of ["absent", "proposal-gated"] as const) {
+    it(`re-launches before typing when shell integration is ${shape}`, async () => {
+      fake.shellIntegration = shape;
+      fake.workspaceFolders = [fakeFolder("/work/repo", "repo")];
+      const waits: number[] = [];
+      const hub = createTerminalHub({
+        platform: "darwin",
+        sleep: async (ms) => {
+          waits.push(ms);
+        },
+      });
+      const folder = fake.workspaceFolders[0] as never;
+      hub.open(folder, cli);
+
+      await hub.sendInput(folder, cli, "@src/a.ts ");
+
+      expect(fake.terminals).toHaveLength(1);
+      expect(fake.terminals[0]?.sent).toEqual([
+        { text: "/usr/local/bin/arcturn", addNewLine: true },
+        { text: "/usr/local/bin/arcturn", addNewLine: true },
+        { text: "@src/a.ts ", addNewLine: false },
+      ]);
+      expect(waits).toHaveLength(1);
+      hub.dispose();
+    });
+
+    it(`still just focuses on open when shell integration is ${shape}`, () => {
+      // `open` types nothing, so it has nothing to prove. Re-launching here
+      // would submit a junk prompt to a live TUI every time the keybinding is
+      // pressed, which is a cost with no safety to buy.
+      fake.shellIntegration = shape;
+      fake.workspaceFolders = [fakeFolder("/work/repo", "repo")];
+      const hub = createTerminalHub(noWait);
+      const folder = fake.workspaceFolders[0] as never;
+
+      hub.open(folder, cli);
+      hub.open(folder, cli);
+
+      expect(fake.terminals).toHaveLength(1);
+      expect(fake.terminals[0]?.sent).toHaveLength(1);
+      expect(fake.terminals[0]?.shows).toBe(2);
+      hub.dispose();
+    });
+  }
+
+  it("does not re-launch when the signal is available and says the engine is up", () => {
+    fake.shellIntegration = "available";
+    fake.workspaceFolders = [fakeFolder("/work/repo", "repo")];
+    const hub = createTerminalHub(noWait);
+    const folder = fake.workspaceFolders[0] as never;
+    hub.open(folder, cli);
+
+    return hub.sendInput(folder, cli, "@src/a.ts ").then(() => {
+      expect(fake.terminals[0]?.sent).toEqual([
+        { text: "/usr/local/bin/arcturn", addNewLine: true },
+        { text: "@src/a.ts ", addNewLine: false },
+      ]);
+      hub.dispose();
+    });
   });
 });

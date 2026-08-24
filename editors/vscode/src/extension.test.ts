@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { CliProvisioner, ResolvedCli } from "./cli.js";
-import { activateWith } from "./extension.js";
+import { activate, activateWith } from "./extension.js";
 import type { TerminalHub } from "./terminal.js";
 import { fake, fakeFolder, fakeUri, resetFake } from "./test-vscode.js";
 
@@ -392,5 +392,38 @@ describe("arcturn.serve.enabled reacts to being toggled mid-session", () => {
     fireConfigChange("arcturn.cliPath");
 
     expect(seam.activateSidebar).not.toHaveBeenCalled();
+  });
+});
+
+describe("activation survives a host whose shell-integration API is gated", () => {
+  it("registers every command on VS Code 1.90-1.92", async () => {
+    // The shipping bug, at the level it actually broke. `activate()` builds
+    // the terminal hub in its own argument list, before a single
+    // registerCommand runs, so a throw in there does not degrade one feature
+    // -- it makes the whole extension inert and every command "not found".
+    // `activateWith` cannot catch this: it takes an injected hub.
+    fake.shellIntegration = "proposal-gated";
+    const context = { subscriptions: [] as { dispose(): void }[] };
+
+    await activate(context as never);
+
+    for (const id of [
+      "arcturn.open",
+      "arcturn.sendSelection",
+      "arcturn.sendFile",
+      "arcturn.installCli",
+      "arcturn.fixDiagnostic",
+    ]) {
+      expect(fake.commands.has(id), `${id} was never registered`).toBe(true);
+    }
+  });
+
+  it("comes up on a host with no shell-integration API at all", async () => {
+    fake.shellIntegration = "absent";
+    const context = { subscriptions: [] as { dispose(): void }[] };
+
+    await activate(context as never);
+
+    expect(fake.commands.has("arcturn.open")).toBe(true);
   });
 });
