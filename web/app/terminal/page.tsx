@@ -35,8 +35,23 @@ interface Moment {
 }
 
 /**
- * Every line below is transcribed from `content/docs/*.md`. The rule for this
- * page (DESIGN.md §3.9): illustrate real output, never invent it.
+ * Every line below is transcribed from `content/docs/*.md` and from the CLI's
+ * own renderers. The rule for this page (DESIGN.md §3.9): illustrate real
+ * output, never invent it — and print no timing, token count or dollar figure
+ * that is not in the docs, which is why the status bars here carry the model
+ * and the permission mode and stop there.
+ *
+ * The scripts are written in the terminal's vocabulary rather than as spaced
+ * strings: `{ kind: "tool" }` for `● ✎ edit  path`, `{ kind: "result" }` for
+ * the `⎿` tree, `{ kind: "permission" }` for the bordered gate. Sources, per
+ * shape: `packages/cli/src/display.ts` (`TranscriptFormatter` — the `▌` prompt
+ * echo, the `  ⎿ ` result prefix, `ℹ ⚠ ✗` notices), `interactive/dialogs.ts`
+ * (`permissionDialog` — the box title, the three answers, the footer),
+ * `interactive/app.ts` (the input box, the `✦ arcturn · model · mode` status
+ * bar), `packages/types/src/events.ts` (the JSON event stream's real shape).
+ *
+ * `{ kind: "text" }` rows are deliberate: a unified diff and a raw NDJSON dump
+ * are bodies the terminal prints verbatim, with no glyph of their own.
  */
 const MOMENTS: Moment[] = [
   {
@@ -57,10 +72,12 @@ const MOMENTS: Moment[] = [
     ),
     terminalTitle: "arcturn — ~/projects/api",
     description:
-      "An arcturn session header naming the model and working directory, with a typed prompt asking for input validation on the signup handler.",
+      "An arcturn session header naming the model and working directory, the prompt editor holding a typed request for input validation on the signup handler, and the status bar naming the permission mode.",
     lines: [
-      { text: "✦ arcturn · claude-sonnet-4-5 · ~/projects/api", tone: "accent" },
-      { text: "› add input validation to the /signup handler", tone: "prompt", cursor: true },
+      { kind: "chrome", model: "claude-sonnet-4-5", cwd: "~/projects/api" },
+      { kind: "blank" },
+      { kind: "input", value: "add input validation to the /signup handler", cursor: true },
+      { kind: "status", model: "claude-sonnet-4-5", mode: "default" },
     ],
   },
   {
@@ -79,22 +96,32 @@ const MOMENTS: Moment[] = [
     terminalTitle: "arcturn --output-format json",
     description:
       "A non-interactive arcturn run printing its event stream as newline-delimited JSON: a turn start, a grep tool call start and end, and a completed run end.",
+    /*
+      The one scene on this page that is not the TUI: `--print` writes raw
+      NDJSON to stdout, so there is no chrome, no status bar and no glyph to
+      draw — the terminal shows the shell line and the bytes. Event names are
+      the real ones (`turnStart`/`turnIndex`, `toolStart`, `toolEnd`) per
+      `content/docs/sdk-events.md` and `packages/types/src/events.ts`;
+      `getting-started.md` still prints a pre-rename set (`toolCallStart`,
+      `"turn":1`) that the runtime has not emitted for some time.
+    */
     lines: [
       {
+        kind: "text",
         text: '$ arcturn -p "list every TODO comment in src/" --output-format json',
         tone: "prompt",
       },
-      { text: "" },
-      { text: '{"type":"turnStart","turn":1}', tone: "muted" },
+      { kind: "blank" },
+      { kind: "text", text: '{"type":"turnStart","turnIndex":0}', tone: "muted" },
       {
-        text: '{"type":"toolCallStart","toolCallId":"tc_1","toolName":"grep","input":{"pattern":"TODO"}}',
-        tone: "default",
+        kind: "text",
+        text: '{"type":"toolStart","toolCallId":"tc_1","toolName":"grep","input":{"pattern":"TODO"}}',
       },
       {
-        text: '{"type":"toolCallEnd","toolCallId":"tc_1","result":{"content":[{"type":"text","text":"…"}]}}',
-        tone: "default",
+        kind: "text",
+        text: '{"type":"toolEnd","toolCallId":"tc_1","result":{"role":"toolResult","toolName":"grep","isError":false,"content":[{"type":"text","text":"…"}]}}',
       },
-      { text: '{"type":"runEnd","reason":"completed"}', tone: "good", cursor: true },
+      { kind: "text", text: '{"type":"runEnd","reason":"completed"}', tone: "good" },
     ],
   },
   {
@@ -115,12 +142,43 @@ const MOMENTS: Moment[] = [
     ),
     terminalTitle: "arcturn — permission",
     description:
-      "A permission prompt: editing src/routes/signup.ts requires approval, offering allow, deny, or always allow for src/**.ts.",
+      "An arcturn session that has read src/routes/signup.ts and then stopped at the permission gate: a bordered dialog asking to edit that file, offering allow once, allow always for edit src/routes/signup.ts in project scope, or deny with a reason.",
+    /*
+      The gate as `permissionDialog` actually builds it, down to two details
+      that look like mistakes until you read the source. The muted line under
+      the subject really does restate it: `packages/core/src/loop.ts` composes
+      every description as `${tool}: ${subject}`, and the gate the user sees is
+      that one — the `edit` tool's own, wordier request is served from the
+      per-call decision cache and never reaches a dialog. And the always-row
+      offers the *exact subject*: `suggestRule` widens `bash` alone, to its
+      first word plus `" *"` (docs/permissions.md: "other tools default to
+      their exact subject"). A glob like `src/**.ts` is a rule you write, not
+      one the dialog suggests.
+
+      One compression: on the permission path `defaultSubject` is given the
+      cwd and resolves the path, so the live dialog names
+      `/Users/…/projects/api/src/routes/…` and lets `oneLine` clip the
+      always-row at 44 columns. The site keeps the workspace-relative spelling
+      every other mock and every line of copy on it uses; the dialog's shape is
+      unaffected. The `read` row above it needs no such licence — `display.ts`
+      calls `defaultSubject` with no cwd, so a transcript shows the path the
+      model actually passed.
+    */
     lines: [
-      { text: "⚠ Permission required — edit src/routes/signup.ts", tone: "warn" },
-      { text: "  a  allow    d  deny    A  always allow src/**.ts", tone: "muted" },
-      { text: "" },
-      { text: "  ▸ ", tone: "muted", cursor: true },
+      { kind: "user", text: "add input validation to the /signup handler" },
+      { kind: "blank" },
+      { kind: "tool", name: "read", args: "src/routes/signup.ts" },
+      { kind: "result", text: "84 lines" },
+      { kind: "blank" },
+      {
+        kind: "permission",
+        tool: "edit",
+        subject: "src/routes/signup.ts",
+        description: "edit: src/routes/signup.ts",
+        rule: "edit src/routes/signup.ts",
+        selected: "once",
+      },
+      { kind: "status", model: "claude-sonnet-4-5", mode: "default" },
     ],
   },
   {
@@ -142,16 +200,24 @@ const MOMENTS: Moment[] = [
     terminalTitle: "arcturn — dry run",
     description:
       "The /diff command printing a unified diff of one pending change to src/app.ts inside the dry-run shadow tree.",
+    /*
+      `/diff` prints the overlay's aggregate diff through `ui.print`, which
+      writes a blank spacer and then the diff verbatim — so the body is text,
+      not tool rows. The `+`/`−` tinting is the one liberty, and it is the
+      product's own: `TranscriptFormatter#diff` paints an `edit` result's diff
+      with `diffAdded` / `diffRemoved` and leaves context muted.
+    */
     lines: [
-      { text: "> /diff", tone: "prompt" },
-      { text: "--- a/src/app.ts", tone: "muted" },
-      { text: "+++ b/src/app.ts", tone: "muted" },
-      { text: "@@ -12,3 +12,4 @@", tone: "accent" },
-      { text: "  export function start() {", tone: "default" },
-      { text: '-  console.log("boot");', tone: "bad" },
-      { text: '+  console.log("booting");', tone: "good" },
-      { text: "+  return true;", tone: "good" },
-      { text: "  }", tone: "default", cursor: true },
+      { kind: "user", text: "/diff" },
+      { kind: "blank" },
+      { kind: "text", text: "--- a/src/app.ts", tone: "muted" },
+      { kind: "text", text: "+++ b/src/app.ts", tone: "muted" },
+      { kind: "text", text: "@@ -12,3 +12,4 @@", tone: "accent" },
+      { kind: "text", text: "  export function start() {", tone: "muted" },
+      { kind: "text", text: '-  console.log("boot");', tone: "bad" },
+      { kind: "text", text: '+  console.log("booting");', tone: "good" },
+      { kind: "text", text: "+  return true;", tone: "good" },
+      { kind: "text", text: "  }", tone: "muted" },
     ],
   },
   {
@@ -174,14 +240,24 @@ const MOMENTS: Moment[] = [
     ),
     terminalTitle: "arcturn — background agent",
     description:
-      "The /bg command starting a background agent to fix a flaky retry test, which reports its agent id and session id and returns immediately.",
+      "The /bg command starting a background agent to fix a flaky retry test: an informational notice reports the agent id and session id, and the prompt is free again immediately.",
+    /*
+      `/bg` reports through `ui.notice("info", …)`, which the formatter draws
+      as `ℹ` in the info tone — not a success tick: nothing has succeeded yet,
+      an agent has merely been started. The input box below it is the point of
+      the moment: the call returned, and the session took no lock.
+    */
     lines: [
-      { text: "/bg fix the flaky retry test and open a summary of what was wrong", tone: "prompt" },
+      { kind: "user", text: "/bg fix the flaky retry test and open a summary of what was wrong" },
+      { kind: "blank" },
       {
-        text: "Started background agent bg-a1b2c3d4 (session <sessionId>).",
-        tone: "good",
-        cursor: true,
+        kind: "notice",
+        level: "info",
+        text: "Started background agent bg-a1b2c3d4 (session 019c4a2f).",
       },
+      { kind: "blank" },
+      { kind: "input" },
+      { kind: "status", model: "claude-sonnet-4-5", mode: "default" },
     ],
   },
   {
@@ -202,23 +278,25 @@ const MOMENTS: Moment[] = [
     ),
     terminalTitle: "arcturn — rewind",
     description:
-      "The /rewind picker listing turns newest first with how many files changed after each, then the result line reporting restored and deleted files.",
+      "A /rewind in an arcturn session: two informational notices report that three files were restored and one deleted, and that the conversation forked back to that turn, with the prompt ready underneath.",
+    /*
+      What the rewind leaves behind. The picker is a `selectDialog` overlay —
+      a rounded box with its title on the border, `❯` on the highlighted row
+      and the `↑↓ select · enter confirm · esc cancel` footer — and it is off
+      the screen the instant a turn is chosen. These two lines are what
+      `rewindTo` writes into scrollback, word for word from `commands.ts` and
+      `docs/checkpoints.md`. Drawing the picker as bare indented rows would be
+      the old hand-spaced fake wearing a new glyph, so it waits for a boxed
+      select-dialog line kind rather than being approximated here.
+    */
     lines: [
-      { text: "› /rewind", tone: "prompt" },
-      { text: "" },
-      { text: "  Rewind to the start of…", tone: "muted" },
-      {
-        text: "  rate-limit the login route     3 files changed after this point",
-        tone: "default",
-      },
-      { text: "  add a test for the limiter     1 file changed after this point", tone: "default" },
-      { text: "" },
-      { text: "  Restored 3 files, deleted 1.", tone: "good" },
-      {
-        text: "  Conversation forked; earlier branch still resumable.",
-        tone: "accent",
-        cursor: true,
-      },
+      { kind: "user", text: "/rewind" },
+      { kind: "blank" },
+      { kind: "notice", level: "info", text: "Restored 3 files, deleted 1." },
+      { kind: "notice", level: "info", text: "Conversation forked back to that turn." },
+      { kind: "blank" },
+      { kind: "input" },
+      { kind: "status", model: "claude-sonnet-4-5", mode: "default" },
     ],
   },
 ];
