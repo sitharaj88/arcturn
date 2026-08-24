@@ -196,7 +196,7 @@ const rawHtmlAsText: Plugin<[], UnistNode> = () => (tree: UnistNode) => {
  * button as a `data-code` attribute, so the clipboard gets the source rather
  * than a reconstruction of the highlighted DOM.
  */
-function collectCode(sink: string[]): Plugin<[], UnistNode> {
+export function collectCode(sink: string[]): Plugin<[], UnistNode> {
   return () => (tree: UnistNode) => {
     walk(tree, (node) => {
       if (node.type !== "code") return;
@@ -213,7 +213,7 @@ function collectCode(sink: string[]): Plugin<[], UnistNode> {
  * `figure[data-rehype-pretty-code-figure]` per fenced block, in the same
  * order the remark step recorded them.
  */
-function decorateCodeFigures(codes: readonly string[]): Plugin<[], UnistNode> {
+export function decorateCodeFigures(codes: readonly string[]): Plugin<[], UnistNode> {
   return () => (tree: UnistNode) => {
     let index = 0;
     walk(tree, (node) => {
@@ -225,7 +225,11 @@ function decorateCodeFigures(codes: readonly string[]): Plugin<[], UnistNode> {
       const pre = (node.children ?? []).find(
         (child): child is HastElement => isElement(child) && child.tagName === "pre",
       );
-      const language = pre ? stringProperty(pre, "data-language") : undefined;
+      const rawLanguage = pre ? stringProperty(pre, "data-language") : undefined;
+      const language =
+        rawLanguage && rawLanguage !== "text" && rawLanguage !== "plaintext"
+          ? rawLanguage
+          : undefined;
       const source = codes[index] ?? "";
       index += 1;
 
@@ -235,15 +239,39 @@ function decorateCodeFigures(codes: readonly string[]): Plugin<[], UnistNode> {
         "data-code": source,
       };
 
-      if (language && language !== "text" && language !== "plaintext") {
-        const chip: HastElement = {
-          type: "element",
-          tagName: "span",
-          properties: { className: ["code-lang"], "aria-hidden": "true" },
-          children: [{ type: "text", value: language }],
-        };
-        node.children.unshift(chip);
-      }
+      // A fence's `title="…"` arrives as rehype-pretty-code's own caption
+      // element; its text moves into the header and the element goes away, so
+      // there is exactly one bar however the block was authored.
+      const titleIndex = (node.children ?? []).findIndex(
+        (child) => isElement(child) && "data-rehype-pretty-code-title" in (child.properties ?? {}),
+      );
+      const filename = titleIndex >= 0 ? textOf(node.children[titleIndex]) : undefined;
+      if (titleIndex >= 0) node.children.splice(titleIndex, 1);
+
+      // The one header every block gets: filename (or language) on the left,
+      // the language pill only when a filename holds the title slot, and the
+      // client copy layer's portal target on the right. Chip, button and bar
+      // take their size from one ruleset in docs.css, so the three surfaces
+      // that render code — docs, blog, marketing — cannot drift apart.
+      const title: HastElement = {
+        type: "element",
+        tagName: "span",
+        properties: { className: ["code-title"] },
+        children: [{ type: "text", value: filename ?? language ?? "" }],
+      };
+      const chip: HastElement = {
+        type: "element",
+        tagName: "span",
+        properties: { className: ["code-lang"], "aria-hidden": "true" },
+        children: [{ type: "text", value: language ?? "" }],
+      };
+      const head: HastElement = {
+        type: "element",
+        tagName: "div",
+        properties: { className: ["code-head"] },
+        children: filename && language ? [title, chip] : [title],
+      };
+      node.children.unshift(head);
     });
   };
 }
@@ -253,7 +281,14 @@ function decorateCodeFigures(codes: readonly string[]): Plugin<[], UnistNode> {
  * never scroll sideways at 360px (DESIGN.md §2.3.5), and several reference
  * docs have five-column tables.
  */
-const wrapTables: Plugin<[], UnistNode> = () => (tree: UnistNode) => {
+/**
+ * Exported for `lib/blog.ts`: the blog renders through its own pipeline, and
+ * a table wrapper that exists in only one of the two is exactly how a post
+ * with a markdown table shipped a 397px-wide page at a 360px viewport while
+ * every docs table stayed contained. One plugin, two consumers — the next
+ * divergence has to be chosen, not drifted into.
+ */
+export const wrapTables: Plugin<[], UnistNode> = () => (tree: UnistNode) => {
   walk(tree, (node, parent, index) => {
     if (!parent?.children) return;
     if (!isElement(node) || node.tagName !== "table") return;
@@ -275,7 +310,7 @@ const wrapTables: Plugin<[], UnistNode> = () => (tree: UnistNode) => {
  * means the browser asks for exactly the file that exists, instead of relying
  * on the host to redirect. Fragments and query strings are preserved.
  */
-const normalizeInternalLinks: Plugin<[], UnistNode> = () => (tree: UnistNode) => {
+export const normalizeInternalLinks: Plugin<[], UnistNode> = () => (tree: UnistNode) => {
   walk(tree, (node) => {
     if (!isElement(node) || node.tagName !== "a") return;
     const href = stringProperty(node, "href");
@@ -294,7 +329,7 @@ const normalizeInternalLinks: Plugin<[], UnistNode> = () => (tree: UnistNode) =>
  * Harden links that leave the site. Markdown authors write plain URLs; a
  * static export cannot patch this at runtime.
  */
-const hardenExternalLinks: Plugin<[], UnistNode> = () => (tree: UnistNode) => {
+export const hardenExternalLinks: Plugin<[], UnistNode> = () => (tree: UnistNode) => {
   walk(tree, (node) => {
     if (!isElement(node) || node.tagName !== "a") return;
     const href = stringProperty(node, "href");

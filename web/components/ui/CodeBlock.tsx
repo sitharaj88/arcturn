@@ -44,42 +44,34 @@ export async function CodeBlock({
   return (
     <figure
       className={cn(
-        // `code-figure` carries the positioning context, the chip, the button
-        // and the hover gate (`app/docs/docs.css`). Everything left here is
-        // this block's own ground — docs put the same ground on the `<pre>`.
+        // `code-figure` is the shared chrome contract (app/docs/docs.css):
+        // every code surface on the site — docs, blog, this component — emits
+        // the same header bar, so the chip, the title and the copy button have
+        // one size and one position everywhere.
         "code-figure overflow-hidden rounded-md border border-default bg-surface-inset",
         className,
       )}
     >
-      {language && language !== "text" ? (
-        <span className="code-lang" aria-hidden="true">
-          {language}
+      <div className="code-head">
+        <span className="code-title">{filename ?? (language !== "text" ? language : "")}</span>
+        {filename && language && language !== "text" ? (
+          <span className="code-lang" aria-hidden="true">
+            {language}
+          </span>
+        ) : null}
+        <span className="code-copy">
+          <CopyButton value={stripShellPrompt(source)} label="Copy code" />
         </span>
-      ) : null}
-
-      {filename ? (
-        <figcaption className="border-b border-default px-4 py-2 font-mono text-caption text-faint">
-          {filename}
-        </figcaption>
-      ) : null}
+      </div>
 
       <div
         className={cn(
-          // `pl-4`, not `px-4`: the right side is the shared
-          // `--code-chrome-inset`, and pitting Tailwind's logical
-          // `padding-inline` against the sheet's physical `padding-right`
-          // makes the reservation a cascade question nobody should have to
-          // answer. Only one rule sets the right edge.
-          "code-scroll overflow-x-auto py-4 pl-4 text-code-block [&_pre]:min-w-max [&_pre]:bg-transparent",
+          "code-scroll overflow-x-auto p-4 text-code-block [&_pre]:min-w-max [&_pre]:bg-transparent",
           showLineNumbers && "code-line-numbers",
         )}
         // biome-ignore lint/security/noDangerouslySetInnerHtml: `html` is Shiki's own escaped output for local trusted source, produced at build time; no user input reaches it.
         dangerouslySetInnerHTML={{ __html: html }}
       />
-
-      <span className="code-copy">
-        <CopyButton value={stripShellPrompt(source)} label="Copy code" />
-      </span>
     </figure>
   );
 }

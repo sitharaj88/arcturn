@@ -23,110 +23,77 @@
  * ------------------------------------------------------------------ */
 
 .code-figure {
-  /* Anchor for the chip and the button; both are absolutely positioned so
-     neither pipeline has to reserve layout for them. */
-  position: relative;
   margin: 0;
+}
 
-  /* Derived, not guessed. `<CopyButton>` is a 44px touch target until `sm`
-     and 36px from there up, so the chip's step-aside and the first line's
-     right padding are both computed from that one number. A hard-coded step
-     is how the chip ended up underneath the button on a phone. */
-  --code-copy-size: 2.75rem;
-  --code-chrome-edge: 0.45rem;
-  --code-chrome-gap: 0.4rem;
-  --code-chrome-step: calc(
-    var(--code-chrome-edge) +
-    var(--code-copy-size) +
-    var(--code-chrome-gap)
-  );
-  /* Chip room on top of the button's: enough for a five-letter language. */
-  --code-chrome-inset: calc(var(--code-chrome-step) + 2.4rem);
+/*
+ * The one header every code block carries: title (filename, else language)
+ * on the left, the language pill and the copy button on the right. Chip,
+ * title and button are laid out in flow — nothing floats over the code, so
+ * no first-line inset, no hover gate, no step-aside arithmetic. The button
+ * is `<CopyButton>`'s own 44px touch target (36px from `sm`), and the bar's
+ * height follows it, so every surface renders the same header at the same
+ * size from this single ruleset.
+ */
+.code-figure .code-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 2.75rem;
+  padding: 0.25rem 0.45rem 0.25rem 1rem;
+  border-bottom: 1px solid var(--border);
+  background-color: var(--surface-card);
 }
 
 @media (min-width: 40rem) {
-  .code-figure {
-    --code-copy-size: 2.25rem;
+  .code-figure .code-head {
+    min-height: 2.5rem;
   }
 }
 
-/* The scrolling block. It is the `<pre>` in docs — which keeps its ground and
-   hairline from `.prose-arc pre`, so the figure adds neither — and a
-   `.code-scroll` wrapper in `<CodeBlock>`, whose figure owns the border so
-   the filename bar can share it. Only the chrome reservation is shared.
-
-   Child combinators, not descendants: `<CodeBlock>` keeps its `<pre>` one
-   level deeper, inside `.code-scroll`, so a block rendered inside `.prose-arc`
-   would otherwise reserve the inset twice. */
-.prose-arc .code-figure > pre,
-.code-figure > .code-scroll {
-  margin: 0;
-  padding-right: var(--code-chrome-inset);
+.code-figure .code-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--text-caption);
+  color: var(--text-faint);
 }
 
 .code-figure .code-lang {
-  position: absolute;
-  top: 0.5rem;
-  right: 0.6rem;
-  z-index: 1;
+  flex: none;
   border: 1px solid var(--border);
   border-radius: var(--radius-pill);
-  background-color: var(--surface-card);
+  background-color: var(--surface-raised);
   padding: 0.1rem 0.5rem;
   font-size: var(--text-caption);
   line-height: 1.4;
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--text-faint);
-  pointer-events: none;
 }
 
 .code-figure .code-copy {
-  position: absolute;
-  top: var(--code-chrome-edge);
-  right: var(--code-chrome-edge);
-  z-index: 2;
+  flex: none;
 }
 
-/* When both are present the chip steps aside for the button. */
-.code-figure:has(.code-copy) .code-lang {
-  right: var(--code-chrome-step);
-}
-
-/* Pointer devices reveal the button on hover or focus; touch devices, which
-   have neither, always show it — a width gate alone hides it permanently on
-   a tablet. Reduced motion flattens the fade through the kill switch in
-   `globals.css`, leaving the two end states intact. */
-@media (hover: hover) and (pointer: fine) {
-  .code-figure .code-copy {
-    opacity: 0;
-    transition: opacity var(--duration-fast) var(--ease-out);
-  }
-
-  .code-figure:hover .code-copy,
-  .code-figure:focus-within .code-copy {
-    opacity: 1;
-  }
-}
-
-/* ------------------------------------------------------------------ *
- * Documentation-only chrome.
- * ------------------------------------------------------------------ */
-
-/* `title="…"` on a fence renders a filename bar above the block. */
-.prose-arc .code-figure [data-rehype-pretty-code-title] {
+/* Docs and blog render inside `.prose-arc`, where the bare `pre` used to own
+   the ground and the hairline. With a header in the figure, the FIGURE owns
+   them — one border wrapping bar and code — and the pre inside goes flush. */
+.prose-arc .code-figure {
   border: 1px solid var(--border);
-  border-bottom: 0;
-  border-radius: var(--radius-md) var(--radius-md) 0 0;
-  background-color: var(--surface-card);
-  padding: 0.5rem 1.15rem;
-  font-family: var(--font-mono);
-  font-size: var(--text-caption);
-  color: var(--text-faint);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background-color: var(--code-bg);
 }
 
-.prose-arc .code-figure [data-rehype-pretty-code-title] + pre {
-  border-radius: 0 0 var(--radius-md) var(--radius-md);
+.prose-arc .code-figure > pre {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background-color: transparent;
 }
 
 /* Long shell invocations and config paths must not widen the page. */

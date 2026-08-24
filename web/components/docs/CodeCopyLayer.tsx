@@ -48,7 +48,11 @@ export function CodeCopyLayer({ containerId }: CodeCopyLayerProps) {
       if (!code) return;
       const node = document.createElement("span");
       node.className = "code-copy";
-      figure.appendChild(node);
+      // Into the header bar, beside the language pill — the header is part of
+      // the build-time markup, so the slot always has a home; the figure
+      // fallback only exists so a figure something else emitted still gets a
+      // button rather than nothing.
+      (figure.querySelector(":scope > .code-head") ?? figure).appendChild(node);
       created.push({ node, code });
     });
 

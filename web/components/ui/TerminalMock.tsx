@@ -1,6 +1,9 @@
-import type { CSSProperties, ReactNode } from "react";
+import type { ReactNode } from "react";
 import { cn } from "@/lib/cn";
 import { withStableKeys } from "@/lib/keys";
+import { describeTerminalLine, isStructuredScript } from "./terminal/describe";
+import { TerminalRow } from "./terminal/rows";
+import type { TerminalLine } from "./terminal/types";
 import { VisuallyHidden } from "./VisuallyHidden";
 
 /**
@@ -11,6 +14,13 @@ import { VisuallyHidden } from "./VisuallyHidden";
  * rendered visually-hidden beside it so assistive technology gets the meaning
  * without the ANSI-style noise. The line stagger is CSS-only — no client JS.
  *
+ * Lines are **structured**, not strings: `{ kind: "tool", name, args }` rather
+ * than a hand-spaced `"  read   src/routes/signup.ts"`. The component owns the
+ * glyph, the column and the tone, so a mock is drawn from the same vocabulary
+ * the CLI prints — see `./terminal/glyphs`. `{ text, tone }` is still a legal
+ * line (it is the `"text"` kind with its discriminant left off), so scripts
+ * written against the old shape render exactly as they did.
+ *
  * The chrome lives in `<TerminalFrame>` rather than here because
  * `<TerminalPlayer>` — the interactive session on `/` and `/terminal` — has to
  * draw the identical window. One copy of the window means the still and the
@@ -18,7 +28,11 @@ import { VisuallyHidden } from "./VisuallyHidden";
  */
 export type TerminalVariant = "session" | "permission" | "diff" | "subagent" | "rewind";
 export type TerminalSize = "md" | "lg";
-export type TerminalTone = "default" | "muted" | "accent" | "good" | "warn" | "bad" | "prompt";
+
+export * from "./terminal/describe";
+export * from "./terminal/glyphs";
+export * from "./terminal/rows";
+export * from "./terminal/types";
 
 export interface TerminalMockProps {
   variant?: TerminalVariant;
@@ -32,27 +46,6 @@ export interface TerminalMockProps {
   title?: string;
   className?: string;
 }
-
-export interface TerminalLine {
-  text: string;
-  tone?: TerminalTone;
-  /** Render a blinking cursor at the end of this line. */
-  cursor?: boolean;
-}
-
-/**
- * Tone → utility class. Exported so `<TerminalPlayer>` paints its streamed
- * lines from the same table; a second table would be a second truth.
- */
-export const TERMINAL_TONES: Record<TerminalTone, string> = {
-  default: "text-text",
-  muted: "text-muted",
-  accent: "text-accent",
-  good: "text-good",
-  warn: "text-warn",
-  bad: "text-bad",
-  prompt: "text-faint",
-};
 
 export interface TerminalFrameProps {
   /** Window title, shown beside the traffic lights. */
@@ -87,7 +80,8 @@ export function TerminalFrame({
       className={cn(
         "force-dark arc-corner rounded-xl border border-default bg-surface-raised",
         glow && "elev-glow",
-        size === "lg" ? "text-[0.875rem]" : "text-code-block",
+        // §2.2.2 owns both terminal sizes; this file used to carry the literal.
+        size === "lg" ? "text-code-block-lg" : "text-code-block",
       )}
     >
       <div aria-hidden="true">
@@ -112,73 +106,105 @@ export function TerminalFrame({
   );
 }
 
+/**
+ * The shipped scripts.
+ *
+ * Every line is the product's own output shape — a tool call is a tool call,
+ * the gate is the CLI's own bordered dialog with its own three answers, the
+ * last row is the status bar the terminal always ends on (DESIGN.md §3.9).
+ */
 const SCRIPTS: Record<TerminalVariant, { title: string; lines: TerminalLine[] }> = {
   session: {
     title: "arcturn — ~/projects/api",
     lines: [
-      { text: "✦ arcturn · claude-sonnet-4-5 · ~/projects/api", tone: "accent" },
-      { text: "› add input validation to the /signup handler", tone: "prompt" },
-      { text: "" },
-      { text: "  read   src/routes/signup.ts", tone: "muted" },
-      { text: '  grep   "validate" src/**', tone: "muted" },
-      { text: "  edit   src/routes/signup.ts  +24 −3", tone: "good" },
-      { text: "  lsp    0 errors, 0 warnings", tone: "muted" },
-      { text: "" },
-      { text: "  session 019a1f · 3 turns · $0.0412 of $2.00", tone: "muted", cursor: true },
+      { kind: "chrome", model: "claude-sonnet-4-5", cwd: "~/projects/api" },
+      { kind: "user", text: "add input validation to the /signup handler" },
+      { kind: "blank" },
+      { kind: "tool", name: "read", args: "src/routes/signup.ts" },
+      { kind: "result", text: "84 lines" },
+      { kind: "tool", name: "grep", args: '"validate" src/**' },
+      { kind: "result", text: "2 files" },
+      { kind: "tool", name: "edit", args: "src/routes/signup.ts" },
+      { kind: "result", text: "+24 −3" },
+      { kind: "result", text: "lsp 0 errors, 0 warnings", cont: true },
+      { kind: "blank" },
+      { kind: "done", elapsed: "1m34s", tokens: "1.3k" },
+      { kind: "input" },
+      {
+        kind: "status",
+        model: "claude-sonnet-4-5",
+        mode: "default",
+        cost: "$0.0412",
+        ctx: "12%",
+      },
     ],
   },
   permission: {
     title: "arcturn — permission",
     lines: [
-      { text: "✦ arcturn · claude-sonnet-4-5 · ~/projects/api", tone: "accent" },
-      { text: "› add input validation to the /signup handler", tone: "prompt" },
-      { text: "" },
-      { text: "⚠ Permission required — edit src/routes/signup.ts", tone: "warn" },
-      { text: "  a  allow    d  deny    A  always allow src/**.ts", tone: "muted" },
-      { text: "" },
-      { text: "  ▸ ", tone: "muted", cursor: true },
+      { kind: "chrome", model: "claude-sonnet-4-5", cwd: "~/projects/api" },
+      { kind: "user", text: "add input validation to the /signup handler" },
+      { kind: "blank" },
+      { kind: "tool", name: "read", args: "src/routes/signup.ts" },
+      { kind: "tool", name: "grep", args: '"validate" src/**' },
+      { kind: "blank" },
+      {
+        kind: "permission",
+        tool: "edit",
+        subject: "src/routes/signup.ts",
+        description: "edit: add a SignupSchema check before the handler body",
+        rule: "edit src/**.ts",
+        selected: "once",
+      },
+      {
+        kind: "status",
+        model: "claude-sonnet-4-5",
+        mode: "default",
+        cost: "$0.0087",
+        ctx: "9%",
+      },
     ],
   },
   diff: {
     title: "arcturn — dry run",
     lines: [
-      { text: "› /diff", tone: "prompt" },
-      { text: "" },
+      { kind: "user", text: "/diff" },
+      { kind: "blank" },
       { text: "  src/routes/signup.ts", tone: "muted" },
       { text: "+   const parsed = SignupSchema.safeParse(req.body);", tone: "good" },
       { text: "+   if (!parsed.success) return res.status(400).json(parsed.error);", tone: "good" },
       { text: "-   const parsed = req.body;", tone: "bad" },
-      { text: "" },
-      { text: "  shadow tree · /apply to land · /discard to drop", tone: "muted", cursor: true },
+      { kind: "blank" },
+      { kind: "notice", level: "info", text: "shadow tree · /apply to land · /discard to drop" },
     ],
   },
   subagent: {
     title: "arcturn — sub-agent",
     lines: [
-      { text: "› /agents run reviewer", tone: "prompt" },
-      { text: "" },
-      { text: "  ⤷ reviewer · gpt-5 · read-only tools", tone: "accent" },
-      { text: "    read   src/routes/signup.ts", tone: "muted" },
-      { text: "    read   src/schema/signup.ts", tone: "muted" },
-      { text: "  ⤶ returned to parent session", tone: "muted" },
-      { text: "" },
+      { kind: "user", text: "/agents run reviewer" },
+      { kind: "blank" },
+      { kind: "tool", name: "subagent", args: "reviewer · gpt-5 · read-only tools" },
+      { kind: "tool", name: "read", args: "src/routes/signup.ts", depth: 1 },
+      { kind: "tool", name: "read", args: "src/schema/signup.ts", depth: 1 },
+      { kind: "result", text: "returned to parent session" },
+      { kind: "blank" },
       {
-        text: "  sub-agent spend $0.0091 · counted against --max-cost",
-        tone: "muted",
-        cursor: true,
+        kind: "notice",
+        level: "info",
+        text: "sub-agent spend $0.0091 · counted against --max-cost",
       },
     ],
   },
   rewind: {
     title: "arcturn — rewind",
     lines: [
-      { text: "› /rewind 3", tone: "prompt" },
-      { text: "" },
-      { text: "  restored  src/routes/signup.ts", tone: "good" },
-      { text: "  restored  src/schema/signup.ts", tone: "good" },
-      { text: "  forked    turn 3 → branch b2 (turns 4–6 kept)", tone: "accent" },
-      { text: "" },
-      { text: "  both branches remain walkable", tone: "muted", cursor: true },
+      { kind: "user", text: "/rewind 3" },
+      { kind: "blank" },
+      { kind: "notice", level: "good", text: "restored  src/routes/signup.ts" },
+      { kind: "notice", level: "good", text: "restored  src/schema/signup.ts" },
+      { kind: "notice", level: "info", text: "forked    turn 3 → branch b2 (turns 4–6 kept)" },
+      { kind: "blank" },
+      { text: "both branches remain walkable", tone: "muted" },
     ],
   },
 };
@@ -194,24 +220,32 @@ export function TerminalMock({
 }: TerminalMockProps) {
   const script = SCRIPTS[variant];
   const body = lines ?? script.lines;
+  // §2.6 hides hand-spaced transcripts because reading them aloud is noise.
+  // A structured script is different: every line can name what it is, so the
+  // reader gets the steps as well as the summary.
+  const spoken = isStructuredScript(body)
+    ? body.map(describeTerminalLine).filter((sentence) => sentence !== "")
+    : [];
 
   return (
     <div className={cn("w-full", className)}>
       <TerminalFrame title={title ?? script.title} size={size} glow={glow}>
-        <pre className="min-w-max font-mono leading-[1.65]">
-          {withStableKeys(body, (line) => line.text).map(({ key, item: line }, index) => (
-            <div
-              key={key}
-              className={cn("term-line", TERMINAL_TONES[line.tone ?? "default"] ?? "text-text")}
-              style={{ animationDelay: `${index * 60}ms` } as CSSProperties}
-            >
-              {line.text || " "}
-              {line.cursor ? <span className="term-cursor ml-0.5 align-middle" /> : null}
-            </div>
+        <div className="min-w-max font-mono leading-[1.65]">
+          {withStableKeys(body, describeTerminalLine).map(({ key, item }, index) => (
+            <TerminalRow key={key} line={item} delay={index * 60} />
           ))}
-        </pre>
+        </div>
       </TerminalFrame>
-      <VisuallyHidden as="p">{description}</VisuallyHidden>
+      <VisuallyHidden as="div">
+        <p>{description}</p>
+        {spoken.length > 0 ? (
+          <ol>
+            {withStableKeys(spoken, (sentence) => sentence).map(({ key, item }) => (
+              <li key={key}>{item}</li>
+            ))}
+          </ol>
+        ) : null}
+      </VisuallyHidden>
     </div>
   );
 }
