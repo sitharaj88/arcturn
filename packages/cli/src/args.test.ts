@@ -105,79 +105,56 @@ describe("parseArgs", () => {
   });
 });
 
-describe("parseArgs: auth commands", () => {
-  it("parses login, logout and status", () => {
-    expect(ok(["auth", "login", "anthropic"]).command).toEqual({
-      kind: "auth",
-      action: "login",
-      provider: "anthropic",
-    });
-    expect(ok(["auth", "logout", "github-copilot"]).command).toEqual({
-      kind: "auth",
-      action: "logout",
-      provider: "github-copilot",
-    });
-    expect(ok(["auth", "status"]).command).toEqual({ kind: "auth", action: "status" });
+describe("parseArgs: positional commands", () => {
+  it("parses a command and leaves the prompt empty", () => {
+    const args = ok(["completions", "zsh"]);
+    expect(args.command).toEqual({ kind: "completions", shell: "zsh" });
+    expect(args.prompt).toBe("");
   });
 
-  it("leaves the prompt empty when a command was given", () => {
-    expect(ok(["auth", "status"]).prompt).toBe("");
-  });
-
-  it("rejects a missing subcommand and a missing provider", () => {
-    expect(fail(["auth"])).toContain("auth needs a subcommand");
-    expect(fail(["auth", "login"])).toBe(
-      "auth login needs a provider (arcturn auth login <provider>)",
-    );
-    expect(fail(["auth", "logout"])).toContain("auth logout needs a provider");
-  });
-
-  it("rejects an unknown subcommand", () => {
-    expect(fail(["auth", "whoami"])).toContain('Unknown auth subcommand "whoami"');
-    expect(fail(["auth", "whoami"])).toContain("login, logout, status");
-  });
-
-  it("accepts any provider token — the auth command validates it lazily", () => {
-    // Provider validation lives in the auth command so parsing never has to
-    // load the provider registry (see main.test.ts for the end-to-end check).
-    const args = ok(["auth", "login", "gogle"]);
-    expect(args.command).toEqual({ kind: "auth", action: "login", provider: "gogle" });
-  });
-
-  it("rejects extra arguments", () => {
-    expect(fail(["auth", "status", "anthropic"])).toBe("auth status takes no arguments");
-    expect(fail(["auth", "login", "anthropic", "extra"])).toContain("exactly one provider");
+  it("rejects a command with the wrong number of arguments", () => {
+    expect(fail(["completions"])).toContain("completions needs exactly one shell");
+    expect(fail(["completions", "zsh", "extra"])).toContain("completions needs exactly one shell");
   });
 
   it("keeps flags usable alongside a command", () => {
-    const args = ok(["auth", "status", "--cwd", "/tmp"]);
-    expect(args.command).toEqual({ kind: "auth", action: "status" });
+    const args = ok(["completions", "zsh", "--cwd", "/tmp"]);
+    expect(args.command).toEqual({ kind: "completions", shell: "zsh" });
     expect(args.cwd).toBe("/tmp");
   });
 
   it("lets --help and --version win over the command", () => {
-    expect(ok(["auth", "status", "--help"]).help).toBe(true);
-    expect(ok(["auth", "status", "--version"]).version).toBe(true);
+    expect(ok(["completions", "zsh", "--help"]).help).toBe(true);
+    expect(ok(["completions", "zsh", "--version"]).version).toBe(true);
   });
 
   it("does not swallow --print's prompt requirement into a command", () => {
-    // `auth` short-circuits the prompt checks, so a command never trips the
+    // A command short-circuits the prompt checks, so it never trips the
     // "--print needs a prompt" guard.
-    const args = ok(["-p", "auth", "status"]);
-    expect(args.command).toEqual({ kind: "auth", action: "status" });
+    const args = ok(["-p", "completions", "zsh"]);
+    expect(args.command).toEqual({ kind: "completions", shell: "zsh" });
     expect(args.prompt).toBe("");
   });
 
-  it("treats auth after -- as prompt text", () => {
-    const args = ok(["--", "auth", "login", "anthropic"]);
+  it("treats a command word after -- as prompt text", () => {
+    const args = ok(["--", "completions", "zsh"]);
     expect(args.command).toBeUndefined();
-    expect(args.prompt).toBe("auth login anthropic");
+    expect(args.prompt).toBe("completions zsh");
   });
 
-  it("treats a quoted sentence starting with auth as a prompt", () => {
-    const args = ok(["auth login is broken, explain it"]);
+  it("treats a quoted sentence starting with a command word as a prompt", () => {
+    const args = ok(["completions zsh is broken, explain it"]);
     expect(args.command).toBeUndefined();
-    expect(args.prompt).toBe("auth login is broken, explain it");
+    expect(args.prompt).toBe("completions zsh is broken, explain it");
+  });
+
+  it("no longer recognises `auth` as a command", () => {
+    // The subscription sign-in it drove never worked and was removed; the
+    // words must fall through to the prompt rather than resolve to a command.
+    const args = ok(["auth", "login", "anthropic"]);
+    expect(args.command).toBeUndefined();
+    expect(args.prompt).toBe("auth login anthropic");
+    expect(ok(["auth", "status"]).command).toBeUndefined();
   });
 });
 
@@ -203,10 +180,17 @@ describe("helpText", () => {
     }
   });
 
-  it("documents the auth commands", () => {
+  it("documents the positional commands", () => {
     const help = helpText();
-    expect(help).toContain("auth login <provider>");
-    expect(help).toContain("auth logout <provider>");
-    expect(help).toContain("auth status");
+    expect(help).toContain("completions <shell>");
+    expect(help).toContain("mcp auth <name>");
+    expect(help).toContain("mcp logout <name>");
+  });
+
+  it("no longer advertises a subscription sign-in that never worked", () => {
+    const help = helpText();
+    expect(help).not.toContain("auth login");
+    expect(help).not.toContain("auth status");
+    expect(help).not.toContain("ARCTURN_OAUTH_");
   });
 });

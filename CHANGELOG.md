@@ -10,7 +10,43 @@ CLI, the SDK, or the wire protocol.
 
 ## [Unreleased]
 
-Nothing yet.
+### Removed
+
+- **Subscription (OAuth) sign-in — `arcturn auth login`, `auth logout` and
+  `auth status` — along with the `anthropic`, `openai-codex` and
+  `github-copilot` OAuth provider configurations.** They never worked. A
+  sign-in needs an OAuth client id the provider issues to the application
+  making the request; Arcturn has none, and the ids that shipped belonged to
+  other vendors' tools. No endpoint, scope or token format in that file had
+  ever been checked against a live provider, so the feature could not be fixed
+  by correcting a URL — it needed a credential no one had issued. Set the
+  provider's API key environment variable instead; `arcturn --list-providers`
+  names the variable for every provider and preset. The
+  `anthropic-oauth`, `github-copilot` and `openai-codex` provider ids are gone
+  with it, as are `~/.arcturn/auth/<provider>.json` credential files (delete
+  any left behind; nothing reads them) and the `ARCTURN_OAUTH_*` environment
+  overrides.
+- **From `@arcturn/ai`'s `oauth` namespace**: `beginLogin`, `logout`,
+  `createAccessTokenResolver`, the provider registry (`listOAuthProviders`,
+  `getOAuthProviderConfig`, `requireOAuthProviderConfig`,
+  `registerOAuthProvider`, `configureOAuthProvider`, `resetOAuthProviders`,
+  `applyOAuthEnvOverrides`, `OAUTH_CONSTANTS`), the token stores
+  (`FileOAuthTokenStore`, `MemoryOAuthTokenStore`, `BaseOAuthTokenStore`), the
+  token exchange (`exchangeAuthorizationCode`, `refreshAccessToken`,
+  `postOAuthRequest`), the device flow, and the provider factories
+  `registerOAuthProviderFactories` and `registerAnthropicOAuthProvider`. What
+  remains is the provider-agnostic half — PKCE and the loopback redirect
+  listener. From `@arcturn/cli`: `runAuthCommand`, `createAuthStore`,
+  `collectAuthStatus`, `formatAuthStatus`, `formatExpiry`, `AuthCommand` and
+  `AUTH_ACTIONS`.
+
+**MCP OAuth is unaffected and continues to work.** `arcturn mcp auth <name>`
+and `arcturn mcp logout <name>` are a different mechanism: the server's
+authorization server is discovered at runtime (RFC 8414) and a client is
+registered dynamically (RFC 7591), so there is no hardcoded endpoint and no
+borrowed client id. It keeps using `oauth.createStateToken` and
+`oauth.startLoopbackServer`, and `~/.arcturn/auth/mcp-<server>.json` is
+untouched.
 
 ## [0.2.0] — 2026-08-24
 

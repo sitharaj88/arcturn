@@ -24,9 +24,9 @@ You can use Arcturn two ways:
 - **Node.js ≥ 20**
 - **pnpm** if you're building from source (the monorepo is a pnpm workspace).
 - An API key for at least one provider: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or
-  `GOOGLE_API_KEY` (`GEMINI_API_KEY` also works) — or an OAuth subscription sign-in via
-  `arcturn auth login`. See [Configuration](/docs/configuration) for the full precedence
-  order and OpenAI-compatible endpoints.
+  `GOOGLE_API_KEY` (`GEMINI_API_KEY` also works). See
+  [Configuration](/docs/configuration) for the full precedence order and
+  OpenAI-compatible endpoints.
 
 ## Platform support
 
@@ -93,17 +93,10 @@ Arcturn finds it automatically:
 export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-**OAuth subscription** — if the provider supports it, sign in interactively instead of
-holding a raw key:
-
-```bash
-arcturn auth login anthropic
-arcturn auth status
-arcturn auth logout anthropic
-```
-
-Credentials from `auth login` are written to `~/.arcturn/auth/` (one `0600` file per
-provider, in a `0700` directory) and are picked up automatically on the next run.
+**No subscription sign-in.** There is no way to use a Claude, ChatGPT or Copilot plan
+instead of an API key — that needs an OAuth client id each provider issues to its own
+product, and Arcturn has none. See
+[Model providers](/docs/providers#subscription-sign-in-is-not-supported).
 
 ## Run it
 
@@ -205,7 +198,7 @@ Everything Arcturn persists lives under one user directory, `~/.arcturn` by defa
 | `<cwd>/.arcturn/config.json` | Project-scope settings, merged over the user file. |
 | `~/.arcturn/mcp.json`, `<cwd>/.arcturn/mcp.json` | MCP server declarations, merged. |
 | `~/.arcturn/extensions/`, `<cwd>/.arcturn/extensions/` | Extension modules (`.ts`/`.js`). |
-| `~/.arcturn/auth/` | OAuth credentials written by `arcturn auth login`. |
+| `~/.arcturn/auth/` | OAuth credentials written by `arcturn mcp auth`. |
 | `~/.arcturn/sessions/<hash>/` | Session transcripts, bucketed per working directory. |
 | `~/.arcturn/live-models.json` | Cache for live model discovery. |
 

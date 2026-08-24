@@ -23,8 +23,7 @@ export const PROVIDER_ROWS: StatusRow[] = [
   },
   {
     name: "anthropic",
-    detail:
-      "Claude, direct — ANTHROPIC_API_KEY, or an OAuth subscription sign-in. Verified live on Claude Haiku 4.5.",
+    detail: "Claude, direct — ANTHROPIC_API_KEY. Verified live on Claude Haiku 4.5.",
     status: { status: "proven" },
   },
   {

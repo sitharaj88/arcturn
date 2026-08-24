@@ -101,8 +101,8 @@ them to `createAgent`.
    ([LSP diagnostics](/docs/lsp)); if `verify` is set, they're wrapped with the verify
    loop too.
 3. **LLM client** (`@arcturn/ai`) — resolve the configured model id to a `ModelSpec` and
-   build the matching provider client, with API keys or OAuth credentials from the
-   environment or `~/.arcturn/auth/`.
+   build the matching provider client, with API keys from the environment (or ambient
+   cloud credentials, for Bedrock and Vertex).
 4. **Agent** (`@arcturn/core`'s `createAgent`) — wire config, tools, and the LLM client
    into one `Agent`, with a `JsonlSessionStore` rooted at
    `~/.arcturn/sessions/<hash-of-cwd>/`.

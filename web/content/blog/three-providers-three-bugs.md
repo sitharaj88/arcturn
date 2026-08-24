@@ -135,7 +135,6 @@ Six provider paths carry a tick today. Bedrock, Vertex and Azure carry a warning
 have never reached their endpoints, because each needs a cloud account rather than an
 API key. Azure and Vertex at least reuse stream translation the verified runs exercise;
 `bedrock` shares none of it and is the largest genuinely untested surface in the project.
-The OAuth endpoint URLs are unverified against live provider documentation too.
 
 Given the hit rate above — three for three, at under two cents — I would not bet on
 those three being clean. The honest list is the product. When they run, I will say what

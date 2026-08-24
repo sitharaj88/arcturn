@@ -160,8 +160,7 @@ What it isn't: proven at scale, battle-tested, or finished. Six provider paths h
 completed real multi-turn tool-calling sessions against a live endpoint — first-party
 Anthropic, Google, and OpenAI on both its Chat Completions and Responses surfaces, plus
 both compatibility adapters. Bedrock, Vertex and Azure have never reached their endpoints
-at all, and the OAuth endpoint URLs remain unverified against live provider documentation.
-That's written down in the repo too.
+at all. That's written down in the repo too.
 
 One caveat on the compatibility adapters, since it would be easy to overclaim. Each was
 verified against a single implementation of its protocol — `openai-compatible` against

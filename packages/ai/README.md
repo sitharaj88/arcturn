@@ -17,7 +17,9 @@ Vertex, and any OpenAI- or Anthropic-Messages-compatible endpoint via presets.
 - `createConsensusClient`, `compareMessages` — run a prompt across several models.
 - `calculateCostUsd`, `addUsage`, `emptyUsage` — token/cost accounting.
 - `discoverModels`, `refreshCatalog` — live catalog discovery for OpenAI-compatible
-  endpoints; `oauth` (namespace) — subscription (OAuth) authentication helpers.
+  endpoints; `oauth` (namespace) — PKCE and the loopback redirect listener, used by
+  `arcturn mcp auth`. There is no subscription (OAuth) sign-in: that needs a client id
+  each provider issues to its own product. Use an API key.
 
 ## Install
 

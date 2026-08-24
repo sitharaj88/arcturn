@@ -17,10 +17,6 @@
  */
 
 export {
-  AUTH_ACTIONS,
-  AUTH_COMMAND_NAME,
-  type AuthAction,
-  type AuthCommand,
   type CliArgs,
   type CliCommand,
   defaultArgs,
@@ -29,19 +25,6 @@ export {
   type ParseArgsResult,
   parseArgs,
 } from "./args.js";
-export {
-  type AuthStatusRow,
-  type AuthWriter,
-  type BeginLoginFn,
-  CANCELLED_EXIT_CODE,
-  collectAuthStatus,
-  createAuthStore,
-  formatAuthStatus,
-  formatExpiry,
-  type RunAuthCommandOptions,
-  runAuthCommand,
-  UNVERIFIED_ENDPOINTS_NOTE,
-} from "./auth.js";
 export {
   type CommandContext,
   CommandRegistry,

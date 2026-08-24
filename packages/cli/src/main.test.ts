@@ -92,36 +92,11 @@ describe("main", () => {
     expect(text).toContain("Registered providers");
     expect(text).toContain("Provider presets (use --model <preset>/<model>)");
     expect(text).toContain("GROQ_API_KEY");
-    expect(text).toContain("Subscription (OAuth) sign-in");
   });
 
   it("includes the preset models in --list-models", async () => {
     expect(await main(["--list-models"])).toBe(0);
     expect(out.join("")).toContain("groq/llama-3.3-70b-versatile");
-  });
-
-  it("runs auth status against an isolated home", async () => {
-    const scratch = await makeScratch();
-    // `auth status` reads ~/.arcturn/auth; point ARCTURN_HOME at the scratch tree so the
-    // test never sees a real credential.
-    const previous = process.env.ARCTURN_HOME;
-    process.env.ARCTURN_HOME = scratch.home;
-    try {
-      expect(await main(["auth", "status", "--cwd", scratch.cwd])).toBe(0);
-    } finally {
-      if (previous === undefined) delete process.env.ARCTURN_HOME;
-      else process.env.ARCTURN_HOME = previous;
-    }
-    const text = out.join("");
-    expect(text).toContain("OAuth sign-in status");
-    expect(text).toContain(join(scratch.home, "auth"));
-    expect(text).toContain("signed out");
-    expect(text).toContain("UNVERIFIED");
-  });
-
-  it("rejects an unknown auth provider with exit code 2", async () => {
-    expect(await main(["auth", "login", "not-a-provider"])).toBe(2);
-    expect(err.join("")).toContain('Unknown OAuth provider "not-a-provider"');
   });
 
   it("reports a usage error with exit code 2", async () => {

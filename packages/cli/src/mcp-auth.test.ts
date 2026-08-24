@@ -183,3 +183,45 @@ describe("createMcpAuthProviderFactory", () => {
     ).rejects.toThrow(/arcturn mcp auth docs/);
   });
 });
+
+describe("the @arcturn/ai surface MCP OAuth depends on", () => {
+  // `runMcpOAuthFlow` above reaches for exactly two symbols from the package's
+  // `oauth` namespace. They are the whole contract between `@arcturn/cli` and
+  // `@arcturn/ai` for OAuth, and unlike the provider sign-in that was removed
+  // they are live: `arcturn mcp auth <name>` cannot run without them. This test
+  // pins them so pruning that namespace again cannot break MCP silently.
+  it("still exports createStateToken and startLoopbackServer", async () => {
+    const { oauth } = await import("@arcturn/ai");
+    expect(typeof oauth.createStateToken).toBe("function");
+    expect(typeof oauth.startLoopbackServer).toBe("function");
+  });
+
+  it("mints a usable state token and a bound loopback listener", async () => {
+    const { oauth } = await import("@arcturn/ai");
+
+    const state = oauth.createStateToken();
+    expect(state.length).toBeGreaterThan(16);
+    expect(state).not.toBe(oauth.createStateToken());
+
+    const listener = await oauth.startLoopbackServer({ state, timeoutMs: 5_000 });
+    try {
+      expect(listener.port).toBeGreaterThan(0);
+      expect(listener.redirectUri).toBe(`http://127.0.0.1:${listener.port}/callback`);
+
+      // Drive a real redirect through it: this is what the browser does at the
+      // end of `arcturn mcp auth`, and the code it yields is what the MCP SDK
+      // exchanges for tokens.
+      const redirect = new URL(listener.redirectUri);
+      redirect.searchParams.set("code", "the-authorization-code");
+      redirect.searchParams.set("state", state);
+      const response = await fetch(redirect);
+      expect(response.status).toBe(200);
+
+      const callback = await listener.waitForCallback();
+      expect(callback.code).toBe("the-authorization-code");
+      expect(callback.state).toBe(state);
+    } finally {
+      await listener.close();
+    }
+  });
+});

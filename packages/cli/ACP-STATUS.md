@@ -388,8 +388,8 @@ No `runtime.ts` change needed for this half.
    package.
 
 4. **`authenticate` is unimplemented** (`authMethods: []`) — arcturn expects
-   credentials in the environment or via `arcturn auth` before the editor
-   launches it. Unchanged from every prior pass.
+   API keys in the environment before the editor launches it. Unchanged from
+   every prior pass.
 
 5. **`fs/read_text_file`/`fs/write_text_file`/`terminal/*` client methods are
    never called** — arcturn uses its own sandboxed tools rather than asking the

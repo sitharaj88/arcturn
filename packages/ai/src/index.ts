@@ -83,12 +83,8 @@ export {
   type RefreshResult,
   refreshCatalog,
 } from "./live-catalog.js";
-// --- Subscription (OAuth) authentication ---
+// --- OAuth building blocks (PKCE + the loopback redirect listener) ---
 export * as oauth from "./oauth/index.js";
-export {
-  registerAnthropicOAuthProvider,
-  registerOAuthProviderFactories,
-} from "./oauth/register.js";
 export {
   listPresets,
   PROVIDER_PRESETS,

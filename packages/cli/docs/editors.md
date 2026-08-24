@@ -99,10 +99,9 @@ positional arguments after `acp`.
 
 ### Credentials
 
-arcturn expects provider credentials already available in the environment (or
-via `arcturn auth login <provider>` beforehand) — ACP's `authenticate` method
-isn't implemented (`authMethods: []`), so there is no editor-driven login
-flow yet. If your shell environment isn't what Zed's subprocess inherits,
+arcturn expects provider API keys already available in the environment —
+ACP's `authenticate` method isn't implemented (`authMethods: []`), so there is
+no editor-driven login flow yet. If your shell environment isn't what Zed's subprocess inherits,
 set the key(s) arcturn needs under `env` in the config above, e.g.:
 
 ```json
@@ -206,8 +205,8 @@ In short:
   `plan` mode), the editor isn't told via `current_mode_update` — arcturn's
   event stream has no event carrying that transition yet. `session/set_mode`
   itself (the editor-driven direction) works fully.
-- `authenticate` is unimplemented (`authMethods: []`) — credentials must
-  already be in the environment or set up via `arcturn auth` first.
+- `authenticate` is unimplemented (`authMethods: []`) — API keys must
+  already be in the environment.
 - No image/audio prompt content, no editor-served unsaved-buffer contents
   (arcturn reads from disk), no terminal integration for background/long-running
   commands.

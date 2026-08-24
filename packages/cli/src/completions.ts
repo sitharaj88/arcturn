@@ -66,11 +66,11 @@ export interface CompletionFlag {
 
 /** A positional sub-command, optionally with its own fixed set of child words. */
 export interface CompletionSubcommand {
-  /** The word itself, e.g. `"auth"`. */
+  /** The word itself, e.g. `"completions"`. */
   readonly name: string;
   /** One-line description shown by shells that support it. */
   readonly description: string;
-  /** Fixed words that can follow this subcommand (e.g. `auth`'s actions). */
+  /** Fixed words that can follow this subcommand (e.g. `completions`' shells). */
   readonly children?: readonly CompletionSubcommand[];
 }
 
@@ -182,15 +182,6 @@ export const DEFAULT_COMPLETION_SPEC: CompletionSpec = {
     },
   ],
   subcommands: [
-    {
-      name: "auth",
-      description: "Manage subscription (OAuth) sign-in.",
-      children: [
-        { name: "login", description: "Sign in to a provider with an OAuth subscription." },
-        { name: "logout", description: "Forget the credentials stored for a provider." },
-        { name: "status", description: "Show which providers are signed in." },
-      ],
-    },
     {
       name: "completions",
       description: "Print a shell completion script.",
@@ -388,20 +379,25 @@ function generateZshCompletions(spec: CompletionSpec): string {
     }
   }
 
-  const authCommand = spec.subcommands.find((s) => s.name === "auth");
-  const completionsCommand = spec.subcommands.find((s) => s.name === "completions");
-
   const topLevelValues = spec.subcommands
     .map((s) => `'${s.name}[${escapeZshSingleQuoted(s.description)}]'`)
     .join(" ");
 
-  const authValues = (authCommand?.children ?? [])
-    .map((c) => `'${c.name}[${escapeZshSingleQuoted(c.description)}]'`)
-    .join(" ");
-
-  const shellValues = (completionsCommand?.children ?? [])
-    .map((c) => `'${c.name}[${escapeZshSingleQuoted(c.description)}]'`)
-    .join(" ");
+  // One arm per subcommand that has a fixed child list, so adding or removing
+  // a command in the spec is the whole edit.
+  const childArms = spec.subcommands
+    .filter((sub) => sub.children && sub.children.length > 0)
+    .map((sub) => {
+      const values = (sub.children ?? [])
+        .map((child) => `'${child.name}[${escapeZshSingleQuoted(child.description)}]'`)
+        .join(" ");
+      return [
+        `        ${sub.name})`,
+        `          _values '${sub.name} argument' ${values}`,
+        `          ;;`,
+      ].join("\n");
+    })
+    .join("\n");
 
   return `#compdef ${program}
 #
@@ -432,12 +428,7 @@ ${optionLines.join(" \\\n")} \\
       ;;
     args)
       case "\${line[1]}" in
-        auth)
-          _values 'auth action' ${authValues}
-          ;;
-        completions)
-          _values 'shell' ${shellValues}
-          ;;
+${childArms}
       esac
       ;;
   esac

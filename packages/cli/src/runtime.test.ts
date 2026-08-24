@@ -45,23 +45,6 @@ describe("resolveModelSpec", () => {
   it("names the missing environment variable", () => {
     expect(() => resolveModelSpec("anthropic/claude-sonnet-4-5", {})).toThrow(/ANTHROPIC_API_KEY/);
   });
-
-  it("does not demand an API key from an OAuth-only provider", () => {
-    // `anthropic-oauth`, `github-copilot` and `openai-codex` authenticate with a
-    // stored subscription credential; there is no key to look for.
-    registerBundledCatalog();
-    registerModel({
-      id: "test/oauth-only",
-      provider: "anthropic-oauth",
-      model: "claude-sonnet-4-5",
-      displayName: "Subscription Claude",
-      contextWindow: 200_000,
-      maxOutputTokens: 64_000,
-      capabilities: { tools: true, vision: true, thinking: true, caching: true },
-    });
-    expect(resolveModelSpec("test/oauth-only", {}).provider).toBe("anthropic-oauth");
-    unregisterModel("test/oauth-only");
-  });
 });
 
 describe("formatModelCatalog", () => {
@@ -75,7 +58,7 @@ describe("formatModelCatalog", () => {
 });
 
 describe("formatProviderCatalog", () => {
-  it("lists registered providers, presets and the OAuth providers", () => {
+  it("lists registered providers and presets", () => {
     registerBundledCatalog();
     const catalog = formatProviderCatalog({});
     expect(catalog).toContain("Registered providers");
@@ -85,9 +68,10 @@ describe("formatProviderCatalog", () => {
     expect(catalog).toContain("azure");
     expect(catalog).toContain("openai-responses");
     expect(catalog).toContain("Provider presets (use --model <preset>/<model>)");
-    expect(catalog).toContain("Subscription (OAuth) sign-in");
-    expect(catalog).toContain("arcturn auth login <provider>");
-    expect(catalog).toContain("UNVERIFIED");
+    // The subscription (OAuth) sign-in block is gone: it advertised three
+    // logins that never worked. API keys are the supported path.
+    expect(catalog).not.toContain("Subscription (OAuth) sign-in");
+    expect(catalog).not.toContain("arcturn auth login");
   });
 
   it("shows each preset's protocol, key variable and whether it is set", () => {

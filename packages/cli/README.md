@@ -21,7 +21,6 @@ arcturn
 ```
 arcturn [options] [prompt...]        start the interactive TUI
 arcturn -p "prompt" [options]        run once, print the answer, exit
-arcturn auth <command> [provider]    manage subscription (OAuth) sign-in
 ```
 
 ```bash
@@ -47,21 +46,18 @@ arcturn --model openai/gpt-5.1 --permission-mode acceptEdits
 | `--no-mcp` | Do not start any configured MCP servers. |
 | `--max-turns <n>` | End a run after `n` model turns. |
 | `--list-models` | Print the model catalog and exit. |
-| `--list-providers` | Print every registered provider, every named preset endpoint (with its API-key variable and whether it is set) and the OAuth providers, then exit. |
+| `--list-providers` | Print every registered provider and every named preset endpoint (with its API-key variable and whether it is set), then exit. |
 | `-h`, `--help` · `-v`, `--version` | Usage / version. |
 
 Long flags accept both `--model x` and `--model=x`. Everything after `--` is prompt text.
 
 ### Commands
 
-| Command | Description |
-| --- | --- |
-| `arcturn auth login <provider>` | Sign in with a subscription you already pay for. |
-| `arcturn auth logout <provider>` | Delete the credentials stored for a provider. |
-| `arcturn auth status` | Which providers are signed in, and until when. |
+`arcturn --help` lists every positional command (`completions`, `replay`, `audit`, `blame`,
+`bisect`, `serve`, `acp`, `attach`, `mcp …`, and the package verbs).
 
-A command is recognised only as the **first word before `--`**, so `arcturn -- auth login x` and
-`arcturn "auth login is broken"` are still prompts. `--help` and `--version` win over any command.
+A command is recognised only as the **first word before `--`**, so `arcturn -- replay abc` and
+`arcturn "replay is broken"` are still prompts. `--help` and `--version` win over any command.
 
 ### Exit codes
 
@@ -70,7 +66,6 @@ A command is recognised only as the **first word before `--`**, so `arcturn -- a
 | `0` | Success (or the interactive session was closed). |
 | `1` | The run ended with `reason: "error"` or was aborted. |
 | `2` | Usage error, unknown/unusable model, or `stdout` is not a TTY without `--print`. |
-| `130` | A `arcturn auth login` was cancelled with `Ctrl+C`. Nothing was stored. |
 
 ### Permission modes
 
@@ -90,7 +85,7 @@ explanation the model can act on, and a one-line hint goes to stderr. Pick a mod
 
 `arcturn --list-providers` is the discovery surface: it prints every registered adapter, every named
 preset endpoint — with the environment variable that holds its key and a `✓`/`✗` for whether that
-variable is set **right now** — and the providers you can sign into with a subscription.
+variable is set **right now**.
 
 ### Adapters
 
@@ -101,14 +96,13 @@ distinction is called out.
 
 | Provider id | Backend | Credentials | Verified |
 | --- | --- | --- | --- |
-| `anthropic` | Claude, Messages API | `ANTHROPIC_API_KEY` (or `ANTHROPIC_AUTH_TOKEN`), or `arcturn auth login anthropic` | ✅ Haiku 4.5 |
+| `anthropic` | Claude, Messages API | `ANTHROPIC_API_KEY` (or `ANTHROPIC_AUTH_TOKEN`) | ✅ Haiku 4.5 |
 | `openai` · `openai-responses` | Chat Completions / the Responses API | `OPENAI_API_KEY` | ✅ GPT-5 nano, both surfaces |
 | `google` | Gemini | `GOOGLE_API_KEY` (or `GEMINI_API_KEY`) | ✅ Gemini 3.5 Flash Lite |
 | `openai-compatible` · `anthropic-compatible` | Any endpoint speaking either wire format | whatever the spec's `apiKeyEnv` names | ✅ both — Z.AI GLM and a canonical Messages API |
 | `azure` | Azure OpenAI deployments | `AZURE_OPENAI_API_KEY` | ⚠️ not yet |
 | `bedrock` | AWS Bedrock | ambient AWS credentials (profile, role, env) | ⚠️ not yet |
 | `vertex` | Google Vertex AI | ambient Google application-default credentials | ⚠️ not yet |
-| `github-copilot` · `openai-codex` · `anthropic-oauth` | Subscription-only backends | `arcturn auth login <provider>` | ⚠️ OAuth endpoints unverified |
 
 ### Presets
 
@@ -178,34 +172,14 @@ arcturn --model anthropic/claude-sonnet-4-5
 `bedrock` and `vertex` are the exceptions: they authenticate from ambient cloud credentials (an AWS
 profile or role, Google application-default credentials) and fail at call time instead.
 
-### Subscriptions (`arcturn auth`)
+### Subscription sign-in is not supported
 
-If you already pay for Claude, ChatGPT or a GitHub Copilot seat, you can sign in with it rather than
-buying API credit:
+There is no way to point Arcturn at a Claude, ChatGPT or GitHub Copilot subscription. Signing in
+with one needs an OAuth client id that each provider issues to its own product, and Arcturn has
+none. An earlier release shipped `arcturn auth login` for those three; it never completed a sign-in
+and has been removed rather than left in the help text. Use an API key.
 
-```bash
-arcturn auth login anthropic          # Claude subscription (browser, PKCE)
-arcturn auth login github-copilot     # Copilot seat (device code)
-arcturn auth login openai-codex       # ChatGPT subscription (browser, PKCE)
-arcturn auth status
-arcturn auth logout anthropic
-```
-
-`login` prints the authorization URL (or the verification URI and user code) and waits — **no browser
-is launched for you**, so this works over SSH. `Ctrl+C` cancels cleanly, releases the loopback port
-and stores nothing (exit `130`). Credentials land in `~/.arcturn/auth/<provider>.json`, one file per
-provider, `0600` inside a `0700` directory, and every `arcturn` run refreshes them transparently when
-they expire. `status` shows presence and expiry only — it never prints a token or part of one.
-
-`logout` is local: it deletes the stored file. The grant still exists on the provider's side, so
-remove Arcturn from your provider account to revoke it fully.
-
-> **⚠ The OAuth endpoints are UNVERIFIED.** Arcturn's OAuth client ids, authorization/token endpoints and
-> scopes were assembled offline and have not been checked against any provider's live documentation.
-> If a sign-in fails, fix it without a release: set
-> `ARCTURN_OAUTH_<PROVIDER>_{CLIENT_ID,AUTHORIZATION_ENDPOINT,TOKEN_ENDPOINT,DEVICE_ENDPOINT,SCOPES}`
-> (provider id upper-cased, `-` → `_`, e.g. `ARCTURN_OAUTH_GITHUB_COPILOT_TOKEN_ENDPOINT`), or call
-> `configureOAuthProvider()` from an extension. Every `arcturn auth` command repeats this caveat.
+`arcturn mcp auth <name>` is a different mechanism and does work — see [MCP servers](#mcp-servers).
 
 ---
 
@@ -312,7 +286,6 @@ read. Unknown keys are reported and ignored.
 | `ARCTURN_HOME` | Overrides `~/.arcturn`. |
 | `ANTHROPIC_API_KEY` · `OPENAI_API_KEY` · `GOOGLE_API_KEY` | Provider credentials (plus `ANTHROPIC_AUTH_TOKEN`, `GEMINI_API_KEY` fallbacks). |
 | One variable per preset | See [Providers](#providers) or run `arcturn --list-providers`. |
-| `ARCTURN_OAUTH_*` | Override an OAuth client id, endpoint or scope list — see [Authentication](#authentication). |
 
 ### Other locations
 
@@ -321,7 +294,7 @@ read. Unknown keys are reported and ignored.
 | `~/.arcturn/sessions/<hash-of-cwd>/*.jsonl` | Session transcripts, bucketed per working directory. |
 | `~/.arcturn/mcp.json`, `<cwd>/.arcturn/mcp.json` | MCP servers (merged, project wins per server name). |
 | `~/.arcturn/extensions/`, `<cwd>/.arcturn/extensions/` | Extension modules. |
-| `~/.arcturn/auth/<provider>.json` | OAuth credentials from `arcturn auth login` (`0600` in a `0700` directory). |
+| `~/.arcturn/auth/mcp-<server>.json` | OAuth credentials from `arcturn mcp auth` (`0600` in a `0700` directory). |
 | `ARCTURN.md` at the repository root | Project instructions, inlined verbatim into the system prompt. |
 
 ### MCP servers
@@ -447,10 +420,9 @@ await runtime.dispose();
 model and never touch the network. Also exported: `loadConfig`, `ArcturnRuntime`, `CommandRegistry`,
 `TranscriptFormatter`, `InteractiveApp`, `loadExtensions` and the `ArcturnExtensionApi` types.
 
-The provider and credential surface is exported too — `formatProviderCatalog(env)`,
-`registerBundledCatalog()` (idempotent: preset models plus the OAuth adapters), `createAuthStore`,
-`collectAuthStatus`, `formatAuthStatus` and `runAuthCommand`, whose network, clock and filesystem
-dependencies are all injectable.
+The provider surface is exported too — `formatProviderCatalog(env)` and
+`registerBundledCatalog()` (idempotent: registers the preset models) — whose environment and
+filesystem dependencies are injectable.
 
 ---
 
@@ -462,13 +434,14 @@ npx vitest run packages/cli
 node packages/cli/dist/main.js --help
 node packages/cli/dist/main.js --list-models
 node packages/cli/dist/main.js --list-providers
-ARCTURN_HOME=/tmp/arcturn-scratch node packages/cli/dist/main.js auth status
+node packages/cli/dist/main.js mcp --help
 ```
 
 Every test is headless: no real TTY (the TUI runs against `TestTerminal`), no network and no API
-keys — the OAuth tests inject a `MemoryOAuthTokenStore` and a fake `beginLogin`, so no browser flow
-or credential is ever touched. Implementation notes and known rough edges live in
-[`NOTES.md`](./NOTES.md); the credential wiring is covered in [`NOTES-auth.md`](./NOTES-auth.md).
+keys — the MCP OAuth tests bind a loopback listener on an ephemeral port and drive the redirect
+themselves, so no browser flow or credential is ever touched. Implementation notes and known rough
+edges live in [`NOTES.md`](./NOTES.md); the provider and preset wiring is covered in
+[`NOTES-auth.md`](./NOTES-auth.md).
 
 ---
 

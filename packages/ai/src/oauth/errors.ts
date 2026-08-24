@@ -1,11 +1,10 @@
 /**
- * OAuth error type and the redaction used everywhere a provider response is
- * turned into a message.
+ * OAuth error type and the redaction every message it carries goes through.
  *
- * Rule for this whole subsystem: a token never reaches a log, an exception
- * message or any file outside the token store. Provider error bodies routinely
- * echo the credential that was rejected, so every body that becomes a message
- * goes through {@link redactSecrets} first.
+ * Rule for this subsystem: a credential never reaches a log or an exception
+ * message. An authorization server's error text routinely echoes what it
+ * rejected, so {@link OAuthError} redacts its own message on construction
+ * rather than trusting each call site to remember.
  */
 
 import { AIErrorException } from "../errors.js";
@@ -16,28 +15,18 @@ export const REDACTED = "[redacted]";
 /**
  * Error codes this subsystem raises.
  *
- * The RFC 6749 / RFC 8628 codes are passed through verbatim (`slow_down`,
- * `authorization_pending`, `expired_token`, `access_denied`, `invalid_grant`,
- * …); the `arcturn_`-prefixed ones are local.
+ * An authorization server's own RFC 6749 code (`access_denied`,
+ * `invalid_request`, …) is passed through verbatim, which is why the union
+ * stays open; the `arcturn_`-prefixed ones are raised locally by the loopback
+ * listener.
  */
 export type OAuthErrorCode =
-  | "authorization_pending"
-  | "slow_down"
-  | "expired_token"
   | "access_denied"
-  | "invalid_grant"
-  | "invalid_client"
   | "invalid_request"
-  | "unsupported_grant_type"
-  | "arcturn_no_credentials"
-  | "arcturn_token_expired"
-  | "arcturn_refresh_failed"
-  | "arcturn_exchange_failed"
   | "arcturn_state_mismatch"
   | "arcturn_timeout"
   | "arcturn_cancelled"
   | "arcturn_bad_response"
-  | "arcturn_http_error"
   | (string & {});
 
 /** Everything that went wrong during an OAuth flow, with the secrets stripped. */
@@ -138,19 +127,4 @@ export function redactSecrets(text: string, secrets: readonly string[] = []): st
   }
 
   return out;
-}
-
-/**
- * Truncate a provider response body before embedding it in a message, after
- * redaction. Long HTML error pages are useless in a terminal.
- */
-export function summarizeBody(
-  body: string,
-  options: { limit?: number; secrets?: readonly string[] } = {},
-): string {
-  const limit = options.limit ?? 240;
-  const clean = redactSecrets(body, options.secrets ?? [])
-    .replace(/\s+/g, " ")
-    .trim();
-  return clean.length > limit ? `${clean.slice(0, limit)}…` : clean;
 }

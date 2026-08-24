@@ -130,8 +130,8 @@ Tokens are written to:
 ~/.arcturn/auth/mcp-<server>.json      mode 0600, inside a 0700 directory
 ```
 
-That is the same directory and the same permissions `arcturn auth` uses for provider
-sign-ins, with an `mcp-` prefix so the two namespaces cannot collide. The file holds the
+That is the same `~/.arcturn/auth` directory Arcturn keeps every credential in, with an
+`mcp-` prefix on the file name so one server's credentials cannot collide with another's. The file holds the
 access and refresh tokens plus the registered client id for that one server; refreshes are
 performed by the SDK and written back through the same file. `arcturn mcp logout <name>`
 deletes it — the grant still exists on the server's side, so revoke it there too if you

@@ -65,9 +65,8 @@ export interface RunCliOptions {
  */
 export async function runCli(args: CliArgs, options: RunCliOptions = {}): Promise<number> {
   if (args.listModels || args.listProviders) {
-    // The preset models and OAuth adapters are registered here for the same
-    // reason `buildRuntime` registers them: a listing must show exactly what
-    // `--model` will accept.
+    // The preset models are registered here for the same reason `buildRuntime`
+    // registers them: a listing must show exactly what `--model` will accept.
     registerBundledCatalog();
     // Extensions register models, so they must load before the catalog is
     // printed — otherwise a model that `--model` accepts is missing from the
@@ -152,29 +151,6 @@ export async function runCli(args: CliArgs, options: RunCliOptions = {}): Promis
 
   if (args.command?.kind === "replay") {
     return runReplayCommand(args.command.target, args.cwd, args.model);
-  }
-
-  if (args.command?.kind === "auth") {
-    const command = args.command;
-    const [{ oauth }, { runAuthCommand }] = await Promise.all([
-      import("@arcturn/ai"),
-      import("./auth.js"),
-    ]);
-    if (command.action === "login" || command.action === "logout") {
-      const provider = command.provider ?? "";
-      const known = oauth.listOAuthProviders().map((id) => String(id));
-      if (!known.includes(provider)) {
-        process.stderr.write(
-          `arcturn: Unknown OAuth provider "${provider}". ` +
-            `Providers that support sign-in: ${known.join(", ")}\n`,
-        );
-        return 2;
-      }
-    }
-    return runAuthCommand({
-      command,
-      ...(args.cwd === undefined ? {} : { cwd: args.cwd }),
-    });
   }
 
   try {

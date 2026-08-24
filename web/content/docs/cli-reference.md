@@ -54,8 +54,8 @@ my bill on Friday" into "the run stopped."
 
 | Command | What it does |
 |---|---|
-| `arcturn auth login <provider>` | Sign in to a provider with an OAuth subscription |
-| `arcturn auth logout <provider>` · `auth status` | Forget credentials; show who is signed in |
+| `arcturn mcp add\|remove\|list\|get <name>` | Manage MCP server declarations — see [MCP](/docs/mcp) |
+| `arcturn mcp auth <name>` · `mcp logout <name>` | Authorize an OAuth MCP server in the browser; delete its stored credentials |
 | `arcturn add <source>` | Install a package of skills, agents, workflows or themes — see [Packages](/docs/packages) |
 | `arcturn inspect <source>` | Stage a package and print what installing it *would* add; installs nothing |
 | `arcturn packages` | List installed packages with their pinned commits |

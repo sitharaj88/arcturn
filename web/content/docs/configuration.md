@@ -148,9 +148,9 @@ export OPENAI_API_KEY=sk-...
 export GOOGLE_API_KEY=...
 ```
 
-Or sign in with an OAuth subscription instead of holding a raw key — `arcturn auth login
-<provider>` — see [Getting started](/docs/getting-started#signing-in). Credentials land in
-`~/.arcturn/auth/`.
+An API key is the only credential Arcturn takes for a model provider. There is no
+subscription sign-in — see
+[Model providers](/docs/providers#subscription-sign-in-is-not-supported).
 
 ## The model catalog
 
@@ -229,7 +229,6 @@ everything after a literal `--`.
 |---|---|
 | `ARCTURN_MODEL` | Overrides the configured model (wins over every config layer). |
 | `ARCTURN_HOME` | Overrides `~/.arcturn` as the user-scope root. |
-| `ARCTURN_OAUTH_*` | Override an OAuth endpoint, client id, or scopes for `arcturn auth`. |
 | `BRAVE_API_KEY` | Used by the `websearch` tool when present; falls back to scraping DuckDuckGo otherwise. |
 
 ## MCP config

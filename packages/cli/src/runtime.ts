@@ -16,14 +16,10 @@ import {
   createClient,
   createConsensusClient,
   createFailoverClient,
-  DEFAULT_API_KEY_ENV,
   getModel,
   listModels,
   listPresets,
   listProviderIds,
-  oauth,
-  registerAnthropicOAuthProvider,
-  registerOAuthProviderFactories,
   registerPresetModels,
   resolveApiKey,
 } from "@arcturn/ai";
@@ -76,7 +72,6 @@ import {
   auditObserver,
   createAuditLog,
 } from "./audit.js";
-import { createAuthStore } from "./auth.js";
 import {
   type CanaryGuard,
   createCanaryGuard,
@@ -193,15 +188,10 @@ let catalogRegistered = false;
 /**
  * Register everything `@arcturn/ai` ships but does not install by default.
  *
- * Two things happen here, both idempotent and both required *before* a model id
- * is resolved or a catalog is printed:
- *
- * 1. {@link registerPresetModels} adds the curated third-party models, so
- *    `--model groq/llama-3.3-70b-versatile` resolves and the preset entries show
- *    up in `--list-models`.
- * 2. The OAuth-only provider adapters (`github-copilot`, `openai-codex`,
- *    `anthropic-oauth`) are registered, so a stored subscription credential is
- *    dispatchable at all.
+ * It is idempotent and required *before* a model id is resolved or a catalog is
+ * printed: {@link registerPresetModels} adds the curated third-party models, so
+ * `--model groq/llama-3.3-70b-versatile` resolves and the preset entries show
+ * up in `--list-models`.
  *
  * @returns `true` the first time it did the work, `false` on later calls.
  */
@@ -209,24 +199,7 @@ export function registerBundledCatalog(): boolean {
   if (catalogRegistered) return false;
   catalogRegistered = true;
   registerPresetModels();
-  registerOAuthProviderFactories();
-  registerAnthropicOAuthProvider();
   return true;
-}
-
-/**
- * Whether a provider authenticates *only* by OAuth, so a missing API key is
- * not a reason to refuse the model.
- *
- * Providers that accept either credential (`anthropic`) keep the API-key check:
- * for them a missing key with no stored token is still worth reporting up front.
- */
-function isOAuthOnlyProvider(provider: string): boolean {
-  if (provider === oauth.ANTHROPIC_OAUTH_PROVIDER_ID) return true;
-  return (
-    oauth.getOAuthProviderConfig(provider) !== undefined &&
-    DEFAULT_API_KEY_ENV[provider] === undefined
-  );
 }
 
 /**
@@ -244,11 +217,7 @@ export function resolveModelSpec(id: string, env: EnvMap = process.env): ModelSp
         "Register extra models from an extension with registerModel() from @arcturn/ai.",
     );
   }
-  if (
-    spec.provider !== "openai-compatible" &&
-    !isOAuthOnlyProvider(spec.provider) &&
-    !resolveApiKey(spec, { env })
-  ) {
+  if (spec.provider !== "openai-compatible" && !resolveApiKey(spec, { env })) {
     const envVar = spec.apiKeyEnv ?? "the provider API key environment variable";
     throw new ModelResolutionError(
       `No API key found for ${spec.displayName} (${spec.id}).\n` +
@@ -281,8 +250,7 @@ const KEY_PRESENT = "✓";
 const KEY_ABSENT = "✗";
 
 /**
- * Render everything `--model` can reach: registered adapters, named presets and
- * the providers that support subscription sign-in.
+ * Render everything `--model` can reach: registered adapters and named presets.
  *
  * The preset table is the discovery surface — for each entry it names the
  * protocol spoken, the environment variable holding the key, and whether that
@@ -315,18 +283,7 @@ export function formatProviderCatalog(env: EnvMap = process.env): string {
       `(${configured} of ${presets.length}).`,
   );
 
-  const oauthProviders = oauth.listOAuthProviders().map((id) => String(id));
-  lines.push(
-    "",
-    "Subscription (OAuth) sign-in:",
-    "",
-    ...oauthProviders.map((id) => `  ${id}`),
-    "",
-    "  Sign in with `arcturn auth login <provider>`; see `arcturn auth status`.",
-    "  These endpoints are UNVERIFIED against live provider docs — see `arcturn auth status`.",
-    "",
-    "Models registered right now are listed by --list-models.",
-  );
+  lines.push("", "Models registered right now are listed by --list-models.");
   return lines.join("\n");
 }
 
@@ -1611,8 +1568,8 @@ export interface BuildRuntimeOptions {
  */
 export async function buildRuntime(options: BuildRuntimeOptions = {}): Promise<ArcturnRuntime> {
   const env = options.env ?? process.env;
-  // Presets and the OAuth adapters must exist before any model id is resolved,
-  // otherwise `--model groq/…` fails against a catalog that has not been filled.
+  // The presets must exist before any model id is resolved, otherwise
+  // `--model groq/…` fails against a catalog that has not been filled.
   registerBundledCatalog();
   const warnings: string[] = [];
   const pathOptions = {
@@ -1673,15 +1630,10 @@ export async function buildRuntime(options: BuildRuntimeOptions = {}): Promise<A
   // Per-role models: a cheap one for sub-agents/compaction keeps a long
   // session affordable without downgrading the main loop.
   const router = createModelRouter(config.route ?? {}, (id) => resolveModelSpec(id, env), model);
-  // Credentials written by `arcturn auth login` are resolved (and refreshed) per
-  // request, so an OAuth-backed model works with no API key in the environment.
-  oauth.applyOAuthEnvOverrides(env);
-  const authStore = createAuthStore(paths);
   const baseClient =
     options.llm ??
     createClient({
       env,
-      getAccessToken: oauth.createAccessTokenResolver(authStore),
       // Bound a stalled/dead LLM socket so a run never hangs on a silent stream;
       // the watchdog surfaces a transient network error that retry/failover handles.
       ...(config.requestStallTimeoutMs === undefined

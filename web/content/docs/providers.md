@@ -334,24 +334,20 @@ model-listing path onto that would be just that — a guess. A preset whose refr
 falls back to its last cached result (with a warning) rather than dropping its models
 for that round.
 
-## Subscription sign-in
+## Subscription sign-in is not supported
 
-Some providers let you use an existing subscription instead of paying per token. Arcturn
-stores those tokens itself, with `0600` permissions, and refreshes them transparently.
+You cannot point Arcturn at a Claude, ChatGPT or GitHub Copilot subscription. Signing in
+with one requires an OAuth client id that each provider issues to its own product, and
+Arcturn has none. Use an API key.
 
-```bash
-arcturn auth login github-copilot
-arcturn auth status
-arcturn auth logout github-copilot
-```
+An earlier release shipped `arcturn auth login` for those three providers. It never
+completed a sign-in — the client ids belonged to other vendors' tools and no endpoint or
+scope in it had been checked against a live provider — so it was removed rather than left
+in the help text as something that might work.
 
-Supported: GitHub Copilot (device flow), Anthropic and OpenAI Codex (PKCE with a loopback
-redirect).
-
-> **These flows are unverified.** The endpoint URLs and client ids ship as published
-> constants that have not been exercised against a live provider. If a login fails, the
-> values are overridable at runtime via `configureOAuthProvider()` or `ARCTURN_OAUTH_*`
-> environment variables — no code change needed.
+[MCP OAuth](/docs/mcp) (`arcturn mcp auth <name>`) is a different mechanism and does work:
+it discovers the authorization server and registers a client dynamically, so it needs no
+hardcoded endpoint and no borrowed client id.
 
 ## Choosing a model in code
 

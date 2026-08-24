@@ -6,11 +6,11 @@
  * short alias with an argument, and everything after `--` (or any non-flag
  * token) is treated as prompt text.
  *
- * One family of *positional commands* exists alongside the flags: when the
- * first word before `--` is `auth`, the whole invocation is a credential
- * command (`arcturn auth login <provider>`) rather than a prompt. Quoting still
- * wins — `arcturn "auth login explained"` is a single positional and stays a
- * prompt — and anything after `--` is always prompt text.
+ * *Positional commands* exist alongside the flags: when the first word before
+ * `--` is `completions`, `replay`, `audit`, `blame`, `bisect`, `serve`, `acp`
+ * or `attach`, the whole invocation is that command rather than a prompt.
+ * Quoting still wins — `arcturn "replay explained"` is a single positional and
+ * stays a prompt — and anything after `--` is always prompt text.
  *
  * Two families own their *entire* argument list instead, and are dispatched
  * before the flag loop below ever runs: `mcp`, whose `add` takes a launch
@@ -30,22 +30,6 @@ import { PRODUCT_NAME } from "./meta.js";
 
 /** Output encoding for `--print` runs. */
 export type OutputFormat = "text" | "json";
-
-/** Sub-commands of `arcturn auth`. */
-export type AuthAction = "login" | "logout" | "status";
-
-/** Every `auth` action, in help-text order. */
-export const AUTH_ACTIONS: readonly AuthAction[] = ["login", "logout", "status"];
-
-/** A parsed positional command. Today `auth` is the only family. */
-export interface AuthCommand {
-  /** Command family. */
-  readonly kind: "auth";
-  /** Which sub-command was requested. */
-  readonly action: AuthAction;
-  /** Provider id; present for `login` and `logout`, absent for `status`. */
-  readonly provider?: string;
-}
 
 /** A parsed `completions <shell>` command. */
 export interface CompletionsCommand {
@@ -164,7 +148,6 @@ export interface McpCliCommand {
 
 /** Any positional command the CLI recognises. */
 export type CliCommand =
-  | AuthCommand
   | CompletionsCommand
   | ReplayCommand
   | AuditCommand
@@ -235,7 +218,7 @@ export interface CliArgs {
   listModels: boolean;
   /** `--list-providers`. */
   listProviders: boolean;
-  /** A positional command (`arcturn auth …`), when one was given instead of a prompt. */
+  /** A positional command (`arcturn replay …`), when one was given instead of a prompt. */
   command?: CliCommand;
 }
 
@@ -256,9 +239,6 @@ export function defaultArgs(): CliArgs {
     listProviders: false,
   };
 }
-
-/** Name of the positional command family, so callers do not repeat the string. */
-export const AUTH_COMMAND_NAME = "auth";
 
 /** First positional that switches into completions-command parsing. */
 export const COMPLETIONS_COMMAND_NAME = "completions";
@@ -287,57 +267,6 @@ export const ATTACH_COMMAND_NAME = "attach";
 /** Narrow an arbitrary word to a {@link RegistryVerb}. */
 export function isRegistryVerb(value: string): value is RegistryVerb {
   return (REGISTRY_VERBS as readonly string[]).includes(value);
-}
-
-/** Narrow an arbitrary word to an {@link AuthAction}. */
-function isAuthAction(value: string): value is AuthAction {
-  return (AUTH_ACTIONS as readonly string[]).includes(value);
-}
-
-/**
- * Turn `auth …` positionals into a {@link AuthCommand}.
- *
- * The provider is checked against the OAuth registry here rather than later, so
- * a typo fails before any config, extension or network work happens and the
- * error can name the providers that do exist.
- *
- * @param words - Positional words after the leading `auth`.
- * @returns The command, or the message explaining why it is not one.
- */
-function parseAuthCommand(
-  words: readonly string[],
-): { ok: true; command: AuthCommand } | { ok: false; error: string } {
-  const action = words[0];
-  if (action === undefined) {
-    return { ok: false, error: `auth needs a subcommand: ${AUTH_ACTIONS.join(", ")}` };
-  }
-  if (!isAuthAction(action)) {
-    return {
-      ok: false,
-      error: `Unknown auth subcommand "${action}". Expected one of: ${AUTH_ACTIONS.join(", ")}`,
-    };
-  }
-  const rest = words.slice(1);
-
-  if (action === "status") {
-    if (rest.length > 0) return { ok: false, error: "auth status takes no arguments" };
-    return { ok: true, command: { kind: "auth", action: "status" } };
-  }
-
-  const provider = rest[0];
-  if (provider === undefined) {
-    return {
-      ok: false,
-      error: `auth ${action} needs a provider (arcturn auth ${action} <provider>)`,
-    };
-  }
-  if (rest.length > 1) {
-    return { ok: false, error: `auth ${action} takes exactly one provider, got ${rest.length}` };
-  }
-  // Whether the provider is a known OAuth provider is checked by the auth
-  // command itself: the provider registry lives in `@arcturn/ai`, which is
-  // deliberately not loaded during argument parsing (startup cost).
-  return { ok: true, command: { kind: "auth", action, provider } };
 }
 
 const MCP_ACTIONS: readonly McpAction[] = ["add", "remove", "list", "get", "auth", "logout"];
@@ -605,7 +534,7 @@ export function parseArgs(
 
   // The registry verbs own their argument lists too — see the module doc. The
   // collision with a prompt that opens on one of these words is the same one
-  // `auth`, `serve` and `blame` already accept, and it has the same escape:
+  // `serve` and `blame` already accept, and it has the same escape:
   // quoting makes it one positional, so `arcturn "add logging to server.ts"` is
   // still a prompt.
   const verb = argv[0];
@@ -622,7 +551,7 @@ export function parseArgs(
 
   const positional: string[] = [];
   // Tracks how many positionals were seen before `--`; only those can form a
-  // command, so `arcturn -- auth login x` stays prompt text.
+  // command, so `arcturn -- replay abc` stays prompt text.
   let commandCandidates = 0;
   let onlyPositional = false;
 
@@ -880,16 +809,6 @@ export function parseArgs(
     return { ok: true, args };
   }
 
-  if (positional[0] === AUTH_COMMAND_NAME && commandCandidates > 0) {
-    const parsed = parseAuthCommand(positional.slice(1, commandCandidates));
-    if (!parsed.ok) return { ok: false, error: parsed.error };
-    args.command = parsed.command;
-    // `--help` and `--version` still win (main checks them first); everything
-    // else — prompts, --print, --resume — is meaningless next to a command.
-    args.prompt = "";
-    return { ok: true, args };
-  }
-
   args.prompt = positional.join(" ");
 
   if (args.outputFormat === "json" && !args.print) {
@@ -921,12 +840,8 @@ export function helpText(): string {
 Usage
   ${PRODUCT_NAME} [options] [prompt...]         start the interactive TUI
   ${PRODUCT_NAME} -p "prompt" [options]         run once, print the answer, exit
-  ${PRODUCT_NAME} auth <command> [provider]     manage subscription (OAuth) sign-in
 
 Commands
-  auth login <provider>         Sign in to a provider with an OAuth subscription.
-  auth logout <provider>        Forget the credentials stored for a provider.
-  auth status                   Show which providers are signed in.
   completions <shell>           Print a bash, zsh or fish completion script.
   replay <session|file>         Re-run a session's prompts, optionally on another model.
   audit [session]               Print the audit trail for a session.
@@ -992,10 +907,9 @@ Configuration
   ~/.arcturn/workflows/             Workflows, plus <cwd>/.arcturn/workflows/.
   ~/.arcturn/packages/              Packages installed by "arcturn add", linked into the above.
   ~/.arcturn/extensions/            Extension modules (.ts/.js), plus <cwd>/.arcturn/extensions/.
-  ~/.arcturn/auth/                  OAuth credentials written by "arcturn auth login".
+  ~/.arcturn/auth/                  OAuth credentials written by "arcturn mcp auth".
   ARCTURN_MODEL                     Overrides the configured model.
   ARCTURN_HOME                      Overrides ~/.arcturn.
-  ARCTURN_OAUTH_*                   Override an OAuth endpoint, client id or scopes.
 
 In the TUI
   Enter submits, Shift+Enter inserts a newline, / opens the command palette,

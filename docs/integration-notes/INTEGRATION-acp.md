@@ -167,8 +167,8 @@ permission engine — it is informational. The real bridge is
 Named explicitly rather than guessed at; each has a matching `TODO(acp)` in the source.
 
 - **`authenticate`** — the adapter advertises `authMethods: []`, since arcturn authenticates
-  out of band via env vars and `arcturn auth`. If arcturn ever gains an editor-drivable login,
-  this method and non-empty `authMethods` entries must be added.
+  out of band via env vars. If arcturn ever gains an editor-drivable login, this method and
+  non-empty `authMethods` entries must be added.
 - **`session/set_mode`** and the `current_mode_update` notification — the `AcpSessionUpdate`
   union types `current_mode_update` (verified at `/protocol/session-modes`) but no
   `availableModes` are advertised and no handler is registered, so arcturn's
@@ -218,8 +218,8 @@ To have arcturn listed as an ACP agent that editors can discover:
 5. **Declare capabilities honestly.** `loadSession` is `false` unless a host supplies
    transcript replay; `promptCapabilities.image`/`audio` are `false`. Over-declaring is
    worse than under-declaring: clients branch on these.
-6. **Document the auth story** — arcturn expects provider credentials in the environment or
-   from `arcturn auth` before the editor launches it, since `authMethods` is empty.
+6. **Document the auth story** — arcturn expects provider API keys in the environment before
+   the editor launches it, since `authMethods` is empty.
 
 ## Verification
 

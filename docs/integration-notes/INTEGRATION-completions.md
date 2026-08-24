@@ -91,9 +91,8 @@ either way, `commandCandidates !== 2` is what rejects `arcturn completions` (no
 shell) and `arcturn completions bash extra` (too many words) before `main.ts` ever
 sees them.
 
-Note the existing `auth` branch checks `commandCandidates > 0`, not `=== N`,
-because `auth status` (2 words) and `auth login <provider>` (3 words) are both
-valid. `completions` always takes exactly one word, so the check above is
+Note that a variable-arity branch would check `commandCandidates > 0` rather
+than `=== N`. `completions` always takes exactly one word, so the check above is
 stricter on purpose.
 
 ### Help text

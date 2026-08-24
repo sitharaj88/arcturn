@@ -38,7 +38,7 @@ export interface ArcturnPaths {
   readonly userMcp: string;
   /** `~/.arcturn/extensions`. */
   readonly userExtensions: string;
-  /** `~/.arcturn/auth` — one `0600` JSON file per OAuth provider, in a `0700` directory. */
+  /** `~/.arcturn/auth` — one `0600` JSON file per OAuth MCP server, in a `0700` directory. */
   readonly auth: string;
   /** `~/.arcturn/sessions`. */
   readonly sessionsRoot: string;

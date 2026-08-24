@@ -99,8 +99,7 @@ an exact match so the first Enter submits.
 
 **Provider coverage (complete).** Nine registered adapters — anthropic, openai,
 openai-responses, google, bedrock, vertex, azure, openai-compatible,
-anthropic-compatible — plus 35 named presets and OAuth subscription sign-in for
-Copilot, Anthropic and Codex. This closes the gap against the reference harness's 47 provider
+anthropic-compatible — plus 35 named presets. This closes the gap against the reference harness's 47 provider
 modules, which collapse onto ten wire protocols: Arcturn implements the three that
 cover ~38 of them, adds the three enterprise clouds, and reaches the rest through
 the two compatible-endpoint adapters.
@@ -311,6 +310,15 @@ cloud account (AWS model access, a GCP project with application-default credenti
 Azure deployment) rather than an API key, which is why they are the ones outstanding. Their
 stream translation is partly covered by the runs above (`azure` reuses `openaiEventStream`,
 `vertex` reuses both `anthropicEventStream` and `googleEventStream`); `bedrock` shares none
-of it and is the largest genuinely untested surface. The OAuth endpoint URLs and client ids remain unverified against live
-provider documentation (isolated in one overridable block in oauth/providers.ts, with
-ARCTURN_OAUTH_* env overrides so a stale value needs no code change).
+of it and is the largest genuinely untested surface.
+
+**Subscription OAuth: removed, not verified (2026-08-25).** The unverified-endpoint concern
+recorded here is resolved by deletion. `arcturn auth login|logout|status` and the `anthropic`,
+`openai-codex` and `github-copilot` OAuth provider configurations are gone. They had never
+completed a sign-in, and they could not be made to: each needs an OAuth client id the provider
+issues to its own product, and the ids in the file belonged to other vendors' tools. Verifying
+the endpoints would not have helped. API keys are the supported path for a third-party tool, and
+shipping a login that has never succeeded contradicted this project's own honest-limits rule.
+MCP OAuth (`arcturn mcp auth`) is unaffected and still works — it uses RFC 8414 discovery and
+RFC 7591 dynamic client registration, so it needs no hardcoded endpoint and no borrowed client
+id.
