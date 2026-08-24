@@ -84,24 +84,32 @@ export function TerminalFrame({
         size === "lg" ? "text-code-block-lg" : "text-code-block",
       )}
     >
-      <div aria-hidden="true">
-        <div className="flex items-center gap-2 rounded-t-xl border-b border-default bg-surface-card px-4 py-3">
-          <span className="size-2.5 rounded-full bg-bad-dark" />
-          <span className="size-2.5 rounded-full bg-warn-dark" />
-          <span className="size-2.5 rounded-full bg-good-dark" />
-          <span className="ml-2 truncate font-mono text-caption text-faint">{title}</span>
-        </div>
-        <div
-          className={cn(
-            "overflow-x-auto bg-surface-inset px-4 py-4",
-            // The footer, when present, owns the bottom corners instead.
-            footer ? undefined : "rounded-b-xl",
-          )}
-        >
-          {children}
+      <div
+        aria-hidden="true"
+        className="flex items-center gap-2 rounded-t-xl border-b border-default bg-surface-card px-4 py-3"
+      >
+        <span className="size-2.5 rounded-full bg-bad-dark" />
+        <span className="size-2.5 rounded-full bg-warn-dark" />
+        <span className="size-2.5 rounded-full bg-good-dark" />
+        <span className="ml-2 truncate font-mono text-caption text-faint">{title}</span>
+      </div>
+      {/*
+        ONE scroll container for the whole terminal body, scrollback and
+        footer alike. The previous shape gave each slot its own
+        `overflow-x-auto`, which a phone renders as two stacked scrollbars in
+        one window — and two panes that pan independently, which no terminal
+        on earth does. The `min-w-max` inner column makes the bordered boxes
+        and the status bar span the widest line rather than ending mid-pan.
+        Only the scrollback half is `aria-hidden`: the footer slot is where a
+        consumer's real controls live, and hiding it would make them
+        focusable and invisible at once.
+      */}
+      <div className="overflow-x-auto rounded-b-xl bg-surface-inset px-4 py-4">
+        <div className="min-w-max">
+          <div aria-hidden="true">{children}</div>
+          {footer}
         </div>
       </div>
-      {footer}
     </div>
   );
 }

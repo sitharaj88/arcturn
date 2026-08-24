@@ -504,8 +504,10 @@ export function TerminalPlayer({
               scrollback pane above ends on the frame's own `py-4`, and this is
               the same transcript continuing, not a new block.
             */}
-            <div className={cn("-mt-4 overflow-x-auto bg-surface-inset px-4 pb-4", fade)}>
-              <div className="min-w-max font-mono leading-[1.65]">
+            {/* The frame's single scroll container owns padding and panning
+                now — this slot only carries the fade and the type column. */}
+            <div className={cn(fade)}>
+              <div className="font-mono leading-[1.65]">
                 {/*
                   One grid cell, three layers: the dialog, the outcome that
                   replaces it, and the live activity line pinned to the bottom
