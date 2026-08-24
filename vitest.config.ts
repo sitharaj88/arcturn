@@ -3,6 +3,7 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     include: [
+      "editors/vscode/src/**/*.test.ts",
       "packages/*/src/**/*.test.ts",
       "packages/*/test/**/*.test.ts",
       // The site's design-system checks (contrast, theme-block drift) run with

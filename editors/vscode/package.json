@@ -1,0 +1,246 @@
+{
+  "name": "arcturn-vscode",
+  "displayName": "Arcturn",
+  "description": "The Arcturn coding agent in VS Code — terminal integration, native sidebar, and honest cost accounting, all driven by the same engine as the CLI.",
+  "version": "0.2.0",
+  "private": true,
+  "publisher": "sitharaj88",
+  "license": "Apache-2.0",
+  "author": "Sitharaj Seenivasan",
+  "homepage": "https://arcturn.dev",
+  "bugs": {
+    "url": "https://github.com/sitharaj88/arcturn/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sitharaj88/arcturn.git",
+    "directory": "editors/vscode"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "AI",
+    "Programming Languages"
+  ],
+  "keywords": [
+    "arcturn",
+    "ai",
+    "agent",
+    "chat",
+    "terminal"
+  ],
+  "icon": "media/icon.png",
+  "galleryBanner": {
+    "color": "#0B0A08",
+    "theme": "dark"
+  },
+  "extensionKind": [
+    "workspace"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "Arcturn runs an agent that reads and edits this workspace and executes shell commands in it. That is not something to offer in a folder you have not trusted."
+    },
+    "virtualWorkspaces": {
+      "supported": false,
+      "description": "The engine is a local process operating on real files; a virtual filesystem has nothing for it to run against."
+    }
+  },
+  "main": "./dist/extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "commands": [
+      {
+        "command": "arcturn.open",
+        "title": "Open",
+        "category": "Arcturn",
+        "icon": "$(sparkle)"
+      },
+      {
+        "command": "arcturn.sendSelection",
+        "title": "Send Selection",
+        "category": "Arcturn"
+      },
+      {
+        "command": "arcturn.sendFile",
+        "title": "Send File",
+        "category": "Arcturn"
+      },
+      {
+        "command": "arcturn.installCli",
+        "title": "Install CLI",
+        "category": "Arcturn"
+      },
+      {
+        "command": "arcturn.fixDiagnostic",
+        "title": "Fix with Arcturn",
+        "category": "Arcturn"
+      },
+      {
+        "command": "arcturn.selectModel",
+        "title": "Select Model",
+        "category": "Arcturn"
+      },
+      {
+        "command": "arcturn.showSessions",
+        "title": "Show Sessions",
+        "category": "Arcturn"
+      },
+      {
+        "command": "arcturn.newSession",
+        "title": "New Session",
+        "category": "Arcturn"
+      },
+      {
+        "command": "arcturn.abortRun",
+        "title": "Abort Run",
+        "category": "Arcturn"
+      },
+      {
+        "command": "arcturn.showCost",
+        "title": "Show Cost",
+        "category": "Arcturn"
+      },
+      {
+        "command": "arcturn.reconnect",
+        "title": "Reconnect",
+        "category": "Arcturn"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "arcturn.open",
+        "key": "ctrl+alt+a",
+        "mac": "cmd+alt+a"
+      },
+      {
+        "command": "arcturn.sendSelection",
+        "key": "ctrl+alt+m",
+        "mac": "cmd+alt+m",
+        "when": "editorTextFocus"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "arcturn.fixDiagnostic",
+          "when": "false"
+        },
+        {
+          "command": "arcturn.selectModel",
+          "when": "config.arcturn.serve.enabled"
+        },
+        {
+          "command": "arcturn.showSessions",
+          "when": "config.arcturn.serve.enabled"
+        },
+        {
+          "command": "arcturn.newSession",
+          "when": "config.arcturn.serve.enabled"
+        },
+        {
+          "command": "arcturn.abortRun",
+          "when": "config.arcturn.serve.enabled"
+        },
+        {
+          "command": "arcturn.showCost",
+          "when": "config.arcturn.serve.enabled"
+        },
+        {
+          "command": "arcturn.reconnect",
+          "when": "config.arcturn.serve.enabled"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "arcturn.sendSelection",
+          "when": "editorHasSelection",
+          "group": "arcturn@1"
+        },
+        {
+          "command": "arcturn.sendFile",
+          "when": "resourceScheme == file",
+          "group": "arcturn@2"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "arcturn.sendFile",
+          "when": "!explorerResourceIsFolder && resourceScheme == file",
+          "group": "arcturn@1"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "arcturn",
+          "title": "Arcturn",
+          "icon": "media/arcturn-activity.svg"
+        }
+      ]
+    },
+    "views": {
+      "arcturn": [
+        {
+          "id": "arcturn.sidebar",
+          "name": "Chat",
+          "type": "webview",
+          "when": "config.arcturn.serve.enabled"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Arcturn",
+      "properties": {
+        "arcturn.cliPath": {
+          "type": "string",
+          "default": "",
+          "scope": "machine-overridable",
+          "markdownDescription": "Path to the `arcturn` executable. Leave empty to search your `PATH`. A leading `~` is expanded. If this points at something that is not runnable, Arcturn says so rather than quietly falling back to `PATH` — you would otherwise be running a different engine than the one you named."
+        },
+        "arcturn.defaultModel": {
+          "type": "string",
+          "default": "",
+          "scope": "window",
+          "markdownDescription": "Model id passed to the engine as `--model` when a terminal is launched from this extension. Leave empty to use the engine's own default from `~/.arcturn`. The extension never writes that config."
+        },
+        "arcturn.serve.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "Run `arcturn serve` for the native sidebar. Turn this off for terminal integration only; the Arcturn view disappears with it."
+        },
+        "arcturn.serve.port": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 65535,
+          "scope": "window",
+          "markdownDescription": "Loopback port for `arcturn serve`. `0` picks an ephemeral port, which is the recommended setting — a fixed port is one more thing another process on this machine can find."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --minify",
+    "clean": "rm -rf dist *.vsix",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "package": "vsce package --no-dependencies",
+    "vscode:prepublish": "pnpm run build"
+  },
+  "dependencies": {
+    "@arcturn/protocol": "workspace:*",
+    "@arcturn/types": "workspace:*",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.90.0",
+    "@types/ws": "^8.5.10",
+    "@vscode/vsce": "^3.1.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.0"
+  }
+}

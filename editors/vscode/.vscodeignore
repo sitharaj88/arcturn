@@ -1,0 +1,12 @@
+# Everything is excluded, then the shipped artifacts are named explicitly.
+# An allowlist is the only form that stays correct when someone adds a new
+# directory next year: the default is "not in the VSIX", which is the answer
+# that cannot leak sources or a stray .env into a published package.
+**/*
+
+!dist/extension.js
+!media/icon.png
+!media/arcturn-activity.svg
+!README.md
+!LICENSE
+!package.json

@@ -237,6 +237,22 @@ than inherited from whatever the emulator happened to be set to.
 
 ## Remaining follow-ups
 
+Engine gaps surfaced by the VS Code extension build (RFC 0004), each routed
+around in the extension per the one-engine rule and owed a proper fix here:
+
+- `@file:12-34` line-range mentions: `findMentionTokens` treats the whole run
+  as a path, so the suffix defeats content injection (quoted paths behave
+  differently — the asymmetry should go when the suffix is taught).
+- `createSession` over the wire does not subscribe the connection to events
+  (`ws-server.ts` attaches the observer only on `openSession`); every client
+  must know to call both. Either subscribe on create or document it loudly.
+- `arcturn serve` accepts the auth token only on argv (visible in `ps`) and
+  echoes it on its own stdout attach hint. Add `--token-fd` or an env var,
+  and stop printing the secret the flag exists to protect.
+- No `listModels` protocol verb: a client cannot render the model catalog
+  without inventing one, so the extension's picker runs on announced ids
+  plus free text.
+
 Contracts v2 (from packages/ai/NOTES.md): optional thinking `signature` on StreamEvent
 and ToolCallContent — needed for full reasoning continuity on Gemini tool turns and to
 avoid the internal-event workaround; a `contextOverflow` AIError kind so the runtime can

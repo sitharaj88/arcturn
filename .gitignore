@@ -14,3 +14,4 @@ coverage/
 
 # Eval run artifacts (real API runs; regenerate with `arcturn-evals run`)
 runs/
+*.vsix
