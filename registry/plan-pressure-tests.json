@@ -1,0 +1,31 @@
+{
+  "name": "plan-pressure-tests",
+  "kinds": ["skills"],
+  "source": "sitharaj88/arcturn/examples/plan-pressure-tests",
+  "description": "Four reader skills that pressure-test a plan somebody already wrote — its assumptions, its feasibility against your tree, its claims and its cut order — each refusing the judgment it cannot ground.",
+  "maintainer": {
+    "name": "Sitharaj Seenivasan",
+    "url": "https://sitharaj.in"
+  },
+  "disclosure": {
+    "skills": [
+      {
+        "name": "assumption-audit",
+        "line": "Grade the assumptions a plan rests on — SUPPORTED only with a file:line, a command's real output, or a page fetched this session; everything else is UNTESTED."
+      },
+      {
+        "name": "feasibility-read",
+        "line": "Read a plan against this repository — what the tree supports at file:line, what searches came back empty with their patterns, and the unknowns. No estimate."
+      },
+      {
+        "name": "rfc-review",
+        "line": "Review a design document for the comments that would change it — CONTRADICTED needs a file:line, HOLDS never rests on the document, and every drop is counted."
+      },
+      {
+        "name": "scope-cut",
+        "line": "Order scope cuts by dependency read out of the import graph, every edge with its file:line — never by value, and no cut called safe without a named consumer."
+      }
+    ],
+    "executable": false
+  }
+}

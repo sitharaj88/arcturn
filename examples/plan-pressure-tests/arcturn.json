@@ -1,0 +1,13 @@
+{
+  "name": "plan-pressure-tests",
+  "description": "Four reader skills that pressure-test a plan somebody already wrote: its assumptions, its feasibility against this tree, its claims, and its cut order.",
+  "version": "0.1.0",
+  "provides": {
+    "skills": [
+      "skills/assumption-audit.md",
+      "skills/feasibility-read.md",
+      "skills/rfc-review.md",
+      "skills/scope-cut.md"
+    ]
+  }
+}

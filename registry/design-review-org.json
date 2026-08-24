@@ -1,0 +1,44 @@
+{
+  "name": "design-review-org",
+  "kinds": ["org-kit", "agents", "workflows"],
+  "source": "sitharaj88/arcturn/examples/design-review-org",
+  "description": "Five roles and two pipelines that review a design before the code exists, where the document's author holds no shell and the human gate is a pause the engine enforces mid-pipeline.",
+  "maintainer": {
+    "name": "Sitharaj Seenivasan",
+    "url": "https://sitharaj.in"
+  },
+  "disclosure": {
+    "agents": [
+      {
+        "name": "codebase-critic",
+        "lane": "read",
+        "tools": ["read", "grep", "glob", "ls", "search_code"]
+      },
+      {
+        "name": "design-author",
+        "lane": "write",
+        "tools": ["read", "grep", "glob", "ls", "search_code", "write"]
+      },
+      {
+        "name": "design-lead",
+        "lane": "read",
+        "tools": ["read", "grep", "glob", "ls", "search_code"]
+      },
+      {
+        "name": "impact-analyst",
+        "lane": "exec",
+        "tools": ["read", "grep", "glob", "ls", "bash"]
+      },
+      {
+        "name": "invariant-oracle",
+        "lane": "exec",
+        "tools": ["read", "grep", "glob", "ls", "bash"]
+      }
+    ],
+    "workflows": [
+      { "name": "design-drift", "stages": 4, "budgetUsd": 15 },
+      { "name": "design-review", "stages": 4, "budgetUsd": 20 }
+    ],
+    "executable": false
+  }
+}

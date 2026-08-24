@@ -1,0 +1,13 @@
+{
+  "name": "mobile-ground-truth",
+  "description": "Four mobile commands built on refusals: API availability, crash triage, upgrade impact and privacy declarations, none of them answered from memory.",
+  "version": "0.1.0",
+  "provides": {
+    "skills": [
+      "skills/api-check",
+      "skills/crash-triage",
+      "skills/upgrade-impact.md",
+      "skills/privacy-declarations.md"
+    ]
+  }
+}

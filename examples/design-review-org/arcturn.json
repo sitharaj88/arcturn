@@ -1,0 +1,15 @@
+{
+  "name": "design-review-org",
+  "description": "Five roles and two pipelines that review a design before code exists: the author holds no shell, the oracle breaks a throwaway tree to prove a check bites, and the gate is a mid-pipeline pause.",
+  "version": "0.1.0",
+  "provides": {
+    "agents": [
+      "agents/codebase-critic.md",
+      "agents/design-author.md",
+      "agents/design-lead.md",
+      "agents/impact-analyst.md",
+      "agents/invariant-oracle.md"
+    ],
+    "workflows": ["workflows/design-drift.md", "workflows/design-review.md"]
+  }
+}

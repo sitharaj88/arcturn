@@ -1,0 +1,31 @@
+{
+  "name": "mobile-ground-truth",
+  "kinds": ["skills"],
+  "source": "sitharaj88/arcturn/examples/mobile-ground-truth",
+  "description": "Four mobile commands that answer from the tree and the toolchain rather than from memory: API availability, crash triage, upgrade impact, privacy declarations.",
+  "maintainer": {
+    "name": "Sitharaj Seenivasan",
+    "url": "https://sitharaj.in"
+  },
+  "disclosure": {
+    "skills": [
+      {
+        "name": "api-check",
+        "line": "Answer whether an API exists in the SDK you build against and whether it runs on the oldest OS you ship to, from files on this machine, never from memory."
+      },
+      {
+        "name": "crash-triage",
+        "line": "Triage a mobile crash only when the trace is symbolicated and its symbols proven to match the shipped build; otherwise name what is missing and stop."
+      },
+      {
+        "name": "privacy-declarations",
+        "line": "Draft the privacy-manifest and data-safety inputs a store asks for from what the code evidences, marking everything unevidenced as undeclarable."
+      },
+      {
+        "name": "upgrade-impact",
+        "line": "Report only the breaking changes in an upgrade that actually occur in this repository, with the compiler's own deprecation output as the evidence."
+      }
+    ],
+    "executable": false
+  }
+}
