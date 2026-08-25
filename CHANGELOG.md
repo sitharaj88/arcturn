@@ -34,6 +34,15 @@ CLI, the SDK, or the wire protocol.
   entry. Against an engine without `listModels` it silently behaves exactly as
   it did before.
 
+### Changed
+
+- **One mark, every surface.** The favicon and PWA icons, the apple-touch
+  icon, the VS Code extension and activity-bar icons, and the CLI's
+  terminal-art mark now all draw the Turn Arc — the orbital arc with the
+  four-point star at its open end that the website already wears — at an icon
+  weight tuned to stay legible at 16px. The old star-over-arc mark is retired
+  everywhere it appeared.
+
 ### Removed
 
 - **Subscription (OAuth) sign-in — `arcturn auth login`, `auth logout` and

@@ -1,8 +1,9 @@
 /**
  * The arcturn brand mark, rendered as terminal art.
  *
- * The mark is a four-point guiding star over a sweeping arc — the name drawn
- * literally — on a small pixel grid rasterised with half-block characters,
+ * The mark is the Turn Arc (the same device the website wears): an orbital
+ * arc with a four-point star at its open end — a turn, and the star you steer
+ * by — on a small pixel grid rasterised with half-block characters,
  * two pixel rows per terminal row, washed in the brand gradient (starlight
  * fading to ember — the same ramp the website wears). `fg()` degrades
  * the gradient to the 256-colour or 16-colour palette on lesser terminals, so
@@ -15,22 +16,23 @@
 import { fg, getTheme, lightTheme } from "@arcturn/tui";
 
 /**
- * The mark as a 12×12 bitmap: a four-point star (the guide) above an arc
- * sweeping up from the left (the turn).
+ * The mark as a 14-column bitmap: the orbital ring, open at the top-right
+ * (the turn), with the four-point star sitting in the opening (the guide).
  */
 const ARCTURN_BITMAP: readonly string[] = [
-  ".....##.....",
-  ".....##.....",
-  "....####....",
-  "..########..",
-  "..########..",
-  "....####....",
-  ".....##.....",
-  ".....##.....",
-  "............",
-  "##..........",
-  ".#####......",
-  "...########.",
+  ".........##...",
+  "....##..####..",
+  "..####.######.",
+  ".###....####..",
+  ".##......##...",
+  "##............",
+  "##............",
+  "##........##..",
+  "##........##..",
+  ".##......##...",
+  ".###....###...",
+  "..########....",
+  "....####......",
 ];
 
 /**

@@ -1,13 +1,21 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" role="img" aria-label="Arcturn">
   <title>Arcturn</title>
-  <!-- The arcturn mark: a four-point guiding star over a sweeping arc. -->
-  <rect width="64" height="64" rx="14" fill="#0c0a07"/>
+  <!-- The Turn Arc (DESIGN.md §2.4) at icon weight: the orbital arc with a
+       four-point star at its open end — a turn, and the star you steer by.
+       Heavier stroke and a larger star than the site mark so it survives 16px. -->
   <defs>
-    <linearGradient id="arcturn-ramp" x1="14" y1="10" x2="50" y2="54" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#fad185"/>
-      <stop offset="1" stop-color="#b87436"/>
+    <linearGradient id="arc-ramp" x1="14" y1="50" x2="50" y2="14" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#b87436" stop-opacity="0.7"/>
+      <stop offset="0.55" stop-color="#f2af48"/>
+      <stop offset="1" stop-color="#fad185"/>
     </linearGradient>
+    <radialGradient id="arc-glow" cx="44.73" cy="19.27" r="26" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#f2af48" stop-opacity="0.26"/>
+      <stop offset="1" stop-color="#f2af48" stop-opacity="0"/>
+    </radialGradient>
   </defs>
-  <path d="M32 7 C33.5 17.5 37.5 21.5 48 23 C37.5 24.5 33.5 28.5 32 39 C30.5 28.5 26.5 24.5 16 23 C26.5 21.5 30.5 17.5 32 7 Z" fill="url(#arcturn-ramp)"/>
-  <path d="M11 46 C21 53 39 53 51 41" stroke="url(#arcturn-ramp)" stroke-width="6" stroke-linecap="round"/>
+  <rect width="64" height="64" rx="14.4" fill="#0c0a07"/>
+  <rect width="64" height="64" rx="14.4" fill="url(#arc-glow)"/>
+  <path d="M 49.73 28.87 A 18 18 0 1 1 35.13 14.27" stroke="url(#arc-ramp)" stroke-width="5.8" stroke-linecap="round"/>
+  <path d="M0 -40C3 -11 11 -3 40 0C11 3 3 11 0 40C-3 11 -11 3 -40 0C-11 -3 -3 -11 0 -40Z" transform="translate(44.73 19.27) scale(0.32)" fill="#fad185"/>
 </svg>

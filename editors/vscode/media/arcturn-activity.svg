@@ -1,5 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" role="img" aria-label="Arcturn">
   <title>Arcturn</title>
-  <path fill="currentColor" d="M12 1.8c.62 4.34 1.86 5.58 6.2 6.2-4.34.62-5.58 1.86-6.2 6.2-.62-4.34-1.86-5.58-6.2-6.2 4.34-.62 5.58-1.86 6.2-6.2z"/>
-  <path fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" d="M4.2 16.3c3 4.2 12.6 4.2 15.6 0"/>
+  <!-- The Turn Arc (monochrome): the orbital arc with the star at its open end. -->
+  <path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" d="M 19.09 10.75 A 7.2 7.2 0 1 1 13.25 4.91"/>
+  <path fill="currentColor" d="M0 -40C3 -11 11 -3 40 0C11 3 3 11 0 40C-3 11 -11 3 -40 0C-11 -3 -3 -11 0 -40Z" transform="translate(17.09 6.91) scale(0.13)"/>
 </svg>

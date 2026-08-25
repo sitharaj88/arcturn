@@ -695,6 +695,15 @@ translated to `(22.63, -22.63)` and scaled. Stroke ramps ember → gold along th
 **Scale 1 — `<StarMark />`, 20–32px.** Nav wordmark, footer, 404. Solid gold stroke, no
 glow. Always `aria-hidden`; the adjacent text carries the name.
 
+**Scale 0 — the app icon** (`app/icon.svg`, favicon, apple-icon, PWA icons, the VS Code
+extension icon, and the CLI's pixel-art mark). The same device at *icon weight*: on the
+64-unit tile the arc is `r=18`, `stroke-width 5.8`, star scale `0.32` — heavier stroke and
+a larger star than scale 1 so the mark survives 16px. Tail end of the arc ramp drops to
+0.7 opacity (the turn fades in from ember; the star end stays lit), with a soft
+`--glow`-toned radial behind the star. Rounded tile (`rx` 22.5%) for favicon/marketplace;
+full-bleed opaque square with the device inside the 80% safe zone for apple-touch and
+maskable PWA icons.
+
 **Scale 2 — `<ArcEyebrow />`, 14px.** The 90° top-right quadrant of the same arc plus the
 star, inline before every section eyebrow. Colour `--accent-quiet`. It is the site's
 bullet character — used *only* here, so it stays meaningful.
