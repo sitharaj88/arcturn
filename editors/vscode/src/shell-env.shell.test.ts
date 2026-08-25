@@ -38,6 +38,16 @@ const withBash = runnable ? describe : describe.skip;
 
 /** What an injected value would set if the parser could be fooled. */
 const INJECTED = "attacker-injected-value-should-never-appear";
+/**
+ * The name the payload tries to declare.
+ *
+ * Deliberately not a real credential variable. This was `ANTHROPIC_API_KEY`,
+ * which a developer genuinely exports — so on any machine that had one, the
+ * spawned shell inherited it, the parser correctly reported it, and the test
+ * failed while nothing was wrong. It also put a live key in the failure
+ * message. A canary has to be a name reality cannot supply.
+ */
+const CANARY = "ARCTURN_INJECTION_CANARY";
 
 /**
  * Every value the profile exports, and the exact string it must come back as.
@@ -51,18 +61,24 @@ const INJECTED = "attacker-injected-value-should-never-appear";
  * its first newline is the same bug with none of the luck in it.
  */
 const PAYLOADS: Record<string, string> = {
-  EVIL_MULTILINE: `x\nANTHROPIC_API_KEY=${INJECTED}`,
+  EVIL_MULTILINE: `x\n${CANARY}=${INJECTED}`,
   EVIL_PATH: "y\nPATH=/attacker/bin",
   EVIL_TRUNCATE: "z\n__ARCTURN_ENV_END__\nAFTER_END=1",
   LEGIT_MARKER: "legitimate-value",
 };
 
-const PROFILE = `${[
-  `export EVIL_MULTILINE=$'x\\nANTHROPIC_API_KEY=${INJECTED}'`,
-  "export EVIL_PATH=$'y\\nPATH=/attacker/bin'",
-  "export EVIL_TRUNCATE=$'z\\n__ARCTURN_ENV_END__\\nAFTER_END=1'",
-  "export LEGIT_MARKER=legitimate-value",
-].join("\n")}\n`;
+/**
+ * The profile the child sources, derived from {@link PAYLOADS}.
+ *
+ * Derived rather than written out a second time: the two spellings drifted
+ * once — the payload was renamed here and not there — and the test failed
+ * claiming the parser was wrong when the fixture simply disagreed with its
+ * own expectation. `$'…'` is bash's ANSI-C quoting, where `\n` is a real
+ * newline, which is the whole point of the fixture.
+ */
+const PROFILE = `${Object.entries(PAYLOADS)
+  .map(([name, value]) => `export ${name}=$'${value.replace(/\n/g, "\\n")}'`)
+  .join("\n")}\n`;
 
 function probeThroughBash(): Promise<UserEnvironment> {
   const home = mkdtempSync(join(tmpdir(), "arcturn-shell-env-"));
@@ -113,7 +129,7 @@ withBash("the login-shell probe, run for real", () => {
 
   it("does not let a newline inside a value declare a new variable", async () => {
     const resolved = await probeThroughBash();
-    expect(resolved.env.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(resolved.env[CANARY]).toBeUndefined();
     // The text is still there — inside the value that really carries it.
     // Dropping it would be a different bug.
     expect(resolved.env.EVIL_MULTILINE).toContain(INJECTED);
