@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
-import type { ModelCatalogEntry } from "../serve/engine.js";
+import type { ModelCatalogEntry, SessionHeader } from "../serve/engine.js";
 import { CONNECTION_ACTIONS } from "./connection-card.js";
 import {
   MAX_COPY_LENGTH,
   MAX_MODEL_ID_LENGTH,
   MAX_PROMPT_LENGTH,
+  MAX_SESSION_ID_LENGTH,
   parseWebviewMessage,
   projectModelOption,
+  projectSessions,
 } from "./webview-messages.js";
 
 describe("parseWebviewMessage", () => {
@@ -27,6 +29,11 @@ describe("parseWebviewMessage", () => {
       command: "model",
     });
     expect(parseWebviewMessage({ type: "requestModels" })).toEqual({ type: "requestModels" });
+    expect(parseWebviewMessage({ type: "requestSessions" })).toEqual({ type: "requestSessions" });
+    expect(parseWebviewMessage({ type: "openSession", sessionId: "01JABC" })).toEqual({
+      type: "openSession",
+      sessionId: "01JABC",
+    });
     expect(parseWebviewMessage({ type: "setModel", modelId: "anthropic/claude-sonnet-5" })).toEqual(
       { type: "setModel", modelId: "anthropic/claude-sonnet-5" },
     );
@@ -62,6 +69,9 @@ describe("parseWebviewMessage", () => {
       { type: "copy" },
       { type: "copy", text: "" },
       { type: "copy", text: 1 },
+      { type: "openSession" },
+      { type: "openSession", sessionId: 42 },
+      { type: "openSession", sessionId: "   " },
     ]) {
       expect(parseWebviewMessage(value)).toBeUndefined();
     }
@@ -135,6 +145,79 @@ describe("the model selector's boundary", () => {
     expect(
       parseWebviewMessage({ type: "copy", text: "x".repeat(MAX_COPY_LENGTH + 1) }),
     ).toBeUndefined();
+  });
+});
+
+describe("the session list's boundary", () => {
+  it("refuses a control character, which would carry a newline into a log line", () => {
+    for (const sessionId of ["a\nb", "a\rb", "a\u0000b", "a\u001bb", "a\u007fb"]) {
+      expect(parseWebviewMessage({ type: "openSession", sessionId })).toBeUndefined();
+    }
+  });
+
+  it("caps the id rather than forwarding an unbounded string to openSession", () => {
+    expect(
+      parseWebviewMessage({ type: "openSession", sessionId: "x".repeat(MAX_SESSION_ID_LENGTH) }),
+    ).toBeDefined();
+    expect(
+      parseWebviewMessage({
+        type: "openSession",
+        sessionId: "x".repeat(MAX_SESSION_ID_LENGTH + 1),
+      }),
+    ).toBeUndefined();
+  });
+
+  it("trims the id so the engine is asked for what the user meant", () => {
+    expect(parseWebviewMessage({ type: "openSession", sessionId: "  01JABC  " })).toEqual({
+      type: "openSession",
+      sessionId: "01JABC",
+    });
+  });
+});
+
+describe("projectSessions", () => {
+  const header = (over: Partial<SessionHeader> & { sessionId: string }): SessionHeader => ({
+    version: 1,
+    cwd: "/w",
+    createdAt: 1_700_000_000_000,
+    ...over,
+  });
+
+  it("keeps only the sessions started in this workspace", () => {
+    const rows = projectSessions(
+      [header({ sessionId: "mine" }), header({ sessionId: "elsewhere", cwd: "/other" })],
+      "/w",
+    );
+    expect(rows.map((row) => row.sessionId)).toEqual(["mine"]);
+  });
+
+  it("treats a trailing separator as the same directory, not a second one", () => {
+    expect(projectSessions([header({ sessionId: "s", cwd: "/w/" })], "/w")).toHaveLength(1);
+    expect(projectSessions([header({ sessionId: "s", cwd: "/w" })], "/w/")).toHaveLength(1);
+  });
+
+  it("rebuilds the row field by field instead of forwarding the engine's header", () => {
+    const [row] = projectSessions([header({ sessionId: "s", title: "Rebuild" })], "/w");
+    expect(Object.keys(row ?? {}).sort()).toEqual(["createdAt", "sessionId", "title"]);
+  });
+
+  it("carries a field the engine adds nowhere", () => {
+    const extended = { ...header({ sessionId: "s" }), secretHint: "sk-live-1234" } as SessionHeader;
+    expect(JSON.stringify(projectSessions([extended], "/w"))).not.toContain("sk-live-1234");
+  });
+
+  it("reports a missing title as empty rather than inventing one", () => {
+    expect(projectSessions([header({ sessionId: "s" })], "/w")[0]?.title).toBe("");
+  });
+
+  it("reports an unusable timestamp as zero rather than as 1970", () => {
+    const broken = { ...header({ sessionId: "s" }), createdAt: Number.NaN } as SessionHeader;
+    expect(projectSessions([broken], "/w")[0]?.createdAt).toBe(0);
+  });
+
+  it("drops a header with no id, which no verb could be called with", () => {
+    const nameless = { ...header({ sessionId: "" }) } as SessionHeader;
+    expect(projectSessions([nameless, header({ sessionId: "s" })], "/w")).toHaveLength(1);
   });
 });
 

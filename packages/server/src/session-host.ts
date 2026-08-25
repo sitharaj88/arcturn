@@ -73,8 +73,26 @@ export interface SessionHostOptions {
   /**
    * Resolves a wire-level model id (a plain string) to the full
    * {@link ModelSpec} required by `Agent.setModel`. See NOTES.md — the wire
-   * protocol's `setModel` only carries a model id, not a `ModelSpec`. Defaults
-   * to synthesizing a minimal, likely-inaccurate spec from the id alone.
+   * protocol's `setModel` only carries a model id, not a `ModelSpec`, and a
+   * `ModelSpec` is what decides which provider, endpoint and credential the
+   * session's next request uses.
+   *
+   * Injected for the same reason as {@link SessionHostOptions.modelCatalog},
+   * and it should be wired from the same catalog: the pair is what a client
+   * sees (`listModels`) and what actually happens when it picks one
+   * (`setModel`). Wiring one without the other is how those two drift.
+   *
+   * Omitted, {@link SessionHost.setModel} **refuses** every request rather
+   * than inventing a spec. There is no safe guess: an id names a provider
+   * only by convention, so a synthesized spec routes the session's next
+   * prompt — and the credential that goes with it — to whichever provider the
+   * guess happened to name. Refusing is loud and fixable; guessing is silent
+   * and is not.
+   *
+   * @throws Anything, for an id it cannot resolve (unknown model, no
+   *   credentials). {@link SessionHost.setModel} turns that into an
+   *   `invalidRequest` {@link SessionHostError} and leaves the session on the
+   *   model it was already using.
    */
   resolveModel?: (modelId: string) => ModelSpec;
   /**
@@ -133,7 +151,7 @@ export class SessionHost {
   readonly #defaultCwd: string;
   readonly #cwdRoot: string;
   readonly #permissionTimeoutMs: number;
-  readonly #resolveModel: (modelId: string) => ModelSpec;
+  readonly #resolveModel: ((modelId: string) => ModelSpec) | undefined;
   readonly #modelCatalog: (() => ModelCatalogEntry[] | Promise<ModelCatalogEntry[]>) | undefined;
   readonly #maxSessions: number;
   readonly #sessions = new Map<string, LiveSession>();
@@ -151,7 +169,7 @@ export class SessionHost {
     this.#defaultCwd = resolve(options.defaultCwd);
     this.#cwdRoot = resolve(options.cwdRoot ?? options.defaultCwd);
     this.#permissionTimeoutMs = options.permissionTimeoutMs ?? DEFAULT_PERMISSION_TIMEOUT_MS;
-    this.#resolveModel = options.resolveModel ?? defaultResolveModel;
+    this.#resolveModel = options.resolveModel;
     this.#modelCatalog = options.modelCatalog;
     this.#maxSessions = options.maxSessions ?? DEFAULT_MAX_SESSIONS;
   }
@@ -337,11 +355,42 @@ export class SessionHost {
   /**
    * Switch the model used for the session's next turn.
    *
+   * The id is resolved *before* anything on the session is touched, so a
+   * refusal leaves the session on the model it was already running — there is
+   * no half-switched state to recover from.
+   *
    * @throws {SessionHostError} with code `sessionNotFound` when the session
-   *   is not live.
+   *   is not live, or `invalidRequest` when
+   *   {@link SessionHostOptions.resolveModel} rejects the id (unknown model,
+   *   missing credentials).
+   * @throws {Error} When no `resolveModel` was wired into this host. See
+   *   {@link SessionHostOptions.resolveModel}: this host has no way to know
+   *   which provider `modelId` names, and guessing would send the session's
+   *   next prompt and credential to a provider the client never asked for.
    */
   setModel(sessionId: string, modelId: string): void {
-    this.#require(sessionId).agent.setModel(this.#resolveModel(modelId));
+    const session = this.#require(sessionId);
+    // Not `resolve`: that name is `node:path`'s in this module.
+    const resolveModel = this.#resolveModel;
+    if (!resolveModel) {
+      throw new Error(
+        `Cannot switch to model ${JSON.stringify(modelId)}: this server was built without ` +
+          "SessionHostOptions.resolveModel, so it cannot tell which provider that id names. " +
+          "Refusing rather than guessing one.",
+      );
+    }
+    let spec: ModelSpec;
+    try {
+      spec = resolveModel(modelId);
+    } catch (error) {
+      throw new SessionHostError(
+        "invalidRequest",
+        `Cannot switch to model ${JSON.stringify(modelId)}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+    session.agent.setModel(spec);
   }
 
   /**
@@ -441,22 +490,4 @@ export class SessionHost {
     this.#sessions.set(header.sessionId, session);
     return session;
   }
-}
-
-/**
- * Fallback for {@link SessionHostOptions.resolveModel}: synthesizes a minimal
- * `ModelSpec` from a bare model id. Hosts that care about accurate context
- * windows, pricing or capabilities should inject a real catalog lookup
- * instead — see NOTES.md.
- */
-function defaultResolveModel(modelId: string): ModelSpec {
-  return {
-    id: modelId,
-    provider: "anthropic",
-    model: modelId,
-    displayName: modelId,
-    contextWindow: 200_000,
-    maxOutputTokens: 8_192,
-    capabilities: { tools: true, vision: false, thinking: false, caching: false },
-  };
 }

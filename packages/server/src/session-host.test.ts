@@ -1,6 +1,6 @@
 import { isAbsolute, resolve } from "node:path";
 import { Agent, MemorySessionStore } from "@arcturn/core";
-import type { AgentEvent, ModelCatalogEntry, Tool } from "@arcturn/types";
+import type { AgentEvent, ModelCatalogEntry, ModelSpec, Tool } from "@arcturn/types";
 import { describe, expect, it } from "vitest";
 import { SessionHost, SessionHostError } from "./session-host.js";
 import {
@@ -240,6 +240,96 @@ describe("SessionHost", () => {
     expect(() => host.abort("nope")).toThrow(SessionHostError);
     expect(() => host.setModel("nope", "some/model")).toThrow(SessionHostError);
     expect(() => host.observe("nope", () => undefined)).toThrow(SessionHostError);
+  });
+
+  describe("setModel", () => {
+    /**
+     * A host plus a handle on the `Agent` it built, so a test can read the
+     * model actually in force rather than trust the call's return value.
+     * `SessionHost` exposes no accessor for the live agent; the factory is
+     * where one is available, and it is the same object the host holds.
+     */
+    function hostWithAgent(options: { resolveModel?: (id: string) => ModelSpec } = {}): {
+      host: SessionHost;
+      agentFor: (sessionId: string) => Agent;
+    } {
+      const agents = new Map<string, Agent>();
+      const llm = createScriptedLLM([textTurn("hi")]);
+      const host = new SessionHost({
+        agentFactory: (opts) => {
+          const agent = new Agent({
+            llm,
+            model: TEST_MODEL,
+            systemPrompt: "You are a test agent.",
+            tools: [],
+            cwd: opts.cwd,
+            sessionId: opts.sessionId,
+          });
+          agents.set(opts.sessionId, agent);
+          return agent;
+        },
+        defaultCwd: "/tmp/arcturn-test",
+        ...(options.resolveModel === undefined ? {} : { resolveModel: options.resolveModel }),
+      });
+      return {
+        host,
+        agentFor: (sessionId) => {
+          const agent = agents.get(sessionId);
+          if (!agent) throw new Error(`No agent recorded for ${sessionId}`);
+          return agent;
+        },
+      };
+    }
+
+    const ELSEWHERE: ModelSpec = {
+      ...TEST_MODEL,
+      id: "elsewhere/model",
+      provider: "openai-compatible",
+      baseUrl: "https://elsewhere.example/v1",
+    };
+
+    it("refuses outright when no resolveModel was wired, rather than guessing a provider", async () => {
+      const { host, agentFor } = hostWithAgent();
+      const header = await host.createSession({});
+      const agent = agentFor(header.sessionId);
+
+      // A guessed spec is worse than an error: it sends this session's next
+      // prompt, and the credential that goes with it, to whichever provider
+      // the guess named. The refusal has to be total.
+      expect(() => host.setModel(header.sessionId, "zai-api/glm-5.3")).toThrow(
+        /without SessionHostOptions\.resolveModel/,
+      );
+      expect(agent.model).toBe(TEST_MODEL);
+    });
+
+    it("uses the wired resolver's spec verbatim", async () => {
+      const { host, agentFor } = hostWithAgent({
+        resolveModel: (id) => {
+          if (id !== ELSEWHERE.id) throw new Error(`Unknown model "${id}"`);
+          return ELSEWHERE;
+        },
+      });
+      const header = await host.createSession({});
+
+      host.setModel(header.sessionId, ELSEWHERE.id);
+      expect(agentFor(header.sessionId).model).toEqual(ELSEWHERE);
+    });
+
+    it("reports a resolver rejection as invalidRequest and leaves the model alone", async () => {
+      const { host, agentFor } = hostWithAgent({
+        resolveModel: (id) => {
+          throw new Error(`No API key found for ${id}`);
+        },
+      });
+      const header = await host.createSession({});
+      const agent = agentFor(header.sessionId);
+
+      expect(() => host.setModel(header.sessionId, "zai-api/glm-5.3")).toThrow(
+        expect.objectContaining({ code: "invalidRequest" }),
+      );
+      expect(() => host.setModel(header.sessionId, "zai-api/glm-5.3")).toThrow(/No API key found/);
+      expect(agent.model).toBe(TEST_MODEL);
+    });
   });
 
   it("routes a permission ask to observers and resolves on handlePermissionDecision", async () => {

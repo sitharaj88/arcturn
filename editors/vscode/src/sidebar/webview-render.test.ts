@@ -809,6 +809,198 @@ describe("the model selector", () => {
   });
 });
 
+describe("the session history, in the panel", () => {
+  const HOUR = 3_600_000;
+  const sessions = [
+    { sessionId: "01JOLDEST", title: "Find the setModel bug", createdAt: Date.now() - 50 * HOUR },
+    { sessionId: "01JNEWEST", title: "Rebuild the sidebar", createdAt: Date.now() - 3 * HOUR },
+  ];
+
+  /** The header button and the palette are two doors; this opens the near one. */
+  function open(): void {
+    panel.byId("sessions").dispatch("click");
+    panel.send({ type: "showSessions" });
+  }
+
+  function list(over: Record<string, unknown> = {}): unknown {
+    return {
+      type: "sessions",
+      status: "ready",
+      sessions,
+      current: "01JNEWEST",
+      cwd: "/repo/arcturn",
+      ...over,
+    };
+  }
+
+  it("opens where the transcript was, rather than over it", () => {
+    expect(panel.byId("sessions-view").classList.contains("hidden")).toBe(true);
+    open();
+    expect(panel.byId("sessions-view").classList.contains("hidden")).toBe(false);
+    // A full-panel view, not a popover: the transcript and the composer are
+    // gone while it is up, because opening a session replaces both.
+    expect(panel.byId("transcript").classList.contains("hidden")).toBe(true);
+    expect(panel.byId("dock").classList.contains("hidden")).toBe(true);
+    expect(panel.posted.at(-1)).toEqual({ type: "requestSessions" });
+  });
+
+  it("names each session, its id and how long ago it was started", () => {
+    open();
+    panel.send(list());
+    const rows = panel.byId("sessions-list").all("session-row");
+    expect(rows).toHaveLength(2);
+    // Newest first: the session a user is most likely coming back for.
+    expect(rows[0]?.textContent).toContain("Rebuild the sidebar");
+    expect(rows[0]?.textContent).toContain("01JNEWEST · 3h ago");
+    expect(rows[0]?.textContent).toContain("Current");
+    expect(rows[1]?.textContent).toContain("Find the setModel bug");
+    expect(rows[1]?.textContent).toContain("2d ago");
+    expect(rows[1]?.textContent).not.toContain("Current");
+  });
+
+  it("opens the session that was clicked and puts the transcript back", () => {
+    open();
+    panel.send(list());
+    panel.byId("sessions-list").all("session-row")[1]?.dispatch("click");
+    expect(panel.posted.at(-1)).toEqual({ type: "openSession", sessionId: "01JOLDEST" });
+    expect(panel.byId("sessions-view").classList.contains("hidden")).toBe(true);
+    expect(panel.byId("transcript").classList.contains("hidden")).toBe(false);
+    expect(panel.byId("dock").classList.contains("hidden")).toBe(false);
+  });
+
+  it("offers a new session without making the user find the header again", () => {
+    open();
+    panel.send(list());
+    panel.byId("sessions-new").dispatch("click");
+    expect(panel.posted.at(-1)).toEqual({ type: "command", command: "newSession" });
+    expect(panel.byId("sessions-view").classList.contains("hidden")).toBe(true);
+  });
+
+  it("names the folder a new session would start in", () => {
+    open();
+    panel.send(list());
+    expect(panel.byId("sessions-new").textContent).toContain("New session");
+    expect(panel.byId("sessions-new").textContent).toContain("arcturn");
+  });
+
+  it("filters as you type, and says so when nothing matches", () => {
+    open();
+    panel.send(list());
+    panel.byId("sessions-search").value = "setmodel";
+    panel.byId("sessions-search").dispatch("input");
+    const rows = panel.byId("sessions-list").all("session-row");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.textContent).toContain("Find the setModel bug");
+    panel.byId("sessions-search").value = "nothing like this";
+    panel.byId("sessions-search").dispatch("input");
+    expect(panel.byId("sessions-list").all("session-row")).toHaveLength(0);
+    expect(panel.byId("sessions-list").textContent).toContain("No session matches that search");
+  });
+
+  it("is usable from the keyboard alone, the way the model list is", () => {
+    open();
+    panel.send(list());
+    const search = panel.byId("sessions-search");
+    expect(panel.byId("sessions-list").all("session-row")[0]?.className).toContain("active");
+    expect(search.getAttribute("aria-activedescendant")).toBe("session-row-0");
+    search.dispatch("keydown", { key: "ArrowDown" });
+    expect(search.getAttribute("aria-activedescendant")).toBe("session-row-1");
+    search.dispatch("keydown", { key: "Enter" });
+    expect(panel.posted.at(-1)).toEqual({ type: "openSession", sessionId: "01JOLDEST" });
+    open();
+    panel.byId("sessions-search").dispatch("keydown", { key: "Escape" });
+    expect(panel.byId("sessions-view").classList.contains("hidden")).toBe(true);
+    expect(panel.byId("transcript").classList.contains("hidden")).toBe(false);
+  });
+
+  it("asks again when the engine comes back, and stays quiet when it is closed", () => {
+    panel.send({ type: "connection", status: "disconnected", detail: "gone" });
+    const before = panel.posted.filter((message) => message.type === "requestSessions").length;
+    panel.send({ type: "connection", status: "ready" });
+    expect(panel.posted.filter((message) => message.type === "requestSessions")).toHaveLength(
+      before,
+    );
+    open();
+    panel.send({ type: "connection", status: "disconnected", detail: "gone" });
+    const open_ = panel.posted.filter((message) => message.type === "requestSessions").length;
+    panel.send({ type: "connection", status: "ready" });
+    expect(
+      panel.posted.filter((message) => message.type === "requestSessions").length,
+    ).toBeGreaterThan(open_);
+  });
+
+  it("gets out of the way when the transcript becomes a different conversation", () => {
+    // Whoever changed it — the header's New Session button, the palette — the
+    // list was only ever open in order to do this.
+    panel.send({ type: "session", sessionId: "01JNEWEST", title: "Rebuild", cwd: "/repo/arcturn" });
+    open();
+    panel.send({ type: "session", sessionId: "01JFRESH", title: "Untitled", cwd: "/repo/arcturn" });
+    expect(panel.byId("sessions-view").classList.contains("hidden")).toBe(true);
+    expect(panel.byId("transcript").classList.contains("hidden")).toBe(false);
+  });
+
+  it("stays put when a repaint names the session it is already showing", () => {
+    panel.send({ type: "session", sessionId: "01JNEWEST", title: "Rebuild", cwd: "/repo/arcturn" });
+    open();
+    panel.send({ type: "session", sessionId: "01JNEWEST", title: "Rebuild", cwd: "/repo/arcturn" });
+    expect(panel.byId("sessions-view").classList.contains("hidden")).toBe(false);
+  });
+
+  it("says the workspace has no sessions yet rather than showing a blank list", () => {
+    open();
+    panel.send(list({ sessions: [], current: undefined }));
+    expect(panel.byId("sessions-status").classList.contains("hidden")).toBe(false);
+    expect(panel.byId("sessions-status").textContent).toContain(
+      "No sessions in this workspace yet",
+    );
+    // The one thing a user can do from here is still on screen.
+    expect(panel.byId("sessions-new").classList.contains("hidden")).toBe(false);
+  });
+
+  it("says the engine is not connected rather than claiming there are no sessions", () => {
+    open();
+    panel.send(list({ status: "disconnected", sessions: [] }));
+    expect(panel.byId("sessions-status").textContent).toContain("not connected");
+    expect(panel.byId("sessions-status").textContent).not.toContain(
+      "No sessions in this workspace",
+    );
+  });
+
+  it("separates a failed listSessions from a disconnected engine", () => {
+    open();
+    panel.send(list({ status: "failed", sessions: [] }));
+    expect(panel.byId("sessions-status").textContent).toContain("could not list");
+    expect(panel.byId("sessions-status").textContent).not.toContain("not connected");
+  });
+
+  it("says it is still asking rather than claiming the workspace is empty", () => {
+    open();
+    panel.send(list({ status: "loading", sessions: [] }));
+    expect(panel.byId("sessions-status").textContent).toContain("Loading");
+    expect(panel.byId("sessions-list").all("session-row")).toHaveLength(0);
+  });
+
+  it("renders codicon syntax in a title as the characters the engine sent", () => {
+    // A session title is model-influenceable. `picker.ts` escapes it on the way
+    // into a quick-pick because VS Code expands `$(check)` into a glyph; this
+    // page has no such renderer, so the characters must arrive unescaped and
+    // unexpanded — no glyph, and no backslash the engine never sent.
+    open();
+    panel.send(list({ sessions: [{ ...sessions[0], title: "$(check) Trusted session" }] }));
+    const row = panel.byId("sessions-list").all("session-row")[0];
+    expect(row?.textContent).toContain("$(check) Trusted session");
+    expect(row?.textContent).not.toContain("\\$(check)");
+    expect(row?.walk().some((node) => node.tagName === "svg")).toBe(false);
+  });
+
+  it("drops a header with no id rather than rendering a row nothing can open", () => {
+    open();
+    panel.send(list({ sessions: [{ title: "Ghost", createdAt: Date.now() }, ...sessions] }));
+    expect(panel.byId("sessions-list").textContent).not.toContain("Ghost");
+    expect(panel.byId("sessions-list").all("session-row")).toHaveLength(2);
+  });
+});
+
 describe("the header", () => {
   it("names the session and the folder, and shows the honest cost", () => {
     panel.send({

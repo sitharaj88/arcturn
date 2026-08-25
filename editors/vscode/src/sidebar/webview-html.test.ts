@@ -89,6 +89,11 @@ describe("renderSidebarHtml", () => {
     expect(page).toMatch(/<input[^>]*id="model-search"/);
     expect(page).toMatch(/<button[^>]*id="new-session"/);
     expect(page).toMatch(/<button[^>]*id="sessions"/);
+    // Same for history, which used to be a native quick-pick and is now a view
+    // in the panel: a search box, a way back, and a way to start fresh.
+    expect(page).toMatch(/<input[^>]*id="sessions-search"/);
+    expect(page).toMatch(/<button[^>]*id="sessions-back"/);
+    expect(page).toMatch(/<button[^>]*id="sessions-new"/);
   });
 
   it("gives the model list the roles a screen reader needs to announce it", () => {
@@ -96,6 +101,14 @@ describe("renderSidebarHtml", () => {
     expect(page).toMatch(/id="model"[^>]*aria-haspopup="listbox"/s);
     expect(page).toMatch(/id="model-list"[^>]*role="listbox"/s);
     expect(page).toMatch(/id="model-search"[^>]*role="combobox"/s);
+  });
+
+  it("gives the session list the same roles the model list has", () => {
+    const page = html();
+    expect(page).toMatch(/id="sessions-view"[^>]*role="dialog"/s);
+    expect(page).toMatch(/id="sessions-list"[^>]*role="listbox"/s);
+    expect(page).toMatch(/id="sessions-search"[^>]*role="combobox"/s);
+    expect(page).toMatch(/id="sessions"[^>]*aria-controls="sessions-view"/s);
   });
 
   it("marks the transcript as a live region so streamed text is announced", () => {

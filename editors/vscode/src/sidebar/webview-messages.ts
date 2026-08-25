@@ -28,7 +28,7 @@
  * Pure, so both directions are testable with no `vscode` and no DOM.
  */
 
-import type { ModelCatalogEntry } from "../serve/engine.js";
+import type { ModelCatalogEntry, SessionHeader } from "../serve/engine.js";
 import type { ChatViewModel } from "./chat-state.js";
 import {
   CONNECTION_ACTIONS,
@@ -36,6 +36,7 @@ import {
   type ConnectionActionId,
 } from "./connection-card.js";
 import type { ModelOption } from "./webview-models.js";
+import type { SessionOption } from "./webview-sessions.js";
 
 /** Ceiling on a prompt, mirroring nothing in particular — just not unbounded. */
 export const MAX_PROMPT_LENGTH = 100_000;
@@ -57,6 +58,14 @@ export const MAX_MODEL_ID_LENGTH = 200;
  * user can reach by copying something they can see.
  */
 export const MAX_COPY_LENGTH = 100_000;
+/**
+ * Ceiling on a session id.
+ *
+ * The engine mints ULIDs — 26 characters — but the id is the engine's to
+ * choose, so this is the same generous-but-bounded ceiling a model id gets
+ * rather than a length assertion about a format this extension does not own.
+ */
+export const MAX_SESSION_ID_LENGTH = 200;
 
 /** Commands the webview may ask the host to run. */
 export const WEBVIEW_COMMANDS = ["model", "sessions", "newSession"] as const;
@@ -77,6 +86,20 @@ export type ConnectionStatus = "idle" | "starting" | "ready" | "disconnected";
  * server has no models".
  */
 export type ModelListStatus = "loading" | "ready" | "unavailable";
+
+/**
+ * Where the session list stands.
+ *
+ * Four states rather than three, because "cannot show you a list" has two
+ * different causes and they call for two different sentences: the engine is
+ * not connected (fix it with the card the panel is still showing), or the
+ * engine is connected and `listSessions` failed (the Output channel has the
+ * reason). Collapsing them would make the panel tell one of those two groups
+ * of users something untrue — and a user with fifty sessions being told this
+ * workspace has none is exactly the silent wrong answer this codebase keeps
+ * refusing to give.
+ */
+export type SessionListStatus = "loading" | "ready" | "disconnected" | "failed";
 
 /** Host → webview. */
 export type HostMessage =
@@ -105,6 +128,24 @@ export type HostMessage =
       current?: string;
     }
   | {
+      type: "sessions";
+      status: SessionListStatus;
+      /** This workspace's sessions, projected field by field. Empty unless `status` is `"ready"`. */
+      sessions: SessionOption[];
+      /** The session the panel is attached to, so its row can say so. */
+      current?: string;
+      /** The folder a new session would be started in. */
+      cwd?: string;
+    }
+  /**
+   * Open the in-panel history view.
+   *
+   * The panel's header button and `arcturn.showSessions` are two doors to one
+   * surface, and this is what makes them one: the palette command reveals the
+   * view and posts this, rather than opening a second, native list of its own.
+   */
+  | { type: "showSessions" }
+  | {
       type: "session";
       sessionId?: string;
       /** The session's title, as the engine stored it. Rendered as text. */
@@ -122,6 +163,8 @@ export type WebviewMessage =
   | { type: "command"; command: WebviewCommand }
   | { type: "requestModels" }
   | { type: "setModel"; modelId: string }
+  | { type: "requestSessions" }
+  | { type: "openSession"; sessionId: string }
   | { type: "copy"; text: string };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -172,12 +215,51 @@ export function projectModelOption(entry: ModelCatalogEntry): ModelOption {
   };
 }
 
+/** Trailing separators make two spellings of one directory. */
+function normalizeCwd(cwd: string): string {
+  const trimmed = cwd.replace(/[/\\]+$/, "");
+  return trimmed === "" ? cwd : trimmed;
+}
+
+/**
+ * Project `listSessions` into the rows the panel is given.
+ *
+ * `listSessions` returns every session the server knows about, across working
+ * directories; RFC 0004 §1 asks for "`listSessions` for this cwd", so the
+ * filter is here — the page is never told a cwd because every row it shows
+ * shares one. Ordering is deliberately *not* here: the page sorts, in
+ * `webview-sessions.ts`, and one sort in one place cannot drift from another.
+ *
+ * Rebuilt field by field for the reason {@link projectModelOption} gives:
+ * `SessionHeader` is engine input, and `version` is protocol bookkeeping the
+ * panel does not render.
+ *
+ * @param headers - Everything `listSessions` returned.
+ * @param cwd - The workspace folder to keep.
+ */
+export function projectSessions(headers: readonly SessionHeader[], cwd: string): SessionOption[] {
+  const wanted = normalizeCwd(cwd);
+  const rows: SessionOption[] = [];
+  for (const header of headers) {
+    if (typeof header.sessionId !== "string" || header.sessionId === "") continue;
+    if (normalizeCwd(header.cwd) !== wanted) continue;
+    rows.push({
+      sessionId: header.sessionId,
+      title: typeof header.title === "string" ? header.title : "",
+      // A header with no usable timestamp is not a session from 1970; the page
+      // prints nothing for a zero rather than a date nobody chose.
+      createdAt: Number.isFinite(header.createdAt) ? header.createdAt : 0,
+    });
+  }
+  return rows;
+}
+
 /**
  * Validate one message from the webview.
  *
  * @param value - Whatever arrived on `onDidReceiveMessage`.
  * @returns A freshly built message, or `undefined` when the value is not one
- *   of the nine the webview is allowed to send. The `action` case is validated
+ *   of the eleven the webview is allowed to send. The `action` case is validated
  *   against {@link CONNECTION_ACTIONS} rather than by shape alone.
  */
 export function parseWebviewMessage(value: unknown): WebviewMessage | undefined {
@@ -189,6 +271,8 @@ export function parseWebviewMessage(value: unknown): WebviewMessage | undefined 
       return { type: "abort" };
     case "requestModels":
       return { type: "requestModels" };
+    case "requestSessions":
+      return { type: "requestSessions" };
     case "action": {
       // The card's buttons are the only thing that sends this, and the host
       // turns an id into a VS Code command. Accepting an arbitrary string here
@@ -227,6 +311,18 @@ export function parseWebviewMessage(value: unknown): WebviewMessage | undefined 
       if (modelId === "" || modelId.length > MAX_MODEL_ID_LENGTH) return undefined;
       if (hasControlCharacter(modelId)) return undefined;
       return { type: "setModel", modelId };
+    }
+    case "openSession": {
+      // Same shape check as `setModel`, for the same reason: the id reaches
+      // the Output channel and an error notification, so a newline in it would
+      // forge a log line. Whether it names a session the server has is the
+      // server's answer to give, and `openSession` gives it.
+      const raw = value.sessionId;
+      if (typeof raw !== "string") return undefined;
+      const sessionId = raw.trim();
+      if (sessionId === "" || sessionId.length > MAX_SESSION_ID_LENGTH) return undefined;
+      if (hasControlCharacter(sessionId)) return undefined;
+      return { type: "openSession", sessionId };
     }
     case "copy": {
       const text = value.text;

@@ -91,18 +91,49 @@ invocation that the event itself arrived on.
 ## `setModel`'s wire payload is a bare string; `Agent.setModel` needs a full `ModelSpec`
 
 `ClientRequest`'s `setModel` carries only `{ sessionId, model: string }` (a
-model id), but `Agent.setModel(model: ModelSpec)` needs the full spec
-(context window, capabilities, pricing, ...) — there is no model catalog in
-`packages/types` or reachable from this package's frozen dependencies.
-`SessionHostOptions.resolveModel?: (modelId: string) => ModelSpec` was added
-(not part of the options object literally spelled out in the task brief, but
-additive and optional) so a composition root with access to a real model
-catalog (e.g. `@arcturn/ai`) can inject an accurate resolver. Without one,
-`SessionHost` falls back to synthesizing a minimal, almost-certainly-inaccurate
-`ModelSpec` from the id alone (200k context window, no thinking/vision/caching
-capabilities) — good enough to keep the session working, not to price or size
-it correctly. Flagging for whoever wires a real server process: pass
-`resolveModel`.
+model id), but `Agent.setModel(model: ModelSpec)` needs the full spec — and a
+`ModelSpec` is not decoration: `provider`, `baseUrl` and `apiKeyEnv` are what
+decide which company's endpoint the session's next prompt, and the credential
+that goes with it, are sent to. There is no model catalog in `packages/types`
+or reachable from this package's frozen dependencies, so
+`SessionHostOptions.resolveModel?: (modelId: string) => ModelSpec` is injected
+by a composition root that has one (e.g. `@arcturn/ai` via `@arcturn/cli`'s
+`createServeHost`).
+
+**Without one, `SessionHost.setModel` refuses.** It used to synthesize a
+minimal spec from the id — `provider: "anthropic"`, a 200k context window, no
+capabilities — described here as "good enough to keep the session working, not
+to price or size it correctly". That was wrong twice over. It was not a
+sizing inaccuracy but a routing one: whatever id a client asked for, the next
+request went to Anthropic. And it was silent — the only reason it ever
+surfaced was a user whose `ANTHROPIC_API_KEY` happened to be dead, so a
+mis-routed `setModel("zai-api/glm-5.3")` came back as a 401 in Anthropic's
+error shape instead of quietly billing the wrong provider.
+
+The default now throws rather than guessing. Deliberately a refusal and not a
+required option: making `resolveModel` mandatory is satisfiable by a lie —
+the cheapest way to quiet the compiler is to paste back the very synthesizer
+being deleted — while a refusal has nothing to paste. It also keeps hosts that
+never accept `setModel` (a client that only prompts) able to construct a
+`SessionHost` at all. The compile-time check that requiredness would have
+bought is instead bought by a test at the seam where the gap actually lived:
+`packages/cli/src/serve.test.ts`'s "routes the next request to the provider
+the id names", which drives a real `ArcturnServer` + real `ProtocolClient`
+over real `ws` and asserts on which of two stub provider endpoints received
+the HTTP request.
+
+Two failure modes, two codes:
+
+- No resolver wired — a wiring fault in the host process, not the client's
+  doing — throws a plain `Error`, which `ws-server.ts`'s `mapError` reports as
+  `ErrorCode.internal`, message naming `SessionHostOptions.resolveModel`.
+- A wired resolver rejecting the id (unknown model, missing credentials) is
+  the client's doing and becomes a `SessionHostError` with code
+  `invalidRequest`, carrying the resolver's own message.
+
+Either way the id is resolved *before* the live session is touched, so a
+refusal leaves the session on the model it was already using — there is no
+half-switched state.
 
 ## `SessionHostOptions` has two more optional fields than the task brief's minimal list
 
@@ -112,7 +143,8 @@ optional fields were added, both additive/backward-compatible:
 - `permissionTimeoutMs?: number` (default 5 minutes) — the brief explicitly
   calls for "a configurable timeout, default 5 min → deny", and this is the
   only place to configure it.
-- `resolveModel?: (modelId: string) => ModelSpec` — see above.
+- `resolveModel?: (modelId: string) => ModelSpec` — see above. Optional to
+  pass, but `setModel` refuses without it rather than inventing a spec.
 - `modelCatalog?: () => ModelCatalogEntry[] | Promise<ModelCatalogEntry[]>` —
   what `SessionHost.listModels()` (and therefore the `listModels` wire verb)
   answers with. Injected for the same reason as `resolveModel`: the catalog

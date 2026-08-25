@@ -1,7 +1,9 @@
 import { mkdtemp } from "node:fs/promises";
+import { createServer as createHttpServer } from "node:http";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createClient, registerModel, unregisterModel } from "@arcturn/ai";
 import { JsonlSessionStore } from "@arcturn/core";
 import { createProtocolClient } from "@arcturn/protocol";
 import { ArcturnServer } from "@arcturn/server";
@@ -276,5 +278,160 @@ describe("listModels end-to-end: real server, real client, real catalog", () => 
 describe("runServe", () => {
   it("refuses a non-loopback bind with authentication explicitly disabled, before building a runtime", async () => {
     await expect(runServe({ host: "0.0.0.0", token: "", port: 0 })).rejects.toThrow(ServeBindError);
+  });
+});
+
+/**
+ * A stand-in provider endpoint: an HTTP server that records every request it
+ * receives and answers with one OpenAI-compatible SSE turn.
+ *
+ * The point of the recording is that a model id is just a label — the thing
+ * that actually matters is which host the prompt and the credentials were
+ * sent to. Two of these, two model specs pointed at them, and "which one got
+ * the request" is a direct read of the routing.
+ */
+async function stubProvider(): Promise<{
+  baseUrl: string;
+  requests: string[];
+  close: () => Promise<void>;
+}> {
+  const requests: string[] = [];
+  const server = createHttpServer((req, res) => {
+    let body = "";
+    req.on("data", (chunk) => {
+      body += String(chunk);
+    });
+    req.on("end", () => {
+      requests.push(body);
+      const chunk = {
+        id: "chatcmpl-stub",
+        object: "chat.completion.chunk",
+        created: 1,
+        model: "stub",
+        choices: [{ index: 0, delta: { role: "assistant", content: "ok" }, finish_reason: null }],
+      };
+      const done = {
+        id: "chatcmpl-stub",
+        object: "chat.completion.chunk",
+        created: 1,
+        model: "stub",
+        choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+      };
+      res.writeHead(200, {
+        "content-type": "text/event-stream",
+        "cache-control": "no-cache",
+        connection: "keep-alive",
+      });
+      res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+      res.write(`data: ${JSON.stringify(done)}\n\n`);
+      res.write("data: [DONE]\n\n");
+      res.end();
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  const port = typeof address === "object" && address ? address.port : 0;
+  return {
+    baseUrl: `http://127.0.0.1:${port}/v1`,
+    requests,
+    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+  };
+}
+
+function stubSpec(id: string, baseUrl: string): ModelSpec {
+  return {
+    id,
+    provider: "openai-compatible",
+    model: "stub-model",
+    displayName: id,
+    contextWindow: 100_000,
+    maxOutputTokens: 1_024,
+    baseUrl,
+    capabilities: { tools: true, vision: false, thinking: false, caching: false },
+  };
+}
+
+describe("setModel end-to-end: real server, real client, real provider dispatch", () => {
+  it("routes the next request to the provider the id names, not the default one", async () => {
+    const home = await stubProvider();
+    const elsewhere = await stubProvider();
+    const homeSpec = stubSpec("stub-home/model", home.baseUrl);
+    const elsewhereSpec = stubSpec("stub-elsewhere/model", elsewhere.baseUrl);
+    registerModel(homeSpec);
+    registerModel(elsewhereSpec);
+
+    // A real dispatching client: it picks the adapter and the endpoint from
+    // the ModelSpec it is handed, exactly as `arcturn serve` does.
+    const runtime = await fakeRuntime({
+      llm: createClient({ env: {}, retry: false }),
+      model: homeSpec,
+    });
+    const sessionHost = createServeHost(runtime);
+    const server = new ArcturnServer({ sessionHost });
+    servers.push(server);
+    const port = await server.start({ host: "127.0.0.1", port: 0 });
+
+    const socket = new WebSocket(`ws://127.0.0.1:${port}`);
+    const client = createProtocolClient(socket);
+    try {
+      const events: AgentEvent[] = [];
+      client.onEvent((_sessionId, event) => events.push(event));
+
+      const header = await client.createSession({ cwd: runtime.cwd });
+      await client.openSession(header.sessionId);
+      await client.setModel(header.sessionId, elsewhereSpec.id);
+      await client.prompt(header.sessionId, "hi");
+
+      // The decisive assertion: which host actually received the prompt. A
+      // returned model id proves only that the label was carried; the id was
+      // already right while the routing was wrong.
+      expect(elsewhere.requests).toHaveLength(1);
+      expect(home.requests).toHaveLength(0);
+      const runEnd = events.find(
+        (event): event is Extract<AgentEvent, { type: "runEnd" }> => event.type === "runEnd",
+      );
+      expect(runEnd?.reason).toBe("completed");
+    } finally {
+      client.close();
+      unregisterModel(homeSpec.id);
+      unregisterModel(elsewhereSpec.id);
+      await home.close();
+      await elsewhere.close();
+    }
+  });
+
+  it("refuses an id it cannot resolve, and leaves the session on the model it had", async () => {
+    const home = await stubProvider();
+    const homeSpec = stubSpec("stub-home/model", home.baseUrl);
+    registerModel(homeSpec);
+
+    const runtime = await fakeRuntime({
+      llm: createClient({ env: {}, retry: false }),
+      model: homeSpec,
+    });
+    const sessionHost = createServeHost(runtime);
+    const server = new ArcturnServer({ sessionHost });
+    servers.push(server);
+    const port = await server.start({ host: "127.0.0.1", port: 0 });
+
+    const socket = new WebSocket(`ws://127.0.0.1:${port}`);
+    const client = createProtocolClient(socket);
+    try {
+      const header = await client.createSession({ cwd: runtime.cwd });
+      await client.openSession(header.sessionId);
+
+      await expect(client.setModel(header.sessionId, "no-such/model")).rejects.toMatchObject({
+        code: "invalidRequest",
+        message: expect.stringContaining("no-such/model"),
+      });
+
+      // Not half-switched: the next turn still goes where it went before.
+      await client.prompt(header.sessionId, "hi");
+      expect(home.requests).toHaveLength(1);
+    } finally {
+      client.close();
+      unregisterModel(homeSpec.id);
+      await home.close();
+    }
   });
 });

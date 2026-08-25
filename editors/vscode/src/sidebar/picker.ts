@@ -1,14 +1,20 @@
 /**
- * The two quick-picks — sessions and models — as pure item builders.
+ * The model quick-pick, as a pure item builder.
  *
- * ### Sessions
+ * ### Where the sessions picker went
  *
- * `listSessions` returns every session the server knows about, across working
- * directories; RFC 0004 §1 asks for "`listSessions` for this cwd", so the
- * filter is here. "Open, resume, or start new" collapses to two outcomes for a
- * client: attach to an existing `sessionId` (`openSession`) or create one
- * (`createSession`) — the engine exposes no third verb, and per RFC §0 the
- * extension does not invent one.
+ * This file used to build a second quick-pick, for sessions. It does not any
+ * more: history is a list *in the panel* now
+ * (`webview-sessions.ts`), opened from the header button and from
+ * `arcturn.showSessions` alike. The quick-pick was deleted rather than kept as
+ * a fallback, because two builders for one surface is precisely how the model
+ * chip and the palette nearly ended up disagreeing about which model was in
+ * use. There is one session list, and one place its rows are decided.
+ *
+ * The model picker stays a quick-pick, and that asymmetry is deliberate — see
+ * the note at the top of `webview-sessions.ts` on why an unbounded list that
+ * *replaces* the transcript wants the whole panel while a fixed catalog that
+ * leaves it in place does not.
  *
  * ### Models
  *
@@ -45,41 +51,21 @@
  *
  * A `vscode.QuickPickItem`'s `label`, `description` and `detail` are rendered
  * through VS Code's `IconLabel` with `supportIcons` on, which turns `$(name)`
- * into a real glyph. Session titles, session ids and model ids all arrive from
- * the engine — and a session title is model-influenceable — so a session named
- * `$(check) Trusted session` would render with an actual checkmark and read as
+ * into a real glyph — and so is a notification's message. Model ids, display
+ * names and session ids all arrive from the engine, and a model's display name
+ * is as model-influenceable as a session title was: a model called
+ * `$(check) Recommended` would render with an actual checkmark and read as
  * system-blessed. Every engine-supplied string is therefore passed through
- * {@link escapeCodicons} on its way into a rendered field. The extension's own
- * `$(add)` / `$(edit)` affordances are literals in this file, not engine input,
- * and stay live.
- */
-
-import type { ModelCatalogEntry, SessionHeader } from "../serve/engine.js";
-
-/**
- * One row of the sessions quick-pick.
+ * {@link escapeCodicons} on its way into a rendered field — here, and in
+ * `index.ts` where an id reaches a notification. The extension's own `$(edit)`
+ * affordance is a literal in this file, not engine input, and stays live.
  *
- * The discriminant is `action`, not `kind`: `vscode.QuickPickItem` already
- * defines `kind` as its separator enum, and these items are handed straight to
- * `showQuickPick`.
+ * The panel does **not** escape: it renders through `textContent`, which has no
+ * `$(name)` syntax to expand, and adding a backslash there would show the user
+ * a character the engine never sent. See `webview-sessions.ts`.
  */
-export interface SessionPickItem {
-  /** `"session"` to open an existing one, `"new"` to create one. */
-  action: "session" | "new";
-  label: string;
-  description?: string;
-  detail?: string;
-  /** Present only on a `"session"` row. */
-  sessionId?: string;
-}
 
-/** Options for {@link sessionPickItems}. */
-export interface SessionPickOptions {
-  /** Workspace folder to filter by. */
-  cwd: string;
-  /** The session already open in the sidebar, if any. */
-  activeSessionId?: string;
-}
+import type { ModelCatalogEntry } from "../serve/engine.js";
 
 /**
  * Codicon syntax as VS Code's own `iconLabels.ts` matches it: `$(name)` with an
@@ -108,48 +94,14 @@ export function escapeCodicons(text: string): string {
   );
 }
 
-/** Trailing separators make two spellings of one directory. */
-function normalizeCwd(cwd: string): string {
-  const trimmed = cwd.replace(/[/\\]+$/, "");
-  return trimmed === "" ? cwd : trimmed;
-}
-
-/**
- * Build the sessions quick-pick.
- *
- * @param headers - Everything `listSessions` returned.
- * @param options - See {@link SessionPickOptions}.
- * @returns Newest session first, always ending with a "new session" row.
- */
-export function sessionPickItems(
-  headers: readonly SessionHeader[],
-  options: SessionPickOptions,
-): SessionPickItem[] {
-  const cwd = normalizeCwd(options.cwd);
-  const mine = headers
-    .filter((header) => normalizeCwd(header.cwd) === cwd)
-    .slice()
-    .sort((a, b) => b.createdAt - a.createdAt);
-
-  const items: SessionPickItem[] = mine.map((header) => ({
-    action: "session" as const,
-    label: escapeCodicons(header.title ?? header.sessionId),
-    sessionId: header.sessionId,
-    ...(header.sessionId === options.activeSessionId ? { description: "current" } : {}),
-    detail: `${escapeCodicons(header.sessionId)} · ${new Date(header.createdAt).toLocaleString()}`,
-  }));
-
-  items.push({
-    action: "new",
-    label: "$(add) New session",
-    detail: `Start a new Arcturn session in ${escapeCodicons(options.cwd)}`,
-  });
-  return items;
-}
-
-/** One row of the model quick-pick. See {@link SessionPickItem} on `action`. */
+/** One row of the model quick-pick. */
 export interface ModelPickItem {
-  /** `"model"` to switch to `modelId`, `"other"` to prompt for one. */
+  /**
+   * `"model"` to switch to `modelId`, `"other"` to prompt for one. The
+   * discriminant is `action`, not `kind`: `vscode.QuickPickItem` already
+   * defines `kind` as its separator enum, and these items are handed straight
+   * to `showQuickPick`.
+   */
   action: "model" | "other";
   label: string;
   description?: string;

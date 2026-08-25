@@ -27,18 +27,24 @@ import { createRedactor } from "../serve/redact.js";
 import type { SpawnLike } from "../serve/supervisor.js";
 import { generateToken } from "../serve/token.js";
 import { forgetFailedUserEnvironment, resolveUserEnvironment } from "../user-env.js";
-import type { ChatViewModel } from "./chat-state.js";
+import { type ChatViewModel, toViewModel } from "./chat-state.js";
 import { createCoalescer } from "./coalesce.js";
 import { type ConnectionActionId, type ConnectionReport, reportText } from "./connection-card.js";
 import { costBreakdown, costLabel } from "./cost.js";
 import { answerFromChoice, permissionChoices } from "./dialog.js";
 import { createEngineSession, type EngineSession } from "./engine-session.js";
 import { describePermissionRequest } from "./permission-queue.js";
-import { modelPickItems, sessionPickItems } from "./picker.js";
+import { escapeCodicons, modelPickItems } from "./picker.js";
 import { CostStatusBar } from "./status-bar.js";
 import { SidebarViewProvider } from "./view.js";
-import { type ModelListStatus, projectModelOption } from "./webview-messages.js";
+import {
+  type ModelListStatus,
+  projectModelOption,
+  projectSessions,
+  type SessionListStatus,
+} from "./webview-messages.js";
 import type { ModelOption } from "./webview-models.js";
+import type { SessionOption } from "./webview-sessions.js";
 
 /**
  * Builder A's resolved CLI.
@@ -141,6 +147,12 @@ export function activateSidebar(
           return;
         case "requestModels":
           void publishModels();
+          return;
+        case "requestSessions":
+          void publishSessions();
+          return;
+        case "openSession":
+          void openSession(message.sessionId);
           return;
         case "setModel":
           void withEngine((session) => switchModel(session, message.modelId));
@@ -260,6 +272,116 @@ export function activateSidebar(
     await publishModels();
   }
 
+  /**
+   * This workspace's sessions, projected for the panel and cached.
+   *
+   * The same shape as the model catalog above, for the same reasons: the list
+   * is opened far more often than it changes, and "cannot list them" is
+   * reported as itself rather than as an empty list — a panel that says "no
+   * sessions in this workspace" to a user with fifty of them is worse than one
+   * that says nothing. Cleared whenever the connection is replaced or a
+   * session is created, which are the two things that make it wrong.
+   */
+  let sessions: SessionOption[] | undefined;
+  let sessionsFailed = false;
+  let sessionsInFlight: Promise<void> | undefined;
+
+  function sessionsStatus(): SessionListStatus {
+    if (engine === undefined || engine.status !== "ready") return "disconnected";
+    if (sessionsFailed) return "failed";
+    return sessions === undefined ? "loading" : "ready";
+  }
+
+  /** Post the session list as it stands, fetching it first when it is not known yet. */
+  async function publishSessions(): Promise<void> {
+    const status = sessionsStatus();
+    const current = engine?.controller?.sessionId;
+    provider.postSessions({
+      status,
+      sessions: sessions ?? [],
+      ...(current === undefined ? {} : { current }),
+      cwd: workspaceCwd(),
+    });
+    if (status !== "loading") return;
+    sessionsInFlight ??= fetchSessions().finally(() => {
+      sessionsInFlight = undefined;
+    });
+    await sessionsInFlight;
+  }
+
+  async function fetchSessions(): Promise<void> {
+    try {
+      // `listSessions` returns every session the server knows about; RFC 0004
+      // §1 asks for this cwd, and `projectSessions` is where that filter lives.
+      sessions = projectSessions(await ensureEngine().listSessions(), workspaceCwd());
+      sessionsFailed = false;
+    } catch (error) {
+      log(
+        `sidebar: could not list sessions: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      sessionsFailed = true;
+      sessions = [];
+    }
+    await publishSessions();
+  }
+
+  /**
+   * Attach the panel to an existing session.
+   *
+   * The id is the engine's own, echoed back by the page and re-validated at
+   * the boundary; the *engine* decides whether it names a session, which is
+   * where that check belongs. A refusal is reported rather than swallowed —
+   * a history row that does nothing when clicked is the failure mode this
+   * whole surface exists to remove.
+   */
+  async function openSession(sessionId: string): Promise<void> {
+    await withEngine(async (session) => {
+      try {
+        await session.openSession(sessionId);
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        log(`sidebar: could not open session ${sessionId}: ${reason}`);
+        // Escaped because a notification expands `$(name)` into a glyph, and
+        // this id came from the engine.
+        void vscode.window.showErrorMessage(
+          `Arcturn could not open session ${escapeCodicons(sessionId)}: ${reason}`,
+        );
+        return;
+      }
+      selectedModel = undefined;
+      repaintTranscript();
+      publishSession();
+      await publishSessions();
+    });
+  }
+
+  /** Start a session, and put it in the list the panel shows. */
+  async function startNewSession(session: EngineSession): Promise<void> {
+    await session.newSession();
+    selectedModel = undefined;
+    repaintTranscript();
+    // A session that exists now was not in the cached list.
+    sessions = undefined;
+    publishSession();
+    await publishSessions();
+    await provider.reveal();
+  }
+
+  /**
+   * Repaint the transcript from the controller's own state.
+   *
+   * A controller starts empty and posts only when an event *changes* it, so a
+   * freshly attached session posts nothing at all — and the panel would go on
+   * rendering the conversation the user just navigated away from, underneath
+   * the new session's title. Pushing the controller's current state once on
+   * attach is what makes "open that session" actually replace the transcript:
+   * empty if the engine replays nothing, the replayed history if it does.
+   */
+  function repaintTranscript(): void {
+    const controller = engine?.controller;
+    if (controller !== undefined) states.push(toViewModel(controller.state));
+  }
+
   /** Tell the panel's header which session it is looking at. */
   function publishSession(): void {
     const controller = engine?.controller;
@@ -303,6 +425,12 @@ export function activateSidebar(
             catalog = undefined;
             catalogUnavailable = false;
             selectedModel = undefined;
+            // A new connection is also a new session store to ask. Cleared,
+            // not re-fetched: a user who never opens history should not cost a
+            // `listSessions` round trip on every reconnect, and a panel that
+            // *is* showing the list asks for itself when it sees `ready`.
+            sessions = undefined;
+            sessionsFailed = false;
             publishSession();
           }
           // The card is only visible when the view is open. The Output channel
@@ -455,36 +583,30 @@ export function activateSidebar(
       withEngine((session) => session.controller?.abort()),
     ),
     vscode.commands.registerCommand(SIDEBAR_COMMANDS.newSession, () =>
-      withEngine(async (session) => {
-        await session.newSession();
-        selectedModel = undefined;
-        publishSession();
-        await provider.reveal();
-      }),
+      withEngine((session) => startNewSession(session)),
     ),
-    vscode.commands.registerCommand(SIDEBAR_COMMANDS.showSessions, () =>
-      withEngine(async (session) => {
-        const headers = await session.listSessions();
-        const active = session.controller?.sessionId;
-        const items = sessionPickItems(headers, {
-          cwd: workspaceCwd(),
-          ...(active === undefined ? {} : { activeSessionId: active }),
-        });
-        const picked = await vscode.window.showQuickPick(items, {
-          title: "Arcturn sessions",
-          placeHolder: "Open a session, or start a new one",
-        });
-        if (picked === undefined) return;
-        if (picked.action === "new" || picked.sessionId === undefined) {
-          await session.newSession();
-        } else {
-          await session.openSession(picked.sessionId);
-        }
-        selectedModel = undefined;
-        publishSession();
-        await provider.reveal();
-      }),
-    ),
+    /**
+     * The palette's door to the panel's history view.
+     *
+     * It used to be a quick-pick: a native dropdown at the top of the *window*,
+     * detached from the panel that launched it, which made the sidebar feel
+     * like a launcher for dialogs rather than a surface of its own. It now
+     * reveals the panel and opens the view that lives there, so the header
+     * button and this command are two doors to one list — with one
+     * implementation behind them, which is the only way they cannot drift.
+     *
+     * Deliberately *not* wrapped in `withEngine`: a dead engine must not
+     * swallow the command with a toast and leave the user looking at the same
+     * panel they started from. The view opens either way and says what it
+     * knows, over the reconnect card that says why — which is the same
+     * argument RFC 0004 §1 makes for a card instead of a toast storm.
+     */
+    vscode.commands.registerCommand(SIDEBAR_COMMANDS.showSessions, async () => {
+      await provider.reveal();
+      provider.showSessions();
+      void start();
+      await publishSessions();
+    }),
     vscode.commands.registerCommand(SIDEBAR_COMMANDS.selectModel, () =>
       withEngine(async (session) => {
         const controller = session.controller;

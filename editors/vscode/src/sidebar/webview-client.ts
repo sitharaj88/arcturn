@@ -38,15 +38,16 @@
  * ## What lives here and what does not
  *
  * Anything that is a decision — how markdown parses, how the model list orders
- * and filters, how blocks group into turns, what one line of a tool call says
- * — lives in `webview-markdown.ts`, `webview-models.ts` and
- * `webview-transcript.ts`, each shipped as source and each driven directly by
- * a unit test. What is left in this file is the part that can only be checked
+ * and filters, how the session list orders and searches, how blocks group into
+ * turns, what one line of a tool call says — lives in `webview-markdown.ts`,
+ * `webview-models.ts`, `webview-sessions.ts` and `webview-transcript.ts`, each
+ * shipped as source and each driven directly by a unit test. What is left in this file is the part that can only be checked
  * by looking at it: element creation, event wiring, and CSS.
  */
 
 import { MARKDOWN_SOURCE } from "./webview-markdown.js";
 import { MODEL_LIST_SOURCE } from "./webview-models.js";
+import { SESSION_LIST_SOURCE } from "./webview-sessions.js";
 import { TRANSCRIPT_SOURCE } from "./webview-transcript.js";
 
 /**
@@ -627,7 +628,7 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
   text-transform: uppercase;
   color: var(--arc-muted);
 }
-.model-row {
+.model-row, .session-row {
   display: block;
   width: 100%;
   padding: 5px 7px;
@@ -639,17 +640,17 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
   background: transparent;
   cursor: pointer;
 }
-.model-row:hover, .model-row.active {
+.model-row:hover, .model-row.active, .session-row:hover, .session-row.active {
   color: var(--vscode-list-activeSelectionForeground, var(--vscode-foreground));
   background: var(--vscode-list-activeSelectionBackground, var(--vscode-list-hoverBackground));
 }
-.model-top { display: flex; align-items: center; gap: 6px; }
+.model-top, .session-top { display: flex; align-items: center; gap: 6px; }
 .model-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
 .dot-present { color: var(--arc-ok); }
 .dot-unknown { color: var(--arc-muted); }
 .dot-absent { color: var(--arc-err); opacity: 0.75; }
-.model-name { flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.model-current {
+.model-name, .session-name { flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.model-current, .session-current {
   flex: none;
   padding: 0 5px;
   border-radius: 999px;
@@ -672,6 +673,61 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
 .model-id { font-family: var(--vscode-editor-font-family); }
 .popover-empty { padding: 12px 10px; color: var(--arc-muted); font-size: 0.9em; text-align: center; }
 
+/* ---- sessions: the history view, in the panel -------------------------- */
+
+/*
+ * A flow item rather than an overlay: it takes the space the transcript and
+ * the composer were in, and the header and the connection card above it stay
+ * put. A user who opens history on a dead engine can still see the card that
+ * says why, and still press its Connect button.
+ */
+.fullview { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.fullview-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--arc-border);
+}
+.fullview-title { flex: 1 1 auto; margin: 0; font-size: 1em; font-weight: 600; }
+.fullview-list { flex: 1 1 auto; min-height: 0; }
+.session-new {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 8px 0;
+  padding: 7px 10px;
+  border: 1px solid var(--arc-border);
+  border-radius: var(--arc-radius);
+  font: inherit;
+  text-align: left;
+  color: var(--vscode-foreground);
+  background: transparent;
+  cursor: pointer;
+}
+.session-new:hover {
+  background: var(--vscode-list-hoverBackground);
+  border-color: var(--vscode-focusBorder);
+}
+.session-new-where {
+  margin-left: auto;
+  min-width: 0;
+  font-size: 0.85em;
+  color: var(--arc-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.session-meta {
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.8em;
+  color: var(--arc-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.session-row:hover .session-meta, .session-row.active .session-meta { color: inherit; opacity: 0.8; }
+
 @media (prefers-reduced-motion: reduce) {
   .spinner, .streaming .md > *:last-child::after { animation: none; }
   .chevron { transition: none; }
@@ -690,7 +746,9 @@ const CLIENT_SOURCE = String.raw`
    * message whose type collides with something on Object.prototype — is
    * dropped rather than dispatched.
    */
-  var KNOWN_HOST_MESSAGES = { state: 1, connection: 1, cost: 1, models: 1, session: 1 };
+  var KNOWN_HOST_MESSAGES = {
+    state: 1, connection: 1, cost: 1, models: 1, session: 1, sessions: 1, showSessions: 1
+  };
 
   var SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -733,6 +791,8 @@ const CLIENT_SOURCE = String.raw`
            ["path", stroked({ d: "M6.5 9L14 2.4" })]],
     stop: [["rect", { x: "4.2", y: "4.2", width: "7.6", height: "7.6", rx: "1.4", fill: "currentColor" }]],
     chevron: [["path", stroked({ d: "M6.2 3.6L10.6 8l-4.4 4.4" })]],
+    arrowLeft: [["path", stroked({ d: "M13.2 8H3.4" })],
+                ["path", stroked({ d: "M7.4 3.8L3.2 8l4.2 4.2" })]],
     chevronDown: [["path", stroked({ d: "M3.6 6.2L8 10.6l4.4-4.4" })]],
     check: [["path", stroked({ d: "M3.2 8.4l3.2 3.2 6.4-7.2" })]],
     close: [["path", stroked({ d: "M4 4l8 8M12 4l-8 8" })]],
@@ -827,6 +887,13 @@ const CLIENT_SOURCE = String.raw`
   var hint = $("hint");
   var sendButton = $("send");
   var stopButton = $("abort");
+  var dock = $("dock");
+  var sessionsButton = $("sessions");
+  var sessionsView = $("sessions-view");
+  var sessionsSearch = $("sessions-search");
+  var sessionsStatus = $("sessions-status");
+  var sessionsList = $("sessions-list");
+  var sessionsNew = $("sessions-new");
   var popover = $("model-popover");
   var modelSearch = $("model-search");
   var modelStatus = $("model-status");
@@ -839,9 +906,12 @@ const CLIENT_SOURCE = String.raw`
   $("new-session").appendChild(icon("plus"));
   $("new-session").setAttribute("aria-label", "New session");
   $("new-session").title = "New session";
-  $("sessions").appendChild(icon("history"));
-  $("sessions").setAttribute("aria-label", "Sessions");
-  $("sessions").title = "Sessions";
+  sessionsButton.appendChild(icon("history"));
+  sessionsButton.setAttribute("aria-label", "Sessions");
+  sessionsButton.title = "Sessions";
+  $("sessions-back").appendChild(icon("arrowLeft"));
+  $("sessions-back").setAttribute("aria-label", "Back to the conversation");
+  $("sessions-back").title = "Back to the conversation";
   $("model-close").appendChild(icon("close"));
   $("model-close").setAttribute("aria-label", "Close");
   $("model-icon").appendChild(icon("sparkle"));
@@ -861,11 +931,20 @@ const CLIENT_SOURCE = String.raw`
   var starterButtons = [];
   var stick = true;
   var activeModelRow = -1;
+  var sessions = { status: "loading", list: [], current: undefined, cwd: "" };
+  var activeSessionRow = -1;
   var planOpen = true;
 
   /* ---- header, cost, session ----------------------------------------- */
 
+  var shownSessionId = "";
+
   function renderSession(sessionId, title, cwd) {
+    // The transcript is about to be a different conversation, which is the
+    // only thing the history view was ever open to do. Whoever changed it —
+    // a row, the header button, the palette — the list has finished its job.
+    if (sessionId !== shownSessionId && sessionsOpen()) closeSessions(false);
+    shownSessionId = sessionId;
     sessionTitle.textContent = title && title !== "" ? title : "Arcturn";
     var sub = [];
     if (sessionId) sub.push(sessionId.length > 12 ? sessionId.slice(0, 8) : sessionId);
@@ -1367,6 +1446,155 @@ const CLIENT_SOURCE = String.raw`
     modelChip.title = chipModel ? "Model: " + chipModel : "Choose the model for this session";
   }
 
+  /* ---- sessions: the history view ------------------------------------- */
+
+  /*
+   * A full-panel view rather than a popover, which is the one place this
+   * surface deliberately parts company with the model list above it.
+   *
+   * Two reasons, both about what the list *is*. It is unbounded — a workspace
+   * accumulates sessions forever, where a catalog is a fixed 135 rows — and a
+   * 420px popover in a 300px-wide sidebar turns a long list into a peephole.
+   * And picking a row *replaces the transcript*: there is nothing behind this
+   * view worth keeping in sight, where the model popover deliberately leaves
+   * the conversation visible because which model suits it is the question
+   * being asked. Everything else is held in common with the popover on
+   * purpose — the same search box, the same row shape, the same arrow/Enter/
+   * Escape keys — so the two read as siblings rather than as two designs.
+   */
+
+  var SESSION_STATUS = {
+    loading: "Loading this workspace’s sessions…",
+    disconnected: "Arcturn is not connected, so it cannot list this workspace’s sessions. Reconnect above and they will appear here.",
+    failed: "Arcturn could not list this workspace’s sessions. Run Arcturn: Show Log for the reason."
+  };
+  var NO_SESSIONS_YET =
+    "No sessions in this workspace yet. Start one and it will be waiting here next time.";
+
+  function sessionsOpen() { return !sessionsView.classList.contains("hidden"); }
+
+  function openSessions() {
+    // Two lists over one panel would be two things to dismiss.
+    if (modelPopoverOpen()) closeModels(false);
+    sessionsView.classList.remove("hidden");
+    transcript.classList.add("hidden");
+    dock.classList.add("hidden");
+    jump.classList.add("hidden");
+    sessionsButton.setAttribute("aria-expanded", "true");
+    sessionsSearch.value = "";
+    activeSessionRow = -1;
+    renderSessionList();
+    sessionsSearch.focus();
+    post({ type: "requestSessions" });
+  }
+
+  function closeSessions(refocus) {
+    sessionsView.classList.add("hidden");
+    transcript.classList.remove("hidden");
+    dock.classList.remove("hidden");
+    jump.classList.toggle("hidden", stick);
+    sessionsButton.setAttribute("aria-expanded", "false");
+    if (refocus) sessionsButton.focus();
+  }
+
+  function chooseSession(sessionId) {
+    var id = String(sessionId || "").trim();
+    if (id === "") return;
+    post({ type: "openSession", sessionId: id });
+    closeSessions(true);
+  }
+
+  function startNewSession() {
+    post({ type: "command", command: "newSession" });
+    closeSessions(true);
+  }
+
+  function sessionRow(session, index, now) {
+    var row = button("session-row");
+    row.setAttribute("role", "option");
+    row.setAttribute("aria-selected", session.sessionId === sessions.current ? "true" : "false");
+    row.setAttribute("id", "session-row-" + String(index));
+    var top = el("div", "session-top");
+    // textContent, like everything else on this page: a session title is
+    // model-influenceable, and $(check) is six characters here rather than
+    // the glyph VS Code's own label renderer would make of it.
+    top.appendChild(el("span", "session-name", sessionLabel(session)));
+    if (session.sessionId === sessions.current) {
+      top.appendChild(el("span", "session-current", "Current"));
+    }
+    row.appendChild(top);
+    row.appendChild(el("div", "session-meta", sessionMeta(session, now)));
+    row.title = sessionLabel(session) + "\n" + session.sessionId;
+    row.addEventListener("click", function () { chooseSession(session.sessionId); });
+    return row;
+  }
+
+  var visibleSessionRows = [];
+
+  function renderSessionList() {
+    clear(sessionsList);
+    visibleSessionRows = [];
+    var now = Date.now();
+    var shown = orderSessions(filterSessions(sessions.list, sessionsSearch.value));
+
+    // What the status line says is the whole difference between "you have no
+    // history" and "this panel cannot see your history", which are not the
+    // same news.
+    var words = Object.prototype.hasOwnProperty.call(SESSION_STATUS, sessions.status)
+      ? SESSION_STATUS[sessions.status]
+      : "";
+    if (words === "" && sessions.list.length === 0) words = NO_SESSIONS_YET;
+    sessionsStatus.textContent = words;
+    sessionsStatus.classList.toggle("hidden", words === "");
+
+    for (var i = 0; i < shown.length; i += 1) {
+      var row = sessionRow(shown[i], visibleSessionRows.length, now);
+      visibleSessionRows.push({ el: row, id: shown[i].sessionId });
+      sessionsList.appendChild(row);
+    }
+    if (shown.length === 0 && sessions.list.length > 0) {
+      sessionsList.appendChild(el("div", "popover-empty", "No session matches that search."));
+    }
+    highlightSessionRow(
+      visibleSessionRows.length === 0
+        ? -1
+        : Math.min(Math.max(activeSessionRow, 0), visibleSessionRows.length - 1)
+    );
+  }
+
+  function highlightSessionRow(index) {
+    activeSessionRow = index;
+    for (var i = 0; i < visibleSessionRows.length; i += 1) {
+      visibleSessionRows[i].el.classList.toggle("active", i === index);
+    }
+    if (index >= 0 && visibleSessionRows[index]) {
+      sessionsSearch.setAttribute("aria-activedescendant", "session-row-" + String(index));
+      visibleSessionRows[index].el.scrollIntoView({ block: "nearest" });
+    } else {
+      sessionsSearch.removeAttribute("aria-activedescendant");
+    }
+  }
+
+  /**
+   * The New session button, named with the folder it would start one in.
+   *
+   * Pinned above the list rather than sitting in it, and deliberately outside
+   * the arrow-key ring: with the search box focused, Enter opens the
+   * highlighted *session*, and a list whose default action was "throw this
+   * away and start over" would be a trap. It is still one Tab from the search
+   * box, and it is the only affordance left when the list is empty.
+   */
+  function renderSessionsCwd(cwd) {
+    clear(sessionsNew);
+    sessionsNew.appendChild(icon("plus"));
+    sessionsNew.appendChild(el("span", "", "New session"));
+    var folder = cwd === "" ? "" : (cwd.replace(/\\/g, "/").split("/").filter(Boolean).pop() || cwd);
+    if (folder !== "") sessionsNew.appendChild(el("span", "session-new-where", folder));
+    sessionsNew.title = cwd === ""
+      ? "Start a new Arcturn session"
+      : "Start a new Arcturn session in " + cwd;
+  }
+
   /* ---- host messages -------------------------------------------------- */
 
   function renderState(state) {
@@ -1420,6 +1648,9 @@ const CLIENT_SOURCE = String.raw`
       renderEngineOutput("");
       renderActions([]);
       if (models.status !== "ready") post({ type: "requestModels" });
+      // A connection that came back is a different session store; a list that
+      // is on screen has to be told so, and nothing else has to be asked at all.
+      if (sessionsOpen()) post({ type: "requestSessions" });
     } else if (status === "starting") {
       banner.classList.remove("hidden");
       bannerText.textContent = "Starting the Arcturn engine…";
@@ -1447,6 +1678,12 @@ const CLIENT_SOURCE = String.raw`
     if (current) chipModel = current;
     renderChip();
     if (modelPopoverOpen()) renderModelList();
+  }
+
+  function renderSessions(status, list, current, cwd) {
+    sessions = { status: status, list: list, current: current, cwd: cwd };
+    renderSessionsCwd(cwd);
+    if (sessionsOpen()) renderSessionList();
   }
 
   /* ---- wiring --------------------------------------------------------- */
@@ -1483,8 +1720,54 @@ const CLIENT_SOURCE = String.raw`
 
   sendButton.addEventListener("click", send);
   stopButton.addEventListener("click", function () { post({ type: "abort" }); });
-  $("new-session").addEventListener("click", function () { post({ type: "command", command: "newSession" }); });
-  $("sessions").addEventListener("click", function () { post({ type: "command", command: "sessions" }); });
+  // The same verb the history view's own button sends, so pressing either
+  // leaves the panel showing the new session rather than the list it came from.
+  $("new-session").addEventListener("click", startNewSession);
+  // The header button and arcturn.showSessions are two doors to one surface,
+  // so the button opens it the same way the palette does: through the command,
+  // which reveals the panel and posts showSessions back. Clicking it while
+  // the view is up closes it, which is what a toggle in a header should do.
+  sessionsButton.addEventListener("click", function () {
+    if (sessionsOpen()) closeSessions(true);
+    else post({ type: "command", command: "sessions" });
+  });
+  $("sessions-back").addEventListener("click", function () { closeSessions(true); });
+  sessionsNew.addEventListener("click", startNewSession);
+  sessionsSearch.addEventListener("input", function () {
+    activeSessionRow = -1;
+    renderSessionList();
+  });
+  sessionsSearch.addEventListener("keydown", function (event) {
+    if (event.key === "Escape") { event.preventDefault(); closeSessions(true); return; }
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      if (visibleSessionRows.length > 0) {
+        highlightSessionRow((activeSessionRow + 1) % visibleSessionRows.length);
+      }
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      if (visibleSessionRows.length > 0) {
+        highlightSessionRow(
+          (activeSessionRow - 1 + visibleSessionRows.length) % visibleSessionRows.length
+        );
+      }
+      return;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      // No free-text row here, unlike the model list: a session id is not
+      // something a user knows by heart, and openSession on a typed guess has
+      // no useful failure mode.
+      if (activeSessionRow >= 0 && visibleSessionRows[activeSessionRow]) {
+        chooseSession(visibleSessionRows[activeSessionRow].id);
+      }
+    }
+  });
+  sessionsView.addEventListener("keydown", function (event) {
+    if (event.key === "Escape") { event.preventDefault(); closeSessions(true); }
+  });
 
   promptBox.addEventListener("input", syncComposer);
   promptBox.addEventListener("keydown", function (event) {
@@ -1583,6 +1866,35 @@ const CLIENT_SOURCE = String.raw`
       renderModels(status, list, typeof message.current === "string" ? message.current : undefined);
       return;
     }
+    if (message.type === "showSessions") {
+      if (!sessionsOpen()) openSessions();
+      return;
+    }
+    if (message.type === "sessions") {
+      var listStatus = message.status === "ready" || message.status === "disconnected"
+        || message.status === "failed" ? message.status : "loading";
+      var rows = [];
+      var sent = Array.isArray(message.sessions) ? message.sessions : [];
+      for (var n = 0; n < sent.length; n += 1) {
+        var header = sent[n];
+        if (!header || typeof header.sessionId !== "string" || header.sessionId === "") continue;
+        // Rebuilt field by field, like every other boundary in this extension.
+        rows.push({
+          sessionId: header.sessionId,
+          title: typeof header.title === "string" ? header.title : "",
+          createdAt: typeof header.createdAt === "number" && isFinite(header.createdAt)
+            ? header.createdAt
+            : 0
+        });
+      }
+      renderSessions(
+        listStatus,
+        rows,
+        typeof message.current === "string" ? message.current : undefined,
+        typeof message.cwd === "string" ? message.cwd : ""
+      );
+      return;
+    }
     if (message.type === "session") {
       renderSession(
         typeof message.sessionId === "string" ? message.sessionId : "",
@@ -1594,6 +1906,7 @@ const CLIENT_SOURCE = String.raw`
   });
 
   renderChip();
+  renderSessionsCwd("");
   syncComposer();
   post({ type: "ready" });
 })();
@@ -1609,6 +1922,7 @@ const CLIENT_SOURCE = String.raw`
 export const SIDEBAR_SCRIPT = [
   MARKDOWN_SOURCE,
   MODEL_LIST_SOURCE,
+  SESSION_LIST_SOURCE,
   TRANSCRIPT_SOURCE,
   CLIENT_SOURCE,
 ].join("\n");

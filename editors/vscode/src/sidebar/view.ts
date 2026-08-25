@@ -24,9 +24,11 @@ import {
   type HostMessage,
   type ModelListStatus,
   parseWebviewMessage,
+  type SessionListStatus,
   type WebviewMessage,
 } from "./webview-messages.js";
 import type { ModelOption } from "./webview-models.js";
+import type { SessionOption } from "./webview-sessions.js";
 
 /** What the header shows about the session the panel is attached to. */
 export interface SessionSummary {
@@ -40,6 +42,14 @@ export interface ModelListView {
   status: ModelListStatus;
   models: ModelOption[];
   current?: string;
+}
+
+/** The session list as the panel last saw it. */
+export interface SessionListView {
+  status: SessionListStatus;
+  sessions: SessionOption[];
+  current?: string;
+  cwd?: string;
 }
 
 /** What the provider needs from the extension host. */
@@ -74,6 +84,18 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
    */
   #lastModels: ModelListView | undefined;
   #lastSession: SessionSummary | undefined;
+  #lastSessions: SessionListView | undefined;
+  /**
+   * Whether the page has announced itself since the current document loaded.
+   *
+   * `showSessions` is an *action*, not state: posting it at a document whose
+   * script has not run yet does not queue it, it loses it — and
+   * `retainContextWhenHidden` is off, so revealing the view from the palette
+   * is exactly that case. So the action is held until the page says `ready`,
+   * which is the only signal there is that a listener exists.
+   */
+  #pageReady = false;
+  #pendingShowSessions = false;
 
   constructor(handlers: SidebarViewHandlers) {
     this.#handlers = handlers;
@@ -86,6 +108,8 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
 
   resolveWebviewView(view: vscode.WebviewView): void {
     this.#view = view;
+    // A fresh document: whatever the last one had heard, this one has not.
+    this.#pageReady = false;
     view.webview.options = {
       enableScripts: true,
       // The page is entirely inline; it needs no local resource root at all.
@@ -102,6 +126,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
         return;
       }
       if (message.type === "ready") {
+        this.#pageReady = true;
         this.#replay();
         this.#handlers.onReady();
         return;
@@ -110,6 +135,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
     });
     view.onDidDispose(() => {
       this.#view = undefined;
+      this.#pageReady = false;
     });
     if (!this.#resolved) {
       this.#resolved = true;
@@ -162,6 +188,33 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
     this.#post(sessionMessage(session));
   }
 
+  /**
+   * Push this workspace's sessions behind the header's history button.
+   *
+   * @param view - List status, the projected rows, the session in use, and the
+   *   folder a new one would start in. See {@link SessionListView}.
+   */
+  postSessions(view: SessionListView): void {
+    this.#lastSessions = view;
+    this.#post(sessionsMessage(view));
+  }
+
+  /**
+   * Open the panel's history view.
+   *
+   * The palette's `arcturn.showSessions` and the panel's own header button are
+   * two doors to this one surface, so this is what the command does instead of
+   * building a second, native list of its own. Held until the page is `ready`
+   * when it is not — see {@link SidebarViewProvider.#pageReady}.
+   */
+  showSessions(): void {
+    if (this.#pageReady) {
+      this.#post({ type: "showSessions" });
+      return;
+    }
+    this.#pendingShowSessions = true;
+  }
+
   /** Reveal the view, resolving it if it has never been opened. */
   async reveal(): Promise<void> {
     if (this.#view !== undefined) {
@@ -189,6 +242,13 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
     if (this.#lastCost !== "") this.#post({ type: "cost", label: this.#lastCost });
     if (this.#lastModels !== undefined) this.#post(modelsMessage(this.#lastModels));
     if (this.#lastSession !== undefined) this.#post(sessionMessage(this.#lastSession));
+    if (this.#lastSessions !== undefined) this.#post(sessionsMessage(this.#lastSessions));
+    // Last, so the view it opens is already holding the list it will show. One
+    // shot: a reload the user did not ask for must not re-open the view.
+    if (this.#pendingShowSessions) {
+      this.#pendingShowSessions = false;
+      this.#post({ type: "showSessions" });
+    }
   }
 
   #post(message: HostMessage): void {
@@ -203,6 +263,17 @@ function modelsMessage(view: ModelListView): HostMessage {
     status: view.status,
     models: view.models,
     ...(view.current === undefined || view.current === "" ? {} : { current: view.current }),
+  };
+}
+
+/** Build the `sessions` message, omitting what is not known rather than sending `undefined`. */
+function sessionsMessage(view: SessionListView): HostMessage {
+  return {
+    type: "sessions",
+    status: view.status,
+    sessions: view.sessions,
+    ...(view.current === undefined || view.current === "" ? {} : { current: view.current }),
+    ...(view.cwd === undefined || view.cwd === "" ? {} : { cwd: view.cwd }),
   };
 }
 

@@ -236,6 +236,16 @@ than inherited from whatever the emulator happened to be set to.
 
 ## Remaining follow-ups
 
+A resumed session silently reverts to the server's default model rather than
+the one it was last switched to. `Agent.setModel` writes the id into the
+session's `state` entry and `materializeBranch` reads it back, but
+`Agent.resume` never applies `state.model` — and `arcturn serve` does not call
+`Agent.resume` at all, so `openSession` rebuilds the agent on `runtime.model`.
+Found while fixing the `setModel` routing bug; fixing it needs a resolver on
+the core resume path. Until then, re-attaching a session is a silent model
+change.
+
+
 Engine gaps surfaced by the VS Code extension build (RFC 0004), each routed
 around in the extension per the one-engine rule and owed a proper fix here:
 

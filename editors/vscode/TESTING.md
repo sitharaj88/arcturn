@@ -30,10 +30,11 @@ rots. So it is split into pieces that are each driven directly:
 | --- | --- | --- |
 | `webview-markdown.ts` | `MARKDOWN_SOURCE` | `webview-markdown.test.ts` |
 | `webview-models.ts` | `MODEL_LIST_SOURCE` | `webview-models.test.ts` |
+| `webview-sessions.ts` | `SESSION_LIST_SOURCE` | `webview-sessions.test.ts` |
 | `webview-transcript.ts` | `TRANSCRIPT_SOURCE` | `webview-transcript.test.ts` |
 | the page itself | `SIDEBAR_SCRIPT` | `webview-render.test.ts` |
 
-The three pure modules are compiled with `new Function(SOURCE)` and called, so
+The four pure modules are compiled with `new Function(SOURCE)` and called, so
 the tests exercise **the bytes that ship** rather than a second copy of the
 algorithm kept in step by hand. Each returns plain data — the markdown parser
 returns a *tree of objects*, never a string of HTML — so none of them needs a
@@ -258,6 +259,22 @@ projection expects, that `setModel` accepts the id that was clicked, and that
 the next run announces it. `packages/protocol` tests the wire; nothing tests
 the two ends together.
 
+**Needs a real engine, for the session list too.** History moved out of a
+command-palette quick-pick and into the panel, and the same gap applies to it:
+the unit suite drives the view against a fixture — ordering, searching, the
+relative timestamp, the current-session badge, the empty / disconnected /
+failed states, the keyboard path, and that picking a row posts `openSession` —
+but nothing exercises the round trip. Specifically unverified: that
+`listSessions` returns headers whose `cwd` matches `workspaceCwd()` byte for
+byte on every platform (the filter in `projectSessions` is the whole list on a
+mismatch, and it would fail silently as "no sessions in this workspace"), that
+`openSession` on a row's id actually re-attaches the stream, and that a title
+the engine stored is the title a row shows. One more, specific to switching:
+attaching a controller repaints the transcript from that controller's own
+state, so the panel cannot go on showing the previous conversation — but
+whether the engine *replays* the opened session's history into it, or leaves
+the panel correctly empty, is the engine's behaviour and is unobserved here.
+
 **Markdown the parser does not implement.** Tables, reference links, setext
 headings, HTML blocks (deliberately — raw HTML renders as text, and there is a
 test for that), and nested emphasis of three or more markers. A model that
@@ -296,7 +313,12 @@ of it is asserted anywhere:
 
 **Notifications.** There is no stable API to read what is on screen, so
 `showInformationMessage` / `showWarningMessage` / `showErrorMessage` /
-`showQuickPick` are invisible to the suite. Concretely: the injection test
+`showQuickPick` are invisible to the suite. One of those is now smaller than it
+was: the sessions quick-pick is gone entirely, so the only unobservable
+session-related surface left is the error notification raised when
+`openSession` is refused — including the `escapeCodicons` call that keeps an
+engine-supplied id from rendering as a glyph in it. The in-panel list that
+replaced the quick-pick *is* observable, in `webview-render.test.ts`. Concretely: the injection test
 proves nothing was typed, but *not* that the user was told why. The same goes
 for the missing-CLI notification, its "Install" / "Set path…" buttons, the
 version-upgrade nag, and the one error notification a palette command raises

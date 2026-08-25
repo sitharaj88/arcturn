@@ -355,6 +355,51 @@ describe("retrying after the engine failed to start", () => {
   });
 });
 
+describe("arcturn.showSessions", () => {
+  function open(): ReturnType<typeof fakeView> {
+    activate();
+    const panel = fakeView();
+    ledger.views[0]?.provider.resolveWebviewView(panel.view);
+    return panel;
+  }
+
+  it("opens the panel's own history view instead of a quick-pick", async () => {
+    const panel = open();
+    panel.send({ type: "ready" });
+    ledger.posted.length = 0;
+    await ledger.commands.get(SIDEBAR_COMMANDS.showSessions)?.();
+    expect(panel.posted().map((message) => message.type)).toContain("showSessions");
+    // The whole point of the move: no native dropdown at the top of the window.
+    expect(ledger.quickPicks).toHaveLength(0);
+  });
+
+  it("reveals the panel first, so the palette does not talk to a hidden view", async () => {
+    activate();
+    await ledger.commands.get(SIDEBAR_COMMANDS.showSessions)?.();
+    expect(ledger.executed.map((entry) => entry.command)).toContain("arcturn.sidebar.focus");
+  });
+
+  it("waits for a page that has not loaded yet rather than posting into the void", async () => {
+    // `retainContextWhenHidden` is off: revealing the view starts a *fresh*
+    // document, and a message posted before its script runs is simply lost.
+    // The command is invoked here against a resolved-but-silent page.
+    const panel = open();
+    await ledger.commands.get(SIDEBAR_COMMANDS.showSessions)?.();
+    expect(panel.posted().map((message) => message.type)).not.toContain("showSessions");
+    panel.send({ type: "ready" });
+    expect(panel.posted().map((message) => message.type)).toContain("showSessions");
+  });
+
+  it("opens the view once, not again on every later reload", async () => {
+    const panel = open();
+    await ledger.commands.get(SIDEBAR_COMMANDS.showSessions)?.();
+    panel.send({ type: "ready" });
+    ledger.posted.length = 0;
+    panel.send({ type: "ready" });
+    expect(panel.posted().map((message) => message.type)).not.toContain("showSessions");
+  });
+});
+
 describe("the panel's own messages", () => {
   /**
    * Resolve the view the way VS Code does when a user opens the sidebar, and
@@ -423,6 +468,37 @@ describe("the panel's own messages", () => {
       line.includes("dropped an unrecognised webview message"),
     );
     expect(dropped).toHaveLength(3);
+  });
+
+  it("answers a session-list request even while the engine is down", async () => {
+    const panel = open();
+    panel.send({ type: "requestSessions" });
+    await Promise.resolve();
+    const lists = panel.posted().filter((message) => message.type === "sessions");
+    expect(lists.length).toBeGreaterThan(0);
+    // "disconnected", not an empty list: the panel must not tell the user this
+    // workspace has no history when what happened is that nothing can read it.
+    expect(lists.at(-1)?.status).toBe("disconnected");
+    expect(lists.at(-1)?.sessions).toEqual([]);
+    expect(lists.at(-1)?.cwd).toBe("/workspace");
+  });
+
+  it("opens the session the panel asked for, and never a native list", async () => {
+    const panel = open();
+    panel.send({ type: "openSession", sessionId: "01JABCDEFGHJKMNPQRS" });
+    await Promise.resolve();
+    // The engine is down here, so what is provable is that the id went to the
+    // engine path rather than to a quick-pick — the surface this work removed.
+    expect(ledger.quickPicks).toHaveLength(0);
+  });
+
+  it("replays the session list when the page reloads", async () => {
+    const panel = open();
+    panel.send({ type: "requestSessions" });
+    await Promise.resolve();
+    ledger.posted.length = 0;
+    panel.send({ type: "ready" });
+    expect(panel.posted().map((message) => message.type)).toContain("sessions");
   });
 
   it("replays the model list when the page reloads", async () => {

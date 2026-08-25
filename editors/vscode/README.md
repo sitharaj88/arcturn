@@ -34,7 +34,7 @@ terminal*, so you can always read what it ran and re-run it yourself.
 | Arcturn: Install CLI | `arcturn.installCli` | — | Runs the install in a terminal on demand, for when you dismissed the notification. |
 | Fix with Arcturn | `arcturn.fixDiagnostic` | — | A code action on any diagnostic. Sends the file, the range, and the problem reporter's own words. Not marked as the preferred fix, so it never displaces a real quick fix or hijacks fix-on-save. |
 | Arcturn: Select Model | `arcturn.selectModel` | — | Quick-pick fed by the engine's model catalog (`listModels`): every registered model with its context window, price per Mtok and whether the engine holds a credential for it, the ones you have keys for first. Plus anything the session announced, `arcturn.defaultModel`, and a free-text entry for an id the catalog does not carry. Switches the model for the live session. |
-| Arcturn: Show Sessions | `arcturn.showSessions` | — | Sessions for this folder — open one, resume it, or start fresh. |
+| Arcturn: Show Sessions | `arcturn.showSessions` | — | Opens the sidebar's own history view — every session for this folder, searchable, newest first, with its id and how long ago it started. Pick one to resume it, or start a new one. The panel's history button opens the same view. |
 | Arcturn: New Session | `arcturn.newSession` | — | Starts a new session in the sidebar. |
 | Arcturn: Abort Run | `arcturn.abortRun` | — | Stops the turn in flight. |
 | Arcturn: Show Cost | `arcturn.showCost` | — | The breakdown behind the status bar figure. |

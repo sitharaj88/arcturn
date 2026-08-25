@@ -96,7 +96,8 @@ export function renderSidebarHtml(options: SidebarHtmlOptions): string {
     </span>
     <span id="cost" class="cost" aria-label="Session cost"></span>
     <button id="new-session" class="icon-button" type="button"></button>
-    <button id="sessions" class="icon-button" type="button"></button>
+    <button id="sessions" class="icon-button" type="button" aria-expanded="false"
+      aria-controls="sessions-view"></button>
   </header>
 
   <div id="banner" class="hidden" role="status" aria-live="polite">
@@ -120,6 +121,24 @@ export function renderSidebarHtml(options: SidebarHtmlOptions): string {
   <div class="jump-wrap">
     <button id="jump" class="jump hidden" type="button">Jump to latest</button>
   </div>
+
+  <section id="sessions-view" class="fullview hidden" role="dialog" aria-modal="false"
+    aria-label="Session history">
+    <div class="fullview-head">
+      <button id="sessions-back" class="icon-button" type="button"></button>
+      <h2 class="fullview-title">Sessions</h2>
+    </div>
+    <div class="popover-head">
+      <input id="sessions-search" class="popover-search" type="text" autocomplete="off"
+        spellcheck="false" role="combobox" aria-expanded="true" aria-controls="sessions-list"
+        aria-autocomplete="list" aria-label="Search sessions"
+        placeholder="Search sessions&hellip;">
+    </div>
+    <button id="sessions-new" class="session-new" type="button"></button>
+    <div id="sessions-status" class="popover-status"></div>
+    <div id="sessions-list" class="popover-list fullview-list" role="listbox"
+      aria-label="Sessions"></div>
+  </section>
 
   <div id="dock">
     <section id="plan-card" class="plan-card hidden open" aria-label="Plan">

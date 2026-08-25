@@ -72,6 +72,36 @@ borrowed client id. It keeps using `oauth.createStateToken` and
 `oauth.startLoopbackServer`, and `~/.arcturn/auth/mcp-<server>.json` is
 untouched.
 
+### Fixed
+
+- **Switching models over the wire sent the next request to the wrong
+  provider.** Reported from the VS Code extension: picking `zai-api/glm-5.3`
+  came back `401 authentication_error` — in Anthropic's error shape, for a
+  model that is not Anthropic's. Every `setModel` a server received behaved
+  this way, whichever id was asked for, and switching back to the model the
+  session started on did not undo it.
+
+  `arcturn serve` handed its `SessionHost` a model catalog, so a remote picker
+  saw the real list, but never handed it the resolver that turns a chosen id
+  into a provider, an endpoint and a credential. The `setModel` verb carries
+  only a bare id, so without a resolver the server built a stand-in spec from
+  the id alone — and that stand-in named Anthropic. The id on screen was
+  always correct; only the routing was wrong. The user who found this had a
+  dead `ANTHROPIC_API_KEY`, which is the only reason it surfaced as a 401
+  rather than as prompts and a key quietly going to a provider they had not
+  chosen.
+
+  `arcturn serve` now resolves a `setModel` id through the same catalog and
+  the same environment `--list-models` and the `listModels` verb read, so what
+  a picker offers and what a pick does are one thing. And a server built
+  without a resolver no longer invents one: `setModel` is refused with an
+  error the client can read. An id that cannot be resolved — an unknown model,
+  or one whose API key is not set — is reported as an `invalidRequest` naming
+  the reason, and the session stays on the model it was already using.
+
+  `arcturn attach` and the browser client never sent `setModel`, and starting
+  a session with `--model` always resolved properly; neither was affected.
+
 ## [0.2.0] — 2026-08-24
 
 ### The package ecosystem

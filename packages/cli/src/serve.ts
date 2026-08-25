@@ -208,14 +208,40 @@ function attachCostGuard(agent: Agent, limitUsd: number): void {
   });
 }
 
+/**
+ * The one place a wire-level model id becomes a real {@link ModelSpec} for a
+ * served session.
+ *
+ * A model id is a label; a `ModelSpec` is the provider, endpoint and
+ * credential the next request actually uses. Both wire routes that carry a
+ * bare id — `createSession({ model })` and `setModel` — go through this
+ * single function, against the same catalog and the same environment
+ * `--list-models` and the `listModels` verb read, so a client can never pick
+ * an id off the catalog and have it resolve to something else (or to
+ * nothing) on the way in.
+ *
+ * `registerBundledCatalog` runs on every call rather than once at startup:
+ * it is idempotent, and an extension may register a model after the server is
+ * already up — the same reason `createServeHost`'s `modelCatalog` re-reads.
+ *
+ * @throws {ModelResolutionError} For an unknown id, or one whose provider key
+ *   is not set. Callers surface it; nothing falls back to a guess.
+ */
+function serveModelResolver(env: EnvMap): (modelId: string) => ModelSpec {
+  return (modelId) => {
+    registerBundledCatalog();
+    return resolveModelSpec(modelId, env);
+  };
+}
+
 /** Build the `Agent` backing one served session. See {@link ServableRuntime}. */
 function buildServedAgent(
   runtime: ServableRuntime,
   opts: AgentFactoryOptions,
   maxCostUsd: number | undefined,
+  resolveModel: (modelId: string) => ModelSpec,
 ): Agent {
-  const model =
-    opts.model === undefined ? runtime.model : resolveModelSpec(opts.model, runtime.env);
+  const model = opts.model === undefined ? runtime.model : resolveModel(opts.model);
   // A real ArcturnRuntime builds a properly isolated agent — its own checkpoint
   // store keyed by this session, so one served session's /rewind never
   // touches another's files. The structural fallback below keeps this
@@ -262,10 +288,20 @@ export function createServeHost(
   runtime: ServableRuntime,
   options: { maxCostUsd?: number } = {},
 ): SessionHost {
+  const resolveModel = serveModelResolver(runtime.env);
   return new SessionHost({
-    agentFactory: (opts) => buildServedAgent(runtime, opts, options.maxCostUsd),
+    agentFactory: (opts) => buildServedAgent(runtime, opts, options.maxCostUsd, resolveModel),
     sessionStore: runtime.store,
     defaultCwd: runtime.cwd,
+    // ---- Model injection: both halves, deliberately adjacent. ----
+    // These are one feature, not two. `modelCatalog` is what a remote picker
+    // is *offered*; `resolveModel` is what a pick actually *does* — which
+    // provider, which endpoint, which credential. They read the same catalog
+    // and the same environment, and they sit together because wiring only one
+    // is not a partial feature but a wrong one: a `setModel` that reaches a
+    // host with no resolver used to be answered by a synthesized spec, which
+    // sent the session's next prompt to whichever provider the guess named.
+    //
     // The `listModels` verb answers from the same catalog `--list-models`
     // prints — `registerBundledCatalog` first, so the presets are in it, and
     // it is idempotent. Re-read on every call rather than snapshotted: an
@@ -274,6 +310,7 @@ export function createServeHost(
       registerBundledCatalog();
       return modelCatalogEntries(runtime.env);
     },
+    resolveModel,
   });
 }
 
