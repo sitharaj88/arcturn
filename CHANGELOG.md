@@ -10,6 +10,10 @@ CLI, the SDK, or the wire protocol.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.3.0] — 2026-08-25
+
 ### Added
 
 - **`listModels` on the wire protocol.** A client can now ask a server for its
@@ -331,6 +335,7 @@ servers unspawnable because npm ships them as `.cmd` shims. All fixed, with the
 matrix as referee. Shell resolution, path handling and case sensitivity are
 resolved per platform at runtime.
 
-[Unreleased]: https://github.com/sitharaj88/arcturn/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/sitharaj88/arcturn/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/sitharaj88/arcturn/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/sitharaj88/arcturn/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/sitharaj88/arcturn/releases/tag/v0.1.0
