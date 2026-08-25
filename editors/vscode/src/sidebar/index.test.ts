@@ -27,7 +27,9 @@ const ledger = vi.hoisted(() => ({
     hidden: number;
     disposed: boolean;
   }[],
-  views: [] as { id: string; options: unknown }[],
+  views: [] as { id: string; options: unknown; provider: WebviewViewProviderLike }[],
+  posted: [] as { type: string; [key: string]: unknown }[],
+  clipboard: [] as string[],
   quickPicks: [] as { items: { label: string; description?: string }[]; options: unknown }[],
   messages: [] as { level: string; message: string; items: string[] }[],
   executed: [] as { command: string; args: unknown[] }[],
@@ -42,6 +44,8 @@ const ledger = vi.hoisted(() => ({
     ledger.outputs = [];
     ledger.statusBars = [];
     ledger.views = [];
+    ledger.posted = [];
+    ledger.clipboard = [];
     ledger.quickPicks = [];
     ledger.messages = [];
     ledger.executed = [];
@@ -125,8 +129,8 @@ vi.mock("vscode", () => {
         ledger.statusBars.push(item);
         return item;
       },
-      registerWebviewViewProvider(id: string, _provider: unknown, options: unknown) {
-        ledger.views.push({ id, options });
+      registerWebviewViewProvider(id: string, provider: unknown, options: unknown) {
+        ledger.views.push({ id, options, provider: provider as WebviewViewProviderLike });
         return { dispose: () => {} };
       },
       showQuickPick(items: { label: string }[], options: unknown) {
@@ -157,6 +161,14 @@ vi.mock("vscode", () => {
         return Promise.resolve(undefined);
       },
     },
+    env: {
+      clipboard: {
+        writeText: (text: string) => {
+          ledger.clipboard.push(text);
+          return Promise.resolve();
+        },
+      },
+    },
     workspace: {
       get workspaceFolders() {
         return ledger.folders;
@@ -169,6 +181,51 @@ vi.mock("vscode", () => {
 });
 
 import { activateSidebar, SIDEBAR_COMMANDS, SIDEBAR_VIEW_ID } from "./index.js";
+
+/** The slice of `WebviewViewProvider` this file drives. */
+interface WebviewViewProviderLike {
+  resolveWebviewView(view: unknown): void;
+}
+
+/**
+ * A stand-in `WebviewView`.
+ *
+ * `view.ts` touches exactly these members, so this is the whole API surface
+ * the panel needs to be driven from a test — which is what lets the messages
+ * the *page* would send be pushed through the real validation and the real
+ * handlers, with no editor and no DOM.
+ */
+function fakeView(): {
+  view: unknown;
+  send(message: unknown): void;
+  posted(): { type: string; [key: string]: unknown }[];
+} {
+  let receive: ((raw: unknown) => void) | undefined;
+  const view = {
+    webview: {
+      options: {} as unknown,
+      cspSource: "vscode-webview://test",
+      html: "",
+      onDidReceiveMessage(handler: (raw: unknown) => void) {
+        receive = handler;
+        return { dispose: () => {} };
+      },
+      postMessage(message: { type: string }) {
+        ledger.posted.push(message as { type: string });
+        return Promise.resolve(true);
+      },
+    },
+    onDidDispose(_handler: () => void) {
+      return { dispose: () => {} };
+    },
+    show(_focus?: boolean) {},
+  };
+  return {
+    view,
+    send: (message: unknown) => receive?.(message),
+    posted: () => ledger.posted,
+  };
+}
 
 function activate(): { disposable: { dispose(): void }; subscriptions: { dispose(): void }[] } {
   const subscriptions: { dispose(): void }[] = [];
@@ -295,5 +352,87 @@ describe("retrying after the engine failed to start", () => {
     activate();
     await ledger.commands.get(SIDEBAR_COMMANDS.reconnect)?.();
     expect(ledger.forgotEnvironment).toBeGreaterThan(0);
+  });
+});
+
+describe("the panel's own messages", () => {
+  /**
+   * Resolve the view the way VS Code does when a user opens the sidebar, and
+   * hand back a channel for the messages the page would post.
+   *
+   * The mocked `spawn` throws, so the engine never reaches `ready` here. That
+   * is deliberate: what is being checked is that each message is *answered* —
+   * a panel whose model list silently never arrives looks exactly like the
+   * panel this work replaced.
+   */
+  function open(): ReturnType<typeof fakeView> {
+    activate();
+    const panel = fakeView();
+    ledger.views[0]?.provider.resolveWebviewView(panel.view);
+    return panel;
+  }
+
+  it("renders the page into the view when VS Code resolves it", () => {
+    const panel = open();
+    const html = (panel.view as { webview: { html: string } }).webview.html;
+    expect(html).toContain("default-src 'none'");
+    expect(html).toContain('id="model"');
+  });
+
+  it("answers a model-list request even while the engine is down", async () => {
+    const panel = open();
+    panel.send({ type: "requestModels" });
+    await Promise.resolve();
+    const models = panel.posted().filter((message) => message.type === "models");
+    expect(models.length).toBeGreaterThan(0);
+    // "loading", not an empty catalog: the panel must not tell the user this
+    // server has no models when what happened is that nobody has asked it yet.
+    expect(models.at(-1)?.status).toBe("loading");
+    expect(models.at(-1)?.models).toEqual([]);
+  });
+
+  it("shows the configured default on the chip before any run has announced one", async () => {
+    ledger.config.defaultModel = "anthropic/claude-sonnet-5";
+    const panel = open();
+    panel.send({ type: "requestModels" });
+    await Promise.resolve();
+    expect(
+      panel
+        .posted()
+        .filter((message) => message.type === "models")
+        .at(-1)?.current,
+    ).toBe("anthropic/claude-sonnet-5");
+  });
+
+  it("puts a copied code block on the clipboard and nowhere else", () => {
+    const panel = open();
+    panel.send({ type: "copy", text: "pnpm -r run typecheck" });
+    expect(ledger.clipboard).toEqual(["pnpm -r run typecheck"]);
+    // No command, no engine verb: the copy button is the clipboard and nothing
+    // else, which is why the text is allowed to be arbitrary model output.
+    expect(ledger.executed).toEqual([]);
+  });
+
+  it("drops a message the boundary does not recognise, and says so once", () => {
+    const panel = open();
+    panel.send({ type: "copy", text: "x".repeat(200_000) });
+    panel.send({ type: "setModel", modelId: "bad\nid" });
+    panel.send({ type: "evaluate", code: "1" });
+    expect(ledger.clipboard).toEqual([]);
+    const dropped = (ledger.outputs[0]?.lines ?? []).filter((line) =>
+      line.includes("dropped an unrecognised webview message"),
+    );
+    expect(dropped).toHaveLength(3);
+  });
+
+  it("replays the model list when the page reloads", async () => {
+    const panel = open();
+    panel.send({ type: "requestModels" });
+    await Promise.resolve();
+    ledger.posted.length = 0;
+    // retainContextWhenHidden is off: a revealed panel is a fresh document
+    // that announces itself with `ready` and has to be told everything again.
+    panel.send({ type: "ready" });
+    expect(panel.posted().map((message) => message.type)).toContain("models");
   });
 });

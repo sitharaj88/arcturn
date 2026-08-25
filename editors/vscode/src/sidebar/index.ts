@@ -37,6 +37,8 @@ import { describePermissionRequest } from "./permission-queue.js";
 import { modelPickItems, sessionPickItems } from "./picker.js";
 import { CostStatusBar } from "./status-bar.js";
 import { SidebarViewProvider } from "./view.js";
+import { type ModelListStatus, projectModelOption } from "./webview-messages.js";
+import type { ModelOption } from "./webview-models.js";
 
 /**
  * Builder A's resolved CLI.
@@ -137,6 +139,17 @@ export function activateSidebar(
                 : SIDEBAR_COMMANDS.newSession,
           );
           return;
+        case "requestModels":
+          void publishModels();
+          return;
+        case "setModel":
+          void withEngine((session) => switchModel(session, message.modelId));
+          return;
+        case "copy":
+          // The clipboard, and nothing else. The text is a code block the user
+          // is looking at, capped at the boundary; it reaches no engine verb.
+          void vscode.env.clipboard.writeText(message.text);
+          return;
         // `ready` is handled inside the provider, which replays state first.
         case "ready":
           return;
@@ -148,6 +161,115 @@ export function activateSidebar(
   // Coalesced so a token-by-token stream repaints at frame rate, not per delta.
   const states = createCoalescer((state: ChatViewModel) => provider.postState(state));
   disposables.push({ dispose: () => states.dispose() });
+
+  /**
+   * The engine's catalog, projected for the panel and cached for this
+   * connection.
+   *
+   * The panel's model list is the same catalog the palette quick-pick renders,
+   * and it is fetched on the same terms: `listModels` is an optional verb, an
+   * older engine answers `undefined`, and that is reported as *unavailable*
+   * rather than as an empty catalog — "this server has no models" is not what
+   * happened. Cached because the list is opened far more often than a server's
+   * credentials change, and cleared whenever the connection is replaced.
+   */
+  let catalog: ModelOption[] | undefined;
+  let catalogUnavailable = false;
+  let catalogInFlight: Promise<void> | undefined;
+  /**
+   * The last `setModel` that the engine accepted.
+   *
+   * The event stream announces a model only when a run starts, so between a
+   * switch and the next prompt the stream still names the old one. Without
+   * this the chip would revert on the next repaint and tell the user their
+   * switch did not take — which it did.
+   */
+  let selectedModel: string | undefined;
+
+  function configuredModel(): string | undefined {
+    const value = vscode.workspace.getConfiguration("arcturn").get<string>("defaultModel");
+    return value === undefined || value === "" ? undefined : value;
+  }
+
+  /** What the composer's chip should name, most authoritative first. */
+  function currentModelId(): string | undefined {
+    return selectedModel ?? engine?.controller?.state.model ?? configuredModel();
+  }
+
+  /** Post the catalog as it stands, fetching it first when it is not known yet. */
+  async function publishModels(): Promise<void> {
+    const status: ModelListStatus = catalogUnavailable
+      ? "unavailable"
+      : catalog === undefined
+        ? "loading"
+        : "ready";
+    const current = currentModelId();
+    provider.postModels({
+      status,
+      models: catalog ?? [],
+      ...(current === undefined ? {} : { current }),
+    });
+    if (status !== "loading") return;
+    if (engine === undefined || engine.status !== "ready") return;
+    catalogInFlight ??= fetchCatalog().finally(() => {
+      catalogInFlight = undefined;
+    });
+    await catalogInFlight;
+  }
+
+  async function fetchCatalog(): Promise<void> {
+    try {
+      const models = await ensureEngine().listModels();
+      if (models === undefined) {
+        catalogUnavailable = true;
+        catalog = [];
+      } else {
+        catalogUnavailable = false;
+        catalog = models.map(projectModelOption);
+      }
+    } catch (error) {
+      // Not a reason to deny the user a list: the free-text row still works,
+      // and `setModel` is validated by the engine either way.
+      log(
+        `sidebar: model catalog unavailable: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      catalogUnavailable = true;
+      catalog = [];
+    }
+    await publishModels();
+  }
+
+  /**
+   * Switch the session's model and tell the panel what actually happened.
+   *
+   * `selectedModel` moves only on success, and the chip is re-published either
+   * way, so a rejected id snaps back to the model still in use rather than
+   * leaving the panel claiming a switch that did not happen.
+   */
+  async function switchModel(session: EngineSession, modelId: string): Promise<void> {
+    const controller = session.controller;
+    if (controller === undefined) return;
+    try {
+      await controller.setModel(modelId);
+      selectedModel = modelId;
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      log(`sidebar: could not switch to ${modelId}: ${reason}`);
+      void vscode.window.showErrorMessage(`Arcturn could not switch to ${modelId}: ${reason}`);
+    }
+    await publishModels();
+  }
+
+  /** Tell the panel's header which session it is looking at. */
+  function publishSession(): void {
+    const controller = engine?.controller;
+    const title = controller?.header?.title;
+    provider.postSession({
+      ...(controller === undefined ? {} : { sessionId: controller.sessionId }),
+      ...(title === undefined ? {} : { title }),
+      cwd: workspaceCwd(),
+    });
+  }
 
   /** Build the engine session on first use. Spawns nothing by itself. */
   function ensureEngine(): EngineSession {
@@ -173,6 +295,16 @@ export function activateSidebar(
         },
         onConnection: (status, detail, report) => {
           provider.postConnection(status, report);
+          if (status === "ready") {
+            // A new connection is a new server: its credentials, and therefore
+            // which models are usable, may not be the ones the last catalog
+            // described. The panel asks for a fresh one as soon as it sees
+            // `ready`; this only makes sure the stale answer is not what it gets.
+            catalog = undefined;
+            catalogUnavailable = false;
+            selectedModel = undefined;
+            publishSession();
+          }
           // The card is only visible when the view is open. The Output channel
           // is where the same words live for everyone else — including the
           // user who reached this through the command palette.
@@ -325,6 +457,8 @@ export function activateSidebar(
     vscode.commands.registerCommand(SIDEBAR_COMMANDS.newSession, () =>
       withEngine(async (session) => {
         await session.newSession();
+        selectedModel = undefined;
+        publishSession();
         await provider.reveal();
       }),
     ),
@@ -346,6 +480,8 @@ export function activateSidebar(
         } else {
           await session.openSession(picked.sessionId);
         }
+        selectedModel = undefined;
+        publishSession();
         await provider.reveal();
       }),
     ),
@@ -353,29 +489,29 @@ export function activateSidebar(
       withEngine(async (session) => {
         const controller = session.controller;
         if (controller === undefined) return;
-        const configured = vscode.workspace.getConfiguration("arcturn").get<string>("defaultModel");
+        const configured = configuredModel();
         // `listModels` is an optional verb: an older engine answers
         // `undefined`, and anything else that goes wrong here is a
         // diagnostic, not a reason to deny the user a picker. Either way the
         // catalog is simply absent and the pre-catalog rows still render.
-        const catalog = await session.listModels().catch((error: unknown) => {
+        const entries = await session.listModels().catch((error: unknown) => {
           log(
             `sidebar: model catalog unavailable: ${error instanceof Error ? error.message : String(error)}`,
           );
           return undefined;
         });
         const items = modelPickItems({
-          ...(catalog === undefined ? {} : { catalog }),
+          ...(entries === undefined ? {} : { catalog: entries }),
           observed: controller.observedModels,
-          ...(configured === undefined || configured === "" ? {} : { configured }),
-          ...(controller.state.model === undefined ? {} : { current: controller.state.model }),
+          ...(configured === undefined ? {} : { configured }),
+          ...(currentModelId() === undefined ? {} : { current: currentModelId() as string }),
         });
         const picked = await vscode.window.showQuickPick(items, {
           title: "Arcturn model",
           placeHolder:
-            catalog === undefined
+            entries === undefined
               ? "Switch the model for this session"
-              : `Switch the model for this session (${catalog.length} available)`,
+              : `Switch the model for this session (${entries.length} available)`,
           matchOnDescription: true,
           matchOnDetail: true,
         });
@@ -388,7 +524,9 @@ export function activateSidebar(
             ignoreFocusOut: true,
           }));
         if (modelId === undefined || modelId.trim() === "") return;
-        await controller.setModel(modelId.trim());
+        // Through the same path the panel's chip uses, so the palette and the
+        // panel can never disagree about which model is in use.
+        await switchModel(session, modelId.trim());
       }),
     ),
     vscode.commands.registerCommand(SIDEBAR_COMMANDS.showCost, async () => {

@@ -22,9 +22,25 @@ import { createNonce, renderSidebarHtml } from "./webview-html.js";
 import {
   type ConnectionStatus,
   type HostMessage,
+  type ModelListStatus,
   parseWebviewMessage,
   type WebviewMessage,
 } from "./webview-messages.js";
+import type { ModelOption } from "./webview-models.js";
+
+/** What the header shows about the session the panel is attached to. */
+export interface SessionSummary {
+  sessionId?: string;
+  title?: string;
+  cwd?: string;
+}
+
+/** The model list as the panel last saw it. */
+export interface ModelListView {
+  status: ModelListStatus;
+  models: ModelOption[];
+  current?: string;
+}
 
 /** What the provider needs from the extension host. */
 export interface SidebarViewHandlers {
@@ -50,6 +66,14 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
   #lastState: ChatViewModel | undefined;
   #lastConnection: { status: ConnectionStatus; report?: ConnectionReport } = { status: "idle" };
   #lastCost = "";
+  /**
+   * The model list and the session header, remembered for the same reason the
+   * connection report is: `retainContextWhenHidden` is off, so a panel that is
+   * hidden and revealed reloads with an empty chip and an unnamed session
+   * unless the host replays what it already knows.
+   */
+  #lastModels: ModelListView | undefined;
+  #lastSession: SessionSummary | undefined;
 
   constructor(handlers: SidebarViewHandlers) {
     this.#handlers = handlers;
@@ -121,6 +145,23 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
     this.#post({ type: "cost", label });
   }
 
+  /**
+   * Push the model list behind the composer's chip.
+   *
+   * @param view - Catalog status, the projected rows, and the id the chip
+   *   should show. See {@link ModelListView}.
+   */
+  postModels(view: ModelListView): void {
+    this.#lastModels = view;
+    this.#post(modelsMessage(view));
+  }
+
+  /** Push the session the panel is attached to. */
+  postSession(session: SessionSummary): void {
+    this.#lastSession = session;
+    this.#post(sessionMessage(session));
+  }
+
   /** Reveal the view, resolving it if it has never been opened. */
   async reveal(): Promise<void> {
     if (this.#view !== undefined) {
@@ -146,9 +187,31 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
     this.#post(this.#connectionMessage());
     if (this.#lastState !== undefined) this.#post({ type: "state", state: this.#lastState });
     if (this.#lastCost !== "") this.#post({ type: "cost", label: this.#lastCost });
+    if (this.#lastModels !== undefined) this.#post(modelsMessage(this.#lastModels));
+    if (this.#lastSession !== undefined) this.#post(sessionMessage(this.#lastSession));
   }
 
   #post(message: HostMessage): void {
     void this.#view?.webview.postMessage(message);
   }
+}
+
+/** Build the `models` message, omitting `current` rather than sending `undefined`. */
+function modelsMessage(view: ModelListView): HostMessage {
+  return {
+    type: "models",
+    status: view.status,
+    models: view.models,
+    ...(view.current === undefined || view.current === "" ? {} : { current: view.current }),
+  };
+}
+
+/** Build the `session` message from whatever of the header is known. */
+function sessionMessage(session: SessionSummary): HostMessage {
+  return {
+    type: "session",
+    ...(session.sessionId === undefined ? {} : { sessionId: session.sessionId }),
+    ...(session.title === undefined ? {} : { title: session.title }),
+    ...(session.cwd === undefined ? {} : { cwd: session.cwd }),
+  };
 }

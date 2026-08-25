@@ -15,6 +15,40 @@ activates, that its commands are registered with the workbench, that its view
 id resolves a provider, and that the bytes it types into a terminal are the
 bytes it meant to type.
 
+## The sidebar webview, which is neither
+
+The chat panel is a third thing, and it needs saying because it is the part
+that looks least testable and is not.
+
+The page's script ships as a **string** (`src/sidebar/webview-client.ts`
+explains why: a webview has no module loader, and inlining under a nonce is
+what lets the CSP grant `script-src 'nonce-…'` and nothing else). A string of
+JavaScript is invisible to `tsc`, which is exactly the shape of code that
+rots. So it is split into pieces that are each driven directly:
+
+| Module | Ships as | Driven by |
+| --- | --- | --- |
+| `webview-markdown.ts` | `MARKDOWN_SOURCE` | `webview-markdown.test.ts` |
+| `webview-models.ts` | `MODEL_LIST_SOURCE` | `webview-models.test.ts` |
+| `webview-transcript.ts` | `TRANSCRIPT_SOURCE` | `webview-transcript.test.ts` |
+| the page itself | `SIDEBAR_SCRIPT` | `webview-render.test.ts` |
+
+The three pure modules are compiled with `new Function(SOURCE)` and called, so
+the tests exercise **the bytes that ship** rather than a second copy of the
+algorithm kept in step by hand. Each returns plain data — the markdown parser
+returns a *tree of objects*, never a string of HTML — so none of them needs a
+DOM, and `environment: "node"` stays.
+
+`webview-render.test.ts` goes one step further and runs the whole page script
+against ~150 lines of stub DOM declared in that file. That settles
+**structure**: which elements are built, with which classes and text, in
+response to which host message, and which messages go back — including the
+claims that matter most, that a `<script>` in model output becomes characters
+and that a repaint reuses the elements it already built. It settles **nothing
+about appearance**; see "does not cover" below. It is deliberately strict
+(`appendChild(undefined)` throws, as a browser would) so that a passing test is
+a statement about the script and not about the stub.
+
 ## Running them
 
 ```sh
@@ -212,18 +246,53 @@ with the right arguments; it does not prove the two ends talk. RFC 0004 §4's
 Stage 2 demo ("sidebar chat streams a tool call, a permission modal answers
 it, the status bar ticks real dollars") is untested end to end.
 
-**Needs a real model.** Cost accounting against live usage events, the model
-picker's catalog contents, and anything about answer quality.
+**Needs a real model.** Cost accounting against live usage events, and
+anything about answer quality.
 
-**Needs a human looking at pixels.** The webview's rendered DOM. The extension
-host can prove a provider was registered and resolved; it cannot read the
-page. Theme-awareness, keyboard-only operation, "the reconnect card looks like
-a card and not a stack trace", and the card's action buttons
-(*Show Log* / *Choose a Model* / *Retry*) actually rendering are all unverified
-here. What the card is *told* to render is covered by
-`src/sidebar/connection-card.test.ts` and `src/sidebar/view.ts`'s tests. The webview's CSP
-and message validation are covered by unit tests against the HTML string, not
-against a rendered page.
+**Needs a real engine, for the model list specifically.** The panel's model
+selector is driven end to end in the unit suite against a catalog fixture:
+ordering, filtering, the credential dot, the free-text row, the keyboard path,
+and that picking one posts `setModel`. What no suite covers is the round trip
+against a live `arcturn serve` — that `listModels` answers with the shape the
+projection expects, that `setModel` accepts the id that was clicked, and that
+the next run announces it. `packages/protocol` tests the wire; nothing tests
+the two ends together.
+
+**Markdown the parser does not implement.** Tables, reference links, setext
+headings, HTML blocks (deliberately — raw HTML renders as text, and there is a
+test for that), and nested emphasis of three or more markers. A model that
+emits a table gets its pipes and dashes as prose. This is a known gap, not an
+unverified claim.
+
+**Needs a human looking at pixels.** The extension host can prove a provider
+was registered and resolved; it cannot read the page. `webview-render.test.ts`
+now covers the panel's *structure* (see above), and `webview-html.test.ts`
+covers its CSP, its accessibility roles and the claim that every id the script
+reaches for exists in the skeleton. What is left is genuinely visual, and none
+of it is asserted anywhere:
+
+- **How any of it looks.** The stub DOM has no layout, no cascade, no computed
+  style, no font metrics. That the panel is legible, that spacing and
+  alignment read as deliberate, that the composer's grid/`attr()` mirror
+  actually grows the textarea, that a long tool summary ellipsises instead of
+  pushing the status badge off the row, that the model popover lands over the
+  composer rather than behind it — all unverified.
+- **Themes.** Every colour is a `--vscode-*` token and a unit test asserts
+  there are no literal ones, which is not the same as saying light, dark and
+  high-contrast all resolve to something with usable contrast. Nobody has
+  looked at high-contrast at all.
+- **Motion.** The streaming caret, the running-tool spinner, and their
+  suppression under `prefers-reduced-motion` are CSS-only and untested.
+- **Real focus behaviour.** The tab order, that `:focus-visible` rings are
+  visible against every theme, and that a screen reader announces streamed
+  text once rather than re-reading the log. The *roles and properties* are
+  asserted; what an assistive technology does with them is not.
+- **`color-mix` and `:where`.** Both are used with fallbacks and both need a
+  Chromium newer than the one `engines.vscode: ^1.93.0` guarantees at its
+  floor. The fallbacks are written; they have not been observed degrading.
+- **The copy button actually copying.** The unit suite proves the panel posts
+  `{ type: "copy" }` and that the host calls `vscode.env.clipboard.writeText`
+  with it. That the clipboard then holds it is untested.
 
 **Notifications.** There is no stable API to read what is on screen, so
 `showInformationMessage` / `showWarningMessage` / `showErrorMessage` /
