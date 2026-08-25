@@ -388,21 +388,24 @@ describe("the permission sheet", () => {
     test.instance.client.close();
   });
 
-  it("persists a project rule for allow-always", async () => {
+  it("grants a SESSION-scoped allow, never one that reaches the server's disk", async () => {
+    // RFC 0005 §1.2: nothing persists to disk from a remote client, and this
+    // page is one. It sends a scope and no rule at all — the engine mints the
+    // rule from the `suggestedRule` it put on the ask, so the page says how
+    // long and never what.
     const test = boot();
     await attach(test);
     event(test, { type: "permissionRequest", request });
     test.doc.el("perm-always").dispatch("click");
     await Promise.resolve();
-    expect(test.socket().last).toMatchObject({
-      method: "permissionDecision",
-      params: {
-        decision: {
-          behavior: "allow",
-          persistRule: { tool: "bash", specifier: "rm *", action: "allow", scope: "project" },
-        },
-      },
-    });
+    const frame = test.socket().last as {
+      method: string;
+      params: { scope?: string; decision: { behavior: string; persistRule?: unknown } };
+    };
+    expect(frame.method).toBe("permissionDecision");
+    expect(frame.params.scope).toBe("session");
+    expect(frame.params.decision.behavior).toBe("allow");
+    expect(frame.params.decision.persistRule).toBeUndefined();
     test.instance.client.close();
   });
 

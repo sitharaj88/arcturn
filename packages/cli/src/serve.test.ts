@@ -1,12 +1,12 @@
-import { mkdtemp, readdir } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer } from "node:http";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative, sep } from "node:path";
 import { createClient, registerModel, unregisterModel } from "@arcturn/ai";
-import { JsonlSessionStore } from "@arcturn/core";
-import { createProtocolClient } from "@arcturn/protocol";
-import { ArcturnServer } from "@arcturn/server";
+import { Agent, JsonlSessionStore } from "@arcturn/core";
+import { createProtocolClient, type ProtocolClient } from "@arcturn/protocol";
+import { ArcturnServer, SessionHost } from "@arcturn/server";
 import type { AgentEvent, ModelSpec, SessionHistory } from "@arcturn/types";
 import { afterEach, describe, expect, it } from "vitest";
 import { WebSocket } from "ws";
@@ -678,6 +678,349 @@ describe("setModel end-to-end: real server, real client, real provider dispatch"
       client.close();
       unregisterModel(homeSpec.id);
       await home.close();
+    }
+  });
+});
+
+/** A 1x1 PNG, as a `prompt` attachment would carry it. */
+const TINY_PNG_BASE64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+/** {@link stubSpec}, with the one capability RFC 0005 §1.1 gates images on. */
+function visionSpec(id: string, baseUrl: string): ModelSpec {
+  const spec = stubSpec(id, baseUrl);
+  return { ...spec, capabilities: { ...spec.capabilities, vision: true } };
+}
+
+/**
+ * One connected client against a real `ArcturnServer` over a real socket, with
+ * every event it was pushed.
+ *
+ * Assembled here because every test below needs the same six lines, and because
+ * the `events` array is half the point: the mention refusals RFC 0005 §1.1 asks
+ * for are `notice` events, and a test that only inspected the returned promise
+ * could not see one.
+ */
+async function connectedClient(
+  runtime: ServableRuntime,
+  options: { maxAttachmentBytes?: number } = {},
+): Promise<{ client: ProtocolClient; sessionId: string; events: AgentEvent[] }> {
+  const sessionHost = createServeHost(runtime, options);
+  const server = new ArcturnServer({ sessionHost });
+  servers.push(server);
+  const port = await server.start({ host: "127.0.0.1", port: 0 });
+  const client = createProtocolClient(new WebSocket(`ws://127.0.0.1:${port}`));
+  const events: AgentEvent[] = [];
+  client.onEvent((_sessionId, event) => events.push(event));
+  const header = await client.createSession({ cwd: runtime.cwd });
+  await client.openSession(header.sessionId);
+  return { client, sessionId: header.sessionId, events };
+}
+
+describe("RFC 0005 §1.1 — context and attachments on the wire", () => {
+  it("expands an @-mention so the file's CONTENT reaches the provider, not the token", async () => {
+    const provider = await stubProvider();
+    const spec = stubSpec("stub-ctx/model", provider.baseUrl);
+    registerModel(spec);
+
+    const runtime = await fakeRuntime({
+      llm: createClient({ env: {}, retry: false }),
+      model: spec,
+    });
+    await writeFile(join(runtime.cwd, "auth.ts"), "export const SECRET_SENTINEL = 42;\n", "utf8");
+
+    const { client, sessionId } = await connectedClient(runtime);
+    try {
+      await client.prompt(sessionId, "what does @auth.ts do?");
+
+      // The decisive assertion: what the model was actually handed. Asserting
+      // on the returned promise, or on a rendered transcript, would have passed
+      // for the entire life of the bug — the prompt was accepted and the run
+      // completed; it was only the *content* that never arrived.
+      expect(provider.requests).toHaveLength(1);
+      expect(provider.requests[0]).toContain("SECRET_SENTINEL");
+    } finally {
+      client.close();
+      unregisterModel(spec.id);
+      await provider.close();
+    }
+  });
+
+  it("refuses a mention that escapes the workspace: nothing is read, and the client is told", async () => {
+    const provider = await stubProvider();
+    const spec = stubSpec("stub-esc/model", provider.baseUrl);
+    registerModel(spec);
+
+    const runtime = await fakeRuntime({
+      llm: createClient({ env: {}, retry: false }),
+      model: spec,
+    });
+    // A real file, really outside the served workspace — not a path that merely
+    // looks like an escape.
+    const outside = await mkdtemp(join(tmpdir(), "arcturn-outside-"));
+    await writeFile(join(outside, "secrets.txt"), "OUTSIDE_SENTINEL\n", "utf8");
+    const traversal = relative(runtime.cwd, join(outside, "secrets.txt")).split(sep).join("/");
+
+    const { client, sessionId, events } = await connectedClient(runtime);
+    try {
+      await client.prompt(sessionId, `read @${traversal} for me`);
+
+      expect(provider.requests).toHaveLength(1);
+      expect(provider.requests[0]).not.toContain("OUTSIDE_SENTINEL");
+      // Refused *with a reason*, which is the half the pre-RFC behaviour was
+      // missing: the TUI could get away with silence because the user could see
+      // their own filesystem; a remote client could not tell a refusal from a
+      // mention that simply worked.
+      const notice = events.find(
+        (event): event is Extract<AgentEvent, { type: "notice" }> => event.type === "notice",
+      );
+      expect(notice?.text).toMatch(/outside the workspace/i);
+    } finally {
+      client.close();
+      unregisterModel(spec.id);
+      await provider.close();
+    }
+  });
+
+  it("refuses an ATTACHMENT that escapes the workspace outright, and spends no turn", async () => {
+    const provider = await stubProvider();
+    const spec = stubSpec("stub-esc2/model", provider.baseUrl);
+    registerModel(spec);
+
+    const runtime = await fakeRuntime({
+      llm: createClient({ env: {}, retry: false }),
+      model: spec,
+    });
+    const outside = await mkdtemp(join(tmpdir(), "arcturn-outside-"));
+    await writeFile(join(outside, "secrets.txt"), "OUTSIDE_SENTINEL\n", "utf8");
+
+    const { client, sessionId } = await connectedClient(runtime);
+    try {
+      // Absolute, and plainly elsewhere. Unlike a mention this is fatal: the
+      // client named the file, so running the turn without it would be exactly
+      // the silent drop RFC 0005 §1.1 forbids.
+      await expect(
+        client.prompt(sessionId, "look at this", [
+          { kind: "file", path: join(outside, "secrets.txt") },
+        ]),
+      ).rejects.toMatchObject({ code: "invalidRequest" });
+
+      expect(provider.requests).toHaveLength(0);
+    } finally {
+      client.close();
+      unregisterModel(spec.id);
+      await provider.close();
+    }
+  });
+
+  it("turns a file attachment into a context block that says what it is", async () => {
+    const provider = await stubProvider();
+    const spec = stubSpec("stub-att/model", provider.baseUrl);
+    registerModel(spec);
+
+    const runtime = await fakeRuntime({
+      llm: createClient({ env: {}, retry: false }),
+      model: spec,
+    });
+    await writeFile(join(runtime.cwd, "notes.md"), "ATTACHED_SENTINEL\n", "utf8");
+
+    const { client, sessionId } = await connectedClient(runtime);
+    try {
+      await client.prompt(sessionId, "summarise this", [{ kind: "file", path: "notes.md" }]);
+
+      expect(provider.requests).toHaveLength(1);
+      expect(provider.requests[0]).toContain("ATTACHED_SENTINEL");
+      expect(provider.requests[0]).toContain("notes.md (attached file)");
+    } finally {
+      client.close();
+      unregisterModel(spec.id);
+      await provider.close();
+    }
+  });
+
+  it("refuses an image for a model without vision BEFORE the turn is spent", async () => {
+    const provider = await stubProvider();
+    // stubSpec's capabilities.vision is false — the case RFC 0005 §4 asks for.
+    const spec = stubSpec("stub-blind/model", provider.baseUrl);
+    registerModel(spec);
+
+    const runtime = await fakeRuntime({
+      llm: createClient({ env: {}, retry: false }),
+      model: spec,
+    });
+
+    const { client, sessionId } = await connectedClient(runtime);
+    try {
+      await expect(
+        client.prompt(sessionId, "what is this?", [
+          { kind: "image", data: TINY_PNG_BASE64, mimeType: "image/png" },
+        ]),
+      ).rejects.toMatchObject({
+        code: "invalidRequest",
+        message: expect.stringContaining("cannot see images"),
+      });
+
+      // "Before the turn is spent" is this line, not the rejection: a refusal
+      // that arrived after the provider had already been billed would satisfy
+      // the error message and none of the promise.
+      expect(provider.requests).toHaveLength(0);
+    } finally {
+      client.close();
+      unregisterModel(spec.id);
+      await provider.close();
+    }
+  });
+
+  it("sends the same image to a model that can see one", async () => {
+    const provider = await stubProvider();
+    const spec = visionSpec("stub-eyes/model", provider.baseUrl);
+    registerModel(spec);
+
+    const runtime = await fakeRuntime({
+      llm: createClient({ env: {}, retry: false }),
+      model: spec,
+    });
+
+    const { client, sessionId } = await connectedClient(runtime);
+    try {
+      await client.prompt(sessionId, "what is this?", [
+        { kind: "image", data: TINY_PNG_BASE64, mimeType: "image/png" },
+      ]);
+
+      expect(provider.requests).toHaveLength(1);
+      expect(provider.requests[0]).toContain(TINY_PNG_BASE64);
+    } finally {
+      client.close();
+      unregisterModel(spec.id);
+      await provider.close();
+    }
+  });
+
+  it("refuses attachments past the total byte budget, and spends no turn", async () => {
+    const provider = await stubProvider();
+    const spec = stubSpec("stub-cap/model", provider.baseUrl);
+    registerModel(spec);
+
+    const runtime = await fakeRuntime({
+      llm: createClient({ env: {}, retry: false }),
+      model: spec,
+    });
+    await writeFile(join(runtime.cwd, "big.txt"), "x".repeat(4096), "utf8");
+
+    // The budget is injected rather than exercised at its real 1 MiB, for the
+    // reason `sessionHistoryLimits` is injectable: proving the cap cuts should
+    // not cost a megabyte of scratch files.
+    const { client, sessionId } = await connectedClient(runtime, { maxAttachmentBytes: 512 });
+    try {
+      await expect(
+        client.prompt(sessionId, "read it", [{ kind: "file", path: "big.txt" }]),
+      ).rejects.toMatchObject({
+        code: "invalidRequest",
+        message: expect.stringContaining("attachment budget"),
+      });
+      expect(provider.requests).toHaveLength(0);
+    } finally {
+      client.close();
+      unregisterModel(spec.id);
+      await provider.close();
+    }
+  });
+});
+
+describe("resolveContext end-to-end: real server, real client, real files", () => {
+  it("answers what a mention would resolve to, without attaching anything", async () => {
+    const runtime = await fakeRuntime();
+    await writeFile(join(runtime.cwd, "notes.md"), "hello\n", "utf8");
+    await mkdir(join(runtime.cwd, "sub"), { recursive: true });
+
+    const { client, sessionId } = await connectedClient(runtime);
+    try {
+      const file = await client.resolveContext(sessionId, "notes.md");
+      expect(file).toMatchObject({
+        relativePath: "notes.md",
+        inWorkspace: true,
+        exists: true,
+        bytes: 6,
+        kind: "file",
+      });
+      expect(file?.reason).toBeUndefined();
+
+      const missing = await client.resolveContext(sessionId, "nope.md");
+      expect(missing).toMatchObject({
+        inWorkspace: true,
+        exists: false,
+        bytes: 0,
+        kind: "missing",
+      });
+
+      const dir = await client.resolveContext(sessionId, "sub");
+      expect(dir).toMatchObject({ inWorkspace: true, exists: true, kind: "directory" });
+      expect(dir?.reason).toMatch(/directory/i);
+
+      // The refusal a picker must show as a refusal: outside the workspace, and
+      // reported as *not looked at* rather than as "no such file".
+      const escaped = await client.resolveContext(sessionId, "../../etc/passwd");
+      expect(escaped).toMatchObject({
+        inWorkspace: false,
+        exists: false,
+        bytes: 0,
+        relativePath: "",
+      });
+      expect(escaped?.reason).toMatch(/outside the workspace/i);
+    } finally {
+      client.close();
+    }
+  });
+
+  it("attaches nothing and starts no run — it is a read", async () => {
+    const runtime = await fakeRuntime();
+    await writeFile(join(runtime.cwd, "notes.md"), "hello\n", "utf8");
+
+    const { client, sessionId, events } = await connectedClient(runtime);
+    try {
+      await client.resolveContext(sessionId, "notes.md");
+      expect(events).toHaveLength(0);
+    } finally {
+      client.close();
+    }
+  });
+});
+
+describe("prompt attachments against an engine that cannot honour them", () => {
+  it("refuses locally rather than letting an old engine drop them and answer ok", async () => {
+    const runtime = await fakeRuntime();
+    // A host assembled without a context resolver *is* the pre-RFC-0005 engine:
+    // it answers `prompt` and knows no `resolveContext`.
+    const sessionHost = new SessionHost({
+      agentFactory: () =>
+        new Agent({
+          llm: runtime.llm,
+          model: runtime.model,
+          systemPrompt: runtime.systemPrompt,
+          tools: [],
+          cwd: runtime.cwd,
+          sessionId: "old-engine",
+          sessionStore: runtime.store,
+          permissions: { mode: "yolo", rules: [] },
+        }),
+      defaultCwd: runtime.cwd,
+    });
+    const server = new ArcturnServer({ sessionHost });
+    servers.push(server);
+    const port = await server.start({ host: "127.0.0.1", port: 0 });
+    const client = createProtocolClient(new WebSocket(`ws://127.0.0.1:${port}`));
+    try {
+      const header = await client.createSession({ cwd: runtime.cwd });
+      await client.openSession(header.sessionId);
+
+      // A plain prompt still works — nothing about this degrades text.
+      await client.prompt(header.sessionId, "hello");
+
+      await expect(
+        client.prompt(header.sessionId, "look", [{ kind: "file", path: "notes.md" }]),
+      ).rejects.toMatchObject({ code: "invalidRequest" });
+    } finally {
+      client.close();
     }
   });
 });

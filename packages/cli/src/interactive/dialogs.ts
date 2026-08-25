@@ -8,7 +8,7 @@
  */
 
 import { Box, type Component, Markdown, SelectList, Text } from "@arcturn/tui";
-import type { PermissionRequest, PermissionRule } from "@arcturn/types";
+import type { PermissionRequest, PermissionRule, PermissionScope } from "@arcturn/types";
 import type { SelectOption } from "../commands.js";
 import { oneLine } from "../format.js";
 import { type GlyphSet, resolveGlyphs, toolGlyph } from "../glyphs.js";
@@ -132,20 +132,36 @@ export function suggestRule(request: Omit<PermissionRequest, "id">): Omit<Permis
  * @param request - The request to present.
  * @param width - Terminal width, used to size the subject line.
  * @param glyphs - Icon set; the nested-activity connector marks the label.
+ * @param scope - How far the "Allow always" row actually reaches. The local
+ *   TUI writes a `project` rule to the user's config and says so; `arcturn
+ *   attach` is a *remote* client and can only grant `session` (RFC 0005 §1.2 —
+ *   nothing persists to disk from a remote client), so it passes `"session"`
+ *   and the row says "this session" rather than promising a durable rule the
+ *   engine would refuse to write.
  */
 export function permissionDialog(
   request: Omit<PermissionRequest, "id">,
   width: number,
   glyphs: GlyphSet = resolveGlyphs(),
+  scope: PermissionScope = "project",
 ): DialogHandle<PermissionChoice> {
   const rule = suggestRule(request);
+  const reach = scope === "session" ? "this session" : scope;
   const alwaysLabel = rule.specifier
-    ? `Allow always: ${oneLine(`${rule.tool} ${rule.specifier}`, 44)} (project)`
-    : `Allow always: ${rule.tool} (project)`;
+    ? `Allow always: ${oneLine(`${rule.tool} ${rule.specifier}`, 44)} (${reach})`
+    : `Allow always: ${rule.tool} (${reach})`;
+
+  // A session-scoped grant is minted by the ENGINE from the request's own
+  // `suggestedRule`, so a request that carries none is not repeatable and the
+  // row must not be offered — RFC 0005 §2 puts it exactly that way ("where the
+  // engine reports the request is repeatable"), and it is what the VS Code
+  // panel's `permissionChoices` already does. The local `project` path is
+  // unaffected: there the CLI authors the rule itself and can always offer it.
+  const repeatable = scope !== "session" || request.suggestedRule !== undefined;
 
   const choice = createChoice<PermissionChoice>([
     { value: "once", label: "Allow once", data: "once" },
-    { value: "always", label: alwaysLabel, data: "always" },
+    ...(repeatable ? [{ value: "always", label: alwaysLabel, data: "always" as const }] : []),
     { value: "deny", label: "Deny and tell the model why", data: "deny" },
   ]);
 

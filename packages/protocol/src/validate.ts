@@ -10,12 +10,20 @@
 import type {
   AgentEvent,
   ClientRequest,
+  CommandDescriptor,
+  CommandList,
+  ContextKind,
+  ContextResolution,
   ModelCatalog,
   ModelCatalogEntry,
   ModelCost,
   ModelCredentialStatus,
   PermissionDecision,
+  PermissionMode,
   PermissionRule,
+  PermissionScope,
+  PermissionState,
+  PromptAttachment,
   ServerMessage,
   SessionHeader,
   SessionHistory,
@@ -46,6 +54,10 @@ const CLIENT_METHODS = [
   "listModels",
   "sessionHistory",
   "deleteSession",
+  "resolveContext",
+  "permissionState",
+  "setPermissionMode",
+  "listCommands",
 ] as const;
 
 const SERVER_KINDS = ["response", "event", "sessions"] as const;
@@ -106,10 +118,34 @@ export function validateClientRequest(value: unknown): ClientRequestValidation {
       if (!isRecord(params)) return fail('prompt requires an object "params"');
       if (!isString(params.sessionId)) return fail("prompt params.sessionId must be a string");
       if (!isString(params.text)) return fail("prompt params.text must be a string");
+      // Absent and empty are kept distinct on the way through: `undefined`
+      // means "this client said nothing about attachments" and `[]` means "it
+      // meant none", and only the first is a shape an older client produces.
+      let attachments: PromptAttachment[] | undefined;
+      if (params.attachments !== undefined) {
+        if (!Array.isArray(params.attachments)) {
+          return fail("prompt params.attachments must be an array when present");
+        }
+        if (params.attachments.length > MAX_PROMPT_ATTACHMENTS) {
+          return fail(
+            `prompt params.attachments must hold at most ${String(MAX_PROMPT_ATTACHMENTS)} items`,
+          );
+        }
+        attachments = [];
+        for (let i = 0; i < params.attachments.length; i++) {
+          const result = validatePromptAttachment(params.attachments[i]);
+          if (!result.ok) return fail(`prompt params.attachments[${i}] invalid: ${result.error}`);
+          attachments.push(result.value);
+        }
+      }
       return ok<ClientRequest>({
         id,
         method: "prompt",
-        params: { sessionId: params.sessionId, text: params.text },
+        params: {
+          sessionId: params.sessionId,
+          text: params.text,
+          ...(attachments === undefined ? {} : { attachments }),
+        },
       });
     }
     case "steer": {
@@ -136,10 +172,46 @@ export function validateClientRequest(value: unknown): ClientRequestValidation {
       if (!decisionResult.ok) {
         return fail(`permissionDecision params.decision invalid: ${decisionResult.error}`);
       }
+      // The wall RFC 0005 §1.2 asks for, enforced on the wire rather than
+      // documented next to it: the only scope a remote client may ask for is
+      // the one that dies with the session. `project` and `user` are the
+      // scopes `persistPermissionRule` writes to a config file a *person*
+      // owns, and no frame on this socket gets to author one.
+      //
+      // Checked here rather than inside `validatePermissionDecision`, which is
+      // a general validator for a type local hosts also build: the restriction
+      // is a property of this VERB, not of the shape. And checked on both
+      // ends, because the client validates its own outbound frames — a UI bug
+      // fails immediately with a precise message instead of after a round trip.
+      if (decisionResult.value.persistRule !== undefined) {
+        const ruleScope = decisionResult.value.persistRule.scope;
+        if (ruleScope !== "session") {
+          return fail(rejectWiderScope("params.decision.persistRule.scope", ruleScope));
+        }
+      }
+      let scope: PermissionScope | undefined;
+      if (params.scope !== undefined) {
+        if (
+          !isString(params.scope) ||
+          !(PERMISSION_SCOPES as readonly string[]).includes(params.scope)
+        ) {
+          return fail(
+            'permissionDecision params.scope must be one of "session" | "project" | "user"',
+          );
+        }
+        if (params.scope !== "session") {
+          return fail(rejectWiderScope("params.scope", params.scope as PermissionScope));
+        }
+        scope = params.scope as PermissionScope;
+      }
       return ok<ClientRequest>({
         id,
         method: "permissionDecision",
-        params: { sessionId: params.sessionId, decision: decisionResult.value },
+        params: {
+          sessionId: params.sessionId,
+          decision: decisionResult.value,
+          ...(scope === undefined ? {} : { scope }),
+        },
       });
     }
     case "setModel": {
@@ -177,6 +249,58 @@ export function validateClientRequest(value: unknown): ClientRequestValidation {
         method: "deleteSession",
         params: { sessionId: params.sessionId },
       });
+    }
+    case "resolveContext": {
+      if (!isRecord(params)) return fail('resolveContext requires an object "params"');
+      if (!isString(params.sessionId)) {
+        return fail("resolveContext params.sessionId must be a string");
+      }
+      if (!isString(params.query)) return fail("resolveContext params.query must be a string");
+      if (params.query.length > MAX_CONTEXT_QUERY_LENGTH) {
+        return fail(
+          `resolveContext params.query must be at most ${String(MAX_CONTEXT_QUERY_LENGTH)} characters`,
+        );
+      }
+      return ok<ClientRequest>({
+        id,
+        method: "resolveContext",
+        params: { sessionId: params.sessionId, query: params.query },
+      });
+    }
+    case "permissionState": {
+      if (!isRecord(params)) return fail('permissionState requires an object "params"');
+      if (!isString(params.sessionId)) {
+        return fail("permissionState params.sessionId must be a string");
+      }
+      return ok<ClientRequest>({
+        id,
+        method: "permissionState",
+        params: { sessionId: params.sessionId },
+      });
+    }
+    case "setPermissionMode": {
+      if (!isRecord(params)) return fail('setPermissionMode requires an object "params"');
+      if (!isString(params.sessionId)) {
+        return fail("setPermissionMode params.sessionId must be a string");
+      }
+      if (
+        !isString(params.mode) ||
+        !(PERMISSION_MODES as readonly string[]).includes(params.mode)
+      ) {
+        return fail(
+          'setPermissionMode params.mode must be one of "default" | "acceptEdits" | "plan" | "yolo"',
+        );
+      }
+      return ok<ClientRequest>({
+        id,
+        method: "setPermissionMode",
+        params: { sessionId: params.sessionId, mode: params.mode as PermissionMode },
+      });
+    }
+    case "listCommands": {
+      // No params: skills are discovered from the served workspace and the
+      // user's home, both properties of the server, not of a conversation.
+      return ok<ClientRequest>({ id, method: "listCommands" });
     }
     default:
       return exhaustiveCheck(method as never, `Unknown method: "${method}"`);
@@ -265,9 +389,174 @@ export function validateServerMessage(value: unknown): ServerMessageValidation {
 // exported since they're independently useful and fully general).
 // ---------------------------------------------------------------------------
 
+/**
+ * Ceiling on how many attachments one prompt may carry.
+ *
+ * A second bound alongside the server's byte budget
+ * (`PROMPT_ATTACHMENT_MAX_BYTES`), because the two costs differ: bytes are what
+ * the wire and the model pay, item count is what the *engine* pays in stat and
+ * read syscalls before a single byte is counted. 64 is far past any composer's
+ * chip row and far short of a `prompt` frame that makes this server walk a
+ * directory tree on a client's say-so.
+ */
+export const MAX_PROMPT_ATTACHMENTS = 64;
+
+/**
+ * Ceiling on a `resolveContext` query.
+ *
+ * A mention is a path, and 4096 is the practical path ceiling on every
+ * platform this runs on (`PATH_MAX` on Linux/macOS, well past Windows' own).
+ * Bounded because the verb is reachable by anyone holding the serve token and
+ * an unbounded string is one this server would resolve and normalize before it
+ * had any reason to.
+ */
+export const MAX_CONTEXT_QUERY_LENGTH = 4096;
+
+/**
+ * Image media types an `image` attachment may declare inline.
+ *
+ * Mirrors `@arcturn/cli`'s `IMAGE_MIME_TYPES` — the set `expandMentions`
+ * already turns into vision blocks. An allowlist rather than a `image/*` shape
+ * check, because the value is forwarded to a provider: a type this engine
+ * cannot actually send is better refused at the wire than discovered as a 400
+ * from someone else's API.
+ */
+const IMAGE_MIME_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"] as const;
+
+const CONTEXT_KINDS = ["file", "image", "directory", "missing", "other"] as const;
+
+/**
+ * Validate one {@link PromptAttachment}.
+ *
+ * The three branches are checked by *shape*, not by trusting `kind` alone, and
+ * a `file` carrying inline `data` is refused rather than quietly reduced to its
+ * path: RFC 0005 §3 puts every file read inside the engine, and accepting bytes
+ * for something that claims to be a workspace file would be the one hole in
+ * that. Inline data is an `image`-only affordance — a paste has no path, and so
+ * has no confinement to bypass.
+ */
+export function validatePromptAttachment(value: unknown): ValidationResult<PromptAttachment> {
+  if (!isRecord(value)) return fail("PromptAttachment must be an object");
+  const kind = value.kind;
+  if (kind !== "file" && kind !== "image") {
+    return fail('PromptAttachment.kind must be one of "file" | "image"');
+  }
+  const hasPath = value.path !== undefined;
+  const hasData = value.data !== undefined;
+  if (hasPath === hasData) {
+    return fail('PromptAttachment must carry exactly one of "path" or "data"');
+  }
+  if (hasPath) {
+    if (!isString(value.path)) return fail("PromptAttachment.path must be a string");
+    if (value.path === "") return fail("PromptAttachment.path must not be empty");
+    if (value.path.length > MAX_CONTEXT_QUERY_LENGTH) {
+      return fail(
+        `PromptAttachment.path must be at most ${String(MAX_CONTEXT_QUERY_LENGTH)} characters`,
+      );
+    }
+    const attachment: PromptAttachment =
+      kind === "file" ? { kind: "file", path: value.path } : { kind: "image", path: value.path };
+    return { ok: true, value: attachment };
+  }
+  if (kind !== "image") {
+    return fail(
+      'PromptAttachment inline "data" is accepted for kind "image" only — a file that exists ' +
+        "on disk is read by the engine, from its path, so the read happens where the " +
+        "permission engine can see it",
+    );
+  }
+  if (!isString(value.data)) return fail("PromptAttachment.data must be a base64 string");
+  if (value.data === "") return fail("PromptAttachment.data must not be empty");
+  if (!isString(value.mimeType)) {
+    return fail("PromptAttachment.mimeType must be a string when data is present");
+  }
+  if (!(IMAGE_MIME_TYPES as readonly string[]).includes(value.mimeType)) {
+    return fail(`PromptAttachment.mimeType must be one of ${IMAGE_MIME_TYPES.join(", ")}`);
+  }
+  return { ok: true, value: { kind: "image", data: value.data, mimeType: value.mimeType } };
+}
+
+/**
+ * Validate a `resolveContext` result.
+ *
+ * Run at both ends, like {@link validateModelCatalog} and
+ * {@link validateSessionHistory}, and with fields copied out one at a time so a
+ * server that puts something extra in the envelope cannot have it ride along
+ * into a client that renders it.
+ *
+ * Two cross-field rules are enforced rather than left to a client to reconcile,
+ * because each has exactly one honest reading and a client guessing at the
+ * other would tell a user something false:
+ *
+ * - A path outside the workspace can never report `exists: true`. The engine
+ *   does not look at one, so a `true` there would be a fact it never
+ *   established.
+ * - Nothing that does not exist has a size.
+ */
+export function validateContextResolution(value: unknown): ValidationResult<ContextResolution> {
+  if (!isRecord(value)) return fail("ContextResolution must be an object");
+  if (!isString(value.query)) return fail("ContextResolution.query must be a string");
+  if (!isString(value.path)) return fail("ContextResolution.path must be a string");
+  if (!isString(value.relativePath)) return fail("ContextResolution.relativePath must be a string");
+  if (typeof value.inWorkspace !== "boolean") {
+    return fail("ContextResolution.inWorkspace must be a boolean");
+  }
+  if (typeof value.exists !== "boolean") return fail("ContextResolution.exists must be a boolean");
+  if (!isNumber(value.bytes) || value.bytes < 0) {
+    return fail("ContextResolution.bytes must be a non-negative number");
+  }
+  if (!isString(value.kind) || !(CONTEXT_KINDS as readonly string[]).includes(value.kind)) {
+    return fail(
+      'ContextResolution.kind must be one of "file" | "image" | "directory" | "missing" | "other"',
+    );
+  }
+  if (value.reason !== undefined && !isString(value.reason)) {
+    return fail("ContextResolution.reason must be a string when present");
+  }
+  if (!value.inWorkspace && value.exists) {
+    return fail("ContextResolution.exists must be false when inWorkspace is false");
+  }
+  if (!value.exists && value.bytes !== 0) {
+    return fail("ContextResolution.bytes must be 0 when exists is false");
+  }
+  return {
+    ok: true,
+    value: {
+      query: value.query,
+      path: value.path,
+      relativePath: value.relativePath,
+      inWorkspace: value.inWorkspace,
+      exists: value.exists,
+      bytes: value.bytes,
+      kind: value.kind as ContextKind,
+      ...(value.reason === undefined ? {} : { reason: value.reason }),
+    },
+  };
+}
+
 const PERMISSION_ACTIONS = ["allow", "deny", "ask"] as const;
 const PERMISSION_SCOPES = ["session", "project", "user"] as const;
 const PERMISSION_BEHAVIORS = ["allow", "deny"] as const;
+const PERMISSION_MODES = ["default", "acceptEdits", "plan", "yolo"] as const;
+
+/**
+ * The one refusal message for every way a frame can ask for a rule that
+ * outlives its session.
+ *
+ * Written out rather than left as `"invalid scope"` because the person reading
+ * it is a client author who believed this was allowed, and the useful part is
+ * not "no" but *where the thing they want does live*.
+ *
+ * @param field - The offending field, for the message.
+ * @param scope - The scope that was asked for.
+ */
+function rejectWiderScope(field: string, scope: PermissionScope): string {
+  return (
+    `permissionDecision ${field} must be "session": a decision made over the wire may not ` +
+    `outlive the session, and "${scope}" would be written to a permission config file that a ` +
+    "person owns. Grant it for this session, or have the user add the rule to their own config."
+  );
+}
 
 /** Validate a {@link PermissionRule} value. */
 export function validatePermissionRule(value: unknown): ValidationResult<PermissionRule> {
@@ -485,6 +774,90 @@ export function validateSessionHistory(value: unknown): ValidationResult<Session
       droppedEvents: value.droppedEvents,
     },
   };
+}
+
+/**
+ * Validate a `permissionState` (or `setPermissionMode`) result.
+ *
+ * Run at **both** ends, exactly as {@link validateModelCatalog} is: the host
+ * re-validates what it built before it leaves, and the client re-validates
+ * what arrived. Fields are copied out one at a time rather than spread, for
+ * the reason {@link validateModelCatalogEntry} states — whatever else a host
+ * happens to hang off its state object cannot ride along into a client. Here
+ * the field that matters is `tools`: it carries tool *names* and must never
+ * start carrying descriptions or schemas, which is a thing a copy-one-field-
+ * at-a-time validator makes impossible rather than merely discouraged.
+ */
+export function validatePermissionState(value: unknown): ValidationResult<PermissionState> {
+  if (!isRecord(value)) return fail("PermissionState must be an object");
+  if (!isString(value.sessionId)) return fail("PermissionState.sessionId must be a string");
+  if (!isString(value.mode) || !(PERMISSION_MODES as readonly string[]).includes(value.mode)) {
+    return fail('PermissionState.mode must be one of "default" | "acceptEdits" | "plan" | "yolo"');
+  }
+  if (!Array.isArray(value.rules)) return fail("PermissionState.rules must be an array");
+  const rules: PermissionRule[] = [];
+  for (let i = 0; i < value.rules.length; i++) {
+    const result = validatePermissionRule(value.rules[i]);
+    if (!result.ok) return fail(`PermissionState.rules[${i}] invalid: ${result.error}`);
+    rules.push(result.value);
+  }
+  if (!Array.isArray(value.tools)) return fail("PermissionState.tools must be an array");
+  const tools: string[] = [];
+  for (let i = 0; i < value.tools.length; i++) {
+    const name: unknown = value.tools[i];
+    if (!isString(name)) return fail(`PermissionState.tools[${i}] must be a string`);
+    tools.push(name);
+  }
+  return {
+    ok: true,
+    value: { sessionId: value.sessionId, mode: value.mode as PermissionMode, rules, tools },
+  };
+}
+
+const COMMAND_KINDS = ["skill", "builtin"] as const;
+
+/** Validate one {@link CommandDescriptor}. */
+export function validateCommandDescriptor(value: unknown): ValidationResult<CommandDescriptor> {
+  if (!isRecord(value)) return fail("CommandDescriptor must be an object");
+  if (!isString(value.name) || value.name === "") {
+    return fail("CommandDescriptor.name must be a non-empty string");
+  }
+  if (!isString(value.description)) {
+    return fail("CommandDescriptor.description must be a string");
+  }
+  if (!isString(value.kind) || !(COMMAND_KINDS as readonly string[]).includes(value.kind)) {
+    return fail('CommandDescriptor.kind must be one of "skill" | "builtin"');
+  }
+  if (value.source !== undefined && !isString(value.source)) {
+    return fail("CommandDescriptor.source must be a string when present");
+  }
+  const descriptor: CommandDescriptor = {
+    name: value.name,
+    description: value.description,
+    kind: value.kind as CommandDescriptor["kind"],
+    ...(value.source === undefined ? {} : { source: value.source }),
+  };
+  return { ok: true, value: descriptor };
+}
+
+/**
+ * Validate a `listCommands` result.
+ *
+ * The server answers `{ commands: [...] }`; a bare array is also accepted, the
+ * same latitude {@link validateModelCatalog} gives a leaner server variant.
+ */
+export function validateCommandList(value: unknown): ValidationResult<CommandList> {
+  const raw = Array.isArray(value) ? value : isRecord(value) ? value.commands : undefined;
+  if (!Array.isArray(raw)) {
+    return fail('CommandList must be an array of commands or an object with a "commands" array');
+  }
+  const commands: CommandDescriptor[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const result = validateCommandDescriptor(raw[i]);
+    if (!result.ok) return fail(`commands[${i}] invalid: ${result.error}`);
+    commands.push(result.value);
+  }
+  return { ok: true, value: { commands } };
 }
 
 // ---------------------------------------------------------------------------

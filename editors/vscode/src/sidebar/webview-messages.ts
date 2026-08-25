@@ -16,8 +16,8 @@
  *
  * RFC 0004 §0 freezes what a client may drive: `prompt`, `steer`, `abort`,
  * `setModel`, `respondToPermission`, `listModels`, `listSessions`,
- * `createSession`, `openSession`, `sessionHistory`, `deleteSession`. Every
- * message in the webview→host union
+ * `createSession`, `openSession`, `sessionHistory`, `deleteSession`,
+ * `resolveContext`. Every message in the webview→host union
  * below lands on exactly one of those, on a VS Code command the extension
  * already contributes, or on nothing at all (`toggle` is view state; `copy` is
  * the clipboard). No message here invents a verb — the last two on that list
@@ -32,13 +32,20 @@
  * Pure, so both directions are testable with no `vscode` and no DOM.
  */
 
-import type { ModelCatalogEntry, SessionHeader } from "../serve/engine.js";
+import type {
+  ContextKind,
+  ContextResolution,
+  ModelCatalogEntry,
+  SessionHeader,
+} from "../serve/engine.js";
+import { MAX_CONTEXT_QUERY_LENGTH, MAX_PROMPT_ATTACHMENTS } from "../serve/engine.js";
 import type { ChatViewModel } from "./chat-state.js";
 import {
   CONNECTION_ACTIONS,
   type ConnectionAction,
   type ConnectionActionId,
 } from "./connection-card.js";
+import { escapeCodicons } from "./picker.js";
 import type { ModelOption } from "./webview-models.js";
 import type { SessionOption } from "./webview-sessions.js";
 
@@ -70,6 +77,70 @@ export const MAX_COPY_LENGTH = 100_000;
  * rather than a length assertion about a format this extension does not own.
  */
 export const MAX_SESSION_ID_LENGTH = 200;
+
+/**
+ * One thing the composer is holding, or one candidate the picker is offering.
+ *
+ * `path` and `label` are deliberately two fields carrying nearly the same
+ * string. `path` is **identity**: it is what `detach` quotes back, what the
+ * host dedupes on, and what the engine is sent as a `PromptAttachment`. `label`
+ * is **display**, and so is escaped on the way out — the engine chose that
+ * string (it is a filename on the user's disk), and an engine-supplied string
+ * reaching a rendered field without escaping is a finding this codebase has
+ * already had once. See `picker.ts`'s `escapeCodicons`.
+ */
+export interface ContextItem {
+  /** Stable id for `detach`. The workspace-relative path, or the absolute one when outside. */
+  id: string;
+  /** The path as the engine resolved it, unescaped — identity, not display. */
+  path: string;
+  /** What to show. Escaped. */
+  label: string;
+  /** Size in bytes; `0` when nothing was measured. */
+  bytes: number;
+  /** What the engine found there. */
+  kind: ContextKind;
+  /**
+   * Whether this can actually be attached and sent.
+   *
+   * The whole point of the `resolveContext` round trip: a chip that cannot be
+   * sent says so before the user presses enter, rather than turning into a
+   * refused prompt. RFC 0005 §1.1 — "what makes a file picker honest rather
+   * than hopeful".
+   */
+  ok: boolean;
+  /** Why not, when `ok` is `false`. Escaped. */
+  reason?: string;
+}
+
+/**
+ * Project one engine resolution into a panel row.
+ *
+ * Rebuilt field by field for the reason {@link projectModelOption} gives, and
+ * with one judgement of its own: `ok` is computed *here*, from the engine's
+ * facts, rather than sent by the engine. The engine reports what is true
+ * (`inWorkspace`, `exists`, `kind`); whether that adds up to "attachable" is
+ * the panel's question, and keeping it on this side means the answer cannot
+ * drift from the chip that renders it.
+ *
+ * @param resolution - One `resolveContext` answer.
+ */
+export function projectContextItem(resolution: ContextResolution): ContextItem {
+  const path = resolution.inWorkspace ? resolution.relativePath : resolution.path;
+  const ok =
+    resolution.inWorkspace &&
+    resolution.exists &&
+    (resolution.kind === "file" || resolution.kind === "image");
+  return {
+    id: path,
+    path,
+    label: escapeCodicons(path),
+    bytes: Number.isFinite(resolution.bytes) ? resolution.bytes : 0,
+    kind: resolution.kind,
+    ok,
+    ...(resolution.reason === undefined ? {} : { reason: escapeCodicons(resolution.reason) }),
+  };
+}
 
 /** Commands the webview may ask the host to run. */
 export const WEBVIEW_COMMANDS = ["model", "sessions", "newSession"] as const;
@@ -149,6 +220,17 @@ export type HostMessage =
    * view and posts this, rather than opening a second, native list of its own.
    */
   | { type: "showSessions" }
+  /**
+   * What the composer is holding right now, in full.
+   *
+   * A whole-list message rather than add/remove deltas: the host owns the set
+   * (it is what `send` actually attaches), and a panel that rebuilt it from
+   * deltas could disagree with what the next prompt carries — which is the one
+   * thing a chip row must never do.
+   */
+  | { type: "context"; items: ContextItem[] }
+  /** The answer to one `resolveContext`, echoing the query it answers. */
+  | { type: "contextCandidates"; query: string; items: ContextItem[] }
   | {
       type: "session";
       sessionId?: string;
@@ -178,6 +260,21 @@ export type WebviewMessage =
    * delete control sends exactly this.
    */
   | { type: "deleteSession"; sessionId: string }
+  /**
+   * Ask what a mention would resolve to. The host answers with
+   * `contextCandidates`; nothing is attached and no turn is started.
+   */
+  | { type: "resolveContext"; query: string }
+  /**
+   * Attach one or more paths.
+   *
+   * The **host** resolves and validates them — the panel never reads a file to
+   * build a prompt (RFC 0005 §3) and never decides for itself whether a path is
+   * attachable. The answer is a `context` message carrying the whole set.
+   */
+  | { type: "attach"; paths: string[] }
+  /** Drop one chip, by the `id` the host gave it. */
+  | { type: "detach"; id: string }
   | { type: "copy"; text: string };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -272,7 +369,7 @@ export function projectSessions(headers: readonly SessionHeader[], cwd: string):
  *
  * @param value - Whatever arrived on `onDidReceiveMessage`.
  * @returns A freshly built message, or `undefined` when the value is not one
- *   of the twelve the webview is allowed to send. The `action` case is validated
+ *   of the ones the webview is allowed to send. The `action` case is validated
  *   against {@link CONNECTION_ACTIONS} rather than by shape alone.
  */
 export function parseWebviewMessage(value: unknown): WebviewMessage | undefined {
@@ -349,6 +446,37 @@ export function parseWebviewMessage(value: unknown): WebviewMessage | undefined 
       if (sessionId === "" || sessionId.length > MAX_SESSION_ID_LENGTH) return undefined;
       if (hasControlCharacter(sessionId)) return undefined;
       return { type: "deleteSession", sessionId };
+    }
+    case "resolveContext": {
+      // A path, with the same shape rules `setModel` gets: bounded, and no
+      // control character, because the query is echoed back into a rendered
+      // field and reaches the Output channel on failure. Whether it names
+      // anything is the engine's answer to give, and `resolveContext` gives it.
+      const raw = value.query;
+      if (typeof raw !== "string") return undefined;
+      if (raw.length > MAX_CONTEXT_QUERY_LENGTH) return undefined;
+      if (hasControlCharacter(raw)) return undefined;
+      return { type: "resolveContext", query: raw };
+    }
+    case "attach": {
+      const raw = value.paths;
+      if (!Array.isArray(raw)) return undefined;
+      if (raw.length === 0 || raw.length > MAX_PROMPT_ATTACHMENTS) return undefined;
+      const paths: string[] = [];
+      for (const entry of raw) {
+        if (typeof entry !== "string") return undefined;
+        if (entry === "" || entry.length > MAX_CONTEXT_QUERY_LENGTH) return undefined;
+        if (hasControlCharacter(entry)) return undefined;
+        paths.push(entry);
+      }
+      return { type: "attach", paths };
+    }
+    case "detach": {
+      const raw = value.id;
+      if (typeof raw !== "string") return undefined;
+      if (raw === "" || raw.length > MAX_CONTEXT_QUERY_LENGTH) return undefined;
+      if (hasControlCharacter(raw)) return undefined;
+      return { type: "detach", id: raw };
     }
     case "copy": {
       const text = value.text;

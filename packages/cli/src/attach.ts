@@ -71,6 +71,7 @@ import type {
   AgentEvent,
   PermissionDecision,
   PermissionRequest,
+  PermissionScope,
   SessionHeader,
   TodoItem,
 } from "@arcturn/types";
@@ -83,7 +84,6 @@ import {
   EXIT_PLAN_SUBJECT,
   permissionDialog,
   planDialog,
-  suggestRule,
 } from "./interactive/dialogs.js";
 import {
   Dynamic,
@@ -689,10 +689,14 @@ class AttachApp {
     this.#openPermissions.add(request.id);
     const sessionId = this.#sessionId();
     try {
-      const decision = await this.#decide(request);
+      const answer = await this.#decide(request);
       if (!this.#openPermissions.delete(request.id)) return;
       this.#send("permission decision", () =>
-        this.#client.respondToPermission(sessionId, decision),
+        this.#client.respondToPermission(
+          sessionId,
+          answer.decision,
+          answer.scope === undefined ? {} : { scope: answer.scope },
+        ),
       );
     } catch (error) {
       this.#openPermissions.delete(request.id);
@@ -700,41 +704,65 @@ class AttachApp {
     }
   }
 
-  async #decide(request: PermissionRequest): Promise<PermissionDecision> {
+  /**
+   * One answer to one ask: the decision, plus how long an allow lasts.
+   *
+   * `scope` rides alongside the decision rather than inside it because that is
+   * the wire's own shape — a client says how long, and the engine mints the
+   * rule from the `suggestedRule` it already offered.
+   */
+  async #decide(
+    request: PermissionRequest,
+  ): Promise<{ decision: PermissionDecision; scope?: PermissionScope }> {
     if (request.subject === EXIT_PLAN_SUBJECT) {
       const plan = request.description.replace(/^[^\n]*\n+/, "");
       const choice = await this.#showDialog(planDialog(plan, this.#glyphs));
       if (choice === "once" || choice === "always") {
         if (choice === "always") {
-          // The wire has no `setPermissionMode`, so "approve and auto-accept
-          // edits" cannot be expressed remotely; approve this once and say so.
+          // The wire *does* have `setPermissionMode` now (RFC 0005 §1.2), but
+          // the plan-exit gate is raised mid-run and the engine refuses a mode
+          // change while a turn is in flight — a mode that changed halfway
+          // through one would not govern this very ask, which is already
+          // pending. So the plan is approved once, and the user is told where
+          // the switch does live.
           this.#notice(
             "warn",
-            "Auto-accepting edits cannot be set over the wire; approving this plan once.",
+            "Auto-accepting edits cannot be set while a run is in flight; approving this plan " +
+              "once. Switch the mode between turns to make it stick.",
           );
         }
-        return { requestId: request.id, behavior: "allow" };
+        return { decision: { requestId: request.id, behavior: "allow" } };
       }
       return {
-        requestId: request.id,
-        behavior: "deny",
-        message: "The user wants to keep planning. Revise the plan and present it again.",
+        decision: {
+          requestId: request.id,
+          behavior: "deny",
+          message: "The user wants to keep planning. Revise the plan and present it again.",
+        },
       };
     }
 
-    const choice = await this.#showDialog(permissionDialog(request, this.#width(), this.#glyphs));
-    if (choice === "once") return { requestId: request.id, behavior: "allow" };
+    // "session", not "project": this is a REMOTE client, and RFC 0005 §1.2 is
+    // explicit that nothing persists to disk from one — a rule that outlives
+    // the session is written by a person, in their own config. The dialog is
+    // told the same scope so its "Allow always" row says "this session" rather
+    // than promising a durable rule the engine would refuse to write.
+    const choice = await this.#showDialog(
+      permissionDialog(request, this.#width(), this.#glyphs, "session"),
+    );
+    if (choice === "once") return { decision: { requestId: request.id, behavior: "allow" } };
     if (choice === "always") {
-      return {
-        requestId: request.id,
-        behavior: "allow",
-        persistRule: { ...suggestRule(request), scope: "project" },
-      };
+      // No `persistRule` of our own: the ENGINE mints the rule from the
+      // `suggestedRule` it put on the ask, so a client says how long and never
+      // what. See `ProtocolClient.respondToPermission`.
+      return { decision: { requestId: request.id, behavior: "allow" }, scope: "session" };
     }
     return {
-      requestId: request.id,
-      behavior: "deny",
-      message: "The user denied this action. Do not retry it; choose another approach or ask.",
+      decision: {
+        requestId: request.id,
+        behavior: "deny",
+        message: "The user denied this action. Do not retry it; choose another approach or ask.",
+      },
     };
   }
 

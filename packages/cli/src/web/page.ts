@@ -149,7 +149,7 @@ export function renderWebClientPage(options: WebClientPageOptions): string {
   <p class="gate" id="permission-gate" hidden>Scroll to the end of the request before allowing it.</p>
   <div class="actions">
     <button type="button" class="danger" id="perm-deny">Deny</button>
-    <button type="button" id="perm-always">Allow always</button>
+    <button type="button" id="perm-always">Allow this session</button>
     <button type="button" class="primary" id="perm-allow">Allow once</button>
   </div>
 </section>

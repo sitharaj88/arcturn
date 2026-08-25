@@ -568,7 +568,11 @@ export const APP_SCRIPT = `
     function updateGate() {
       var allowed = model.approvalGate(permissionGate);
       ui.permissionAllow.disabled = !allowed;
-      ui.permissionAlways.disabled = !allowed;
+      // A session-scoped grant is minted by the ENGINE from the request's own
+      // suggestedRule, so a request carrying none is not repeatable and the
+      // button must not be offered — the engine refuses a scope it has no rule
+      // for rather than quietly downgrading it to an allow-once.
+      ui.permissionAlways.disabled = !allowed || !openPermission || !openPermission.suggestedRule;
       ui.permissionGate.hidden = allowed;
     }
 
@@ -717,11 +721,11 @@ export const APP_SCRIPT = `
         decision.message =
           "The user denied this action. Do not retry it; choose another approach or ask.";
       }
-      if (persist) {
-        var rule = model.suggestRule(request);
-        rule.scope = "project";
-        decision.persistRule = rule;
-      }
+      // "session", not "project": this page is a REMOTE client, and RFC 0005
+      // §1.2 is explicit that nothing persists to disk from one. The scope
+      // rides beside the decision and the ENGINE mints the rule from the
+      // suggestedRule it put on the ask — a client says how long, never what.
+      var scope = persist ? "session" : undefined;
       state.permissions = state.permissions.filter(function (open) {
         return open.id !== request.id;
       });
@@ -729,7 +733,9 @@ export const APP_SCRIPT = `
       ui.permission.hidden = true;
       updateScrim();
       requestRender();
-      client.request("permissionDecision", { sessionId: currentSession.sessionId, decision: decision })
+      var params = { sessionId: currentSession.sessionId, decision: decision };
+      if (scope) params.scope = scope;
+      client.request("permissionDecision", params)
         .catch(function (error) { notice("error", "Decision failed: " + describe(error)); });
     }
 

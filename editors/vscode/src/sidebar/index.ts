@@ -22,7 +22,11 @@ import { spawn as nodeSpawn } from "node:child_process";
 import * as vscode from "vscode";
 import type { ResolvedCliLike } from "../serve/args.js";
 import type { SocketFactory } from "../serve/connect.js";
-import { isUnsupportedMethodError, type WebSocketLike } from "../serve/engine.js";
+import {
+  isUnsupportedMethodError,
+  type PromptAttachment,
+  type WebSocketLike,
+} from "../serve/engine.js";
 import { createRedactor } from "../serve/redact.js";
 import type { SpawnLike } from "../serve/supervisor.js";
 import { generateToken } from "../serve/token.js";
@@ -43,7 +47,9 @@ import { escapeCodicons, modelPickItems } from "./picker.js";
 import { CostStatusBar } from "./status-bar.js";
 import { SidebarViewProvider } from "./view.js";
 import {
+  type ContextItem,
   type ModelListStatus,
+  projectContextItem,
   projectModelOption,
   projectSessions,
   type SessionListStatus,
@@ -129,8 +135,24 @@ export function activateSidebar(
     onReady: () => void start(),
     onMessage: (message) => {
       switch (message.type) {
-        case "send":
-          void withEngine((session) => session.controller?.send(message.text));
+        case "send": {
+          // The chips go with the text, and are cleared once they are on the
+          // wire: a chip that survived its own prompt would ride along on the
+          // next one too, which is a file the user attached once being sent
+          // twice.
+          const attachments = pendingAttachments();
+          void withEngine((session) => session.controller?.send(message.text, attachments));
+          clearContext();
+          return;
+        }
+        case "resolveContext":
+          void resolveContext(message.query);
+          return;
+        case "attach":
+          void attachPaths(message.paths);
+          return;
+        case "detach":
+          if (attached.delete(message.id)) publishContext();
           return;
         case "abort":
           void withEngine((session) => session.controller?.abort());
@@ -205,6 +227,102 @@ export function activateSidebar(
    * switch did not take — which it did.
    */
   let selectedModel: string | undefined;
+
+  /**
+   * What the composer is holding, in insertion order, keyed by id.
+   *
+   * Held **here** rather than in the page for one reason: this is what `send`
+   * actually attaches. A panel that kept its own list could show a chip the
+   * next prompt did not carry, or carry one the user had removed — the exact
+   * disagreement between what a user sees and what a model gets that RFC 0005
+   * §1.1 exists to close. The page's chip row is a render of this map and
+   * nothing else.
+   *
+   * Cleared with the connection and with the session: a path resolved against
+   * one workspace means nothing in another.
+   */
+  let attached = new Map<string, ContextItem>();
+
+  /** Push the chip row as it stands. */
+  function publishContext(): void {
+    provider.postContext([...attached.values()]);
+  }
+
+  /** Forget every chip — a new session, or a new engine. */
+  function clearContext(): void {
+    if (attached.size === 0) return;
+    attached = new Map();
+    publishContext();
+  }
+
+  /**
+   * Ask the engine what one query resolves to, and answer the picker.
+   *
+   * Never throws at the page: an engine too old for the verb resolves
+   * `undefined` and the answer is an empty candidate list, which is what lets a
+   * picker degrade to nothing rather than to a list of guesses.
+   */
+  async function resolveContext(query: string): Promise<void> {
+    await withEngine(async (session) => {
+      const resolution = await session.controller?.resolveContext(query);
+      provider.postContextCandidates(
+        query,
+        resolution === undefined ? [] : [projectContextItem(resolution)],
+      );
+    });
+  }
+
+  /**
+   * Resolve and validate paths the page asked to attach, then post the chips.
+   *
+   * The engine resolves; this only records the answer. A path that comes back
+   * unattachable is still added as a chip — with `ok: false` and the engine's
+   * reason — because a drop that silently produced nothing is worse than a chip
+   * that says why it cannot be sent, and because `send` filters on `ok` anyway.
+   */
+  async function attachPaths(paths: readonly string[]): Promise<void> {
+    await withEngine(async (session) => {
+      const controller = session.controller;
+      if (controller === undefined) return;
+      for (const path of paths) {
+        const resolution = await controller.resolveContext(path);
+        if (resolution === undefined) {
+          log("sidebar: this arcturn engine cannot resolve context paths");
+          return;
+        }
+        const item = projectContextItem(resolution);
+        // Re-inserted rather than skipped when already present: attaching the
+        // same path twice should refresh its size, not silently do nothing.
+        attached.delete(item.id);
+        attached.set(item.id, item);
+      }
+      publishContext();
+    });
+  }
+
+  /**
+   * The attachments to send with the next prompt.
+   *
+   * Only the chips that actually resolved. An unattachable one is *shown* so
+   * the user can see why, and dropped here so the engine is not asked to refuse
+   * something the panel already knows it will refuse — the turn would fail as a
+   * whole, taking the user's text with it.
+   */
+  function pendingAttachments(): PromptAttachment[] {
+    const items: PromptAttachment[] = [];
+    for (const item of attached.values()) {
+      if (!item.ok) continue;
+      items.push(
+        item.kind === "image"
+          ? { kind: "image", path: item.path }
+          : {
+              kind: "file",
+              path: item.path,
+            },
+      );
+    }
+    return items;
+  }
 
   function configuredModel(): string | undefined {
     const value = vscode.workspace.getConfiguration("arcturn").get<string>("defaultModel");
@@ -357,6 +475,7 @@ export function activateSidebar(
         return;
       }
       selectedModel = undefined;
+      clearContext();
       repaintTranscript();
       publishSession();
       await publishSessions();
@@ -431,6 +550,7 @@ export function activateSidebar(
   async function startNewSession(session: EngineSession): Promise<void> {
     await session.newSession();
     selectedModel = undefined;
+    clearContext();
     repaintTranscript();
     // A session that exists now was not in the cached list.
     sessions = undefined;
@@ -497,6 +617,10 @@ export function activateSidebar(
             catalog = undefined;
             catalogUnavailable = false;
             selectedModel = undefined;
+            // A path resolved against the last workspace means nothing in this
+            // one, and a chip carried across a reconnect is a chip the engine
+            // never agreed to.
+            clearContext();
             // A new connection is also a new session store to ask. Cleared,
             // not re-fetched: a user who never opens history should not cost a
             // `listSessions` round trip on every reconnect, and a panel that

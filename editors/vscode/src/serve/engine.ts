@@ -21,11 +21,18 @@ export type {
   ProtocolEventListener,
   WebSocketLike,
 } from "@arcturn/protocol";
-export { createProtocolClient, isUnsupportedMethodError } from "@arcturn/protocol";
+export {
+  createProtocolClient,
+  isUnsupportedMethodError,
+  MAX_CONTEXT_QUERY_LENGTH,
+  MAX_PROMPT_ATTACHMENTS,
+} from "@arcturn/protocol";
 export type {
   AgentEvent,
   AgentEventType,
   AssistantMessage,
+  ContextKind,
+  ContextResolution,
   Message,
   ModelCatalog,
   ModelCatalogEntry,
@@ -34,6 +41,7 @@ export type {
   PermissionDecision,
   PermissionRequest,
   PermissionRule,
+  PromptAttachment,
   SessionHeader,
   SessionHistory,
   StreamEvent,

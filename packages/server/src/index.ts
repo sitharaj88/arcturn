@@ -8,6 +8,20 @@
 
 export type { AuthenticateFrame } from "./auth.js";
 export { isAuthenticateFrame, tokensMatch } from "./auth.js";
+export { REMOTE_REACHABLE_BUILT_IN_COMMANDS } from "./built-in-commands.js";
+export type {
+  ContextQueryRequest,
+  ContextRefusal,
+  ContextResolver,
+  PromptContextRequest,
+  ResolvedImage,
+  ResolvedPrompt,
+} from "./prompt-context.js";
+export {
+  ContextRefusedError,
+  PROMPT_ATTACHMENT_MAX_BYTES,
+  visionRefusalMessage,
+} from "./prompt-context.js";
 export type { SessionHistoryLimits } from "./session-history.js";
 export {
   buildSessionHistory,

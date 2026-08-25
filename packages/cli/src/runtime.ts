@@ -453,6 +453,8 @@ export interface ArcturnRuntimeInit {
   router: ModelRouter;
   agents: Map<string, AgentDef>;
   themes: Map<string, TuiTheme>;
+  /** Markdown skills discovered by `loadSkills`, in discovery order. */
+  skills: Skill[];
   systemPrompt: string;
   permissionMode: PermissionMode;
   maxTurns?: number;
@@ -524,6 +526,18 @@ export class ArcturnRuntime {
   readonly agents: Map<string, AgentDef>;
   /** Custom themes loaded from ~/.arcturn/themes and <cwd>/.arcturn/themes. */
   readonly themes: Map<string, TuiTheme>;
+  /**
+   * Markdown skills discovered from ~/.arcturn/skills and <cwd>/.arcturn/skills.
+   *
+   * The **same** collection three consumers read, which is the point of it
+   * being a field rather than a local in `buildRuntime`: the slash commands
+   * registered on `extensions.commands`, the model-invoked `skill` tool, and —
+   * since RFC 0005 §1.3 — the `listCommands` verb a remote client discovers
+   * them through. One discovery, one name-collision resolution, one set of
+   * warnings; a second scan with slightly different rules is exactly how a
+   * panel's `/` menu comes to disagree with the terminal's.
+   */
+  readonly skills: readonly Skill[];
   /** Non-fatal problems collected during assembly. */
   readonly warnings: string[];
 
@@ -599,6 +613,7 @@ export class ArcturnRuntime {
     this.router = init.router;
     this.agents = init.agents;
     this.themes = init.themes;
+    this.skills = init.skills;
     this.#systemPrompt = init.systemPrompt;
     this.#initialMode = init.permissionMode;
     this.#maxTurns = init.maxTurns;
@@ -1973,6 +1988,7 @@ export async function buildRuntime(options: BuildRuntimeOptions = {}): Promise<A
     router,
     agents,
     themes,
+    skills,
     systemPrompt: buildSystemPrompt(promptContext),
     permissionMode,
     // `--max-turns` wins over the config key, which wins over core's default.

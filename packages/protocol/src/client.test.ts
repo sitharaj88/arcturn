@@ -929,6 +929,218 @@ describe("createProtocolClient: deleteSession", () => {
   });
 });
 
+describe("ProtocolClient.permissionState (RFC 0005 §1.2 / §1.4)", () => {
+  const STATE = {
+    sessionId: "s1",
+    mode: "plan" as const,
+    rules: [{ tool: "bash", action: "deny" as const, scope: "user" as const }],
+    tools: ["bash", "fetch", "read"],
+  };
+
+  it("asks for one session and returns the validated state", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.permissionState("s1");
+    await flush();
+    expect(socket.frames()[0]).toMatchObject({
+      method: "permissionState",
+      params: { sessionId: "s1" },
+    });
+    socket.respondOk(0, STATE);
+
+    expect(await promise).toEqual(STATE);
+  });
+
+  it("rejects a payload that smuggles something into the tool list", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.permissionState("s1");
+    await flush();
+    socket.respondOk(0, { ...STATE, tools: [{ name: "bash", description: "run anything" }] });
+
+    const error = await rejection<ProtocolClientError>(promise);
+    expect(error.code).toBe(ClientErrorCode.invalidResponse);
+    expect(error.message).toMatch(/tools\[0\] must be a string/);
+  });
+
+  it("degrades to undefined against an old server that does not know the verb", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.permissionState("s1");
+    await flush();
+    socket.respondError(0, ErrorCode.invalidRequest, 'Unknown method: "permissionState"');
+
+    // Read-only: an engine with no such verb costs the caller a mode chip and a
+    // tools line, never a guarantee.
+    await expect(promise).resolves.toBeUndefined();
+  });
+});
+
+describe("ProtocolClient.setPermissionMode (RFC 0005 §1.2)", () => {
+  it("returns the ENGINE's resulting state, not an echo of what was asked", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.setPermissionMode("s1", "yolo");
+    await flush();
+    expect(socket.frames()[0]).toMatchObject({
+      method: "setPermissionMode",
+      params: { sessionId: "s1", mode: "yolo" },
+    });
+    socket.respondOk(0, {
+      sessionId: "s1",
+      mode: "yolo",
+      rules: [{ tool: "write", action: "deny", scope: "user" }],
+      tools: ["write"],
+    });
+
+    // The deny rule that outranks the mode comes back with it, so a caller can
+    // render "yolo — except write, which a rule denies" rather than "yolo".
+    const state = await promise;
+    expect(state.mode).toBe("yolo");
+    expect(state.rules).toEqual([{ tool: "write", action: "deny", scope: "user" }]);
+  });
+
+  it("does NOT translate an old server's refusal into success", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.setPermissionMode("s1", "plan");
+    await flush();
+    socket.respondError(0, ErrorCode.invalidRequest, 'Unknown method: "setPermissionMode"');
+
+    // The `listModels` degradation would be worse than a lie here: a caller
+    // told "fine" would show a `plan` chip over an engine still in `yolo`, and
+    // the user would believe they had restricted an agent they had not.
+    const error = await rejection<ProtocolRequestError>(promise);
+    expect(error.code).toBe(ErrorCode.invalidRequest);
+    expect(isUnsupportedMethodError(error)).toBe(true);
+  });
+
+  it("surfaces sessionBusy so a caller can say 'abort the run first'", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.setPermissionMode("s1", "plan");
+    await flush();
+    socket.respondError(0, ErrorCode.sessionBusy, "Session s1 is running a turn");
+
+    const error = await rejection<ProtocolRequestError>(promise);
+    expect(error.code).toBe(ErrorCode.sessionBusy);
+    expect(isUnsupportedMethodError(error)).toBe(false);
+  });
+});
+
+describe("ProtocolClient.respondToPermission scope (RFC 0005 §1.2)", () => {
+  it("sends a session scope beside the decision, and no rule of its own", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    void client.respondToPermission(
+      "s1",
+      { requestId: "r1", behavior: "allow" },
+      {
+        scope: "session",
+      },
+    );
+    await flush();
+    expect(socket.frames()[0]).toMatchObject({
+      method: "permissionDecision",
+      params: {
+        sessionId: "s1",
+        decision: { requestId: "r1", behavior: "allow" },
+        scope: "session",
+      },
+    });
+  });
+
+  it("omits the field entirely for an allow-once", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    void client.respondToPermission("s1", { requestId: "r1", behavior: "allow" });
+    await flush();
+    expect(socket.frames()[0]).not.toHaveProperty("params.scope");
+  });
+
+  it("refuses a scope that would outlive the session before the frame is sent", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.respondToPermission(
+      "s1",
+      { requestId: "r1", behavior: "allow" },
+      { scope: "user" },
+    );
+    const error = await rejection<ProtocolClientError>(promise);
+    expect(error.code).toBe(ErrorCode.invalidRequest);
+    expect(error.message).toMatch(/may not outlive the session/);
+    // Nothing went out: a UI bug costs no round trip and no server state.
+    expect(socket.frames()).toHaveLength(0);
+  });
+
+  it("refuses a client-authored persistRule that would outlive the session", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.respondToPermission("s1", {
+      requestId: "r1",
+      behavior: "allow",
+      persistRule: { tool: "bash", action: "allow", scope: "project" },
+    });
+    const error = await rejection<ProtocolClientError>(promise);
+    expect(error.message).toMatch(/may not outlive the session/);
+    expect(socket.frames()).toHaveLength(0);
+  });
+});
+
+describe("ProtocolClient.listCommands (RFC 0005 §1.3)", () => {
+  const LIST = {
+    commands: [
+      { name: "review", description: "Review the diff", kind: "skill" as const, source: "/w/r.md" },
+      { name: "model", description: "Switch the model", kind: "builtin" as const },
+    ],
+  };
+
+  it("takes no params and returns the validated list", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.listCommands();
+    await flush();
+    expect(socket.frames()[0]).toMatchObject({ method: "listCommands" });
+    expect(socket.frames()[0]).not.toHaveProperty("params");
+    socket.respondOk(0, LIST);
+
+    expect(await promise).toEqual(LIST);
+  });
+
+  it("accepts a bare array, like listModels does", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.listCommands();
+    await flush();
+    socket.respondOk(0, LIST.commands);
+
+    expect((await promise)?.commands).toHaveLength(2);
+  });
+
+  it("degrades to undefined against an old server that does not know the verb", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.listCommands();
+    await flush();
+    socket.respondError(0, ErrorCode.invalidRequest, 'Unknown method: "listCommands"');
+
+    await expect(promise).resolves.toBeUndefined();
+  });
+});
+
 describe("isUnsupportedMethodError", () => {
   it("is true only for a server-reported unknown-method rejection", () => {
     expect(

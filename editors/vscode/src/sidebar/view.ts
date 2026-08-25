@@ -21,6 +21,7 @@ import type { ConnectionReport } from "./connection-card.js";
 import { createNonce, renderSidebarHtml } from "./webview-html.js";
 import {
   type ConnectionStatus,
+  type ContextItem,
   type HostMessage,
   type ModelListStatus,
   parseWebviewMessage,
@@ -85,6 +86,8 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
   #lastModels: ModelListView | undefined;
   #lastSession: SessionSummary | undefined;
   #lastSessions: SessionListView | undefined;
+  /** What the composer is holding, replayed on reload. See {@link SidebarViewProvider.postContext}. */
+  #lastContext: ContextItem[] | undefined;
   /**
    * Whether the page has announced itself since the current document loaded.
    *
@@ -182,6 +185,30 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
     this.#post(modelsMessage(view));
   }
 
+  /**
+   * Push what the composer is holding.
+   *
+   * Remembered and replayed for the reason every other list here is:
+   * `retainContextWhenHidden` is off, so a panel that is hidden and revealed
+   * reloads — and chips that vanished while the host was still going to attach
+   * them on the next `send` would be the panel and the prompt disagreeing.
+   */
+  postContext(items: ContextItem[]): void {
+    this.#lastContext = items;
+    this.#post({ type: "context", items });
+  }
+
+  /**
+   * Push one `resolveContext` answer.
+   *
+   * Deliberately *not* remembered: a picker's candidate list is a response to
+   * something the user is typing right now, and replaying a stale one into a
+   * reloaded page would re-open a picker nobody asked for.
+   */
+  postContextCandidates(query: string, items: ContextItem[]): void {
+    this.#post({ type: "contextCandidates", query, items });
+  }
+
   /** Push the session the panel is attached to. */
   postSession(session: SessionSummary): void {
     this.#lastSession = session;
@@ -243,6 +270,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
     if (this.#lastModels !== undefined) this.#post(modelsMessage(this.#lastModels));
     if (this.#lastSession !== undefined) this.#post(sessionMessage(this.#lastSession));
     if (this.#lastSessions !== undefined) this.#post(sessionsMessage(this.#lastSessions));
+    if (this.#lastContext !== undefined) this.#post({ type: "context", items: this.#lastContext });
     // Last, so the view it opens is already holding the list it will show. One
     // shot: a reload the user did not ask for must not re-open the view.
     if (this.#pendingShowSessions) {

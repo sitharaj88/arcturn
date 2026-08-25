@@ -279,15 +279,67 @@ export function createFileMentionSource(
 /* Mention expansion                                                           */
 /* -------------------------------------------------------------------------- */
 
+/** One mention the engine would not read, and why. */
+export interface MentionRefusal {
+  /** The mention exactly as it was written, `@` included. */
+  what: string;
+  /** One sentence a person can act on. */
+  reason: string;
+}
+
 /** Result of {@link expandMentions}. */
 export interface ExpandedMentions {
   /** The original text, with text-mention content appended at the end. */
   text: string;
   /** Image blocks for mentioned image files, ready to attach to the prompt. */
   images: ImageContent[];
+  /**
+   * Workspace-relative paths of {@link ExpandedMentions.images}, index-aligned.
+   *
+   * A parallel array rather than a field on `ImageContent`, because that type
+   * is what goes to a provider and must carry nothing a provider does not
+   * define. It exists so a caller that has to *refuse* an image — a served
+   * session on a text-only model — can name the file rather than say "an
+   * image": see `SessionHost.prompt`.
+   */
+  imagePaths: string[];
+  /**
+   * Mentions that resolve outside the workspace. Never read.
+   *
+   * Reported rather than silently skipped, which is what this function did
+   * before RFC 0005: the TUI could get away with it because the user could see
+   * their own filesystem, but over `arcturn serve` a mention that quietly did
+   * nothing was indistinguishable from one that worked. The refusal is not
+   * fatal — the token stays in the text — it is just no longer invisible.
+   */
+  refusals: MentionRefusal[];
 }
 
-const IMAGE_MIME_TYPES: Record<string, string> = {
+/** What {@link readContextFile} made of one already-confined path. */
+export type ContextFileContent =
+  /** Text to append to a prompt: a fenced block, headed by `heading`. */
+  | { kind: "text"; text: string; truncated: boolean }
+  /** A vision block. */
+  | { kind: "image"; content: ImageContent }
+  /**
+   * Past the inline ceiling; nothing was read. `text` is the note a mention
+   * appends instead, and `bytes`/`limit` are what a caller that must refuse
+   * outright (an attachment) composes its own message from.
+   */
+  | { kind: "tooLarge"; text: string; bytes: number; limit: number }
+  /** A directory, a socket, or something that vanished between checks. */
+  | { kind: "notAFile" };
+
+/**
+ * File extensions this engine turns into vision blocks, and the media type each
+ * becomes.
+ *
+ * Exported because it is the *definition* of "this is an image" for every
+ * context path in this codebase: `readContextFile` decides with it, and
+ * `context.ts` answers `resolveContext`'s `kind` with it. A second copy would
+ * let a picker call a file a file that a prompt then sends as a picture.
+ */
+export const IMAGE_MIME_TYPES: Record<string, string> = {
   ".png": "image/png",
   ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg",
@@ -353,34 +405,76 @@ function findMentionTokens(text: string): MentionToken[] {
 }
 
 /**
- * Resolve `rawPath` against `root`, rejecting anything that escapes it
- * (absolute paths elsewhere, `../` traversal, symlink-free path tricks).
+ * Where a client-supplied path landed, relative to the workspace it must stay
+ * inside.
  *
- * @param root - Absolute, resolved workspace root.
- * @param rawPath - Path as typed in the mention.
- * @returns The resolved absolute path, or `null` when it falls outside `root`.
+ * Three outcomes rather than a nullable path, because "you may not read this"
+ * and "there is nothing here" are different answers and a caller that conflates
+ * them tells a user something false — a file picker reporting a traversal
+ * attempt as "no such file", or an attachment refusal that reads like a typo.
  */
-function resolveInside(root: string, rawPath: string): string | null {
-  const resolved = resolve(root, rawPath);
-  if (resolved === root || resolved.startsWith(root + sep)) return resolved;
-  return null;
-}
+export type WorkspacePathVerdict =
+  /** Confined and real. `realPath` is symlink-resolved; read *that*. */
+  | { outcome: "inside"; path: string; realPath: string; relativePath: string }
+  /**
+   * Escapes the workspace, lexically or through a symlink. **Never read**, and
+   * never even stat'ed — everything here is string arithmetic over what the
+   * caller supplied.
+   */
+  | { outcome: "outside"; path: string; reason: string }
+  /** Inside the workspace, but nothing is there (or it could not be resolved). */
+  | { outcome: "missing"; path: string; relativePath: string; reason: string };
 
 /**
- * Symlink-aware confinement: the lexical check above stops `../` tricks, but
- * a symlink *inside* the workspace can still point outside it. The final
- * gate compares real paths, so a mention never reads through such a link.
+ * The one workspace-confinement gate every context path in this codebase goes
+ * through — `@`-mentions, `prompt` attachments, and `resolveContext`.
  *
- * @returns The real path when it stays under `root`, else `null`.
+ * Deliberately one function. RFC 0005 §1.1 requires the served path to inherit
+ * "the strictest existing rule rather than a new one", and the way a rule stops
+ * being the strictest is that somebody writes a second one that agrees with it
+ * until it does not. This *is* the rule the TUI has always applied; the served
+ * path now calls it rather than approximating it.
+ *
+ * Two gates, and both are needed:
+ *
+ * 1. **Lexical.** `resolve` collapses `../` and absolutizes, so a mention that
+ *    names a path outside the root is refused before any syscall.
+ * 2. **Real.** A symlink *inside* the workspace can still point outside it, so
+ *    the final check compares symlink-resolved paths. A mention never reads
+ *    through such a link (see `security-review.test.ts`).
+ *
+ * @param root - Workspace root; resolved here, so a relative one is fine.
+ * @param rawPath - Path as the client wrote it.
  */
-async function realInside(root: string, resolved: string): Promise<string | null> {
-  try {
-    const [realRoot, realTarget] = await Promise.all([realpath(root), realpath(resolved)]);
-    if (realTarget === realRoot || realTarget.startsWith(realRoot + sep)) return realTarget;
-    return null;
-  } catch {
-    return null;
+export async function confineToWorkspace(
+  root: string,
+  rawPath: string,
+): Promise<WorkspacePathVerdict> {
+  const resolvedRoot = resolve(root);
+  const resolved = resolve(resolvedRoot, rawPath);
+  if (resolved !== resolvedRoot && !resolved.startsWith(resolvedRoot + sep)) {
+    return {
+      outcome: "outside",
+      path: resolved,
+      reason: "resolves outside the workspace, so it was not read",
+    };
   }
+  const relativePath = relative(resolvedRoot, resolved).split(sep).join("/");
+  let realRoot: string;
+  let realTarget: string;
+  try {
+    [realRoot, realTarget] = await Promise.all([realpath(resolvedRoot), realpath(resolved)]);
+  } catch {
+    return { outcome: "missing", path: resolved, relativePath, reason: "does not exist" };
+  }
+  if (realTarget !== realRoot && !realTarget.startsWith(realRoot + sep)) {
+    return {
+      outcome: "outside",
+      path: resolved,
+      reason: "is a symlink leading outside the workspace, so it was not read",
+    };
+  }
+  return { outcome: "inside", path: resolved, realPath: realTarget, relativePath };
 }
 
 /** Truncate text to {@link MAX_TEXT_LINES} lines and {@link MAX_TEXT_BYTES} bytes. */
@@ -397,6 +491,64 @@ function truncateText(raw: string): { content: string; truncated: boolean } {
     truncated = true;
   }
   return { content, truncated };
+}
+
+/**
+ * Turn one confined path into the content a prompt carries.
+ *
+ * The single place a context file is read in this codebase — mentions and
+ * `prompt` attachments both come through here, so the caps below (5 MB image,
+ * 2 MB file, 2000 lines / 200 KB inlined) are one set of numbers rather than
+ * two that drift. The caller has already run {@link confineToWorkspace}; this
+ * function never resolves a path and never checks one.
+ *
+ * @param realPath - The symlink-resolved path from a `"inside"` verdict.
+ * @param heading - What to call the file in the emitted block, e.g.
+ *   `"@src/auth.ts"` for a mention or `"src/auth.ts (attached)"` for an
+ *   attachment. This is what makes a context block "say what it is".
+ */
+export async function readContextFile(
+  realPath: string,
+  heading: string,
+): Promise<ContextFileContent> {
+  let info: Awaited<ReturnType<typeof stat>>;
+  try {
+    info = await stat(realPath);
+  } catch {
+    return { kind: "notAFile" };
+  }
+  if (!info.isFile()) return { kind: "notAFile" };
+
+  const mimeType = IMAGE_MIME_TYPES[extname(realPath).toLowerCase()];
+  if (mimeType) {
+    if (info.size > MAX_IMAGE_BYTES) {
+      return {
+        kind: "tooLarge",
+        text: `\n\n${heading} (too large)`,
+        bytes: info.size,
+        limit: MAX_IMAGE_BYTES,
+      };
+    }
+    const data = await readFile(realPath);
+    return { kind: "image", content: { type: "image", data: data.toString("base64"), mimeType } };
+  }
+
+  if (info.size > MAX_TEXT_FILE_BYTES) {
+    return {
+      kind: "tooLarge",
+      text: `\n\n${heading} (too large to inline)`,
+      bytes: info.size,
+      limit: MAX_TEXT_FILE_BYTES,
+    };
+  }
+  const raw = await readFile(realPath, "utf8");
+  const { content, truncated } = truncateText(raw);
+  const marker = truncated ? "\n… truncated (2000 line / 200KB cap)" : "";
+  return {
+    kind: "text",
+    text: `\n\n${heading}:\n\`\`\`\n${content}${marker}\n\`\`\``,
+    truncated,
+  };
 }
 
 /**
@@ -425,44 +577,30 @@ export async function expandMentions(text: string, cwd: string): Promise<Expande
   const root = resolve(cwd);
   const tokens = findMentionTokens(text);
   const images: ImageContent[] = [];
+  const imagePaths: string[] = [];
+  const refusals: MentionRefusal[] = [];
   const appended: string[] = [];
 
   for (const token of tokens) {
-    const lexical = resolveInside(root, token.path);
-    if (!lexical) continue;
-    const resolved = await realInside(root, lexical);
-    if (!resolved) continue;
-
-    let info: Awaited<ReturnType<typeof stat>>;
-    try {
-      info = await stat(resolved);
-    } catch {
+    const verdict = await confineToWorkspace(root, token.path);
+    if (verdict.outcome === "outside") {
+      // Reported, not read. A `@here` in prose that happens not to exist stays
+      // silent (the `"missing"` branch below); only an actual escape is worth
+      // a sentence, so this stays quiet for ordinary typing.
+      refusals.push({ what: `@${token.path}`, reason: verdict.reason });
       continue;
     }
-    if (!info.isFile()) continue;
+    if (verdict.outcome === "missing") continue;
 
-    const relPath = relative(root, lexical).split(sep).join("/");
-    const mimeType = IMAGE_MIME_TYPES[extname(resolved).toLowerCase()];
-
-    if (mimeType) {
-      if (info.size > MAX_IMAGE_BYTES) {
-        appended.push(`\n\n@${relPath} (too large)`);
-        continue;
-      }
-      const data = await readFile(resolved);
-      images.push({ type: "image", data: data.toString("base64"), mimeType });
+    const content = await readContextFile(verdict.realPath, `@${verdict.relativePath}`);
+    if (content.kind === "notAFile") continue;
+    if (content.kind === "image") {
+      images.push(content.content);
+      imagePaths.push(verdict.relativePath);
       continue;
     }
-
-    if (info.size > MAX_TEXT_FILE_BYTES) {
-      appended.push(`\n\n@${relPath} (too large to inline)`);
-      continue;
-    }
-    const raw = await readFile(resolved, "utf8");
-    const { content, truncated } = truncateText(raw);
-    const marker = truncated ? "\n… truncated (2000 line / 200KB cap)" : "";
-    appended.push(`\n\n@${relPath}:\n\`\`\`\n${content}${marker}\n\`\`\``);
+    appended.push(content.text);
   }
 
-  return { text: text + appended.join(""), images };
+  return { text: text + appended.join(""), images, imagePaths, refusals };
 }

@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+  MAX_CONTEXT_QUERY_LENGTH,
+  MAX_PROMPT_ATTACHMENTS,
   validateClientRequest,
+  validateContextResolution,
   validateModelCatalog,
   validatePermissionDecision,
   validatePermissionRule,
+  validatePromptAttachment,
   validateServerMessage,
   validateSessionHeader,
   validateSessionHistory,
@@ -42,7 +46,9 @@ describe("validateClientRequest: accepts every method", () => {
           decision: {
             requestId: "r1",
             behavior: "deny",
-            persistRule: { tool: "bash", specifier: "git *", action: "allow", scope: "project" },
+            // "session" is the only scope this verb accepts; see the
+            // "refuses a rule that would outlive the session" cases below.
+            persistRule: { tool: "bash", specifier: "git *", action: "allow", scope: "session" },
             message: "no",
           },
         },
@@ -52,6 +58,24 @@ describe("validateClientRequest: accepts every method", () => {
     ["listModels", { id: "1", method: "listModels" }],
     ["sessionHistory", { id: "1", method: "sessionHistory", params: { sessionId: "s1" } }],
     ["deleteSession", { id: "1", method: "deleteSession", params: { sessionId: "s1" } }],
+    [
+      "permissionDecision with a session scope",
+      {
+        id: "1",
+        method: "permissionDecision",
+        params: {
+          sessionId: "s1",
+          decision: { requestId: "r1", behavior: "allow" },
+          scope: "session",
+        },
+      },
+    ],
+    ["permissionState", { id: "1", method: "permissionState", params: { sessionId: "s1" } }],
+    [
+      "setPermissionMode",
+      { id: "1", method: "setPermissionMode", params: { sessionId: "s1", mode: "plan" } },
+    ],
+    ["listCommands", { id: "1", method: "listCommands" }],
   ];
 
   it.each(cases)("%s", (_name, value) => {
@@ -126,6 +150,79 @@ describe("validateClientRequest: rejects corrupt shapes", () => {
       "setModel missing model",
       { id: "1", method: "setModel", params: { sessionId: "s1" } },
       /model must be a string/,
+    ],
+    // RFC 0005 §1.2: nothing persists to disk from a remote client. The wire
+    // is where that stops being a sentence and becomes a refusal, and it stops
+    // both spellings — the explicit scope, and a client-authored rule.
+    [
+      "permissionDecision with a project scope",
+      {
+        id: "1",
+        method: "permissionDecision",
+        params: {
+          sessionId: "s1",
+          decision: { requestId: "r1", behavior: "allow" },
+          scope: "project",
+        },
+      },
+      /may not outlive the session/,
+    ],
+    [
+      "permissionDecision with a user scope",
+      {
+        id: "1",
+        method: "permissionDecision",
+        params: {
+          sessionId: "s1",
+          decision: { requestId: "r1", behavior: "allow" },
+          scope: "user",
+        },
+      },
+      /may not outlive the session/,
+    ],
+    [
+      "permissionDecision with an unknown scope",
+      {
+        id: "1",
+        method: "permissionDecision",
+        params: {
+          sessionId: "s1",
+          decision: { requestId: "r1", behavior: "allow" },
+          scope: "forever",
+        },
+      },
+      /params.scope must be one of/,
+    ],
+    [
+      "permissionDecision with a project-scoped persistRule",
+      {
+        id: "1",
+        method: "permissionDecision",
+        params: {
+          sessionId: "s1",
+          decision: {
+            requestId: "r1",
+            behavior: "allow",
+            persistRule: { tool: "bash", action: "allow", scope: "project" },
+          },
+        },
+      },
+      /may not outlive the session/,
+    ],
+    [
+      "permissionState missing sessionId",
+      { id: "1", method: "permissionState", params: {} },
+      /sessionId must be a string/,
+    ],
+    [
+      "setPermissionMode with a mode that is not one",
+      { id: "1", method: "setPermissionMode", params: { sessionId: "s1", mode: "godmode" } },
+      /mode must be one of/,
+    ],
+    [
+      "setPermissionMode missing params",
+      { id: "1", method: "setPermissionMode" },
+      /requires an object "params"/,
     ],
   ];
 
@@ -379,5 +476,198 @@ describe("validateSessionHistory", () => {
     ["droppedEvents without truncated", { ...OK, droppedEvents: 3 }],
   ])("rejects %s", (_name, value) => {
     expect(validateSessionHistory(value).ok).toBe(false);
+  });
+});
+
+describe("RFC 0005 §1.1 — prompt attachments and resolveContext", () => {
+  describe("validatePromptAttachment", () => {
+    it("accepts a file named by path", () => {
+      const result = validatePromptAttachment({ kind: "file", path: "src/auth.ts" });
+      expect(result).toEqual({ ok: true, value: { kind: "file", path: "src/auth.ts" } });
+    });
+
+    it("accepts an image named by path", () => {
+      const result = validatePromptAttachment({ kind: "image", path: "shot.png" });
+      expect(result).toEqual({ ok: true, value: { kind: "image", path: "shot.png" } });
+    });
+
+    it("accepts an inline image with an allowed media type", () => {
+      const result = validatePromptAttachment({
+        kind: "image",
+        data: "AAAA",
+        mimeType: "image/png",
+      });
+      expect(result).toEqual({
+        ok: true,
+        value: { kind: "image", data: "AAAA", mimeType: "image/png" },
+      });
+    });
+
+    it("refuses inline data on a FILE attachment", () => {
+      // RFC 0005 §3: a file that exists on disk is read by the engine, from its
+      // path, so the read happens where the permission engine can see it.
+      // Accepting bytes for one would be the single hole in that rule.
+      const result = validatePromptAttachment({
+        kind: "file",
+        data: "AAAA",
+        mimeType: "image/png",
+      });
+      expect(result).toMatchObject({ ok: false });
+      if (!result.ok) expect(result.error).toMatch(/kind "image" only/);
+    });
+
+    it("refuses an attachment carrying both a path and inline data", () => {
+      const result = validatePromptAttachment({
+        kind: "image",
+        path: "a.png",
+        data: "AAAA",
+        mimeType: "image/png",
+      });
+      expect(result).toMatchObject({ ok: false });
+      if (!result.ok) expect(result.error).toMatch(/exactly one/);
+    });
+
+    it("refuses a media type the engine cannot send", () => {
+      const result = validatePromptAttachment({
+        kind: "image",
+        data: "AAAA",
+        mimeType: "image/tiff",
+      });
+      expect(result).toMatchObject({ ok: false });
+    });
+
+    it("refuses an unknown kind, an empty path, and a path past the ceiling", () => {
+      expect(validatePromptAttachment({ kind: "video", path: "a.mp4" })).toMatchObject({
+        ok: false,
+      });
+      expect(validatePromptAttachment({ kind: "file", path: "" })).toMatchObject({ ok: false });
+      expect(
+        validatePromptAttachment({ kind: "file", path: "a".repeat(MAX_CONTEXT_QUERY_LENGTH + 1) }),
+      ).toMatchObject({ ok: false });
+    });
+  });
+
+  describe("validateClientRequest: prompt with attachments", () => {
+    it("carries a valid attachment list through", () => {
+      const result = validateClientRequest({
+        id: "1",
+        method: "prompt",
+        params: { sessionId: "s", text: "hi", attachments: [{ kind: "file", path: "a.ts" }] },
+      });
+      expect(result).toMatchObject({
+        ok: true,
+        request: { params: { attachments: [{ kind: "file", path: "a.ts" }] } },
+      });
+    });
+
+    it("keeps an absent attachments field absent rather than defaulting it", () => {
+      // `undefined` means "this client said nothing about attachments"; `[]`
+      // means "it meant none". Only the first is a shape an older client sends.
+      const result = validateClientRequest({
+        id: "1",
+        method: "prompt",
+        params: { sessionId: "s", text: "hi" },
+      });
+      expect(result.ok).toBe(true);
+      if (result.ok) expect("attachments" in result.request.params).toBe(false);
+    });
+
+    it("refuses a non-array, an over-long list, and one bad element", () => {
+      expect(
+        validateClientRequest({
+          id: "1",
+          method: "prompt",
+          params: { sessionId: "s", text: "hi", attachments: "a.ts" },
+        }),
+      ).toMatchObject({ ok: false });
+      expect(
+        validateClientRequest({
+          id: "1",
+          method: "prompt",
+          params: {
+            sessionId: "s",
+            text: "hi",
+            attachments: Array.from({ length: MAX_PROMPT_ATTACHMENTS + 1 }, () => ({
+              kind: "file",
+              path: "a.ts",
+            })),
+          },
+        }),
+      ).toMatchObject({ ok: false });
+      const bad = validateClientRequest({
+        id: "1",
+        method: "prompt",
+        params: { sessionId: "s", text: "hi", attachments: [{ kind: "file" }] },
+      });
+      expect(bad).toMatchObject({ ok: false });
+      if (!bad.ok) expect(bad.error).toMatch(/attachments\[0\]/);
+    });
+  });
+
+  describe("validateClientRequest: resolveContext", () => {
+    it("accepts a session-scoped query", () => {
+      expect(
+        validateClientRequest({
+          id: "1",
+          method: "resolveContext",
+          params: { sessionId: "s", query: "src/a.ts" },
+        }),
+      ).toEqual({
+        ok: true,
+        request: {
+          id: "1",
+          method: "resolveContext",
+          params: { sessionId: "s", query: "src/a.ts" },
+        },
+      });
+    });
+
+    it("refuses a missing query and one past the path ceiling", () => {
+      expect(
+        validateClientRequest({ id: "1", method: "resolveContext", params: { sessionId: "s" } }),
+      ).toMatchObject({ ok: false });
+      expect(
+        validateClientRequest({
+          id: "1",
+          method: "resolveContext",
+          params: { sessionId: "s", query: "a".repeat(MAX_CONTEXT_QUERY_LENGTH + 1) },
+        }),
+      ).toMatchObject({ ok: false });
+    });
+  });
+
+  describe("validateContextResolution", () => {
+    const good = {
+      query: "a.ts",
+      path: "/ws/a.ts",
+      relativePath: "a.ts",
+      inWorkspace: true,
+      exists: true,
+      bytes: 12,
+      kind: "file",
+    };
+
+    it("accepts a well-formed resolution and drops anything extra", () => {
+      const result = validateContextResolution({ ...good, secret: "leaked" });
+      expect(result).toEqual({ ok: true, value: good });
+    });
+
+    it("refuses a resolution claiming an out-of-workspace path exists", () => {
+      // The engine never looks at one, so `true` here would be a fact it never
+      // established — and a client would render it as one.
+      expect(
+        validateContextResolution({ ...good, inWorkspace: false, exists: true }),
+      ).toMatchObject({ ok: false });
+    });
+
+    it("refuses a size for something that does not exist", () => {
+      expect(validateContextResolution({ ...good, exists: false, bytes: 12 })).toMatchObject({
+        ok: false,
+      });
+    });
+
+    it("refuses an unknown kind", () => {
+      expect(validateContextResolution({ ...good, kind: "socket" })).toMatchObject({ ok: false });
+    });
   });
 });

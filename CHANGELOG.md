@@ -10,8 +10,111 @@ CLI, the SDK, or the wire protocol.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`@`-mentions were never expanded on the serve path.** `expandMentions` ran
+  in `--print` and the TUI and nowhere else, so a prompt arriving over
+  `arcturn serve` was handed to the model verbatim: `@src/auth.ts` reached it as
+  six words about a file rather than the file. Every remote client — the VS Code
+  panel, `arcturn attach`, the browser page — was silently degraded, and nothing
+  caught it because the returned promise resolved and the run completed; only
+  the *content* was missing. The served agent now expands mentions against the
+  session's `cwd` by calling the same function the TUI calls, not a second one.
+  A mention that resolves outside the workspace — lexically, or through a
+  symlink that leaves it — is refused rather than read, and the server now emits
+  a `notice` saying so, because over the wire a mention that quietly did nothing
+  was indistinguishable from one that worked.
+
 ### Added
 
+- **Attachments and `resolveContext` on the wire protocol.** `prompt` takes an
+  optional `attachments` array: a `file` becomes a context block headed with its
+  path, an `image` becomes a vision block. A `file` is always named by path and
+  never carries bytes — a file read by a client is a file the permission engine
+  never saw — while inline data is accepted for an `image`, and only an image,
+  because a pasted screenshot has no path and was never a workspace file. Every
+  path attachment goes through the same workspace confinement a mention does,
+  but a refused attachment is fatal rather than advisory: the client named that
+  file, so running the turn without it would be the silent drop the feature
+  exists to prevent. Total attachment bytes are capped at 1 MiB — the wire's own
+  backpressure threshold, a quarter of the frame size above which `ws` closes
+  the connection, and the same number `sessionHistory` budgets against.
+
+  A prompt carrying an **image for a model without vision** is refused with the
+  reason **before the turn is spent**, checked server-side at prompt time rather
+  than trusted to a client that may be hostile, may be old, or may simply be
+  looking at a stale catalog. An image *mention* on such a model degrades with a
+  notice instead, exactly as the TUI has always degraded one.
+
+  `resolveContext` answers what a mention would resolve to — path, byte count,
+  whether it exists, whether it is inside the workspace — so a file picker can
+  be honest rather than hopeful. It is read-only, and a query that fails
+  confinement is answered without touching the filesystem at all, so it cannot
+  become an oracle for the paths confinement exists to hide.
+
+  `PROTOCOL_VERSION` stays at `1`. `resolveContext` degrades like `listModels`:
+  an older server's `invalidRequest` becomes `undefined`, which is safe because
+  the verb only reads. `prompt`'s `attachments` gets `deleteSession`'s treatment
+  instead — an older server would recognise `prompt`, drop the field, and answer
+  `ok`, spending the turn and telling the client everything was fine — so
+  `ProtocolClient.prompt()` probes `resolveContext` once per session and refuses
+  locally rather than sending attachments that would be dropped.
+
+- **Permission state and permission mode on the wire protocol.**
+  `permissionState` answers with the session's mode, the rules in force, and
+  **the names of the tools the session holds** — the last being the whole of
+  RFC 0005 §1.4: there is no verb for "can this engine reach the web", because
+  the question is really "is `fetch` in the tool set", and a panel that renders
+  a browse button without checking is implying a capability it never confirmed.
+  Names only, never a tool's description or schema, and the full set the session
+  was built with rather than the subset progressive disclosure is showing the
+  model this turn.
+
+  `setPermissionMode` switches between `default`, `acceptEdits`, `plan` and
+  `yolo`, and answers with the resulting state so a client reads what the engine
+  *is* rather than assuming it got what it asked for. **A mode is a request, not
+  a grant:** a stored `deny` rule still wins over `yolo` set from here, exactly
+  as it does for a local user, and this verb never edits a rule. It is refused
+  mid-run with `sessionBusy` — a mode that changed halfway through a turn would
+  not govern the ask already sitting in the client's modal, and `abort` is the
+  better verb for stopping an agent now.
+
+  `permissionDecision` grows an optional `scope`, so "allow once" and "allow for
+  this session" are distinguishable at the moment of asking. **Nothing persists
+  to disk from a remote client:** `"project"` and `"user"` are refused, and so is
+  a client-authored `persistRule` carrying either, at three independent seams —
+  a client's outbound validation, a server's inbound validation, and
+  `SessionHost` itself, which an SDK embedder may reach through another
+  transport entirely. A `"session"` allow makes the **engine** mint the rule from
+  the `suggestedRule` it already offered, so a client chooses how long and never
+  what. `arcturn attach` and the browser client now offer "allow for this
+  session" on those terms; previously both sent a `project`-scoped rule that the
+  server wrote into the user's own config file. The local TUI is unchanged.
+
+  `PROTOCOL_VERSION` stays at `1`. `permissionState` degrades like `listModels`
+  — it reads, so `undefined` costs a client a mode chip and nothing else.
+  `setPermissionMode` gets `deleteSession`'s treatment and rejects instead: a
+  client told "fine" by a server that ignored it would show a `plan` chip over
+  an engine still in `yolo`, and a user who believes they restricted an agent
+  they did not restrict is the one outcome a permission control may not produce.
+  `permissionDecision`'s `scope` is a field, not a verb — an older server drops
+  it and the allow lands as an allow-*once*, which narrows rather than widens.
+- **`listCommands` on the wire protocol.** A client can now discover what a `/`
+  could invoke: every markdown skill the workspace holds — name, sanitized
+  description, and the absolute path it came from — plus the built-ins the wire
+  can **actually** carry out. A menu offering `/rewind` to a client with no
+  rewind verb is a menu that lies, so the built-ins are enumerated deliberately:
+  `model`, `permissions`, `sessions` and `clear` are in because verbs back each
+  of them; `rewind`, `compact`, `diff`/`apply`/`discard`, `export`, `theme`,
+  `mcp`, `todos`, `cost`, `scout`, `help` and `exit` are out because none do.
+  The list lives beside the server's dispatch table, which is what makes an
+  entry true. Descriptions are sanitized with the same function that sanitizes
+  them on the way to the model, because `<cwd>/.arcturn/skills` is a directory a
+  cloned repository controls and those strings now reach a UI as well as a
+  prompt. Execution stays `prompt` — a skill is prompt text, and a second
+  execution path would give one skill two behaviours. Optional and additive:
+  `PROTOCOL_VERSION` stays at `1`, and an older server's `invalidRequest`
+  becomes `undefined`.
 - **`sessionHistory` on the wire protocol.** A client can now ask a server for a
   session's stored conversation, so a panel that attaches to a session it never
   watched can render it. `openSession` subscribes to *future* events and replays

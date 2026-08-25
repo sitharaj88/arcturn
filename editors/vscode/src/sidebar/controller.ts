@@ -10,7 +10,9 @@
  * and that the token appears in none of it.
  *
  * The verbs used are exactly the ones RFC 0004 §1 lists — `prompt`, `steer`,
- * `abort`, `setModel`, `respondToPermission`, `onEvent` — and nothing else.
+ * `abort`, `setModel`, `respondToPermission`, `onEvent` — plus
+ * `resolveContext`, which RFC 0005 §1.1 added to the *engine* first, exactly as
+ * §0 prescribes, and nothing else.
  *
  * History is folded in the same way live events are, through {@link reduceChat}
  * and nothing else. That is the whole reason the engine replays `AgentEvent`s
@@ -21,7 +23,9 @@
 
 import type {
   AgentEvent,
+  ContextResolution,
   PermissionRequest,
+  PromptAttachment,
   ProtocolClient,
   SessionHeader,
   SessionHistory,
@@ -94,8 +98,24 @@ export interface SessionController {
    * Resolves once the frame is on the wire, **not** when the run finishes —
    * see the implementation note. A failure is reported through
    * {@link ControllerHost.onDiagnostic}, never thrown at the caller.
+   *
+   * `text` is sent **unexpanded**: `@`-mentions are the engine's to resolve, so
+   * this panel never reads a file to build a prompt (RFC 0005 §3).
+   *
+   * @param attachments - What the composer is holding. Carried only by
+   *   `prompt`: `steer` has no attachment parameter, and inventing one here
+   *   would be a client-side feature the engine never agreed to — so a
+   *   mid-run send with chips attached is reported and refused rather than
+   *   quietly sent without them.
    */
-  send(text: string): Promise<void>;
+  send(text: string, attachments?: readonly PromptAttachment[]): Promise<void>;
+  /**
+   * Ask the engine what a mention would resolve to.
+   *
+   * Read-only. `undefined` means this engine predates the verb — the panel
+   * shows no picker rather than a hopeful one.
+   */
+  resolveContext(query: string): Promise<ContextResolution | undefined>;
   /** Abort the current run. */
   abort(): Promise<void>;
   /** Switch the session's model. */
@@ -186,8 +206,17 @@ export function createSessionController(options: SessionControllerOptions): Sess
       return observedModels;
     },
     permissions,
-    send(text: string): Promise<void> {
+    send(text: string, attachments?: readonly PromptAttachment[]): Promise<void> {
       const verb = chooseSendVerb(state.running);
+      if (verb === "steer" && attachments !== undefined && attachments.length > 0) {
+        // `steer` carries no attachments on the wire. Sending the text without
+        // them would drop the user's chips silently, which is the exact failure
+        // RFC 0005 §1.1 exists to close — so this says so instead.
+        host.onDiagnostic?.(
+          "steer carries no attachments; wait for the current run to finish before sending them",
+        );
+        return Promise.resolve();
+      }
       // Neither verb is awaited. `ProtocolClient.prompt` resolves when the
       // *run* ends — `ws-server.ts` awaits `SessionHost.prompt`, which awaits
       // the agent — so awaiting it here would leave the prompt box blocked for
@@ -196,7 +225,13 @@ export function createSessionController(options: SessionControllerOptions): Sess
       // so a late rejection becomes a diagnostic rather than an unhandled
       // rejection.
       const sent =
-        verb === "steer" ? client.steer(sessionId, text) : client.prompt(sessionId, text);
+        verb === "steer"
+          ? client.steer(sessionId, text)
+          : client.prompt(
+              sessionId,
+              text,
+              ...(attachments === undefined || attachments.length === 0 ? [] : [attachments]),
+            );
       sent.catch((error: unknown) => {
         host.onDiagnostic?.(
           `${verb} failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -204,6 +239,7 @@ export function createSessionController(options: SessionControllerOptions): Sess
       });
       return Promise.resolve();
     },
+    resolveContext: (query: string) => client.resolveContext(sessionId, query),
     abort: () => client.abort(sessionId),
     setModel: (modelId: string) => client.setModel(sessionId, modelId),
     toggle(blockId: string): void {

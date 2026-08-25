@@ -50,6 +50,7 @@ import type {
   SessionStore,
   Tool,
 } from "@arcturn/types";
+import { createContextResolver } from "./context.js";
 import { createCostGuard } from "./cost-guard.js";
 import type { EnvMap } from "./paths.js";
 import {
@@ -60,6 +61,8 @@ import {
   registerBundledCatalog,
   resolveModelSpec,
 } from "./runtime.js";
+import { serveCommandDescriptors } from "./serve-commands.js";
+import type { Skill } from "./skills.js";
 import { startWebClientServer, type WebClientServer, webClientOrigins } from "./web/server.js";
 
 /**
@@ -173,6 +176,14 @@ export interface ServableRuntime {
   readonly tools: readonly Tool[];
   readonly config: { permissions: PermissionRule[]; permissionMode: PermissionMode };
   /**
+   * Markdown skills this runtime discovered, for the `listCommands` verb.
+   *
+   * Optional so a stub runtime (this module's tests, an embedder that has no
+   * skill library) still satisfies the shape; absent, `listCommands` answers
+   * with the built-ins alone, which is the truth for such a host.
+   */
+  readonly skills?: readonly Skill[];
+  /**
    * Optional: build a fully isolated agent for one served session. A real
    * `ArcturnRuntime` provides it; stubs may omit it and get the generic assembly.
    */
@@ -282,11 +293,14 @@ function buildServedAgent(
  *   {@link ArcturnRuntime} satisfies this without modification.
  * @param options - `maxCostUsd` applies an independent `--max-cost`-style
  *   ceiling to each served session (see {@link buildServedAgent}'s
- *   `attachCostGuard`).
+ *   `attachCostGuard`); `maxAttachmentBytes` overrides the total per-prompt
+ *   attachment budget, injectable so a test can prove the cap cuts without
+ *   writing a megabyte of scratch files first (see
+ *   `ContextResolverOptions.maxAttachmentBytes`).
  */
 export function createServeHost(
   runtime: ServableRuntime,
-  options: { maxCostUsd?: number } = {},
+  options: { maxCostUsd?: number; maxAttachmentBytes?: number } = {},
 ): SessionHost {
   const resolveModel = serveModelResolver(runtime.env);
   return new SessionHost({
@@ -307,6 +321,24 @@ export function createServeHost(
     // implements it.
     sessionStore: runtime.store,
     defaultCwd: runtime.cwd,
+    // ---- Context injection: the fix for RFC 0005 §0's bug, in one line. ----
+    // `expandMentions` ran in `print.ts` and the TUI and nowhere else, so a
+    // prompt arriving over this server reached the model as text *about* a file
+    // rather than the file. This is what closes that, and it is the same
+    // function the TUI calls rather than a second one — see `context.ts`.
+    //
+    // It serves three consumers and stays at one injection, the rule the
+    // `resolveModel`/`modelCatalog` pair below had to learn the hard way:
+    // `prompt` expands mentions through it, `prompt` reads `attachments`
+    // through it, and `resolveContext` answers a file picker from it. All
+    // three share one workspace-confinement gate and one set of size caps
+    // *because* they share one resolver; wiring a second would be how the
+    // preview a picker shows and the file a prompt reads start disagreeing.
+    contextResolver: createContextResolver(
+      options.maxAttachmentBytes === undefined
+        ? {}
+        : { maxAttachmentBytes: options.maxAttachmentBytes },
+    ),
     // ---- Model injection: both halves, deliberately adjacent. ----
     // These are one feature, not two. `modelCatalog` is what a remote picker
     // is *offered*; `resolveModel` is what a pick actually *does* — which
@@ -325,6 +357,21 @@ export function createServeHost(
       return modelCatalogEntries(runtime.env);
     },
     resolveModel,
+    // ---- Command injection: the same skills the terminal already loaded. ----
+    // `buildRuntime` ran `loadSkills` once, registered a slash command per
+    // skill and handed the same array to the model-invoked `skill` tool; this
+    // reads that array rather than scanning the skills directory again. A
+    // second scan is how a panel's `/` menu comes to list a skill the terminal
+    // resolved differently under a name collision.
+    //
+    // Re-read on every call rather than snapshotted, matching `modelCatalog`
+    // directly above: skills do not reload after startup today, but a future
+    // watcher must not need this wiring changed to be picked up.
+    //
+    // The built-ins folded in alongside are chosen in `@arcturn/server` — the
+    // package that knows which verbs exist, and therefore which commands this
+    // wire can actually carry out. See `serve-commands.ts`.
+    commands: () => serveCommandDescriptors(runtime.skills ?? []),
   });
 }
 

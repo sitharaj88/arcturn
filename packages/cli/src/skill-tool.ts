@@ -95,7 +95,7 @@ export interface CreateSkillToolOptions {
 }
 
 /** Max chars of a single skill's description that reach the index line. */
-const INDEX_LINE_MAX_CHARS = 160;
+export const INDEX_LINE_MAX_CHARS = 160;
 /** Max number of skills listed in the index before it is capped. */
 const INDEX_MAX_ENTRIES = 200;
 /** Hard ceiling on the whole rendered index, independent of entry count. */
@@ -111,11 +111,20 @@ const INDEX_MAX_TOTAL_CHARS = 24_000;
  * prompt-injection surface (no user action needed) and a cache/cost hazard.
  * We take only the first line, strip control characters, and truncate — the
  * same discipline `deferred-tools.ts` applies to its own index lines.
+ *
+ * Exported because RFC 0005 §1.3's `listCommands` puts the same strings on a
+ * different wire: a skill's description now reaches a remote client's `/` menu,
+ * where it is rendered as UI rather than embedded in a prompt. The threat is
+ * not identical — a menu entry needs a person to click it, where the model
+ * index rides on every request with no user action — but the *string* is the
+ * same untrusted markdown from the same attacker-controlled file, and there is
+ * no good reason for two sanitizers to exist and drift. See
+ * `serve-commands.ts` for the one difference in treatment, and why.
  */
 // biome-ignore lint/suspicious/noControlCharactersInRegex: collapsing control chars to spaces is the point.
 const CONTROL_CHARS = /[\u0000-\u001F\u007F]/g;
 
-function sanitizeDescription(raw: string): string {
+export function sanitizeDescription(raw: string): string {
   const firstLine = raw.split(/\r?\n/, 1)[0] ?? "";
   const cleaned = firstLine.replace(CONTROL_CHARS, " ").replace(/\s+/g, " ").trim();
   return cleaned.length > INDEX_LINE_MAX_CHARS

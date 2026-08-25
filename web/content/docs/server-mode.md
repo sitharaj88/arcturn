@@ -114,6 +114,10 @@ Every message is one of two shapes:
 { "id": "9", "method": "listModels" }
 { "id": "10", "method": "sessionHistory", "params": { "sessionId": "sess_abc" } }
 { "id": "11", "method": "deleteSession", "params": { "sessionId": "sess_abc" } }
+{ "id": "12", "method": "resolveContext", "params": { "sessionId": "sess_abc", "query": "src/auth.ts" } }
+{ "id": "13", "method": "permissionState", "params": { "sessionId": "sess_abc" } }
+{ "id": "14", "method": "setPermissionMode", "params": { "sessionId": "sess_abc", "mode": "plan" } }
+{ "id": "15", "method": "listCommands" }
 ```
 
 ```json
@@ -310,6 +314,282 @@ session still live in the server's memory, and it could not know whether a run w
 rejects rather than degrading; `isUnsupportedMethodError(error)` from `@arcturn/protocol` is
 how a client tells "this engine is too old" from "this session is busy".
 
+## Context: mentions and attachments
+
+A `prompt`'s `text` is **not** passed to the model verbatim. The server expands `@path`
+mentions against the session's `cwd` first, using the same `expandMentions` the TUI and
+`--print` call — so `@src/auth.ts` reaches the model as the file, not as six words about a
+file. Before this existed, that expansion ran only in the local CLI, and every remote
+client was silently degraded; see RFC 0005 §0.
+
+A mention that resolves outside the workspace is **refused, not read** — lexically, and
+again after symlinks are resolved, so a link inside the workspace cannot lead out of it.
+The refusal is not fatal: the token stays in the text and the run proceeds, exactly as the
+TUI behaves, but the server now emits a `notice` event naming what it would not read, so a
+remote user is told rather than left wondering.
+
+### Attachments
+
+`prompt` takes an optional `attachments` array:
+
+```json
+{ "id": "13", "method": "prompt", "params": {
+    "sessionId": "sess_abc",
+    "text": "what changed here?",
+    "attachments": [
+      { "kind": "file",  "path": "src/auth.ts" },
+      { "kind": "image", "path": "docs/screenshot.png" },
+      { "kind": "image", "data": "iVBORw0KGgo…", "mimeType": "image/png" }
+    ]
+} }
+```
+
+A `file` becomes a context block headed with its path and the word `(attached file)`, so
+the model can tell attached context from the user's own words. An `image` becomes a vision
+block.
+
+**A `file` is always a path, never bytes.** RFC 0005 §3 puts every file read inside the
+engine: a file read by a client is a file the permission engine never saw, and a client
+that sent bytes would be doing exactly that. Inline `data` is accepted for `image` and only
+for `image` — a pasted screenshot has no path, was never a workspace file, and so has no
+confinement to bypass. Its media type must be one of `image/png`, `image/jpeg`, `image/gif`
+or `image/webp`.
+
+Every path attachment goes through the same workspace confinement a mention does, but the
+refusal is **fatal** rather than advisory: the client named that file, so running the turn
+without it would be the silent drop this verb exists to prevent. The server answers
+`invalidRequest` and no turn is spent.
+
+Total attachment bytes for one prompt are capped at **1 MiB** — deliberately
+`DEFAULT_BACKPRESSURE_THRESHOLD_BYTES`, the same number `sessionHistory` budgets against,
+and a quarter of the 4 MiB frame cap above which `ws` closes the connection with 1009. One
+MiB of attachment bytes is about 1.37 MiB of base64, so a request that respects the budget
+can never be the request that kills the socket. The cap is on the total, not per item: ten
+files of 200 KiB is the same load as one of 2 MiB.
+
+### Images and models that cannot see
+
+A prompt carrying an **image attachment** for a model without vision is refused, with the
+reason, **before the turn is spent**:
+
+```json
+{ "kind": "response", "id": "13", "error": { "code": "invalidRequest",
+  "message": "GPT-4o-mini cannot see images, so docs/screenshot.png cannot be sent to it. …" } }
+```
+
+The check is **server-side, at prompt time**, and deliberately not left to the client. A
+client cannot be trusted to make it: a hostile one holding the serve token would not, and
+an honest older one does not know it should. The server knows the session's current model
+and its capability flags, so it is the only place the answer is always right.
+
+An image **mention** on a text-only model degrades instead of refusing — a `notice`, the
+mention still in the text, the run proceeding — because that is what the TUI does with an
+incidental `@screenshot.png`, and the served path is meant to behave the same way.
+
+### `resolveContext`
+
+```json
+{ "id": "12", "method": "resolveContext", "params": { "sessionId": "sess_abc", "query": "src/auth.ts" } }
+```
+
+```json
+{ "kind": "response", "id": "12", "result": {
+    "query": "src/auth.ts",
+    "path": "/repo/src/auth.ts",
+    "relativePath": "src/auth.ts",
+    "inWorkspace": true,
+    "exists": true,
+    "bytes": 4213,
+    "kind": "file"
+} }
+```
+
+This is what makes a file picker honest rather than hopeful: a client can show what will
+actually be injected, and its size, before anyone presses send. It is **read-only** —
+nothing is attached, no turn starts — and a query that fails confinement is answered
+without the server touching the filesystem at all, so the verb cannot be turned into an
+oracle for the paths confinement exists to hide. Such a path reports `inWorkspace: false`,
+`exists: false` and `bytes: 0` because the server *did not look*, which is not the same
+answer as "there is nothing there".
+
+`resolveContext` is **optional and additive**, on the same terms as `listModels`:
+`ProtocolClient.resolveContext()` translates an older server's `invalidRequest` into
+`undefined`, which is safe because the verb only reads — `undefined` costs a caller a
+preview, never a guarantee.
+
+`prompt`'s `attachments` field gets the **opposite** treatment, and for `deleteSession`'s
+reason. It is a new *parameter* on an old verb, so an older server recognises `prompt`,
+validates it, drops the field it does not know, and answers `ok` — the turn is spent, the
+model never saw the file, and the client was told everything was fine. So
+`ProtocolClient.prompt()` probes `resolveContext` once per session before sending any
+attachment and **rejects locally** when the engine has no such verb. Nothing is sent, and
+nothing is silently dropped.
+
+## Permissions
+
+A client that cannot say which permission mode it is running under has to imply one, and
+an implied permission mode is the kind of thing users act on. Two verbs close that, and a
+third field makes a permission modal offer the choice people actually want.
+
+### `permissionState`
+
+```json
+{ "id": "13", "method": "permissionState", "params": { "sessionId": "sess_abc" } }
+```
+
+```json
+{
+  "kind": "response",
+  "id": "13",
+  "result": {
+    "sessionId": "sess_abc",
+    "mode": "default",
+    "rules": [{ "tool": "bash", "specifier": "rm *", "action": "deny", "scope": "user" }],
+    "tools": ["bash", "edit", "fetch", "glob", "grep", "read", "websearch", "write"]
+  }
+}
+```
+
+Session-scoped, because a mode and a rule set belong to one agent rather than to the
+server. Read it as a whole: `mode` is what was granted, `rules` is what the mode cannot
+talk its way past, and `tools` is the outer bound on both.
+
+**`tools` is how a client learns whether this engine can reach the web.** There is no
+`canBrowse` verb and there will not be one — the question is really "is `fetch` in the tool
+set", and a panel that renders a browse button without checking is implying a capability
+it never confirmed. The list is names only: never a tool's description or schema, which
+are the model's business and would put an extension's or an MCP server's prose onto a wire
+that feeds a UI. It is also the **full** set the session holds, not the subset progressive
+disclosure is showing the model this turn — a capabilities line that flickered between
+turns would be worse than none.
+
+### `setPermissionMode`
+
+```json
+{ "id": "14", "method": "setPermissionMode", "params": { "sessionId": "sess_abc", "mode": "yolo" } }
+```
+
+Answers with the resulting `permissionState`, so a client reads what the engine *is* rather
+than assuming it got what it asked for.
+
+**A mode is a request, not a grant.** The engine's resolution order is unchanged: stored
+rules are step 3 and modes are step 5, so a `deny` rule still wins over `yolo` — set from
+here exactly as it does when a local user picks the mode in `/permissions`. A client that
+sets a mode is granted nothing the permission engine would not grant the person at the
+terminal, and this verb **never edits a rule**.
+
+**Refused mid-run** with `sessionBusy`. A mode that changed halfway through a turn would
+split that turn across two policies — an ask already sitting in the client's modal would
+settle under the old rules while the next call in the same turn settled under the new, and
+nothing in the transcript would say which was which. Refusing is what makes "takes effect
+on the next turn" literally true. A client that wants to stop an agent *now* has a better
+tool than a mode chip: `abort` ends the run outright, and the mode change succeeds
+immediately afterwards.
+
+This is a deliberate asymmetry with the terminal, where `/permissions` will change the mode
+mid-run: a local user is watching the transcript scroll and knows exactly which tool call
+their change landed before. A remote client with a queued modal does not.
+
+Note for operators: this verb lets a token holder raise the mode as far as `yolo`, which is
+the same reach a local user has (see [Threat model](#threat-model) — holding the token is
+already equivalent to a shell for whatever the configured mode allows). Rules remain the
+wall that no mode crosses, so a `deny` in your config is the control that actually confines
+a served session.
+
+### `permissionDecision` grows a `scope`
+
+```json
+{
+  "id": "7",
+  "method": "permissionDecision",
+  "params": {
+    "sessionId": "sess_abc",
+    "decision": { "requestId": "req_1", "behavior": "allow" },
+    "scope": "session"
+  }
+}
+```
+
+- **`scope` omitted** — allow once.
+- **`scope: "session"`** — allow for the rest of this session. The **engine** mints the
+  rule, from the `suggestedRule` it put on the request; a client says *how long*, never
+  *what*. Offer this button only when the request carries a `suggestedRule` — that field is
+  how the engine reports the request is repeatable — because asking for `"session"` on a
+  request without one is refused rather than quietly downgraded to an allow-once.
+- **`scope: "project"` or `"user"`** — **refused**, `invalidRequest`. So is a
+  `decision.persistRule` carrying either scope.
+
+Those two are the scopes that get written into a `config.json` a person owns, and nothing
+on this socket writes one. A session-scoped rule reaches the engine's in-memory rule list
+and dies with the process. The refusal is enforced in three places rather than documented
+in one: `@arcturn/protocol` validates it on the way out of a client (so a UI bug fails
+before a round trip), validates it again on the way into a server, and `SessionHost`
+enforces it independently — because it is a public API that an SDK embedder wires to its
+own transport, and a rule this important may not depend on which door a decision came
+through.
+
+A refused decision leaves the ask **pending**, so the client can re-send a legal one and
+the turn continues.
+
+`arcturn attach` and the browser client both offer "allow for this session" on these terms;
+neither can write a rule to your config any more. The local TUI is unchanged — a person at
+their own terminal still persists a project rule, which is exactly the distinction being
+drawn.
+
+## Commands
+
+```json
+{ "id": "15", "method": "listCommands" }
+```
+
+```json
+{
+  "kind": "response",
+  "id": "15",
+  "result": {
+    "commands": [
+      { "name": "review", "description": "Review the diff", "kind": "skill", "source": "/repo/.arcturn/skills/review.md" },
+      { "name": "model", "description": "Switch the model", "kind": "builtin" },
+      { "name": "permissions", "description": "Show the permission mode and rules, and switch mode", "kind": "builtin" },
+      { "name": "sessions", "description": "Resume an earlier session in this directory", "kind": "builtin" },
+      { "name": "clear", "description": "Start a fresh session", "kind": "builtin" }
+    ]
+  }
+}
+```
+
+Skills first, alphabetically, then built-ins — the order a `/` menu wants, sorted
+server-side so every client's menu agrees. A server property, not a session one: skills are
+discovered from the served workspace and the user's home.
+
+**Only built-ins a client can actually run are listed.** A menu offering `/rewind` to a
+client with no rewind verb is a menu that lies. `model` is here because `listModels` and
+`setModel` are; `permissions` because `permissionState` and `setPermissionMode` are;
+`sessions` because `listSessions`, `openSession` and `sessionHistory` are; `clear` because
+`createSession` and `openSession` are. Left out, each for the same reason — no verb carries
+it — are `rewind`, `compact`, `diff`/`apply`/`discard`, `export`, `theme`, `mcp`, `todos`,
+`cost`, `scout`, `help` (a client renders its own from this list) and `exit` (a client
+closes its own socket). The list lives in `@arcturn/server`, next to the dispatch table
+that decides what is true.
+
+Where a wire client reaches only part of what the terminal command does, the description
+promises only the part that works: `/permissions suggest` persists a learned rule locally,
+and that half is refused on this wire by design.
+
+**Execution stays `prompt`.** A skill is prompt text; there is no `runCommand` verb and
+there will not be one, because a second execution path would give one skill two behaviours
+that could drift apart. Note the current gap: the serve path does not yet expand a leading
+`/name` into the skill's body the way the TUI's command registry does, so a client that
+sends `/review` verbatim reaches a model that must pick the skill up through the
+model-invoked `skill` tool. Closing that belongs in the prompt path, beside mention
+expansion.
+
+Skill descriptions are **sanitized** before they reach a client — first line only, control
+characters collapsed, length-capped — using the same function that sanitizes them on the
+way to the model, because `<cwd>/.arcturn/skills` is a directory a cloned repository
+controls. `source` travels with each skill so a menu can show where it came from rather
+than implying it.
+
 ## Reconnecting
 
 `{ method: "openSession", params: { sessionId } }` re-attaches to a session that already
@@ -355,10 +635,27 @@ changes in a way old clients can't safely ignore. A server and client should agr
 during connection setup; a server built against a newer protocol version should be
 prepared to reject or degrade for an older client rather than silently misbehave.
 
-Adding an *optional* verb is not such a change, and `listModels`, `sessionHistory` and
-`deleteSession` did not bump it. An older
+Adding an *optional* verb is not such a change, and `listModels`, `sessionHistory`,
+`deleteSession`, `resolveContext`, `permissionState`, `setPermissionMode` and
+`listCommands` did not bump it — nor did `prompt`'s optional
+`attachments` field or `permissionDecision`'s optional `scope`, which an older server
+validates and drops. An older
 server rejects the new verb with an ordinary `invalidRequest` response the newer client
-handles, and an older client simply never sends it — both halves keep working. A bump, by
+handles, and an older client simply never sends it — both halves keep working.
+
+**Optional is not the same as degradable**, and the two questions are decided separately.
+A `ProtocolClient` translates an older server's `invalidRequest` into `undefined` only
+where the shrug is true: `listModels`, `sessionHistory`, `resolveContext`,
+`permissionState` and `listCommands` all read, so a client that gets nothing shows nothing
+and has lost only a view. `deleteSession` and `setPermissionMode` reject instead. For the
+delete, "fine" would mean a session that was never deleted; for the mode it is worse — a
+panel told "fine" would show a `plan` chip over an engine still in `yolo`, and a user who
+believes they restricted an agent they did not restrict is the one outcome a permission
+control may not produce. `permissionDecision`'s `scope` is a field rather than a verb: an
+older server drops it and the allow lands as an allow-*once*, which narrows rather than
+widens — the only direction a permission field may move silently.
+
+A bump, by
 contrast, breaks in both directions: `SessionHeader.version` is stamped `1` and validated
 as `1`, and the protocol client raises `ProtocolVersionMismatchError` for any header or
 handshake advertising a different number. Raising it to announce a feature neither side

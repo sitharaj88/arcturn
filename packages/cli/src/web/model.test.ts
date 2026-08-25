@@ -348,17 +348,12 @@ describe("web client model: helpers", () => {
     expect(model.subjectOf(null)).toBe("");
   });
 
-  it("suggests the same persisted rule the TUI does", () => {
-    expect(model.suggestRule({ toolName: "bash", subject: "git status --short" })).toEqual({
-      tool: "bash",
-      specifier: "git *",
-      action: "allow",
-    });
-    expect(model.suggestRule({ toolName: "write", subject: "/a.ts" })).toEqual({
-      tool: "write",
-      specifier: "/a.ts",
-      action: "allow",
-    });
+  it("no longer authors a rule of its own: a client says how long, never what", () => {
+    // RFC 0005 §1.2. `suggestRule` was how the page built a project-scoped
+    // `persistRule` the server wrote to the user's config; the page now sends
+    // `scope: "session"` and the engine mints the rule from the request's own
+    // `suggestedRule`. Nothing here should be able to author one again.
+    expect(model.suggestRule).toBeUndefined();
   });
 
   it("refuses approval while the request has not been read to the end", () => {

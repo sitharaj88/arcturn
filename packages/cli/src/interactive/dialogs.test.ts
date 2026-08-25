@@ -121,6 +121,36 @@ describe("permissionDialog", () => {
     expect(rendered).toContain("Allow once");
   });
 
+  it("says 'this session' for a remote client, which cannot write a durable rule", () => {
+    // `arcturn attach` is a remote client: RFC 0005 §1.2 means its "always" can
+    // only reach the end of the session, so the row must not promise a project
+    // rule the engine would refuse to write.
+    const dialog = permissionDialog(
+      request({ suggestedRule: { tool: "bash", specifier: "git *", action: "allow" } }),
+      80,
+      undefined,
+      "session",
+    );
+    const rendered = stripAnsi(dialog.component.render(70).join("\n"));
+    expect(rendered).toContain("Allow always: bash git * (this session)");
+    expect(rendered).not.toContain("(project)");
+  });
+
+  it("hides the always row for a remote client when the engine offered no rule", () => {
+    // A session grant is minted by the ENGINE from `suggestedRule`; with none,
+    // the request is not repeatable and the engine refuses the scope. Offering
+    // a button that always errors is worse than offering two.
+    const remote = stripAnsi(
+      permissionDialog(request(), 80, undefined, "session").component.render(70).join("\n"),
+    );
+    expect(remote).toContain("Allow once");
+    expect(remote).not.toContain("Allow always");
+
+    // The local path is untouched: there the CLI authors the rule itself.
+    const local = stripAnsi(permissionDialog(request(), 80).component.render(70).join("\n"));
+    expect(local).toContain("Allow always: bash git * (project)");
+  });
+
   it("adds the attribution line only when something delegated the request", () => {
     // The main agent's own prompts must look EXACTLY as they did before
     // attribution existed: same lines, in the same order, nothing extra.

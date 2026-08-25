@@ -31,8 +31,14 @@
 
 import type {
   AgentEvent,
+  CommandList,
+  ContextResolution,
   ModelCatalog,
   PermissionDecision,
+  PermissionMode,
+  PermissionScope,
+  PermissionState,
+  PromptAttachment,
   SessionHeader,
   SessionHistory,
 } from "@arcturn/types";
@@ -41,7 +47,10 @@ import { ErrorCode } from "./messages.js";
 import { RequestIdGenerator } from "./request-id.js";
 import {
   validateClientRequest,
+  validateCommandList,
+  validateContextResolution,
   validateModelCatalog,
+  validatePermissionState,
   validateServerMessage,
   validateSessionHeader,
   validateSessionHistory,
@@ -265,16 +274,77 @@ export interface ProtocolClient {
    * start receiving its {@link AgentEvent}s.
    */
   openSession(sessionId: string): Promise<SessionHeader>;
-  /** Start a run from a user prompt. Resolves when the server accepts it. */
-  prompt(sessionId: string, text: string): Promise<void>;
+  /**
+   * Start a run from a user prompt. Resolves when the server accepts it.
+   *
+   * `text` is sent **unexpanded**: `@path` mentions are resolved by the engine,
+   * against the session's `cwd` and under its workspace confinement. A client
+   * must not read a file to build this string — RFC 0005 §3, and the reason is
+   * that a file read by a client is a file the permission engine never saw.
+   *
+   * ### Attachments do not degrade, and this method enforces that
+   *
+   * `attachments` is a new *parameter* on an old verb, which makes its
+   * old-server behaviour worse than a new verb's: an engine that predates
+   * RFC 0005 recognises `prompt`, validates it, drops the field it does not
+   * know, and answers `ok`. The turn is spent, the model never sees the file,
+   * and the client is told everything went fine — the same lie
+   * {@link ProtocolClient.deleteSession} refuses to tell about a deletion that
+   * did not happen.
+   *
+   * So when `attachments` is non-empty this client checks first, once per
+   * session, by probing {@link ProtocolClient.resolveContext} — the verb that
+   * shipped alongside the field, and whose absence is the honest signal that
+   * the field will be ignored. An engine without it **rejects** here, locally,
+   * before anything is sent. A prompt with no attachments never pays for the
+   * probe and behaves exactly as it always did.
+   *
+   * @param sessionId - Session to run in.
+   * @param text - The prompt as typed, mentions left in place.
+   * @param attachments - Optional context, named by path (or, for a pasted
+   *   image, carried inline). See {@link PromptAttachment}.
+   * @throws {ProtocolRequestError} `invalidRequest` when the engine cannot
+   *   honour attachments at all, or refuses these ones (outside the workspace,
+   *   over the byte budget, an image for a model with no vision).
+   */
+  prompt(sessionId: string, text: string, attachments?: readonly PromptAttachment[]): Promise<void>;
   /** Queue a mid-run steering message. */
   steer(sessionId: string, text: string): Promise<void>;
   /** Abort the session's current run. */
   abort(sessionId: string): Promise<void>;
   /** Switch the session's model. */
   setModel(sessionId: string, modelId: string): Promise<void>;
-  /** Answer a pending permission request. */
-  respondToPermission(sessionId: string, decision: PermissionDecision): Promise<void>;
+  /**
+   * Answer a pending permission request.
+   *
+   * `options.scope` says how long an allow lasts, and is the difference
+   * between the two buttons a permission modal actually wants to offer:
+   *
+   * - **omitted** — allow once.
+   * - **`"session"`** — allow for the rest of this session. The *engine* mints
+   *   the rule from the {@link PermissionRequest.suggestedRule} it put on the
+   *   ask; this client never authors one. Offer this button only when the
+   *   request carries a `suggestedRule` — that field is how the engine reports
+   *   the request is repeatable — because asking for `"session"` on a
+   *   non-repeatable request is refused, not quietly downgraded.
+   * - **`"project"` / `"user"`** — rejected locally, before the frame is sent.
+   *   Nothing persists to disk from a remote client; a rule that outlives a
+   *   session is written by a person in their own config.
+   *
+   * A server that predates `scope` drops the field and the allow lands as an
+   * allow-once, so the user is asked again next time. That degradation
+   * narrows and never widens, which is the only direction this may move
+   * silently.
+   *
+   * @param sessionId - Session that raised the request.
+   * @param decision - The decision, quoting the request's `requestId`.
+   * @param options - `scope`, when the allow should outlast this one call.
+   */
+  respondToPermission(
+    sessionId: string,
+    decision: PermissionDecision,
+    options?: { scope?: PermissionScope },
+  ): Promise<void>;
   /**
    * Fetch the server's model catalog, for rendering a picker.
    *
@@ -338,6 +408,90 @@ export interface ProtocolClient {
    */
   deleteSession(sessionId: string): Promise<void>;
   /**
+   * Ask what a mention would resolve to, without sending anything.
+   *
+   * This is what lets a file picker be honest rather than hopeful: the answer
+   * carries the resolved path, the byte count, whether the file exists, and
+   * whether it lands inside the session's workspace — the last being the one
+   * that decides whether the engine would read it at all.
+   *
+   * Read-only. Nothing is attached, no turn starts, and a query that fails
+   * confinement is answered without the engine touching the filesystem.
+   *
+   * Optional, on the same terms as {@link ProtocolClient.listModels}: an engine
+   * that predates the verb rejects it with `invalidRequest` and that single
+   * rejection becomes `undefined`. Safe to translate for the reason
+   * `sessionHistory` is — the verb only reads, so `undefined` costs a caller a
+   * preview, never a guarantee. It is also the signal
+   * {@link ProtocolClient.prompt} reads before sending attachments.
+   *
+   * @param sessionId - Session whose `cwd` the query resolves against.
+   * @param query - The mention text, as typed, without its `@`.
+   * @returns The resolution, or `undefined` when the engine has no such verb.
+   */
+  resolveContext(sessionId: string, query: string): Promise<ContextResolution | undefined>;
+  /**
+   * Read the permission regime this session runs under: its mode, its rules,
+   * and the names of the tools it holds.
+   *
+   * The tool names are the answer to "can this engine reach the web" — RFC
+   * 0005 §1.4 adds no verb for that, because the question is really "is
+   * `fetch` in the tool set", and a UI that renders a browse affordance
+   * without checking is implying a capability it has not confirmed.
+   *
+   * Optional, on the same terms as {@link ProtocolClient.listModels}: read-only,
+   * so an engine that predates the verb rejects with `invalidRequest` and that
+   * one rejection becomes `undefined`. A caller that gets `undefined` shows no
+   * mode chip and no tools line, which is exactly what it knows.
+   *
+   * @param sessionId - Session to inspect.
+   * @returns Its permission state, or `undefined` when the engine has no such verb.
+   */
+  permissionState(sessionId: string): Promise<PermissionState | undefined>;
+  /**
+   * Ask the session to run under a different permission mode.
+   *
+   * A mode is a **request**, not a grant: a stored `deny` rule still outranks
+   * `yolo`, exactly as it does for the person at the terminal, and this call
+   * never edits a rule. What comes back is the engine's own answer to "what am
+   * I now" — read the returned state rather than assuming the mode you asked
+   * for is the mode you got.
+   *
+   * Deliberately **not** given `listModels`' "old engine → `undefined`"
+   * treatment, and this is the verb where that translation would do the most
+   * damage. Told "fine" by an engine that ignored it, a panel would show a
+   * `plan` chip over a session still in `yolo`: the user believes they have
+   * restricted the agent, and the next write executes. So an older engine's
+   * `invalidRequest` rejects like any other failure; a caller that wants to
+   * say "this engine is too old to change modes" tests the rejection with
+   * {@link isUnsupportedMethodError} rather than showing `Unknown method`.
+   *
+   * @param sessionId - Session to change.
+   * @param mode - The mode to run under from the next turn.
+   * @returns The resulting permission state, as the engine reports it.
+   * @throws {ProtocolRequestError} `sessionBusy` while a run is in flight (a
+   *   mode may not change halfway through a turn — abort, or wait for
+   *   `runEnd`), `sessionNotFound` when the session is not live,
+   *   `invalidRequest` from an engine that does not implement the verb.
+   */
+  setPermissionMode(sessionId: string, mode: PermissionMode): Promise<PermissionState>;
+  /**
+   * List what a `/` could invoke on this engine: the workspace's markdown
+   * skills, plus the built-ins this wire can actually carry out.
+   *
+   * Nothing is listed that a client cannot run — a menu offering `/rewind` to
+   * a client with no rewind verb is a menu that lies. Execution stays
+   * {@link ProtocolClient.prompt}: a skill is prompt text, and there is no
+   * second execution path to keep in sync with the first.
+   *
+   * Optional, on the same terms as {@link ProtocolClient.listModels}: read-only,
+   * so an older engine's `invalidRequest` becomes `undefined` and a caller
+   * simply shows no `/` menu.
+   *
+   * @returns The command list, or `undefined` when the engine has no such verb.
+   */
+  listCommands(): Promise<CommandList | undefined>;
+  /**
    * Subscribe to server-pushed session events.
    *
    * @returns An unsubscribe function; calling it more than once is harmless.
@@ -389,6 +543,8 @@ class ProtocolClientImpl implements ProtocolClient {
   #closed = false;
   #closeCalled = false;
   #handshake: Promise<void> | undefined;
+  /** Memoized answer to "does this engine know RFC 0005's context verbs?". */
+  #contextSupport: Promise<boolean> | undefined;
 
   constructor(socket: WebSocketLike, options: ProtocolClientOptions) {
     this.#socket = socket;
@@ -441,8 +597,51 @@ class ProtocolClientImpl implements ProtocolClient {
     return parseSessionHeader(await this.#call("openSession", { sessionId }));
   }
 
-  async prompt(sessionId: string, text: string): Promise<void> {
+  async prompt(
+    sessionId: string,
+    text: string,
+    attachments?: readonly PromptAttachment[],
+  ): Promise<void> {
+    if (attachments !== undefined && attachments.length > 0) {
+      // See the interface doc: an old engine would drop the field and answer
+      // `ok`, spending the turn. Refusing locally is the `deleteSession`
+      // judgement — never resolve on a request that did not do what it said.
+      if (!(await this.#supportsContext(sessionId))) {
+        // ProtocolClientError, not ProtocolRequestError: no request was made,
+        // so there is no server rejection and no request id to name. The code
+        // is still the server's `invalidRequest`, because a caller branching on
+        // `error.code` wants "this prompt was refused" either way.
+        throw new ProtocolClientError(
+          ErrorCode.invalidRequest,
+          "This arcturn engine is older than prompt attachments (it has no resolveContext " +
+            "verb), and would run the turn without them. Nothing was sent.",
+          { method: "prompt" },
+        );
+      }
+      await this.#call("prompt", { sessionId, text, attachments: [...attachments] });
+      return;
+    }
     await this.#call("prompt", { sessionId, text });
+  }
+
+  /**
+   * Whether this engine implements RFC 0005's context verbs, cached per client.
+   *
+   * The probe is a real `resolveContext` for `"."` — the session's own working
+   * directory, which every session has and which nothing can be attached from
+   * (a directory is not a file). Cached on the client rather than per call
+   * because the engine behind one socket does not change mid-connection, and a
+   * probe per prompt would double the round trips of every attachment send.
+   *
+   * A probe that fails for any reason *other* than an unknown method resolves
+   * `true`: the verb is evidently there, and a transient fault on the probe
+   * must not be reported to the caller as "your engine is too old".
+   */
+  #supportsContext(sessionId: string): Promise<boolean> {
+    this.#contextSupport ??= this.resolveContext(sessionId, ".")
+      .then((resolution) => resolution !== undefined)
+      .catch(() => true);
+    return this.#contextSupport;
   }
 
   async steer(sessionId: string, text: string): Promise<void> {
@@ -457,8 +656,21 @@ class ProtocolClientImpl implements ProtocolClient {
     await this.#call("setModel", { sessionId, model: modelId });
   }
 
-  async respondToPermission(sessionId: string, decision: PermissionDecision): Promise<void> {
-    await this.#call("permissionDecision", { sessionId, decision });
+  async respondToPermission(
+    sessionId: string,
+    decision: PermissionDecision,
+    options: { scope?: PermissionScope } = {},
+  ): Promise<void> {
+    // `#call` validates the outbound frame against the same contract the
+    // server enforces, so a `scope` of "project" or "user" — or a
+    // client-authored `persistRule` that would outlive the session — fails
+    // here, with the message that says where such a rule does belong, instead
+    // of costing a round trip to be told the same thing.
+    await this.#call("permissionDecision", {
+      sessionId,
+      decision,
+      ...(options.scope === undefined ? {} : { scope: options.scope }),
+    });
   }
 
   async listModels(): Promise<ModelCatalog | undefined> {
@@ -502,6 +714,58 @@ class ProtocolClientImpl implements ProtocolClient {
     // No unsupported-method translation: see the interface doc. A delete that
     // did not happen must not resolve.
     await this.#call("deleteSession", { sessionId });
+  }
+
+  async resolveContext(sessionId: string, query: string): Promise<ContextResolution | undefined> {
+    let result: unknown;
+    try {
+      result = await this.#call("resolveContext", { sessionId, query });
+    } catch (error) {
+      // Same reasoning as `listModels` and `sessionHistory`: only a
+      // *server-reported* rejection can mean "I do not know this verb", and a
+      // `sessionNotFound` is the caller's problem rather than the engine's age.
+      if (error instanceof ProtocolRequestError && isUnsupportedMethodError(error)) {
+        return undefined;
+      }
+      throw error;
+    }
+    return parseContextResolution(result);
+  }
+
+  async permissionState(sessionId: string): Promise<PermissionState | undefined> {
+    let result: unknown;
+    try {
+      result = await this.#call("permissionState", { sessionId });
+    } catch (error) {
+      // Same reasoning as `listModels`: only a *server-reported* rejection can
+      // mean "I do not know this verb". `sessionNotFound` is deliberately not
+      // swallowed — an id this engine never heard of is the caller's problem,
+      // not the engine's age.
+      if (error instanceof ProtocolRequestError && isUnsupportedMethodError(error)) {
+        return undefined;
+      }
+      throw error;
+    }
+    return parsePermissionState(result);
+  }
+
+  async setPermissionMode(sessionId: string, mode: PermissionMode): Promise<PermissionState> {
+    // No unsupported-method translation, deliberately: see the interface doc.
+    // A mode that was not set must not resolve as though it had been.
+    return parsePermissionState(await this.#call("setPermissionMode", { sessionId, mode }));
+  }
+
+  async listCommands(): Promise<CommandList | undefined> {
+    let result: unknown;
+    try {
+      result = await this.#call("listCommands");
+    } catch (error) {
+      if (error instanceof ProtocolRequestError && isUnsupportedMethodError(error)) {
+        return undefined;
+      }
+      throw error;
+    }
+    return parseCommandList(result);
   }
 
   onEvent(listener: ProtocolEventListener): () => void {
@@ -826,6 +1090,18 @@ function parseSessionHistory(result: unknown): SessionHistory {
   return validation.value;
 }
 
+/** Parse a `resolveContext` result, rejecting anything off-contract. */
+function parseContextResolution(result: unknown): ContextResolution {
+  const validation = validateContextResolution(result);
+  if (!validation.ok) {
+    throw new ProtocolClientError(
+      ClientErrorCode.invalidResponse,
+      `Invalid resolveContext result: ${validation.error}`,
+    );
+  }
+  return validation.value;
+}
+
 /** Parse a `listModels` result, rejecting anything off-contract. */
 function parseModelCatalog(result: unknown): ModelCatalog {
   const validation = validateModelCatalog(result);
@@ -833,6 +1109,30 @@ function parseModelCatalog(result: unknown): ModelCatalog {
     throw new ProtocolClientError(
       ClientErrorCode.invalidResponse,
       `Invalid listModels result: ${validation.error}`,
+    );
+  }
+  return validation.value;
+}
+
+/** Parse a `permissionState` / `setPermissionMode` result, rejecting anything off-contract. */
+function parsePermissionState(result: unknown): PermissionState {
+  const validation = validatePermissionState(result);
+  if (!validation.ok) {
+    throw new ProtocolClientError(
+      ClientErrorCode.invalidResponse,
+      `Invalid permission state in response: ${validation.error}`,
+    );
+  }
+  return validation.value;
+}
+
+/** Parse a `listCommands` result, rejecting anything off-contract. */
+function parseCommandList(result: unknown): CommandList {
+  const validation = validateCommandList(result);
+  if (!validation.ok) {
+    throw new ProtocolClientError(
+      ClientErrorCode.invalidResponse,
+      `Invalid listCommands result: ${validation.error}`,
     );
   }
   return validation.value;

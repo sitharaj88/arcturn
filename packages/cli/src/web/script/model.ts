@@ -181,25 +181,12 @@ export const MODEL_SCRIPT = `
     return view.atBottom === true;
   }
 
-  /** Mirrors the CLI's suggestRule so "allow always" persists the same rule. */
-  function suggestRule(request) {
-    var req = request || {};
-    var subject = typeof req.subject === "string" ? req.subject : "";
-    var toolName = typeof req.toolName === "string" ? req.toolName : "";
-    if (subject !== "" && toolName === "bash") {
-      var head = subject.trim().split(/\\s+/)[0] || subject;
-      return { tool: "bash", specifier: head + " *", action: "allow" };
-    }
-    if (isRecord(req.suggestedRule)) {
-      return {
-        tool: req.suggestedRule.tool,
-        specifier: req.suggestedRule.specifier,
-        action: req.suggestedRule.action || "allow"
-      };
-    }
-    if (subject === "") return { tool: toolName, action: "allow" };
-    return { tool: toolName, specifier: subject, action: "allow" };
-  }
+  // suggestRule used to live here: the page authored its own rule for "allow
+  // always" and sent it as a project-scoped persistRule, which the server wrote
+  // into the user's config. RFC 0005 section 1.2 ended that — the page now
+  // sends scope "session" and the ENGINE mints the rule from the suggestedRule
+  // it put on the ask. A client says how long, never what, so there is nothing
+  // left here to author. (No backticks in this file: it is a template literal.)
 
   /* ---------------------------------------------------------------- diffs */
 
@@ -1014,7 +1001,6 @@ export const MODEL_SCRIPT = `
     permissionNodes: permissionNodes,
     sessionNodes: sessionNodes,
     subjectOf: subjectOf,
-    suggestRule: suggestRule,
     todoNodes: todoNodes,
     toolGlyph: toolGlyph,
     transcriptNodes: transcriptNodes

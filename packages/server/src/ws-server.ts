@@ -346,7 +346,15 @@ export class ArcturnServer {
         return header;
       }
       case "prompt":
-        await this.#sessionHost.prompt(request.params.sessionId, request.params.text);
+        // Attachments are threaded through rather than defaulted here: the
+        // host is where every refusal (confinement, byte budget, a model with
+        // no vision) is settled, because it is the only layer that knows the
+        // session's cwd and its current model.
+        await this.#sessionHost.prompt(
+          request.params.sessionId,
+          request.params.text,
+          request.params.attachments ?? [],
+        );
         return { ok: true };
       case "steer":
         this.#sessionHost.steer(request.params.sessionId, request.params.text);
@@ -358,6 +366,7 @@ export class ArcturnServer {
         this.#sessionHost.handlePermissionDecision(
           request.params.sessionId,
           request.params.decision,
+          request.params.scope,
         );
         return { ok: true };
       case "setModel":
@@ -375,6 +384,20 @@ export class ArcturnServer {
         this.#detachEveryone(request.params.sessionId);
         return { ok: true };
       }
+      case "resolveContext":
+        // Read-only: nothing is attached and no turn is started, so unlike
+        // `openSession` this attaches no observer and touches no session state.
+        return this.#sessionHost.resolveContext(request.params.sessionId, request.params.query);
+      case "permissionState":
+        return this.#sessionHost.permissionState(request.params.sessionId);
+      case "setPermissionMode":
+        // Answers with the resulting state rather than `{ ok: true }`: the
+        // engine is the authority on what mode is now in force, and a client
+        // that had to ask again to find out would render the mode it *asked*
+        // for in the gap.
+        return this.#sessionHost.setPermissionMode(request.params.sessionId, request.params.mode);
+      case "listCommands":
+        return { commands: await this.#sessionHost.listCommands() };
       default:
         return exhaustiveCheck(request);
     }

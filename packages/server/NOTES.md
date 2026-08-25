@@ -223,6 +223,189 @@ from **every** connection's `observedSessions` map — the host has already drop
 subscriptions, so what is left is this server's own bookkeeping, which would otherwise keep a
 dead unsubscribe closure alive for the life of each socket.
 
+## Mention expansion is injected, not implemented here — and the bug that made it necessary
+
+`expandMentions` lives in `@arcturn/cli`, because that is where the TUI and
+`--print` have always called it. Which is precisely why RFC 0005 §0 lists this
+as a *bug* rather than a gap: `SessionHost.prompt` used to hand `text` straight
+to `Agent.prompt`, so a prompt arriving over the wire reached the model as
+`@src/auth.ts` — six words about a file — while the identical prompt typed into
+the TUI reached it as the file. Every remote client was silently degraded, and
+nobody noticed because the TUI is where mentions were tested.
+
+The fix could have been a second expander in this package. It is not, and the
+reason is the same one `resolveModel`/`modelCatalog` learned: two
+implementations of one rule agree right up until they do not, and RFC 0005 §1.1
+asks the served path to inherit "the strictest existing rule rather than a new
+one". So `SessionHostOptions.contextResolver` is an *injection* — `prompt-context.ts`
+defines the shape, `@arcturn/cli`'s `createContextResolver` supplies the real one,
+and that one calls the very `expandMentions` the TUI calls.
+
+The consequence worth writing down: a `SessionHost` built **without** a
+`contextResolver` is still the old engine. It passes `text` through verbatim.
+That is deliberate (a host assembled by hand still runs) but it means the fix is
+only real where `createServeHost` does the wiring, which is why the end-to-end
+proof lives in `packages/cli/src/serve.test.ts` against a real provider rather
+than here against a stub.
+
+## Two refusals with different blast radii, and why they are not the same refusal
+
+RFC 0005 §1.1 says an attachment the model cannot use is "refused with the
+reason, never silently dropped", and also that the served path expands mentions
+"exactly as the TUI does". Those pull in opposite directions for the same fact —
+an image on a text-only model, a path outside the workspace — so `SessionHost`
+splits on **who asked for it**:
+
+- An **attachment** is a thing the client named. Running the turn without it is
+  the silent drop, so it is fatal: `invalidRequest`, before `agent.prompt` is
+  reached, no turn spent, nothing appended to the session.
+- A **mention** is one token inside prose a person typed. The TUI carries on
+  (the token stays in the text, the file is simply not read), so the served path
+  carries on too — but emits a `notice` naming what it refused, which is the
+  half the served path was missing. A remote user could not previously tell a
+  refusal from a mention that worked.
+
+`ResolvedImage.source` is what carries that distinction out of the resolver, and
+it exists for no other reason.
+
+## The vision check is server-side on purpose
+
+`SessionHost.prompt` reads `session.agent.model.capabilities.vision` itself
+rather than trusting a client to have called `listModels` first. Two reasons,
+and only the second is about hostility: a client holding the serve token has no
+obligation to check, and an *honest* client written before RFC 0005 does not
+know it should. The server is the only party that always knows which model the
+session is on right now — `setModel` may have moved it since the client last
+looked — so it is the only place the answer cannot be stale.
+
+## Context resolution opened a busy window, and `LiveSession.starting` closes it
+
+Worth recording because it was a *regression this change introduced*, caught by
+two tests that already existed. `SessionHost.prompt` used to reach
+`agent.prompt()` synchronously, so `Agent.isRunning` flipped before the returned
+promise was handed back — which is what made "a second `prompt` is
+`sessionBusy`" and "`deleteSession` refuses a running session" true. Expanding
+mentions is filesystem I/O, so `prompt` now `await`s first, and in that window
+the agent is still idle.
+
+Two requests can arrive in it, and both used to be answered wrongly: a second
+`prompt` sailed past the busy check and failed deep inside `Agent` with a raw
+`Error` (mapped to `internal`, not `sessionBusy`), and a `deleteSession` deleted
+a session that was about to start appending to its own file — precisely the
+thing that check exists to prevent.
+
+`LiveSession.starting` is claimed synchronously, before the first `await`, and
+released in a `finally` so a refused prompt cannot wedge the session. `isBusy()`
+is the pair, and both the prompt path and `deleteSession` consult it.
+
+One window remains and is not closed here: `abort()` during the resolve does
+nothing, because `Agent.abort()` on an idle agent is a no-op, so a client that
+aborts between accepting a prompt and starting its run will still see the run
+begin. It is a few milliseconds of `stat`/`readFile` wide.
+
+## `PROMPT_ATTACHMENT_MAX_BYTES` is `DEFAULT_BACKPRESSURE_THRESHOLD_BYTES`, deliberately
+
+Same 1 MiB `SESSION_HISTORY_MAX_BYTES` uses, and the same argument run inbound
+instead of outbound. `sessionHistory` budgeted against the threshold so an
+essential outbound frame could never be the one that wedges the socket; an
+inline-image `prompt` is the inbound mirror — 1 MiB of attachment bytes is about
+1.37 MiB of base64, comfortably inside `DEFAULT_MAX_PAYLOAD_BYTES` (4 MiB),
+above which `ws` closes the connection with 1009 and the client learns nothing
+about why. It also bounds what a path attachment makes this server read off
+disk, which never crosses the wire at all. One ceiling for both costs, because a
+client should not have to know which it is paying.
+
+## The wire's scope wall is enforced three times, and that is not redundancy
+
+RFC 0005 §1.2 is one sentence — "Nothing persists to disk from a remote client"
+— and it is enforced at three seams:
+
+1. `@arcturn/protocol`'s `validateClientRequest`, on the way **out** of a
+   client. A `scope: "project"` never reaches a socket, so a UI bug fails
+   immediately with a message saying where such a rule does live rather than
+   costing a round trip to be told the same thing.
+2. The same function, on the way **in** to a server. A client that skips the
+   client library gets the identical refusal.
+3. `SessionHost.handlePermissionDecision` itself.
+
+The third is the one that looks redundant and is not. `SessionHost` is a public
+API: the SDK docs invite an embedder to wire it to their own transport, and if
+the wall lived only in frame validation, a host that spoke anything other than
+this WebSocket protocol would silently regain the ability to write a user's
+config from a remote decision. A rule this important may not depend on which
+door a decision came through.
+
+## "Allow for this session" is a duration, never a rule
+
+The wire could have let a client send the `persistRule` it wanted. It does not:
+`scope: "session"` makes `SessionHost` build the rule from the request's own
+`suggestedRule`, which is why `PendingPermission` now holds the
+`PermissionRequest` it is waiting on.
+
+The difference is the blast radius of a compromised or buggy client. Given a
+client-authored rule, the widest thing a decision could grant is whatever that
+client cared to write — `{ tool: "*", action: "allow" }` for one `bash` ask.
+Given a duration, the widest thing it can grant is the rule the engine already
+computed for the tool call it already made. The client chose *when to stop*, not
+*what to allow*.
+
+A consequence worth stating: a request with no `suggestedRule` is not
+repeatable (the engine offers one only for a call with a real subject), and
+asking for `"session"` on one is **refused** rather than downgraded to an
+allow-once. A client told "yes" for a session it did not get would keep offering
+the button and never find out.
+
+## `setPermissionMode` refuses mid-run; the TUI's `/permissions` does not
+
+A deliberate asymmetry, and the only place this package's behaviour is
+*narrower* than the terminal's.
+
+`Agent.setPermissionMode` is a single field assignment, so there is no torn
+state to protect — each permission check reads the mode when it runs, exactly as
+it does locally. What there is, is a **pending ask**: an ask already sitting in a
+remote client's modal was raised under the old regime and will be resolved under
+it, whatever the mode says by the time the answer arrives. "I switched to plan
+and it still wrote the file" is a reachable complaint, and refusing with
+`sessionBusy` removes the whole class of it. It also makes RFC 0005 §2's "takes
+effect on the next turn" literally true rather than approximately.
+
+The counter-argument — that a safety control should work while things are going
+wrong — does not survive contact with `abort`, which stops the run outright and
+is strictly stronger than switching to `plan`. A client that wants to stop an
+agent has the better verb already, and the mode change succeeds the moment the
+run ends.
+
+The local user keeps the mid-run change because they are watching the transcript
+scroll and know exactly which tool call their change landed before. A remote
+client with a queued modal does not. The cost is real and is paid in
+`attach.ts`: the plan-exit gate's "approve and auto-accept edits" is raised
+mid-run, so it still cannot be expressed remotely, and the user is told why.
+
+## `permissionState.tools` is the whole of RFC 0005 §1.4
+
+There is no verb for "can this engine reach the web", and the RFC is explicit
+that there should not be: the question is really "is `fetch` in the tool set".
+Two properties of that field are load-bearing and easy to lose:
+
+- **Names only.** `validatePermissionState` copies the array one string at a
+  time, so a tool *description* — untrusted text from an extension or an MCP
+  server — cannot ride along into a UI. A spread would have made that a matter
+  of discipline instead of a matter of types.
+- **The full set, not the disclosed subset.** Under progressive tool disclosure
+  `Agent.tools` is still everything the session was built with, while the model
+  sees a facade that changes per turn. A capabilities line driven by the facade
+  would flicker for reasons no user could explain.
+
+## The built-in command list lives here, not in `@arcturn/cli`
+
+`REMOTE_REACHABLE_BUILT_IN_COMMANDS` names commands that are *defined* in
+`@arcturn/cli`, which looks backwards until you ask what makes an entry true:
+not "does this command exist" but "can the verbs on this wire carry it out".
+This package implements the verbs. Keeping the list next to `ws-server.ts`'s
+dispatch table means the question "does a built-in become reachable now?" gets
+asked when a verb is added, and the list breaks here — rather than in somebody's
+menu — when one is removed.
+
 ## `SessionHostOptions` has two more optional fields than the task brief's minimal list
 
 The brief specifies `{ agentFactory, sessionStore?, defaultCwd }`. Two more
