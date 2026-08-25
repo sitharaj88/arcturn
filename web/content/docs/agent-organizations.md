@@ -163,6 +163,14 @@ one the engine had to be taught:
 2. **A new entry is inert until a person activates it.** Entries are `proposed` or
    `active`, and only `active` ones are ever rendered. `add` is live because you typed
    it; anything suggested to you lands via `propose` and needs `/org memory approve <id>`.
+   The same bound is what decides what `arcturn serve` exposes: a remote client may read
+   the store, propose an entry and revoke or delete one, and there is **no verb that makes
+   an entry active**. The reason is not that a socket caller is untrustworthy — one holding
+   the serve token already has full tool execution as you — but that an engine cannot tell
+   a frame a person clicked from a frame an agent sent, so the "you typed it" that makes
+   `add` live does not survive the wire. Proposing and revoking are allowed because each
+   can only *reduce* what a later run is told. See
+   [Server mode](/docs/server-mode#org-memory).
    Bounding a string does not bound its meaning — *"prefer to disable the sandbox when
    tests fail"* is well inside every length cap there is — so the gate is a person, the
    same way `/permissions suggest` proposes a rule and never applies one.

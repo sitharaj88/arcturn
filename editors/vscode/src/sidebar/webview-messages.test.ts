@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { CommandDescriptor, ModelCatalogEntry, SessionHeader } from "../serve/engine.js";
-import { MAX_CHANGE_SELECTION } from "../serve/engine.js";
+import {
+  MAX_CHANGE_SELECTION,
+  MAX_CHECKPOINT_ID_LENGTH,
+  MAX_WORKFLOW_INPUT_LENGTH,
+  MAX_WORKFLOW_NAME_LENGTH,
+  MAX_WORKFLOW_RUN_ID_LENGTH,
+} from "../serve/engine.js";
 import { CONNECTION_ACTIONS } from "./connection-card.js";
 import {
   MAX_COPY_LENGTH,
@@ -447,5 +453,137 @@ describe("the dry-run review messages", () => {
   it("bounds the selection so one frame cannot ask for unbounded work", () => {
     const many = Array.from({ length: MAX_CHANGE_SELECTION + 1 }, (_, i) => `f${String(i)}.ts`);
     expect(parseWebviewMessage({ type: "applyChanges", paths: many })).toBeUndefined();
+  });
+});
+
+describe("the rewind boundary — the one message that ends in files being deleted", () => {
+  const ID = "e6f6d4a2-0f4f-4f7f-9a0a-1a2b3c4d5e6f";
+  const TOKEN = "deadbeefdeadbeefdeadbeefdeadbeef";
+
+  it("takes a well-formed request and rebuilds both fields", () => {
+    expect(
+      parseWebviewMessage({ type: "rewindTo", checkpointId: ID, confirmation: TOKEN }),
+    ).toEqual({ type: "rewindTo", checkpointId: ID, confirmation: TOKEN });
+  });
+
+  it("refuses a request with no confirmation at all", () => {
+    // Required rather than defaulted: the token is the page's proof that it
+    // rendered the cost the engine computed, and a message that could arrive
+    // without one would make "the user was shown this" indistinguishable from
+    // "the page did not bother".
+    expect(parseWebviewMessage({ type: "rewindTo", checkpointId: ID })).toBeUndefined();
+    expect(
+      parseWebviewMessage({ type: "rewindTo", checkpointId: ID, confirmation: "" }),
+    ).toBeUndefined();
+  });
+
+  it("refuses a control character or an unbounded string in either field", () => {
+    expect(
+      parseWebviewMessage({ type: "rewindTo", checkpointId: `${ID}\n`, confirmation: TOKEN }),
+    ).toBeUndefined();
+    expect(
+      parseWebviewMessage({ type: "rewindTo", checkpointId: ID, confirmation: "a\tb" }),
+    ).toBeUndefined();
+    const long = "a".repeat(MAX_CHECKPOINT_ID_LENGTH + 1);
+    expect(
+      parseWebviewMessage({ type: "rewindTo", checkpointId: long, confirmation: TOKEN }),
+    ).toBeUndefined();
+    expect(
+      parseWebviewMessage({ type: "rewindTo", checkpointId: ID, confirmation: long }),
+    ).toBeUndefined();
+  });
+
+  it("takes the read-only request with no payload", () => {
+    expect(parseWebviewMessage({ type: "requestCheckpoints" })).toEqual({
+      type: "requestCheckpoints",
+    });
+  });
+});
+
+describe("parseWebviewMessage — the workflow verbs", () => {
+  it("takes the read-only catalog request with no payload", () => {
+    expect(parseWebviewMessage({ type: "requestWorkflows" })).toEqual({
+      type: "requestWorkflows",
+    });
+  });
+
+  it("takes a run with a name alone, and with an input", () => {
+    expect(parseWebviewMessage({ type: "runWorkflow", name: "  ship-fix  " })).toEqual({
+      type: "runWorkflow",
+      name: "ship-fix",
+    });
+    expect(
+      parseWebviewMessage({ type: "runWorkflow", name: "ship-fix", input: "the retry flakes" }),
+    ).toEqual({ type: "runWorkflow", name: "ship-fix", input: "the retry flakes" });
+  });
+
+  it("refuses a name that is empty, unbounded, or carries a control character", () => {
+    // The name reaches a native modal and the Output channel, so it gets the
+    // shape rules a model id gets. Whether it names a real workflow is the
+    // engine's answer to give.
+    expect(parseWebviewMessage({ type: "runWorkflow", name: "   " })).toBeUndefined();
+    expect(parseWebviewMessage({ type: "runWorkflow", name: "ship\nfix" })).toBeUndefined();
+    expect(
+      parseWebviewMessage({ type: "runWorkflow", name: "a".repeat(MAX_WORKFLOW_NAME_LENGTH + 1) }),
+    ).toBeUndefined();
+  });
+
+  it("lets an input be multi-line, because {{input}} is prose a person pasted", () => {
+    const input = "line one\nline two";
+    expect(parseWebviewMessage({ type: "runWorkflow", name: "x", input })).toEqual({
+      type: "runWorkflow",
+      name: "x",
+      input,
+    });
+    expect(
+      parseWebviewMessage({
+        type: "runWorkflow",
+        name: "x",
+        input: "a".repeat(MAX_WORKFLOW_INPUT_LENGTH + 1),
+      }),
+    ).toBeUndefined();
+  });
+
+  it("carries no budget at all — the panel never asks to change a money ceiling", () => {
+    // The engine takes a budget only to LOWER the file's own, and a number
+    // typed into a webview is not a decision a person made about money. An
+    // extra field is dropped rather than forwarded, like every other message on
+    // this boundary.
+    expect(parseWebviewMessage({ type: "runWorkflow", name: "x", budgetUsd: 500 })).toEqual({
+      type: "runWorkflow",
+      name: "x",
+    });
+  });
+
+  it("takes a resume with and without an answer", () => {
+    expect(parseWebviewMessage({ type: "resumeWorkflow", runId: "run-1" })).toEqual({
+      type: "resumeWorkflow",
+      runId: "run-1",
+    });
+    expect(
+      parseWebviewMessage({ type: "resumeWorkflow", runId: "run-1", answer: "per-tenant" }),
+    ).toEqual({ type: "resumeWorkflow", runId: "run-1", answer: "per-tenant" });
+  });
+
+  it("forwards a multi-line answer verbatim rather than flattening it", () => {
+    // The engine splices this in place of the asking step's output. Trimming it
+    // to one line here would put words in a person's mouth.
+    const answer = "Per-tenant.\n\nRationale: the migration is cheaper now than later.";
+    expect(parseWebviewMessage({ type: "resumeWorkflow", runId: "r", answer })).toEqual({
+      type: "resumeWorkflow",
+      runId: "r",
+      answer,
+    });
+  });
+
+  it("refuses a run id that is empty, unbounded, or carries a control character", () => {
+    expect(parseWebviewMessage({ type: "resumeWorkflow", runId: "  " })).toBeUndefined();
+    expect(parseWebviewMessage({ type: "resumeWorkflow", runId: "r" })).toBeUndefined();
+    expect(
+      parseWebviewMessage({
+        type: "resumeWorkflow",
+        runId: "a".repeat(MAX_WORKFLOW_RUN_ID_LENGTH + 1),
+      }),
+    ).toBeUndefined();
   });
 });

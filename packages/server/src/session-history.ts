@@ -80,19 +80,29 @@ export interface SessionHistoryLimits {
 /**
  * Project a session's stored entries into the events that reproduce it.
  *
- * Only the **active branch** is replayed — the path from the root to the most
- * recently appended entry, exactly what `Agent.resume` materializes. A session
- * that was rewound has abandoned branches in its file, and replaying those
- * would show a user a conversation that the agent itself will never continue.
+ * Only the **active branch** is replayed — the path from the root to `leafId`,
+ * exactly what `Agent.resume` materializes. A session that was rewound has
+ * abandoned branches in its file, and replaying those would show a user a
+ * conversation that the agent itself will never continue.
+ *
+ * `leafId` defaults to the most recently *appended* entry, which is the right
+ * answer for a session read off disk. It is the wrong answer for the moments
+ * right after a fork: `rewindTo` resumes an agent at an older entry and writes
+ * nothing, so until that agent's next turn the newest entry in the file is the
+ * tip of the branch the fork just walked away from. A caller holding a live
+ * agent passes its `leafEntryId` and gets the conversation that agent is
+ * actually holding — which is what this function's own promise above says it
+ * returns.
  *
  * @param entries - Every entry of the session, in append order.
+ * @param leafId - Branch tip to replay to. Defaults to the newest entry.
  * @returns The events, oldest first, before any cap is applied.
  */
 export function projectSessionEvents(
   sessionId: string,
   entries: readonly SessionEntry[],
+  leafId: string | null = latestEntryId(entries),
 ): AgentEvent[] {
-  const leafId = latestEntryId(entries);
   const branch = leafId === null ? [] : pathToLeaf(entries, leafId);
 
   const events: AgentEvent[] = [];
@@ -208,13 +218,25 @@ export function capSessionEvents(
  * @param sessionId - The session being replayed.
  * @param entries - Every entry of the session, in append order.
  * @param limits - Cap overrides; see {@link SessionHistoryLimits}.
+ * @param leafId - Branch tip to replay to; see {@link projectSessionEvents}.
+ *   Pass a live agent's `leafEntryId` so a session forked by `rewindTo` — which
+ *   appends nothing — replays the branch it is now on rather than the one it
+ *   left.
  */
 export function buildSessionHistory(
   sessionId: string,
   entries: readonly SessionEntry[],
   limits: SessionHistoryLimits = {},
+  leafId?: string | null,
 ): SessionHistory {
-  const capped = capSessionEvents(projectSessionEvents(sessionId, entries), limits);
+  const capped = capSessionEvents(
+    projectSessionEvents(
+      sessionId,
+      entries,
+      leafId === undefined ? latestEntryId(entries) : leafId,
+    ),
+    limits,
+  );
   return {
     sessionId,
     events: capped.events,

@@ -155,6 +155,19 @@ export function renderSidebarHtml(options: SidebarHtmlOptions): string {
       aria-label="Sessions"></div>
   </section>
 
+  <section id="rewind-view" class="fullview hidden" role="dialog" aria-modal="false"
+    aria-label="Rewind to an earlier turn">
+    <div class="fullview-head">
+      <button id="rewind-back" class="icon-button" type="button"></button>
+      <h2 class="fullview-title">Rewind</h2>
+    </div>
+    <p id="rewind-warning" class="rewind-warning">Rewinding restores files to how they were
+      before a turn &mdash; and deletes files created since. It cannot be undone.</p>
+    <div id="rewind-status" class="popover-status"></div>
+    <div id="rewind-list" class="popover-list fullview-list" role="listbox"
+      aria-label="Rewindable turns"></div>
+  </section>
+
   <div id="dock">
     <div id="suggest" class="popover suggest hidden" role="dialog" aria-modal="false"
       aria-label="Insert into the message">
@@ -191,6 +204,42 @@ export function renderSidebarHtml(options: SidebarHtmlOptions): string {
         <button id="dryrun-review" class="dryrun-button" type="button">Review</button>
         <button id="dryrun-apply" class="dryrun-button dryrun-primary" type="button">Apply</button>
         <button id="dryrun-discard" class="dryrun-button dryrun-danger" type="button">Discard</button>
+      </div>
+    </section>
+
+    <!--
+      The workflow surface. Two panes, one section, and only one of them is
+      ever up: the CATALOG a '/workflow' opens (what this workspace defines,
+      with each pipeline's ceiling and each role's derived lane), and the RUN
+      card that replaces it once one is started. The card is where an ORG-ASK
+      question surfaces, with a box for the person's own words — the panel
+      never answers one and never summarises one.
+    -->
+    <section id="wf" class="wf hidden" aria-label="Workflows">
+      <div id="wf-catalog" class="wf-catalog hidden">
+        <div class="wf-head">
+          <span id="wf-catalog-icon"></span>
+          <span id="wf-catalog-text" class="wf-text"></span>
+          <button id="wf-close" class="wf-close" type="button" aria-label="Close workflows">&times;</button>
+        </div>
+        <div id="wf-list" class="wf-list" role="list"></div>
+      </div>
+      <div id="wf-run" class="wf-run hidden">
+        <div class="wf-head" role="status" aria-live="polite">
+          <span id="wf-run-icon"></span>
+          <span id="wf-run-text" class="wf-text"></span>
+        </div>
+        <p id="wf-run-meta" class="wf-meta"></p>
+        <div id="wf-questions" class="wf-questions hidden">
+          <p id="wf-question-text" class="wf-question"></p>
+          <label class="wf-answer-label" for="wf-answer">Your answer</label>
+          <textarea id="wf-answer" class="wf-answer" rows="2"
+            aria-label="Answer the workflow's question"></textarea>
+          <div class="wf-actions">
+            <button id="wf-send-answer" class="wf-button wf-primary" type="button">Answer &amp; resume</button>
+          </div>
+        </div>
+        <p id="wf-note" class="wf-note hidden" role="status" aria-live="polite"></p>
       </div>
     </section>
 

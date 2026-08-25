@@ -235,6 +235,41 @@ naming the role and telling you to approve the plan or leave plan mode and re-ru
 /workflow resume <run-id>          # re-enter an interrupted run where it left off
 ```
 
+## From a panel, or any remote client
+
+Every one of those five commands is on the wire, so a workflow is not a terminal-only
+feature. `arcturn serve` exposes four verbs and the VS Code panel drives all of them:
+
+| Terminal | Verb |
+| --- | --- |
+| `/workflow list` | `listWorkflows` |
+| `/workflow <name> [args]` | `runWorkflow` |
+| `/workflow status [runId]` | `workflowStatus` |
+| `/workflow resume <runId> [answer]` | `resumeWorkflow` |
+
+Three things are worth knowing before you build on them, and all three are covered in
+[Server mode](/docs/server-mode#workflows):
+
+- **The catalog reports the lane the engine derives**, from each role's declared `tools:` —
+  never what the role's description claims. A role this engine has not loaded is reported
+  `unknown` and one with no `tools:` line is `undeclared`, because those are the two ways a
+  lane is genuinely unknowable and both mean the run will fail before it spends anything.
+- **A wire budget may only lower the file's ceiling.** `runWorkflow` takes an optional
+  `budgetUsd` that must be *smaller* than the workflow's own `budgetUsd:`; a larger one is
+  refused, naming both numbers, rather than clamped. Nothing else — `stepTimeoutMs`, a
+  role's `maxTurns`, a role's `tools:`, the permission engine — has a parameter at all.
+- **A run is followed on the session's own event stream.** `runWorkflow` answers as soon as
+  the run is *accepted* (a pipeline outlives every sane request deadline), and its progress
+  arrives as the same `notice` events the terminal prints, plus each step's child agent
+  republished as a sub-agent. There is no second event channel, and the durable half is
+  `workflowStatus` reading the same journal `/workflow status` reads.
+
+One capping difference is worth stating plainly: a step's permission asks go to the served
+*runtime's* requester, and `arcturn serve` installs none, so an ask raised by a step fails
+closed and denies. A write- or exec-lane role therefore reaches its tools over the wire
+only on an engine already running in `yolo` — the same behaviour a `--print` run gets, and
+strictly narrower than a terminal run, never wider.
+
 ## Runs survive the process that started them
 
 Every step's terminal state is appended to a durable write-ahead journal *before* the run

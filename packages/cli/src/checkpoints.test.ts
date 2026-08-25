@@ -240,6 +240,51 @@ describe("checkpoints", () => {
     }
   });
 
+  it("plans exactly what a restore then applies, confinement included", async () => {
+    // One computation, two callers. A preview that walked the manifest with
+    // its own rules would eventually show a file count the restore disagreed
+    // with, and the disagreement would only be visible on somebody's disk.
+    const store = createCheckpointStore(storeDir, { restoreRoot: workDir });
+    const inside = join(workDir, "inside.txt");
+    const created = join(workDir, "created.txt");
+    const outside = join(root, "outside.txt");
+    await writeFile(inside, "before", "utf8");
+    await writeFile(outside, "untouched", "utf8");
+
+    const turnId = await store.beginTurn("first");
+    await store.snapshot(inside);
+    await store.snapshot(created);
+    await store.snapshot(outside);
+    await writeFile(inside, "after", "utf8");
+    await writeFile(created, "new", "utf8");
+
+    const plan = await store.planRestore(turnId);
+    const byPath = new Map(plan.steps.map((step) => [step.path, step]));
+    expect(byPath.get(inside)?.action).toBe("restore");
+    expect(byPath.get(created)?.action).toBe("delete");
+    expect(byPath.get(outside)?.action).toBe("refuse");
+    expect(byPath.get(outside)?.reason).toMatch(/outside the workspace/);
+
+    // Planning is read-only.
+    expect(await readFile(inside, "utf8")).toBe("after");
+    expect(await exists(created)).toBe(true);
+
+    const result = await store.restore(turnId);
+    // The restore's own outcome is the plan, applied.
+    expect(result.restored).toEqual([inside]);
+    expect(result.deleted).toEqual([created]);
+    expect(result.errors).toEqual([{ path: outside, message: byPath.get(outside)?.reason }]);
+    expect(await readFile(inside, "utf8")).toBe("before");
+    expect(await exists(created)).toBe(false);
+    expect(await readFile(outside, "utf8")).toBe("untouched");
+  });
+
+  it("refuses to plan a turn it has never recorded", async () => {
+    const store = createCheckpointStore(storeDir);
+    await store.beginTurn("t1");
+    await expect(store.planRestore("not-a-turn")).rejects.toThrow(/unknown turn id/);
+  });
+
   it("does not duplicate a manifest entry when snapshot() is called concurrently for the same path", async () => {
     const store = createCheckpointStore(storeDir);
     const filePath = join(workDir, "same.txt");

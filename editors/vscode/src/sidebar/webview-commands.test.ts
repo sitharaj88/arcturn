@@ -55,7 +55,26 @@ describe("runnableCommands", () => {
   });
 
   it("drops a built-in the panel cannot run, rather than offering a menu row that does nothing", () => {
-    expect(api.runnableCommands([builtin("rewind"), builtin("compact")])).toEqual([]);
+    // `theme` and `compact` are not `rewind`: `rewind` used to be the example
+    // here and stopped being one when `listCheckpoints`/`rewindTo` arrived and
+    // the panel grew a picker for them. That is the double filter working —
+    // the engine's list grew, this one grew with it — rather than an
+    // exception, so the example moved to two the panel still has no surface
+    // for.
+    expect(api.runnableCommands([builtin("theme"), builtin("compact")])).toEqual([]);
+  });
+
+  it("drops `bg` and `org`, which the engine lists and this panel has no surface for", () => {
+    // The engine lists both because the wire carries them out — four verbs for
+    // `/bg`, three for `/org memory`. This panel has no background-agent view
+    // and no memory queue, so it offers neither row rather than offering one
+    // that does nothing. That is the double filter doing its job in the
+    // direction it was built for: the engine's list grew and this one did not,
+    // and the menu stayed honest without anybody editing it. The day the panel
+    // grows a surface, `BUILTIN_ACTIONS` gains a line and the rows appear.
+    expect(api.runnableCommands([builtin("bg"), builtin("org")])).toEqual([]);
+    expect(api.builtinAction(builtin("bg"))).toBe("");
+    expect(api.builtinAction(builtin("org"))).toBe("");
   });
 });
 

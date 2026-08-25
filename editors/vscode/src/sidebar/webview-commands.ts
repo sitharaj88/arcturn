@@ -27,7 +27,8 @@
  *   path, which is the whole point of the rule.
  * - **A built-in** the panel has a native surface for *opens that surface*:
  *   `/model` is the model chip, `/permissions` is the mode chip, `/sessions`
- *   is the history view, `/clear` is the New session button. Inserting the
+ *   is the history view, `/clear` is the New session button, `/workflow` is
+ *   the workflow catalog pane. Inserting the
  *   text instead would send a prompt asking the model to do something the
  *   panel has a button for, which is not what the terminal's `/model` does.
  *
@@ -78,6 +79,19 @@ export const COMMAND_MENU_SOURCE = String.raw`
  * 'discardChanges', and the panel keeps them because it has a review card that
  * runs exactly those. An engine too old to list them simply does not, and
  * 'runnableCommands' never sees the names.
+ *
+ * 'rewind' is here on the same terms again — the wire carries
+ * 'listCheckpoints' and 'rewindTo', and the panel has a picker that runs
+ * exactly those, with the native modal in front of it. It is the entry that
+ * proves the double filter is not redundant: the engine will list '/rewind'
+ * for any client whose wire carries the pair, and a client with no picker to
+ * open would still be wrong to show the row.
+ *
+ * 'workflow' is here on those same terms once more: the engine lists it when
+ * the wire carries 'listWorkflows', 'runWorkflow', 'workflowStatus' and
+ * 'resumeWorkflow', and the panel keeps it because it has a catalog pane and a
+ * run card that drive exactly those four — including the box a person answers
+ * an 'ORG-ASK:' in.
  */
 var BUILTIN_ACTIONS = {
   model: "model",
@@ -87,7 +101,9 @@ var BUILTIN_ACTIONS = {
   diff: "diff",
   apply: "apply",
   discard: "discard",
-  cost: "cost"
+  rewind: "rewind",
+  cost: "cost",
+  workflow: "workflow"
 };
 
 function builtinAction(command) {

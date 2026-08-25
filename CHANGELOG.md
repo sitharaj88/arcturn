@@ -51,6 +51,198 @@ CLI, the SDK, or the wire protocol.
 
 ### Added
 
+- **`/workflow` reaches a remote client in full, budget ceiling and human gate
+  included.** A markdown workflow is one of Arcturn's signature features — a
+  numbered list that is real control flow, an `@role` per step with its own
+  tools and its own lane, `budgetUsd` capping the run and `ORG-ASK:` stopping it
+  for a person — and none of it was reachable from a socket. A panel attached to
+  an engine full of pipelines could not see that they existed. Four verbs now
+  match the terminal's four subverbs one for one: `listWorkflows`,
+  `runWorkflow`, `workflowStatus` and `resumeWorkflow`, all answered by the same
+  engine `/workflow` drives, with no second parser, no second lane classifier
+  and no second run journal.
+
+  **The catalog reports the lane the engine derives**, from each role's declared
+  `tools:` and never from what the role's prose claims — a reviewer that
+  describes itself as read-only and declares `edit` is reported `write`, because
+  `write` is what will happen. A role the engine has not loaded is `unknown` and
+  one with no `tools:` line is `undeclared`; both fail the run before it spends
+  anything, and rounding either down to `read` would tell a person a pipeline is
+  harmless when the truth is that nobody can say.
+
+  **A wire budget may only lower the file's ceiling.** `runWorkflow` takes an
+  optional `budgetUsd` that must be smaller than the workflow's own; a larger
+  one is refused, naming both numbers, rather than silently clamped — the
+  catalog already published the file's figure, so the refusal is actionable, and
+  a client told "fine" that got a different ceiling would render a number the
+  engine is not enforcing. Nothing else can be raised and nothing else has a
+  parameter: `stepTimeoutMs`, each role's `maxTurns`, each role's `tools:` and
+  the permission engine all bind exactly as they do at the terminal, and a run
+  gets the *stricter* of the engine's permission mode and the calling session's.
+
+  **A run is followed on the session's own event stream**, which the client is
+  already subscribed to. `runWorkflow` answers as soon as the run is accepted —
+  a pipeline outlives every sane request deadline, so a verb shaped like
+  `prompt` would hand a default-configured client a timeout for a run that is
+  spending money happily — and progress arrives as the same `notice` events the
+  terminal prints, from the same function, plus each step's child agent
+  republished as a sub-agent. No second event channel was invented, and the
+  durable half is `workflowStatus` reading the journal `/workflow status`
+  already reads.
+
+  The two reads degrade to `undefined` on the `listModels` precedent; the two
+  that start work do **not**, because a client told "started" by an engine that
+  ignored it would report a verdict nobody produced, and an `ORG-ASK` answer
+  that silently went nowhere would leave a run paused forever.
+
+  One capping difference is recorded rather than papered over: a step's
+  permission asks go to the served runtime's requester, and `arcturn serve`
+  installs none, so an ask raised by a step fails closed and denies. A write- or
+  exec-lane role therefore reaches its tools over the wire only on an engine
+  already in `yolo` — the same behaviour a `--print` run gets, and strictly
+  narrower than a terminal run.
+
+- **The VS Code panel runs workflows.** `/` now offers `/workflow`, which opens
+  a catalog pane listing each pipeline with its spend ceiling and a chip per
+  role carrying the derived lane — `@developer write` is the sentence a person
+  needs before they press Run, not after. Choosing one raises a native modal
+  naming the ceiling and every role that can act (and every role whose lane
+  cannot be derived, because that pipeline will not run at all); the composer's
+  text becomes the workflow's `{{input}}`. A run card then shows live stage
+  progress, read from the run journal rather than counted off the notices
+  scrolling past, and an `ORG-ASK:` surfaces there as the question plus a box —
+  every question a parallel stage raised, not just the first — whose text is
+  forwarded verbatim to `resumeWorkflow`. Stop cancels the pipeline as well as
+  the turn.
+
+- **`/bg` reaches a remote client in full, and cannot be talked into more than
+  a `/bg` at the terminal gets.** A background agent is a whole child
+  conversation running off-thread with a durable record on disk; none of it
+  rides a session's event stream, so a panel attached to a busy engine could not
+  tell that four agents were running, what they had cost, or what they had said.
+  Four verbs now match the terminal's four subverbs one for one:
+  `backgroundAgents` (the listing, and one agent's rendered transcript),
+  `startBackgroundAgent`, `cancelBackgroundAgent` and `adoptBackgroundAgent`.
+
+  The start verb spends money, and its whole containment is that **it carries
+  nothing but the task** — no `tools`, no `permissionMode`, no `cwd`, no
+  `model`, in the request type, in the validator, or in the interface the engine
+  hands its manager. So a remotely-started agent runs under the manager's own
+  defaults, which are the terminal's: permission mode `default` (never `yolo`),
+  the read-only tool set plus `fetch`, `subagent` removed so it cannot fan out,
+  rooted at the served workspace, queued behind the concurrency cap. In
+  practice it cannot write a file or run a shell command, and the test that says
+  so asserts it on the filesystem rather than on a returned status.
+
+  `adoptBackgroundAgent` delivers a finished agent's answer into a live session
+  — steering it into a run in flight, or prompting it when idle — and delivers
+  it **unexpanded**. A background agent's final text is written by a model, so
+  expanding `@`-mentions in it would let a child that wrote `@.env` in its
+  answer make the parent read that file on the strength of somebody clicking
+  "adopt". The terminal does not expand it either; matching that is the point.
+
+  One manager, not two: the engine hands these verbs the same instance a `/bg`
+  in the same process reaches.
+
+- **`/org memory` reaches a remote client — everything except approving.** The
+  per-role lessons that get appended to a role's system prompt on later runs are
+  now readable (`orgMemory`), proposable (`proposeOrgMemory`) and retractable
+  (`revokeOrgMemory`, which demotes an active entry or deletes it outright).
+
+  **There is no verb that makes an entry active, and there will not be.** An
+  `active` entry is standing instruction text the model reads every run with no
+  user action at all, which is why "a proposed entry is inert until a person
+  approves it" is the gate this feature is built around — approving is "not
+  something a model should be able to grant itself". The argument for keeping
+  that gate off the wire is not that a remote caller is untrustworthy (one
+  holding the serve token already has full tool execution as you); it is that an
+  engine cannot tell a frame a person clicked from a frame an agent sent, and
+  `/org memory add` is live precisely *because* a person typed it at their own
+  keyboard. It is the same answer `permissionDecision`'s `scope` already gives to
+  rules that would outlive their session. Proposing, revoking and deleting are
+  allowed because of their direction: each can only reduce what a later run is
+  told. A remotely-proposed entry is tagged `origin: "remote"`, so whoever
+  approves it can see it arrived over a socket.
+
+  Four independent gates hold that line — the request type has no `status` field,
+  the validator copies two fields by name, the engine's call site writes
+  `"proposed"` literally, and the response validator refuses an entry that came
+  back `active`. The decisive test is none of those: it proposes over a real
+  socket and then asks `loadOrgMemoryInjector`, the function that actually builds
+  a role's system prompt, what that role would be told. Nothing, until a person
+  approves.
+
+- **`/team` and `/scout` are deliberately still unreachable**, and the reasons
+  are recorded rather than left to be rediscovered. Reading a team's status is
+  not read-only today: constructing a `TeamManager` rewrites every record still
+  `running` to `interrupted`, so a status verb would declare another live
+  process's team dead on its first call — and `merge` and `discard` write to your
+  checkout with no mid-run guard for a `sessionBusy` to hang off. A scout run
+  leaves nothing behind at all: worktrees destroyed in a `finally`, a report that
+  is printed text, so there is nothing to list and nothing to cancel. Both need
+  an engine change before a verb could be truthful. See
+  [Teams](/docs/teams#from-a-remote-client).
+
+- **`/rewind` reaches a remote client, carefully.** Before a `write` or `edit`
+  touches a file for the first time in a turn, Arcturn snapshots that file's
+  content — or its absence — and `/rewind` restores those snapshots and forks
+  the conversation back to the same point. None of it was addressable over
+  `arcturn serve`. It was, in fact, *the* documented example of a command the
+  protocol would not list: "a menu offering `/rewind` to a client with no rewind
+  verb is a menu that lies."
+
+  **`listCheckpoints`** answers what a picker needs before it offers anything:
+  each turn's label and time, and **what rewinding to it would cost** — how many
+  files, which ones, and how many of them get **deleted** rather than rewritten.
+  That is not a count of what happened during a turn; it is the plan a restore
+  would apply, the union of the earliest snapshot per path from that turn to the
+  end of the manifest, which is a number no client could compute for itself.
+  Deletions are reported separately because "3 files changed" and "3 files
+  deleted" are not the same sentence, and a modal that folded them would let
+  somebody approve the second while reading the first. A turn whose conversation
+  link predates the engine's process reports `forksConversation: false`, so a
+  client can say *before* the click that only the files will move.
+
+  **`rewindTo`** does it, through the engine's own checkpoint store — the same
+  object the terminal's `/rewind` drives, with the same workspace confinement, the
+  same content-addressed blobs and the same atomic writes. There is no second
+  restorer, and the extension never writes or unlinks one of your files.
+
+  **It is the one verb on this wire that echoes a confirmation, and the reason is
+  precise.** `deleteSession` and `discardChanges` deliberately have none: a
+  confirmation belongs in a native modal where a person can read what they are
+  losing, not in a two-phase token an engine keeps state for. Both still true —
+  and `rewindTo` differs in the way that matters, because *its parameters do not
+  name what it destroys*. A delete names its session; a discard names its files.
+  A rewind names an opaque turn id, and the files it deletes come from a manifest
+  that grows every turn — so a client that displayed "this deletes 2 files", let a
+  run append three more, and then sent the id would rewind something nobody was
+  shown. The confirmation is therefore a digest of the plan itself, copied from
+  the row the client rendered: no server state, no expiry, nothing to evict, and
+  a client cannot rewind to a cost it never displayed. If the plan has moved, the
+  engine refuses and says to re-list.
+
+  **Refused mid-run** with `sessionBusy`, on `deleteSession`'s wider check rather
+  than `setPermissionMode`'s narrower one — a prompt accepted but still resolving
+  its context has not started the agent yet, and a restore landing there would
+  rewrite files the run is about to read *and* fork the conversation it is about
+  to append to. The terminal already refuses this; now the wire does too.
+  **Not degradable**: an older engine's refusal rejects rather than resolving,
+  because a rewind reported as done that did not happen tells a user their files
+  went back to a state they never returned to, and they carry on building on code
+  they believe they discarded.
+
+  In the **VS Code panel**, `/rewind` opens an in-panel picker listing each turn
+  with what it would change — deletions coloured, because that is the half that
+  loses work — and a **native modal** naming the file count and the files before
+  anything happens, which is the discipline the session delete and the discard
+  already keep. The list has no Enter action on purpose: rows are clicked, because
+  a picker whose default key deletes files is a picker that fires while somebody
+  is still reading it. After a rewind the transcript is re-read through
+  `sessionHistory`, which now replays the branch the live agent is on rather than
+  the newest entry in the file — the one place that could have shown a user a
+  pre-rewind conversation and called it their transcript.
+
 - **The dry-run review loop reaches a remote client, and the VS Code panel makes
   it the best thing the product does.** `--dry-run` sends every file edit to a
   shadow copy of the workspace and leaves your real files alone until a person

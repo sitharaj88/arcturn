@@ -122,3 +122,84 @@ and both directions are bad. An apply that resolved against an engine which igno
 a reviewer their change landed while the file on disk says otherwise — and their next move
 is to discard the shadow tree holding the only copy. A discard that resolved the same way
 leaves them certain their pending work is gone right until the next apply lands it.
+
+## `proposeOrgMemory` is the one response validator that checks a *value*, not a shape
+
+`validateOrgMemoryProposal` refuses a proposal whose entry came back `status: "active"`.
+Every other validator here asks "is this the right shape"; this one asks "is this the right
+answer", and it is worth the exception.
+
+An `active` org-memory entry is standing instruction text appended to a role's system prompt
+on every later run. There is no request field that could have asked for one and no engine
+path that sets one, so an active entry arriving on this response means something between
+the two is wrong about the gate. A client is the surface a person reads "proposed — waiting
+for your approval" on, and it must not be able to print that over an entry that is already
+in force. Cheaper to refuse here than to discover it in somebody's prompt.
+
+The store fails closed in the *other* direction — it reads an unrecognised status as
+`proposed` — and the two are not in conflict. The store is repairing a file a person may
+have hand-edited; a wire payload is not that, and quietly downgrading a status nobody can
+name would hide the one field this feature turns on. So `validateOrgMemoryEntry` refuses it.
+
+## `startBackgroundAgent`'s validator copies one field, and that is the containment
+
+The request carries a task. It does not carry `tools`, `permissionMode`, `cwd` or `model`,
+and a client that sends them gets a request holding none of them — the same
+one-field-at-a-time copying that keeps a credential off `mcpStatus`, pointed at the caps a
+background agent runs under. `validate.test.ts` sends all four and asserts the result.
+
+## `rewindTo`'s `confirmation` is required, and validated as a plain bounded string
+
+The validator refuses a `rewindTo` with no `confirmation`, rather than treating it as
+optional. An optional safety field is one an older or lazier client omits, and the omission
+would be indistinguishable from a client that genuinely rendered the cost the engine
+computed — which is the single thing the field exists to prove.
+
+What it is *not* is a token this package understands. It is an opaque digest the engine
+produced and the client echoes; validation here is shape and ceiling only
+(`MAX_CHECKPOINT_ID_LENGTH`, 200 — same generous-but-bounded rule an MCP server name gets),
+because deciding whether it still describes the current plan is the engine's job and
+belongs next to the manifest that plan is read from.
+
+## `listCheckpoints` degrades, `rewindTo` does not — and this is the sharpest pair yet
+
+`listCheckpoints` translates an older engine's `invalidRequest` into `undefined`: it reads,
+so a client that gets nothing offers no rewind, which is exactly true — that engine could
+not have rewound anything either.
+
+`rewindTo` rejects. `applyChanges` was described above as the strongest case for the
+counter-precedent; this one is stronger. An apply that silently did not happen tells a
+reviewer their change landed while the file says otherwise. A rewind that silently did not
+happen tells a user their files went back to a state they never returned to — and they will
+keep working on top of code they believe they discarded, with nothing in the transcript to
+suggest otherwise.
+
+`validateCheckpointEntry` rejects a `label` carrying a control character rather than copying
+it: a label is the head of a prompt, on its way to a menu row and a native modal, and a
+newline in a modal's detail forges a second line. Same treatment `validateCommandDescriptor`
+gives a skill description.
+
+## The workflow verbs made "a read must never error in-band" a rule, not a habit
+
+`isUnsupportedMethodError` returns `true` for *any* `invalidRequest`, which is what makes
+the degradation story cheap: a client asks, an older engine says "unknown method", and the
+client shrugs. The cost is that a **degradable** verb can never carry an in-band refusal,
+because the client cannot tell the two apart.
+
+`workflowStatus` was written the other way first — an unknown run id refused with
+`invalidRequest`, on the reasoning that "there is no such run here" and "that run did
+nothing" are opposite pieces of news. The wire test caught it immediately:
+`client.workflowStatus("no-such-run")` resolved `undefined`, exactly as it would against an
+engine that predates the verb. The verb now answers zero rows, which is unambiguous for a
+*named* run since only the listing form can legitimately be empty. `pendingChanges` had
+already learnt this and encoded it as `dryRun: false`; `backgroundAgents` had learnt it
+too. It is now written down.
+
+## `runWorkflow`'s `budgetUsd` is shape-checked here and value-checked in the engine
+
+The validator refuses a non-positive `budgetUsd` and nothing else about it. That split is
+deliberate: `0` disables `shouldAbortForCost` entirely, so a "ceiling" of zero is a
+widening wearing a narrowing's clothes and belongs at the boundary that owns shape.
+Whether a positive number is *allowed* — that it is not above the workflow file's own
+`budgetUsd:` — needs the file, which only the engine has, and a validator that guessed
+would be a second authority on a money ceiling.

@@ -19,6 +19,7 @@ import * as vscode from "vscode";
 import type { ChatViewModel } from "./chat-state.js";
 import type { ConnectionReport } from "./connection-card.js";
 import type { DryRunView } from "./dry-run.js";
+import type { RewindView } from "./rewind.js";
 import type { CommandOption } from "./webview-commands.js";
 import { createNonce, renderSidebarHtml } from "./webview-html.js";
 import {
@@ -34,6 +35,7 @@ import {
 } from "./webview-messages.js";
 import type { ModelOption } from "./webview-models.js";
 import type { SessionOption } from "./webview-sessions.js";
+import type { WorkflowView } from "./workflows.js";
 
 /** What the header shows about the session the panel is attached to. */
 export interface SessionSummary {
@@ -116,6 +118,8 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
   #lastPermission: PermissionView | undefined;
   #lastCommands: CommandListView | undefined;
   #lastDryRun: DryRunView | undefined;
+  #lastRewind: RewindView | undefined;
+  #lastWorkflows: WorkflowView | undefined;
   /** What the composer is holding, replayed on reload. See {@link SidebarViewProvider.postContext}. */
   #lastContext: ContextItem[] | undefined;
   /**
@@ -289,6 +293,42 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
     this.#post({ type: "dryRun", view });
   }
 
+  /**
+   * Push the turns this session could be rewound to.
+   *
+   * Remembered and replayed on the same terms as the review card, and the
+   * `note` dropped for the same reason: a refusal is about one attempt, and
+   * replaying "a run is in flight" into a panel reopened an hour later would
+   * be false.
+   *
+   * @param view - See {@link RewindView}.
+   */
+  postRewind(view: RewindView): void {
+    const { note: _note, ...remembered } = view;
+    this.#lastRewind = remembered;
+    this.#post({ type: "rewind", view });
+  }
+
+  /**
+   * Push the workflow catalog and the run being followed.
+   *
+   * Remembered and replayed on the review card's terms, and the `note` dropped
+   * for the same reason: a refusal is about one attempt, and replaying "the
+   * engine refused" into a panel reopened an hour later would be false.
+   *
+   * The *run* is remembered, which is deliberate and is the point of this
+   * surface: a pipeline outlives the panel being hidden, so a person who
+   * collapsed the sidebar mid-run and came back to it finds the card where they
+   * left it — including a question it is still waiting on.
+   *
+   * @param view - See {@link WorkflowView}.
+   */
+  postWorkflows(view: WorkflowView): void {
+    const { note: _note, ...remembered } = view;
+    this.#lastWorkflows = remembered;
+    this.#post({ type: "workflows", view });
+  }
+
   /** Push the session the panel is attached to. */
   postSession(session: SessionSummary): void {
     this.#lastSession = session;
@@ -360,6 +400,10 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
       });
     }
     if (this.#lastDryRun !== undefined) this.#post({ type: "dryRun", view: this.#lastDryRun });
+    if (this.#lastRewind !== undefined) this.#post({ type: "rewind", view: this.#lastRewind });
+    if (this.#lastWorkflows !== undefined) {
+      this.#post({ type: "workflows", view: this.#lastWorkflows });
+    }
     // Last, so the view it opens is already holding the list it will show. One
     // shot: a reload the user did not ask for must not re-open the view.
     if (this.#pendingShowSessions) {

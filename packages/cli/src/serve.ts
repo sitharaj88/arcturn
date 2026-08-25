@@ -51,6 +51,9 @@ import type {
   SessionStore,
   Tool,
 } from "@arcturn/types";
+import type { AgentDef } from "./agents.js";
+import { type BackgroundAgentHost, getBackgroundAgentManager } from "./background-agents.js";
+import type { CheckpointStore } from "./checkpoints.js";
 import { createContextResolver } from "./context.js";
 import { createCostGuard } from "./cost-guard.js";
 import { exportHtml, exportMarkdown, suggestExportFilename } from "./export.js";
@@ -63,8 +66,12 @@ import {
   registerBundledCatalog,
   resolveModelSpec,
 } from "./runtime.js";
+import { backgroundAgentRegistry } from "./serve-background.js";
 import { serveCommandDescriptors } from "./serve-commands.js";
 import { mcpServerSummaries } from "./serve-mcp.js";
+import { serveOrgMemoryStore } from "./serve-org-memory.js";
+import { createServeRewind, type ServeRewind } from "./serve-rewind.js";
+import { createServeWorkflows, type ServableWorkflowRuntime } from "./serve-workflows.js";
 import type { Skill } from "./skills.js";
 import { startWebClientServer, type WebClientServer, webClientOrigins } from "./web/server.js";
 
@@ -208,10 +215,46 @@ export interface ServableRuntime {
    */
   readonly overlay?: DryRunOverlay | undefined;
   /**
+   * Where workflow files and run journals live, the markdown agents a `@role`
+   * step resolves against, this engine's live permission mode, and the child
+   * agent factory a read-lane step runs through — the four things
+   * `createServeWorkflows` needs to drive the same `/workflow` engine the
+   * terminal drives.
+   *
+   * All optional so a stub runtime (this module's tests, an embedder with no
+   * agent catalog) still satisfies the shape; a real `ArcturnRuntime` satisfies
+   * every one of them structurally, with nothing added to `runtime.ts`. Without
+   * `paths` and `createSubagent` there is nowhere to discover a workflow and
+   * nothing to run a step as, so no workflow engine is wired at all and the
+   * verbs report that honestly — see `serve-workflows.ts`.
+   */
+  readonly paths?: { readonly home: string; readonly project: string };
+  readonly agents?: ReadonlyMap<string, AgentDef>;
+  readonly permissionMode?: PermissionMode;
+  createSubagent?: ServableWorkflowRuntime["createSubagent"];
+  /**
    * Optional: build a fully isolated agent for one served session. A real
    * `ArcturnRuntime` provides it; stubs may omit it and get the generic assembly.
    */
-  buildSessionAgent?: (options: { sessionId: string; cwd?: string; model?: ModelSpec }) => Agent;
+  buildSessionAgent?: (options: {
+    sessionId: string;
+    cwd?: string;
+    model?: ModelSpec;
+    checkpoints?: CheckpointStore;
+  }) => Agent;
+  /**
+   * Optional: fork one served session's conversation to an earlier entry, for
+   * the `rewindTo` verb. A real `ArcturnRuntime` provides it; a stub that omits
+   * it — like one that omits `buildSessionAgent` — simply offers no rewind,
+   * which `listCheckpoints` reports as `available: false` rather than as an
+   * empty picker.
+   */
+  forkSessionAgent?: (options: {
+    sessionId: string;
+    leafId: string | null;
+    cwd?: string;
+    checkpoints: CheckpointStore;
+  }) => Promise<Agent>;
   dispose(): Promise<void>;
 }
 
@@ -269,23 +312,45 @@ function serveModelResolver(env: EnvMap): (modelId: string) => ModelSpec {
   };
 }
 
+/**
+ * Whether this runtime knows where `~/.arcturn` is.
+ *
+ * A type predicate rather than an inline check so the *identity* of the runtime
+ * survives the narrowing: `getBackgroundAgentManager` memoizes on the object it
+ * is handed, so an engine that is both serving and running a TUI must hand it
+ * the same object both times — passing a freshly-built `{ paths, llm, ... }`
+ * literal would mint a second manager over the one records directory, which is
+ * precisely the thing `serve-background.ts` exists to avoid.
+ */
+function hasHomePath(runtime: ServableRuntime): runtime is ServableRuntime & BackgroundAgentHost {
+  return runtime.paths !== undefined;
+}
+
 /** Build the `Agent` backing one served session. See {@link ServableRuntime}. */
 function buildServedAgent(
   runtime: ServableRuntime,
   opts: AgentFactoryOptions,
   maxCostUsd: number | undefined,
   resolveModel: (modelId: string) => ModelSpec,
+  rewind: ServeRewind | undefined,
 ): Agent {
   const model = opts.model === undefined ? runtime.model : resolveModel(opts.model);
   // A real ArcturnRuntime builds a properly isolated agent — its own checkpoint
   // store keyed by this session, so one served session's /rewind never
   // touches another's files. The structural fallback below keeps this
   // function testable with a minimal stub runtime.
+  //
+  // The store is handed IN rather than minted inside, when a rewind provider
+  // exists: `buildSessionAgent` used to create one and drop the reference, so
+  // the manifest was written and nothing could read it back — which is exactly
+  // why `/rewind` was unreachable from here. Same store, one owner.
+  const checkpoints = rewind?.storeFor(opts.sessionId, opts.cwd ?? runtime.cwd);
   const agent = runtime.buildSessionAgent
     ? runtime.buildSessionAgent({
         sessionId: opts.sessionId,
         ...(opts.cwd === undefined ? {} : { cwd: opts.cwd }),
         model,
+        ...(checkpoints === undefined ? {} : { checkpoints }),
       })
     : new Agent({
         llm: runtime.llm,
@@ -302,6 +367,10 @@ function buildServedAgent(
         },
       });
   if (maxCostUsd !== undefined) attachCostGuard(agent, maxCostUsd);
+  // Every turn this agent runs opens a checkpoint and records where in the
+  // conversation it began — the half the terminal gets from `ArcturnRuntime`'s
+  // own `#onEvent` and a served session had no equivalent of.
+  rewind?.track(opts.sessionId, agent);
   return agent;
 }
 
@@ -327,6 +396,39 @@ export function createServeHost(
   options: { maxCostUsd?: number; maxAttachmentBytes?: number } = {},
 ): SessionHost {
   const resolveModel = serveModelResolver(runtime.env);
+  // The `/bg` registry, over the runtime's own memoized manager. `undefined`
+  // for a runtime with no `paths` (a stub, an embedder), which the verbs report
+  // as "this server was built without a background-agent manager" rather than
+  // as an empty list — those are different facts and only one of them means the
+  // feature is absent. See `serve-background.ts` for what a remotely-started
+  // agent is capped by, which is everything except its task.
+  const backgroundAgents = hasHomePath(runtime)
+    ? backgroundAgentRegistry(getBackgroundAgentManager(runtime))
+    : undefined;
+  // The org-memory store, over the same file `/org memory` reads. `undefined`
+  // without a project path, because the store's filename is a hash of it.
+  const orgMemory = runtime.paths === undefined ? undefined : serveOrgMemoryStore(runtime.paths);
+  // ---- Rewind: one provider, the store side AND both verbs. ------------
+  // Built here, before the host, because it has *three* consumers and two of
+  // them are not verbs: `buildServedAgent` asks it for the checkpoint store a
+  // session records into, `listCheckpoints` asks it what those recordings
+  // would cost to undo, and `rewindTo` asks it to apply one. Those have to be
+  // the same object — a store written by one and read by another would list
+  // turns nobody recorded and restore blobs nobody wrote, and the symptom
+  // would be a rewind that silently did nothing, which is the one outcome
+  // this verb's contract forbids. See `serve-rewind.ts`.
+  //
+  // `undefined` for a runtime that cannot fork a conversation (a stub, an
+  // embedder), which the verbs report as `available: false` rather than as an
+  // empty picker.
+  const rewind =
+    runtime.forkSessionAgent && runtime.paths
+      ? createServeRewind({
+          paths: runtime.paths,
+          cwd: runtime.cwd,
+          forkSessionAgent: runtime.forkSessionAgent.bind(runtime),
+        })
+      : undefined;
   // One closure, two consumers: the `/` menu (`commands`, below) and the
   // expander that runs what the menu offered (`contextResolver`, below that).
   // They are the same feature seen from two sides — a listed command must be
@@ -335,8 +437,25 @@ export function createServeHost(
   // This is the `resolveModel`/`modelCatalog` lesson applied before it bites:
   // that pair got separated once and drifted into a real routing bug.
   const skills = (): readonly Skill[] => runtime.skills ?? [];
+  // Built once, next to the injection that uses it, so the four workflow verbs
+  // can never be handed two different engines. See the `workflows:` line below.
+  const workflows = createServeWorkflows(runtime, {
+    // A "[tag]" is a catalog id or a preset name, resolved through the same
+    // catalog `/model` and the terminal's `/workflow` use. An unknown id
+    // resolves to `undefined`, which fails the run before any step spends a
+    // token rather than silently running on the wrong model.
+    resolveModelTag: (tag) => {
+      try {
+        registerBundledCatalog();
+        return resolveModelSpec(tag, runtime.env);
+      } catch {
+        return undefined;
+      }
+    },
+  });
   return new SessionHost({
-    agentFactory: (opts) => buildServedAgent(runtime, opts, options.maxCostUsd, resolveModel),
+    agentFactory: (opts) =>
+      buildServedAgent(runtime, opts, options.maxCostUsd, resolveModel, rewind),
     // ---- Store injection: one store, four verbs, deliberately one line. ----
     // `listSessions`, `openSession`'s fallback, `sessionHistory` and
     // `deleteSession` are all answered from this one reference. Nothing else
@@ -442,6 +561,32 @@ export function createServeHost(
     // and a snapshot taken at startup would report every server disconnected
     // forever.
     mcpStatus: () => mcpServerSummaries(runtime.mcp),
+    // ---- Workflow injection: one engine, four verbs, one line. -----------
+    // `/workflow` is a markdown file the workspace holds, a numbered list that
+    // is real control flow, roles with derived lanes, a spend ceiling and a
+    // resumable journal. None of it was reachable from a socket, so a panel
+    // attached to an engine full of pipelines could not see that they existed.
+    //
+    // `listWorkflows`, `runWorkflow`, `workflowStatus` and `resumeWorkflow` are
+    // all answered from this one object, and it stays one object for the reason
+    // the dry-run block below records: the `resolveModel`/`modelCatalog` pair
+    // was split once and the halves drifted into a real routing bug. Here the
+    // halves would be worse — a catalog built from one workflow root and a run
+    // started against another would run a pipeline nobody was shown.
+    //
+    // It is the runtime's OWN workflow engine: the same `discoverWorkflows`,
+    // the same lane classifier, the same `runWorkflow` loop, the same journal
+    // directory the terminal's `/workflow status` reads. `@arcturn/server`
+    // never parses a workflow itself; there is no second engine on this path.
+    //
+    // The model-tag resolver is the same one `createCommandRegistry` hands the
+    // slash command, threaded rather than re-derived — a `[tag]` has to name
+    // the same model in a panel that it names in a terminal.
+    //
+    // `undefined` for a runtime that cannot drive one (no `paths`, no
+    // `createSubagent`), which the host reports as "this engine has no workflow
+    // engine" rather than as an empty catalog.
+    ...(workflows === undefined ? {} : { workflows }),
     // ---- Dry-run injection: one overlay, three verbs, one line. ----------
     // `--dry-run` reroutes every write/edit into a shadow copy of the
     // workspace so a person reviews the change before it lands. That loop was
@@ -464,6 +609,46 @@ export function createServeHost(
     // `undefined` when the engine is not in dry-run mode, which the verbs
     // report as `dryRun: false` rather than as an empty list.
     ...(runtime.overlay === undefined ? {} : { dryRunOverlay: runtime.overlay }),
+    // ---- Rewind injection: the same provider `agentFactory` records into. --
+    // `listCheckpoints` reads its plans and `rewindTo` applies them, and both
+    // walk the store the session's own `write`/`edit` calls snapshotted into —
+    // because it is one object, built above. The restorer is the engine's own
+    // `CheckpointStore`: the workspace confinement that refuses a manifest
+    // record outside the session's cwd, the content-addressed blobs and the
+    // atomic writes are the same code the TUI's `/rewind` runs.
+    // `@arcturn/server` never touches a file on this path.
+    ...(rewind === undefined ? {} : { checkpoints: rewind }),
+    // ---- Background agents: one manager, four verbs, one line. ------------
+    // `/bg` runs a whole child conversation off-thread with a durable record on
+    // disk. None of it rides a session's event stream, so a remote client had
+    // no way to see that an engine had four agents running, what they had cost,
+    // or what they had said.
+    //
+    // `backgroundAgents`, `startBackgroundAgent`, `cancelBackgroundAgent` and
+    // `adoptBackgroundAgent` are all answered from this one reference, and it
+    // stays one reference for the reason the dry-run block above records. Here
+    // the failure mode is sharper still: two registries over one records
+    // directory would each run the other's crash recovery, and the second one
+    // to load would mark the first one's live agents `interrupted`.
+    //
+    // It is the runtime's OWN manager — `getBackgroundAgentManager` is memoized
+    // by runtime identity, so an engine that is both serving and running a TUI
+    // hands both surfaces the same instance, the same queue and the same
+    // concurrency cap.
+    //
+    // Resolved eagerly, here, rather than lazily on the first client request.
+    // Constructing a manager adopts the records directory and runs its
+    // crash-recovery pass, and that is a startup event of this process, not
+    // something a read verb should cause halfway through somebody's session.
+    ...(backgroundAgents === undefined ? {} : { backgroundAgents }),
+    // ---- Org memory: one store, three verbs, and the fourth left out. -----
+    // Read the per-role lessons, propose an inert one, take one back. There is
+    // deliberately no injection point for approving one: an `active` entry is
+    // standing instruction text in every later run of its role, and the gate on
+    // it is a person at the machine. `serve-org-memory.ts` carries the
+    // argument, and it is written where the store's own bounds are rather than
+    // three packages away from them.
+    ...(orgMemory === undefined ? {} : { orgMemory }),
   });
 }
 

@@ -429,6 +429,78 @@ export class ArcturnServer {
         return this.#sessionHost.applyChanges(request.params.sessionId, request.params.paths);
       case "discardChanges":
         return this.#sessionHost.discardChanges(request.params.sessionId, request.params.paths);
+      case "backgroundAgents":
+        // Read-only, and not session-scoped: background agents belong to the
+        // engine, so no observer is attached and no session is required. A
+        // client may ask before it has opened anything.
+        return this.#sessionHost.backgroundAgents(request.params?.id);
+      case "startBackgroundAgent":
+        // The one verb on this wire that starts a whole second conversation.
+        // Every cap it runs under — tools, permission mode, cwd, model — is
+        // decided by the engine's own defaults, because the request carries
+        // nothing but the task. See `SessionHost.startBackgroundAgent`.
+        return this.#sessionHost.startBackgroundAgent(request.params.task);
+      case "cancelBackgroundAgent":
+        return this.#sessionHost.cancelBackgroundAgent(request.params.id);
+      case "adoptBackgroundAgent":
+        // Session-scoped, unlike the other three: this delivers into a live
+        // conversation. The text is the registry's, delivered unexpanded — see
+        // `SessionHost.adoptBackgroundAgent` for why that matters.
+        return this.#sessionHost.adoptBackgroundAgent(request.params.sessionId, request.params.id);
+      case "orgMemory":
+        // Read-only, shaped like `mcpStatus`: the store is a property of the
+        // server process, not of a conversation.
+        return this.#sessionHost.orgMemory();
+      case "proposeOrgMemory":
+        // Files an entry that reaches no prompt. There is deliberately no
+        // sibling case that makes one active — see `org-memory.ts`.
+        return this.#sessionHost.proposeOrgMemory(request.params.role, request.params.text);
+      case "revokeOrgMemory":
+        // Answers with the resulting store rather than `{ ok: true }`, for the
+        // reason `setPermissionMode` does: the engine is the authority on what
+        // is in the store now.
+        return this.#sessionHost.revokeOrgMemory(request.params.id, request.params.remove);
+      case "listCheckpoints":
+        // Read-only, so no observer is attached and no session state is
+        // touched — the same shape `pendingChanges` has.
+        return this.#sessionHost.listCheckpoints(request.params.sessionId);
+      case "rewindTo":
+        // The other verb on this wire that writes a user's files, and the only
+        // one that deletes them. Every guard is the host's — the busy refusal,
+        // the echoed confirmation, and the workspace confinement the engine's
+        // own checkpoint store applies. See `SessionHost.rewindTo`.
+        return this.#sessionHost.rewindTo(
+          request.params.sessionId,
+          request.params.checkpointId,
+          request.params.confirmation,
+        );
+      case "listWorkflows":
+        return { workflows: await this.#sessionHost.listWorkflows() };
+      case "runWorkflow":
+        // Answers with the accepted run rather than `{ ok: true }`, and
+        // deliberately *before* the pipeline finishes: a run outlives every
+        // sane request deadline, so the response is the handle and the run
+        // itself rides the session's event stream this connection already
+        // subscribed to with `openSession`. No observer is attached here —
+        // the client is already on the stream, and attaching a second time
+        // would double every notice. See `SessionHost.runWorkflow`.
+        return this.#sessionHost.runWorkflow(request.params.sessionId, {
+          name: request.params.name,
+          ...(request.params.input === undefined ? {} : { input: request.params.input }),
+          ...(request.params.budgetUsd === undefined
+            ? {}
+            : { budgetUsd: request.params.budgetUsd }),
+        });
+      case "workflowStatus":
+        // Read-only, and not session-scoped: runs live under the served home,
+        // so a run started in a terminal is as legible here as one started
+        // over this socket.
+        return { runs: await this.#sessionHost.workflowStatus(request.params.runId) };
+      case "resumeWorkflow":
+        return this.#sessionHost.resumeWorkflow(request.params.sessionId, {
+          runId: request.params.runId,
+          ...(request.params.answer === undefined ? {} : { answer: request.params.answer }),
+        });
       default:
         return exhaustiveCheck(request);
     }

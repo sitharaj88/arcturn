@@ -73,6 +73,26 @@ extension hack.
 > additive; `PROTOCOL_VERSION` stays `1`. The frozen list above is now that
 > list plus `listModels`, `sessionHistory` and `deleteSession`.
 
+> **Amendment (2026-08-25, workflows).** The rule held again, for the largest
+> feature yet to hit it. A markdown workflow — a numbered list that is real
+> control flow, an `@role` per step with its own tools and its own lane,
+> `budgetUsd` capping a run, `ORG-ASK:` stopping it for a person — was
+> terminal-only, and a panel attached to an engine full of pipelines could not
+> see that they existed. Reading `.arcturn/workflows` extension-side and
+> deriving a role's lane there is exactly what §0 forbids, and it would have
+> been the worst version of it: the lane is the sentence that says whether a
+> pipeline can rewrite your checkout, and a second derivation of it would be a
+> second answer to that question. So the engine gained **`listWorkflows`**,
+> **`runWorkflow`**, **`workflowStatus`** and **`resumeWorkflow`** (see
+> [Server mode](/docs/server-mode#workflows)), answered by the same engine
+> `/workflow` drives. All four are optional and additive; `PROTOCOL_VERSION`
+> stays `1`. The two reads degrade, the two that start work do not.
+>
+> The panel follows a run on the session event stream it is already subscribed
+> to — a workflow's progress arrives as the same `notice` events the terminal
+> prints — so no second channel was added to satisfy a client, which is the
+> other half of what §0 is for.
+
 - **Server lifecycle.** The extension spawns `arcturn serve` per workspace on
   a loopback ephemeral port with a generated token, hands the token to the
   client via the URL fragment, and never writes it to logs, settings or

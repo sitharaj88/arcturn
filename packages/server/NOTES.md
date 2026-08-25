@@ -809,3 +809,196 @@ on the wire would let a client render a diff against one thing while the engine 
 against another, and the gap between them is exactly where an unreviewed change hides. The
 VS Code panel therefore diffs a `file:` URI (live) against the engine's `after` (fixed),
 and the wire is half the size for it.
+
+## `rewindTo` is the one destructive verb with a wire-level confirmation
+
+`deleteSession` set the discipline and `discardChanges` kept it: no two-phase token. The
+confirmation belongs where a person can read what they are losing — a native modal in the
+client — and a handshake would be state the engine had to keep, expire and evict.
+
+`rewindTo` takes one anyway, and the difference is not "it is more dangerous". It is that
+**its parameters do not name what it destroys.** A `deleteSession` names its session; a
+`discardChanges` selection names its files, spelled as the engine just listed them. A
+`rewindTo` names an opaque turn id, and the files it deletes are derived from a manifest
+that grows with every turn — so a client that rendered "this deletes 2 files", let a run
+append three more, and then sent the id would rewind something nobody was shown.
+
+So `CheckpointEntry.confirmation` is a **digest of the plan**, not a nonce. `checkpointConfirmation`
+hashes the sorted, workspace-relative restore and delete sets plus whether the conversation
+forks; `rewindTo` recomputes it and compares. No server state, nothing to expire, nothing to
+evict — which is why it can be *required* without becoming the handshake `deleteSession`
+refused. It is a drift detector, not a capability: a client already holding the serve token
+can call `listCheckpoints` for any confirmation it likes, so collision resistance is the only
+property that has to hold, and 128 bits is generous for that.
+
+## The busy check is `deleteSession`'s, not `applyChanges`'
+
+`applyChanges` widened its refusal to *every* live session because `--dry-run` is a flag on
+the process: one shadow tree, shared, so no single session's `isRunning` can answer "is it
+safe to write this tree back".
+
+A checkpoint store is not shared. There is one per session, rooted at that session's own
+working directory, so `rewindTo` refuses on `isBusy(session)` — the wider-than-`isRunning`
+check that also covers a prompt still resolving its context, which is `deleteSession`'s and
+`compact`'s. What two served sessions genuinely share is the workspace, and they already
+write it concurrently through ordinary tool calls; that is a property of running two agents
+in one directory rather than something this verb introduces.
+
+## A fork swaps the agent and keeps the observers
+
+`SessionHost.#swapAgent` is the second door into a live session's identity, and it exists
+only for this verb. It moves the two things a session *is* — the event subscription that
+fans out to observers, and the permission requester — onto the forked agent, and leaves the
+observers themselves in place: a rewind is not a delete, the same connections are still
+attached to the same session id, and dropping their subscriptions would silently stop the
+transcript they are watching. What they get instead is a `notice` before any new event can
+arrive, so a client that was not the one asking learns the conversation moved.
+
+`#permissionRequester` was factored out of `#register` for this: a requester built in two
+places is a requester that can be built two ways.
+
+## `sessionHistory` replays the *live agent's* branch
+
+`projectSessionEvents` walked to the newest appended entry, which is right for a session
+read off disk and wrong for the moments right after a fork: `rewindTo` resumes an agent at
+an older entry and **writes nothing**, so until that agent's next turn the newest entry in
+the file is the tip of the branch the fork just walked away from. Replaying that would hand
+a client the pre-rewind conversation and call it the transcript — a `rewindTo` that moved
+the files and silently did not move the transcript.
+
+So `buildSessionHistory` takes an optional leaf and `SessionHost.sessionHistory` passes
+`live.agent.leafEntryId` when the session is live. That is what the function's own doc
+already promised ("only the active branch is replayed"); it just was not true for the one
+case that creates an inactive branch.
+
+## Delegation: `/bg` is a registry, `/team` and `/scout` are not — and that decided it
+
+`background-agents.ts` and `org-memory.ts` are projections over injected managers, the
+shape `dry-run.ts` established. What is worth writing down is why only two of the four
+delegation surfaces got one.
+
+**`/bg` had everything a verb needs.** A durable record per agent, written atomically, with
+a status, a cost and a task on it; a `list`/`get`/`cancel`/`transcript` API on a manager
+that is already memoized per runtime; and a spawn path whose defaults *are* the caps. That
+last part is what made `startBackgroundAgent` safe to expose at all: the wire narrows the
+manager's `start(options)` to `start(task)` at the `BackgroundAgentRegistry` seam, so a
+remote caller cannot widen the tool set, the permission mode, the working directory or the
+model, because the type has nowhere to put them. The cap is not a promise in a comment; it
+is the absence of a parameter, and `delegation-wire.test.ts` proves it on the filesystem.
+
+**`/team` had two blockers, neither of them protocol-shaped.**
+
+1. `TeamManager`'s constructor rewrites every record still `"running"` to `"interrupted"`,
+   on the (correct, for a terminal) assumption that a fresh manager is a fresh process.
+   `arcturn serve` breaks that assumption, so a "read-only" `teamStatus` verb would mark
+   another live process's team dead on its first call. There is no read that is actually a
+   read until a record carries an owner lease.
+2. `merge` and `discard` write to the user's checkout (`git apply`; deleting the patch that
+   is the only copy of a member's work) and neither refuses mid-run. Every write verb here
+   answers `sessionBusy` rather than racing; there is nothing to answer with until the
+   manager can be asked whether a team is still going.
+
+**`/scout` has no durable state at all** — worktrees are destroyed in a `finally` and the
+report is printed text — so there is nothing to list and nothing to cancel. A start verb
+would block for minutes and be unreportable, which is the verb shape this package refuses.
+
+`built-in-commands.ts` records the same three decisions next to the menu they govern.
+
+## The one hazard `/bg` inherits, stated plainly
+
+A background-agent manager corrects a `"running"` record to `"interrupted"` at load, for
+the same process-assumption reason `TeamManager` does. `arcturn serve` constructing one at
+startup is therefore a third process adopting the directory: a terminal's live `/bg` can be
+reported `interrupted` until its owning manager next persists it. It self-heals, the
+terminal's own view is never wrong, and it is not new — two terminals already do it — but
+`arcturn serve` makes it reachable more often. The fix is an owner lease in the record,
+in `@arcturn/cli`, not here.
+
+## Why an unknown background-agent id is an empty list rather than a refusal
+
+Because `backgroundAgents` degrades. `isUnsupportedMethodError` reads *every* server-sent
+`invalidRequest` as "this peer is older than the verb", because that is the only thing the
+wire can tell it — so an engine that refused a mistyped id would make a client hide its
+whole background-agent surface. `pendingChanges` keeps the same discipline by answering
+`dryRun: false` instead of erroring on a read. `cancelBackgroundAgent` and
+`adoptBackgroundAgent` *do* refuse an unknown id, and may, because neither degrades.
+
+## Workflows: an injection, not an implementation
+
+`listWorkflows`, `runWorkflow`, `workflowStatus` and `resumeWorkflow` are answered by a
+`WorkflowService` this package defines (`workflows.ts`) and `@arcturn/cli` implements
+(`serve-workflows.ts`), on exactly the terms `dryRunOverlay` and `mcpStatus` are injected.
+
+The reason is stronger here than for either of those. The workflow engine is 7,000 lines
+of `@arcturn/cli`: a strict parser, a lane classifier that reads a role's declared
+`tools:`, a stage loop with a per-step deadline and a run-scope budget, a seeded-worktree
+write lane, and an append-only run journal under `~/.arcturn/workflow-runs`. A second
+implementation living behind the socket would parse the same file differently, derive a
+different lane for the same role, and write a second journal into the same directory — and
+a panel would then be showing a pipeline the terminal has never run.
+
+One injection, four verbs, and it stays one for the reason `createServeHost` records after
+the `resolveModel`/`modelCatalog` pair drifted apart: a catalog built from one workflow
+root and a run started against another would run a pipeline nobody was shown.
+
+## `runWorkflow` answers on acceptance, and that is not fire-and-forget
+
+`SessionHost.prompt` awaits the whole run, and `ws-server.ts` awaits it in turn, so
+`prompt`'s response arrives when the run ends. That is right for one turn and wrong for a
+pipeline: `stepTimeoutMs` alone defaults to ten minutes *per step*, and
+`ProtocolClient`'s own request deadline defaults to 30 seconds. A `runWorkflow` shaped
+like `prompt` would hand every default-configured client a `ProtocolTimeoutError` for a
+run that is spending money perfectly happily — a worse lie than the one the
+non-degradability rule exists to prevent, because it reports failure for work that is
+succeeding.
+
+So the verb answers with a `WorkflowRunHandle` as soon as the engine has accepted the run,
+and the outcome rides the session's event stream. The two halves of "is this honest" are
+kept separately: the verb is **not degradable** (an older engine's `invalidRequest`
+rejects, so nobody is told "started" by an engine that ignored them), and the run id in the
+handle names a directory the implementation writes a manifest into *before* the response
+goes out, so "started" is a claim the client can go and check.
+
+`AcceptedWorkflowRun.settled` exists for one thing only, and it is not a second answer to
+"what happened": it tells this host when the session is free to start another pipeline.
+Without it, one finished run would leave `#workflowRuns` holding a controller forever and
+the session would answer `sessionBusy` to every later `runWorkflow` — a session wedged by a
+pipeline that ended an hour ago.
+
+## The busy check is about the transcript, not about corruption
+
+`runWorkflow` and `resumeWorkflow` refuse with `sessionBusy` when the session is mid-turn
+**or** already running a pipeline. A workflow's steps are their own agents, so nothing
+would actually corrupt; what would break is legibility. That session's event stream is the
+only place either run is visible, and two pipelines narrating into one transcript is a
+transcript nobody can read. The refusal hands a client something to do — wait, or open a
+second session — rather than producing a mess it cannot untangle afterwards.
+
+`deleteSession` refuses for a session with a run in flight for a sharper reason: one of its
+steps may be applying a patch to the user's checkout at that moment, and deleting the
+session would silence the only stream reporting it.
+
+`abort` cancels both halves, and `dispose`/`#evict` sweep every controller. A Stop button
+that only reached the session's own agent while a pipeline kept spending would be the worst
+kind of unresponsive.
+
+## `#workflowRuns` is on the host, not on `LiveSession`
+
+A run is scoped to one session but is not part of what a session *is*, and the map answers
+two questions that live at the host: "may this session start another pipeline" and "what
+does `abort` on this session have to cancel besides the agent's turn". Keeping it here also
+meant `LiveSession` — a shape three concurrent workstreams were editing — did not have to
+grow a field.
+
+## Why an unknown run id is an empty list rather than a refusal
+
+The same trap `/bg` fell into, found the same way: `isUnsupportedMethodError` treats *any*
+`invalidRequest` as "this engine does not know the verb", and
+`ProtocolClient.workflowStatus` degrades on it. A read that refused in-band would therefore
+be collapsed to `undefined` by every client, making "no such run here" and "this engine is
+too old" one piece of news. Zero rows for a *named* run is unambiguous on its own — only
+the listing form can legitimately be empty — and it is the rule `pendingChanges` already
+keeps by answering `dryRun: false` instead of erroring.
+
+The first version of this verb refused, and the wire test caught it: `workflowStatus`
+resolved `undefined` for a run id the engine had never heard of.

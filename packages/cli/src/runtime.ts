@@ -1081,6 +1081,51 @@ export class ArcturnRuntime {
   }
 
   /**
+   * Fork **one served session's** conversation to an earlier entry, and hand
+   * back the agent that now holds it.
+   *
+   * The sibling of {@link ArcturnRuntime.rewindConversationTo}, which forks
+   * the runtime's *own* agent and swaps it into the TUI. A served session's
+   * agent belongs to `SessionHost`, not to this runtime, so this returns the
+   * replacement rather than installing it — the host is what subscribes
+   * observers and installs the permission requester, and a runtime reaching
+   * into that would be a second session registry.
+   *
+   * Both routes fork the same way: `Agent.resume` at a `leafId` for an entry
+   * that exists, a fresh agent on the same session id for `null` ("before the
+   * first message"). Non-destructive either way — the entries rewound past
+   * stay on their own branch in the session file.
+   *
+   * @param options.sessionId - Session being forked.
+   * @param options.leafId - Entry to branch from, or `null` for a fresh start.
+   * @param options.cwd - The session's working directory.
+   * @param options.checkpoints - The store this session records into, so the
+   *   forked agent keeps writing to the same manifest the fork was chosen from.
+   */
+  async forkSessionAgent(options: {
+    sessionId: string;
+    leafId: string | null;
+    cwd?: string;
+    checkpoints: CheckpointStore;
+  }): Promise<Agent> {
+    if (options.leafId === null) {
+      return this.buildSessionAgent({
+        sessionId: options.sessionId,
+        ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+        checkpoints: options.checkpoints,
+      });
+    }
+    const base = this.#agentOptions({ sessionId: options.sessionId }, options.checkpoints);
+    return Agent.resume({
+      ...base,
+      ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+      sessionStore: this.store,
+      sessionId: options.sessionId,
+      leafId: options.leafId,
+    });
+  }
+
+  /**
    * Build the agent for one scout, rooted at its throwaway worktree.
    *
    * Uses the sub-agent route (a cheap model by default) and gets its own
@@ -1187,6 +1232,15 @@ export class ArcturnRuntime {
    *   file, so there is nothing left for the model to discover. Pass `true`
    *   and this agent's tools are exactly what its caller installed, whatever
    *   the disclosure config says.
+   * @param options.checkpoints - The checkpoint store this agent's `write` and
+   *   `edit` calls snapshot into. Omitted, one is created for this session id
+   *   and then held by nobody but the tool wrapper — fine for a scout or a
+   *   workflow lane, and exactly the gap that made `/rewind` unreachable for a
+   *   served session: the manifest was being written and nothing could read it
+   *   back. A caller that intends to *offer* a rewind (see `serve-rewind.ts`)
+   *   passes the store it will later list and restore from, so the recording
+   *   half and the reading half are one object rather than two rooted at the
+   *   same directory.
    */
   buildSessionAgent(options: {
     sessionId: string;
@@ -1196,11 +1250,13 @@ export class ArcturnRuntime {
     maxTurns?: number;
     origin?: string;
     fixedToolset?: boolean;
+    checkpoints?: CheckpointStore;
   }): Agent {
-    const checkpoints = createCheckpointStore(
-      join(this.paths.home, "checkpoints", options.sessionId),
-      { restoreRoot: options.cwd ?? this.cwd },
-    );
+    const checkpoints =
+      options.checkpoints ??
+      createCheckpointStore(join(this.paths.home, "checkpoints", options.sessionId), {
+        restoreRoot: options.cwd ?? this.cwd,
+      });
     const base = this.#agentOptions(
       {
         sessionId: options.sessionId,

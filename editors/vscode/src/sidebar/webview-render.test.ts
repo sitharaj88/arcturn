@@ -1667,7 +1667,7 @@ describe("the / command menu", () => {
     },
     { name: "changelog", description: "Write a changelog entry", kind: "skill" },
     { name: "model", description: "Switch the model", kind: "builtin" },
-    { name: "rewind", description: "Restore a checkpoint", kind: "builtin" },
+    { name: "theme", description: "Change the terminal theme", kind: "builtin" },
   ];
 
   function open(text = "/"): void {
@@ -1691,8 +1691,28 @@ describe("the / command menu", () => {
   });
 
   it("lists no command the panel cannot run — RFC 0005 §3", () => {
+    // `theme` rather than `rewind`: the panel grew a rewind picker, so
+    // `/rewind` is now a row it can honour. `theme` is a terminal concern with
+    // nothing behind it here, which is what this rule is actually about.
     open();
-    expect(panel.byId("suggest-list").textContent).not.toContain("rewind");
+    expect(panel.byId("suggest-list").textContent).not.toContain("theme");
+  });
+
+  it("offers /rewind, which opens the picker rather than sending prompt text", () => {
+    open();
+    panel.send({
+      type: "commands",
+      status: "ready",
+      commands: [
+        { name: "rewind", description: "Restore files to an earlier turn", kind: "builtin" },
+      ],
+    });
+    const rows = panel.byId("suggest-list").all("suggest-row");
+    expect(rows).toHaveLength(1);
+    rows[0]?.dispatch("click");
+    // The picker asks the engine; nothing is sent as a prompt.
+    expect(panel.posted.some((message) => message.type === "requestCheckpoints")).toBe(true);
+    expect(panel.posted.some((message) => message.type === "send")).toBe(false);
   });
 
   it("filters as you type", () => {
@@ -1788,6 +1808,129 @@ describe("the permission mode chip", () => {
     expect(
       panel.posted.filter((message) => message.type === "requestPermission").length,
     ).toBeGreaterThan(0);
+  });
+});
+
+describe("the rewind picker", () => {
+  function checkpoints(
+    rows: Record<string, unknown>[],
+    extra: Record<string, unknown> = {},
+  ): unknown {
+    return {
+      type: "rewind",
+      view: { status: "ready", truncated: false, checkpoints: rows, ...extra },
+    };
+  }
+
+  function row(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      id: "turn-1",
+      confirmation: "deadbeefdeadbeefdeadbeefdeadbeef",
+      label: "add rate limiting",
+      timestamp: 1_700_000_000_000,
+      fileCount: 2,
+      deleteCount: 1,
+      detail: "2 files · 1 deleted",
+      ...overrides,
+    };
+  }
+
+  function openPicker(): void {
+    panel.type("/");
+    panel.send({
+      type: "commands",
+      status: "ready",
+      commands: [{ name: "rewind", description: "Restore files", kind: "builtin" }],
+    });
+    panel.byId("suggest-list").all("suggest-row")[0]?.dispatch("click");
+  }
+
+  it("stays closed until something opens it, and asks the engine when it does", () => {
+    // Unlike the review card, this is not fetched on load: a picker nobody
+    // opened is a round trip nobody asked for, and it deletes files.
+    expect(panel.posted.filter((message) => message.type === "requestCheckpoints")).toHaveLength(0);
+    openPicker();
+    expect(panel.byId("rewind-view").classList.contains("hidden")).toBe(false);
+    expect(panel.posted.filter((message) => message.type === "requestCheckpoints")).toHaveLength(1);
+  });
+
+  it("shows what each turn would change, next to the turn", () => {
+    openPicker();
+    panel.send(checkpoints([row(), row({ id: "turn-2", label: "fix login", detail: "1 file" })]));
+    const rows = panel.byId("rewind-list").all("rewind-row");
+    expect(rows).toHaveLength(2);
+    expect(rows[0]?.textContent).toContain("add rate limiting");
+    expect(rows[0]?.textContent).toContain("2 files · 1 deleted");
+    expect(rows[1]?.textContent).toContain("1 file");
+  });
+
+  it("colours a row that would delete something, and leaves one that would not", () => {
+    openPicker();
+    panel.send(checkpoints([row(), row({ id: "turn-2", deleteCount: 0, detail: "1 file" })]));
+    const metas = panel.byId("rewind-list").all("rewind-meta");
+    expect(metas[0]?.classList.contains("deletes")).toBe(true);
+    expect(metas[1]?.classList.contains("deletes")).toBe(false);
+  });
+
+  it("carries the confirmation back verbatim, and nothing else", () => {
+    // The page is a courier for this token. A page that regenerated it would
+    // be vouching for a cost it did not compute.
+    openPicker();
+    panel.send(checkpoints([row()]));
+    panel.byId("rewind-list").all("rewind-row")[0]?.dispatch("click");
+    const sent = panel.posted.find((message) => message.type === "rewindTo");
+    expect(sent).toEqual({
+      type: "rewindTo",
+      checkpointId: "turn-1",
+      confirmation: "deadbeefdeadbeefdeadbeefdeadbeef",
+    });
+  });
+
+  it("drops a row with no id or no confirmation rather than rendering a dead button", () => {
+    openPicker();
+    panel.send(
+      checkpoints([
+        row({ confirmation: "" }),
+        row({ id: "", confirmation: "x" }),
+        row({ id: "ok" }),
+      ]),
+    );
+    const rows = panel.byId("rewind-list").all("rewind-row");
+    expect(rows).toHaveLength(1);
+  });
+
+  it("says which of the three 'no rewind' stories applies", () => {
+    openPicker();
+    panel.send({ type: "rewind", view: { status: "off", checkpoints: [], truncated: false } });
+    expect(panel.byId("rewind-status").textContent).toContain("keeps no file checkpoints");
+    panel.send({
+      type: "rewind",
+      view: { status: "unavailable", checkpoints: [], truncated: false },
+    });
+    expect(panel.byId("rewind-status").textContent).toContain("too old to rewind");
+    panel.send(checkpoints([]));
+    expect(panel.byId("rewind-status").textContent).toContain("No checkpoints in this session yet");
+  });
+
+  it("prints the engine's refusal where the user is looking", () => {
+    openPicker();
+    panel.send(
+      checkpoints([row()], { note: "A run is in flight. Stop it, or wait for it to finish." }),
+    );
+    expect(panel.byId("rewind-status").textContent).toContain("A run is in flight");
+  });
+
+  it("states the cost once, above the list, rather than on every row", () => {
+    // A warning repeated N times reads as decoration by the third.
+    openPicker();
+    expect(panel.byId("rewind-warning").textContent).toContain("cannot be undone");
+  });
+
+  it("has no Enter action — rows are clicked, not defaulted into", () => {
+    openPicker();
+    panel.send(checkpoints([row()]));
+    panel.byId("prompt").dispatch("keydown", { key: "Enter", shiftKey: false });
+    expect(panel.posted.some((message) => message.type === "rewindTo")).toBe(false);
   });
 });
 
@@ -2033,5 +2176,231 @@ describe("the composer's menus and the keys they share with it", () => {
       },
     });
     expect(prevented).toBe(true);
+  });
+});
+
+describe("the workflow surface", () => {
+  function catalog(extra: Record<string, unknown> = {}): unknown {
+    return {
+      type: "workflows",
+      view: {
+        status: "ready",
+        workflows: [
+          {
+            name: "ship-fix",
+            label: "ship-fix",
+            description: "Reproduce, patch and review one bug report",
+            source: "/ws/.arcturn/workflows/ship-fix.md",
+            stages: 3,
+            steps: 4,
+            budgetUsd: 15,
+            roles: [
+              { label: "auditor", lane: "read" },
+              { label: "developer", lane: "write" },
+            ],
+          },
+        ],
+        ...extra,
+      },
+    };
+  }
+
+  function run(extra: Record<string, unknown> = {}): unknown {
+    return {
+      type: "workflows",
+      view: {
+        status: "ready",
+        workflows: [],
+        run: {
+          runId: "run-1",
+          workflow: "ship-fix",
+          state: "running",
+          stage: 2,
+          stageCount: 3,
+          stepsDone: 1,
+          stepsTotal: 4,
+          spentUsd: 1.5,
+          budgetUsd: 15,
+          questions: [],
+          ...extra,
+        },
+      },
+    };
+  }
+
+  /** Open the catalog the way a person does: the `/` menu's `/workflow` row. */
+  function openCatalog(): void {
+    panel.send({
+      type: "commands",
+      status: "ready",
+      commands: [{ name: "workflow", description: "Run a workflow", kind: "builtin" }],
+    });
+    panel.type("/");
+    panel.flushTimers();
+    panel.byId("suggest-list").all("suggest-row")[0]?.dispatch("click");
+  }
+
+  it("shows nothing until something opens it", () => {
+    expect(panel.byId("wf").classList.contains("hidden")).toBe(true);
+  });
+
+  it("opens on the / menu's workflow row and asks the engine for the catalog", () => {
+    openCatalog();
+    expect(panel.posted.filter((message) => message.type === "requestWorkflows")).toHaveLength(1);
+    // The row opened a panel surface rather than inserting text — a `/workflow`
+    // pasted into the composer would send the model a message about wanting to
+    // run a pipeline.
+    expect(panel.byId("prompt").value).toBe("");
+  });
+
+  it("lists each pipeline with its ceiling and a chip per role's derived lane", () => {
+    openCatalog();
+    panel.send(catalog());
+    expect(panel.byId("wf").classList.contains("hidden")).toBe(false);
+    const rows = panel.byId("wf-list").all("wf-row");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.textContent).toContain("ship-fix");
+    expect(rows[0]?.textContent).toContain("$15.00");
+    expect(rows[0]?.textContent).toContain("@auditor read");
+    expect(rows[0]?.textContent).toContain("@developer write");
+  });
+
+  it("says a pipeline with no budgetUsd is unbounded rather than showing $0.00", () => {
+    openCatalog();
+    panel.send(
+      catalog({
+        workflows: [
+          {
+            name: "plain",
+            label: "plain",
+            description: "",
+            source: "/ws/plain.md",
+            stages: 1,
+            steps: 1,
+            roles: [],
+          },
+        ],
+      }),
+    );
+    expect(panel.byId("wf-list").all("wf-row")[0]?.textContent).toContain("unbounded");
+  });
+
+  it("says so rather than showing an empty list when the engine has no such verb", () => {
+    // "This workspace defines no pipelines" and "this engine cannot tell me"
+    // are not the same news.
+    openCatalog();
+    panel.send({ type: "workflows", view: { status: "unavailable", workflows: [] } });
+    expect(panel.byId("wf-list").textContent).toContain("too old");
+    expect(panel.byId("wf-list").all("wf-row")).toHaveLength(0);
+  });
+
+  it("runs the chosen pipeline with whatever is in the composer as its input", () => {
+    openCatalog();
+    panel.send(catalog());
+    panel.type("the retry test flakes");
+    panel.byId("wf-list").all("wf-row")[0]?.dispatch("click");
+    expect(panel.posted.at(-1)).toEqual({
+      type: "runWorkflow",
+      name: "ship-fix",
+      input: "the retry test flakes",
+    });
+  });
+
+  it("sends no input at all when the composer is empty", () => {
+    openCatalog();
+    panel.send(catalog());
+    panel.byId("wf-list").all("wf-row")[0]?.dispatch("click");
+    expect(panel.posted.at(-1)).toEqual({ type: "runWorkflow", name: "ship-fix" });
+  });
+
+  it("never sends a budget: the panel does not offer to change a money ceiling", () => {
+    openCatalog();
+    panel.send(catalog());
+    panel.byId("wf-list").all("wf-row")[0]?.dispatch("click");
+    const sent = panel.posted.at(-1) as Record<string, unknown>;
+    expect(Object.hasOwn(sent, "budgetUsd")).toBe(false);
+  });
+
+  it("replaces the catalog with the run card, reading the journal's own numbers", () => {
+    openCatalog();
+    panel.send(run());
+    expect(panel.byId("wf").classList.contains("hidden")).toBe(false);
+    expect(panel.byId("wf-catalog").classList.contains("hidden")).toBe(true);
+    expect(panel.byId("wf-run").classList.contains("hidden")).toBe(false);
+    expect(panel.byId("wf-run-text").textContent).toBe("Workflow ship-fix");
+    expect(panel.byId("wf-run-meta").textContent).toBe(
+      "running · stage 2/3 · 1/4 steps · $1.50 of $15.00",
+    );
+  });
+
+  it("surfaces an ORG-ASK as a question with a box a person answers", () => {
+    panel.send(
+      run({ state: "paused", questions: [{ stepId: "3", question: "per-tenant or per-user?" }] }),
+    );
+    expect(panel.byId("wf-questions").classList.contains("hidden")).toBe(false);
+    expect(panel.byId("wf-question-text").textContent).toBe("per-tenant or per-user?");
+    expect(panel.byId("wf").classList.contains("wf-waiting")).toBe(true);
+  });
+
+  it("lists every question a parallel stage raised, not just the first", () => {
+    // A stage pauses, not a step: answering one of three and watching the run
+    // pause again is the failure this list exists to prevent.
+    panel.send(
+      run({
+        state: "paused",
+        questions: [
+          { stepId: "2.1", question: "first?" },
+          { stepId: "2.2", question: "second?" },
+        ],
+      }),
+    );
+    expect(panel.byId("wf-question-text").textContent).toContain("2.1: first?");
+    expect(panel.byId("wf-question-text").textContent).toContain("2.2: second?");
+  });
+
+  it("sends the person's own words back verbatim, and clears the box", () => {
+    panel.send(
+      run({ state: "paused", questions: [{ stepId: "3", question: "per-tenant or per-user?" }] }),
+    );
+    panel.byId("wf-answer").value = "Per-tenant.\nThe migration is cheaper now.";
+    panel.byId("wf-send-answer").dispatch("click");
+    expect(panel.posted.at(-1)).toEqual({
+      type: "resumeWorkflow",
+      runId: "run-1",
+      answer: "Per-tenant.\nThe migration is cheaper now.",
+    });
+    expect(panel.byId("wf-answer").value).toBe("");
+  });
+
+  it("sends nothing for an empty answer rather than resuming with silence", () => {
+    panel.send(
+      run({ state: "paused", questions: [{ stepId: "3", question: "per-tenant or per-user?" }] }),
+    );
+    panel.byId("wf-answer").value = "   ";
+    panel.byId("wf-send-answer").dispatch("click");
+    expect(panel.posted.filter((message) => message.type === "resumeWorkflow")).toHaveLength(0);
+  });
+
+  it("disables the answer button between a press and the host's next answer", () => {
+    panel.send(run({ state: "paused", questions: [{ stepId: "3", question: "q?" }] }));
+    panel.byId("wf-answer").value = "yes";
+    panel.byId("wf-send-answer").dispatch("click");
+    expect(panel.byId("wf-send-answer").disabled).toBe(true);
+    panel.send(run({ state: "running" }));
+    panel.send(run({ state: "paused", questions: [{ stepId: "4", question: "again?" }] }));
+    expect(panel.byId("wf-send-answer").disabled).toBe(false);
+  });
+
+  it("shows a refusal the engine gave rather than swallowing it", () => {
+    panel.send({
+      type: "workflows",
+      view: {
+        status: "ready",
+        workflows: [],
+        note: "The engine refused: may only lower that ceiling",
+      },
+    });
+    expect(panel.byId("wf-note").classList.contains("hidden")).toBe(false);
+    expect(panel.byId("wf-note").textContent).toContain("may only lower that ceiling");
   });
 });

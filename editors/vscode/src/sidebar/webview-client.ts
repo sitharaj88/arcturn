@@ -799,6 +799,111 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
 .dryrun-danger:hover { color: var(--arc-err); border-color: var(--arc-err); }
 
 /*
+ * The workflow surface, styled as a sibling of the review card on purpose:
+ * both are "the engine is holding something you need to look at", and a person
+ * who has learnt to read one should not have to learn a second vocabulary for
+ * the other. What differs is the accent — the review card borders on the link
+ * colour because it is about files, this borders on the warning colour while a
+ * run is waiting on a person, because that is the state a pipeline can sit in
+ * for an hour if nobody notices it.
+ */
+.wf {
+  margin-bottom: 8px;
+  padding: 7px 9px;
+  border: 1px solid var(--arc-border);
+  border-radius: var(--arc-radius);
+  background: var(--arc-surface);
+  font-size: 0.9em;
+}
+.wf.wf-waiting { border-color: var(--arc-warn); }
+.wf-head { display: flex; align-items: center; gap: 6px; }
+.wf-text { flex: 1 1 auto; min-width: 0; font-weight: 600; }
+.wf-close {
+  flex: none;
+  padding: 0 4px;
+  border: none;
+  font: inherit;
+  font-size: 1.1em;
+  line-height: 1;
+  color: var(--arc-muted);
+  background: transparent;
+  cursor: pointer;
+}
+.wf-close:hover { color: var(--vscode-foreground); }
+.wf-list { margin-top: 5px; display: flex; flex-direction: column; gap: 1px; }
+.wf-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 4px;
+  border: none;
+  border-radius: 3px;
+  font: inherit;
+  text-align: left;
+  color: var(--vscode-foreground);
+  background: transparent;
+  cursor: pointer;
+}
+.wf-row:hover { background: var(--vscode-list-hoverBackground); }
+.wf-row-top { display: flex; align-items: baseline; gap: 6px; }
+.wf-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wf-budget { flex: none; font-size: 0.85em; color: var(--arc-muted); }
+.wf-row-meta { font-size: 0.85em; color: var(--arc-muted); }
+/*
+ * A lane chip per role, and the colour is the whole point of the row: 'read'
+ * is muted because it can do nothing, 'exec' and 'write' are warned because
+ * they can act, and the two unknowable lanes are error-coloured because a
+ * pipeline carrying one cannot run at all.
+ */
+.wf-lanes { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 2px; }
+.wf-lane {
+  padding: 0 4px;
+  border: 1px solid var(--arc-border);
+  border-radius: 3px;
+  font-size: 0.8em;
+  color: var(--arc-muted);
+}
+.wf-lane.lane-exec, .wf-lane.lane-write { color: var(--arc-warn); border-color: var(--arc-warn); }
+.wf-lane.lane-unknown, .wf-lane.lane-undeclared { color: var(--arc-err); border-color: var(--arc-err); }
+.wf-meta { margin: 4px 0 0; color: var(--arc-muted); }
+.wf-question { margin: 6px 0 4px; color: var(--vscode-foreground); }
+.wf-answer-label { display: block; font-size: 0.85em; color: var(--arc-muted); }
+.wf-answer {
+  width: 100%;
+  margin-top: 2px;
+  padding: 4px;
+  border: 1px solid var(--arc-border);
+  border-radius: 4px;
+  font: inherit;
+  font-size: 0.95em;
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  resize: vertical;
+}
+.wf-actions { display: flex; gap: 5px; margin-top: 6px; }
+.wf-button {
+  flex: 1 1 auto;
+  padding: 3px 8px;
+  border: 1px solid var(--arc-border);
+  border-radius: 4px;
+  font: inherit;
+  font-size: 0.95em;
+  color: var(--vscode-foreground);
+  background: transparent;
+  cursor: pointer;
+}
+.wf-button:hover { background: var(--vscode-list-hoverBackground); }
+.wf-button:disabled { opacity: 0.5; cursor: default; }
+.wf-primary {
+  color: var(--vscode-button-foreground);
+  background: var(--vscode-button-background);
+  border-color: var(--vscode-button-background);
+}
+.wf-primary:hover { background: var(--vscode-button-hoverBackground); }
+.wf-note { margin: 5px 0 0; color: var(--arc-warn); }
+
+/*
  * One control, not a text box with buttons bolted on (RFC 0005 §2).
  *
  * Everything the composer holds lives inside this one border: the chip row on
@@ -1069,7 +1174,7 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
   text-transform: uppercase;
   color: var(--arc-muted);
 }
-.model-row, .session-row {
+.model-row, .session-row, .rewind-row {
   display: block;
   width: 100%;
   padding: 5px 7px;
@@ -1081,7 +1186,8 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
   background: transparent;
   cursor: pointer;
 }
-.model-row:hover, .model-row.active, .session-row:hover, .session-row.active {
+.model-row:hover, .model-row.active, .session-row:hover, .session-row.active,
+.rewind-row:hover, .rewind-row.active {
   color: var(--vscode-list-activeSelectionForeground, var(--vscode-foreground));
   background: var(--vscode-list-activeSelectionBackground, var(--vscode-list-hoverBackground));
 }
@@ -1272,6 +1378,46 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
 }
 .session-row:hover .session-meta, .session-row.active .session-meta { color: inherit; opacity: 0.8; }
 
+/*
+ * Rewind — the picker for the one control that deletes a person's files.
+ *
+ * A full-panel view rather than a popover, on the sessions view's terms: the
+ * list is unbounded, and choosing a row replaces both the workspace and the
+ * transcript, so there is nothing behind it worth keeping in sight.
+ *
+ * The warning is stated once, at the top, rather than repeated on every row.
+ * A cost that appears N times reads as decoration by the third; a cost stated
+ * once above the list is read.
+ */
+.rewind-warning {
+  margin: 8px 8px 0;
+  padding: 7px 9px;
+  border: 1px solid var(--arc-border);
+  border-left: 2px solid var(--arc-err);
+  border-radius: var(--arc-radius);
+  font-size: 0.85em;
+  color: var(--arc-muted);
+}
+.rewind-top { display: flex; align-items: baseline; gap: 6px; }
+.rewind-time {
+  flex: 0 0 auto;
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.8em;
+  color: var(--arc-muted);
+}
+.rewind-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rewind-meta {
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.8em;
+  color: var(--arc-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Deletions get the error colour, because they are the half that loses work. */
+.rewind-meta.deletes { color: var(--arc-err); }
+.rewind-row:hover .rewind-meta, .rewind-row.active .rewind-meta { color: inherit; opacity: 0.85; }
+
 /* Delete, on the row — see the doc comment above for why it is shaped so. */
 .session-item { position: relative; }
 .session-row { padding-right: 26px; }
@@ -1329,7 +1475,8 @@ const CLIENT_SOURCE = String.raw`
    */
   var KNOWN_HOST_MESSAGES = {
     state: 1, connection: 1, cost: 1, models: 1, session: 1, sessions: 1, showSessions: 1,
-    context: 1, contextCandidates: 1, permission: 1, commands: 1, dryRun: 1
+    context: 1, contextCandidates: 1, permission: 1, commands: 1, dryRun: 1, rewind: 1,
+    workflows: 1
   };
 
   var SVG_NS = "http://www.w3.org/2000/svg";
@@ -1500,6 +1647,24 @@ const CLIENT_SOURCE = String.raw`
   var suggestBox = $("suggest");
   var suggestStatus = $("suggest-status");
   var suggestList = $("suggest-list");
+  var rewindView = $("rewind-view");
+  var rewindStatusText = $("rewind-status");
+  var rewindList = $("rewind-list");
+  var wfSection = $("wf");
+  var wfCatalog = $("wf-catalog");
+  var wfCatalogIcon = $("wf-catalog-icon");
+  var wfCatalogText = $("wf-catalog-text");
+  var wfClose = $("wf-close");
+  var wfList = $("wf-list");
+  var wfRun = $("wf-run");
+  var wfRunIcon = $("wf-run-icon");
+  var wfRunText = $("wf-run-text");
+  var wfRunMeta = $("wf-run-meta");
+  var wfQuestions = $("wf-questions");
+  var wfQuestionText = $("wf-question-text");
+  var wfAnswer = $("wf-answer");
+  var wfSendAnswer = $("wf-send-answer");
+  var wfNote = $("wf-note");
   var dryRunCard = $("dryrun");
   var dryRunIcon = $("dryrun-icon");
   var dryRunText = $("dryrun-text");
@@ -1524,6 +1689,9 @@ const CLIENT_SOURCE = String.raw`
   sessionsButton.appendChild(icon("history"));
   sessionsButton.setAttribute("aria-label", "Sessions");
   sessionsButton.title = "Sessions";
+  $("rewind-back").appendChild(icon("arrowLeft"));
+  $("rewind-back").setAttribute("aria-label", "Back to the conversation");
+  $("rewind-back").title = "Back to the conversation";
   $("sessions-back").appendChild(icon("arrowLeft"));
   $("sessions-back").setAttribute("aria-label", "Back to the conversation");
   $("sessions-back").title = "Back to the conversation";
@@ -1584,6 +1752,36 @@ const CLIENT_SOURCE = String.raw`
    */
   var dryRun = { status: "loading", changes: [], truncated: false, note: "" };
   var dryRunBusy = false;
+  /*
+   * The workflow catalog and the run being followed, as the HOST last reported
+   * them.
+   *
+   * A render of the host's answer and nothing else. In particular the page
+   * never derives a role's lane and never counts a run's progress from the
+   * notices scrolling past in the transcript: the lane comes from the engine's
+   * own classifier and the numbers come from the run journal, and a page that
+   * kept its own tally would disagree with '/workflow status' in a terminal
+   * looking at the same run.
+   *
+   * 'catalogOpen' is local view state — whether '/workflow' opened the list —
+   * so a catalog the user dismissed does not reappear on the host's next
+   * refresh. 'busy' disables the answer button between a click and that
+   * refresh, so a double press cannot resume one run twice.
+   */
+  var workflows = { status: "loading", workflows: [], run: undefined, note: "" };
+  var wfCatalogOpen = false;
+  var wfBusy = false;
+  /*
+   * The turns this session could be rewound to, as the host last reported them.
+   *
+   * A render of the host's answer and nothing else. In particular the page
+   * never invents a 'confirmation' and never edits one: it carries the token
+   * back verbatim so the ENGINE can refuse a rewind whose cost has changed
+   * since this list was painted. A page that regenerated it would be a page
+   * vouching for a cost it did not compute.
+   */
+  var rewind = { status: "loading", checkpoints: [], truncated: false, note: "" };
+  var activeRewindRow = -1;
   var permissionView = { status: "loading", mode: undefined, tools: [], note: "" };
   var activeModeRow = -1;
   /*
@@ -2314,10 +2512,19 @@ const CLIENT_SOURCE = String.raw`
     if (action === "diff") { post({ type: "showDiff" }); return; }
     if (action === "apply") { requestApply(); return; }
     if (action === "discard") { requestDiscard(); return; }
+    // '/rewind' opens the picker rather than sending anything: the terminal's
+    // '/rewind' opens a picker too, and a composer that mailed the model a
+    // note about wanting to go back would be a different command wearing the
+    // same name.
+    if (action === "rewind") { openRewind(); return; }
     // Cost has no verb of its own: the numbers ride turnEnd on the session the
     // panel is already subscribed to, so the row opens the breakdown the host
     // already holds rather than asking the engine a second time.
     if (action === "cost") { post({ type: "command", command: "cost" }); return; }
+    // '/workflow' opens the catalog pane, which is where a run is started, and
+    // it is the only door — the same rule '/model' follows. Inserting the text
+    // instead would send the model a message about wanting to run a pipeline.
+    if (action === "workflow") { openWorkflows(); return; }
     promptBox.focus();
   }
 
@@ -2786,6 +2993,140 @@ const CLIENT_SOURCE = String.raw`
       : "Start a new Arcturn session in " + cwd;
   }
 
+  /* ---- rewind: the picker for the one control that deletes files ------ */
+
+  /*
+   * A full-panel view, on the sessions view's terms rather than the model
+   * popover's: the list is unbounded, and choosing a row replaces both the
+   * workspace and the transcript, so there is nothing behind it worth keeping
+   * in sight.
+   *
+   * Everything about this surface is arranged so that nobody rewinds by
+   * accident. There is no keyboard default action — the list is clicked, not
+   * Entered, because a picker whose Enter key deletes files is a picker that
+   * fires while somebody is still reading it. The cost is on the row before
+   * the click, and the file NAMES are in a native modal after it. Neither
+   * replaces the other: the row is what you choose from, the modal is what you
+   * consent to.
+   */
+
+  var REWIND_STATUS = {
+    loading: "Loading this session’s checkpoints…",
+    off: "This engine keeps no file checkpoints, so there is nothing to rewind to.",
+    unavailable:
+      "This Arcturn engine is too old to rewind — upgrade the CLI and the turns will appear here."
+  };
+  var NO_CHECKPOINTS_YET =
+    "No checkpoints in this session yet. Every prompt that edits a file records one.";
+
+  function rewindOpen() { return !rewindView.classList.contains("hidden"); }
+
+  function openRewind() {
+    if (modelPopoverOpen()) closeModels(false);
+    if (sessionsOpen()) closeSessions(false);
+    closeSuggest();
+    rewindView.classList.remove("hidden");
+    transcript.classList.add("hidden");
+    dock.classList.add("hidden");
+    jump.classList.add("hidden");
+    activeRewindRow = -1;
+    renderRewindList();
+    post({ type: "requestCheckpoints" });
+  }
+
+  function closeRewind() {
+    rewindView.classList.add("hidden");
+    transcript.classList.remove("hidden");
+    dock.classList.remove("hidden");
+    jump.classList.toggle("hidden", stick);
+  }
+
+  /*
+   * Ask the host to rewind, and then nothing. The confirmation is a native
+   * modal the host owns, and the refreshed list comes back over the same
+   * 'rewind' message this view already renders — so the row stays put until an
+   * answer arrives. Closing the view here would say the rewind happened while
+   * the user was still looking at the dialog asking whether to.
+   */
+  function chooseCheckpoint(entry) {
+    post({
+      type: "rewindTo",
+      checkpointId: String(entry.id || ""),
+      // Verbatim. The page is a courier for this token, never an author of one.
+      confirmation: String(entry.confirmation || "")
+    });
+  }
+
+  /* A local time, which is what 'when was this' means to the person reading. */
+  function rewindTime(timestamp) {
+    var when = new Date(timestamp);
+    return isNaN(when.getTime()) ? "" : when.toLocaleTimeString();
+  }
+
+  function rewindRow(entry, index) {
+    var row = button("rewind-row");
+    row.setAttribute("role", "option");
+    row.setAttribute("aria-selected", "false");
+    row.setAttribute("id", "rewind-row-" + String(index));
+    var top = el("div", "rewind-top");
+    top.appendChild(el("span", "rewind-time", rewindTime(entry.timestamp)));
+    // textContent, like everything else on this page: a label is the head of a
+    // prompt, and '$(check)' is six characters here rather than a glyph.
+    top.appendChild(el("span", "rewind-label", String(entry.label || "")));
+    row.appendChild(top);
+    // The deletions colour the whole meta line, because they are the half that
+    // loses work and the half a person needs to notice before clicking.
+    var meta = el("div", "rewind-meta" + (entry.deleteCount > 0 ? " deletes" : ""),
+      String(entry.detail || ""));
+    row.appendChild(meta);
+    row.title = String(entry.label || "") + "\n" + String(entry.detail || "");
+    row.addEventListener("click", function () { chooseCheckpoint(entry); });
+    row.addEventListener("mouseenter", function () { highlightRewindRow(index); });
+    return row;
+  }
+
+  function renderRewindList() {
+    clear(rewindList);
+    var rows = rewind.status === "ready" ? rewind.checkpoints : [];
+
+    // Four states and four sentences: the difference between "you have not
+    // edited anything yet", "this engine keeps no checkpoints" and "this
+    // engine cannot rewind at all" is the whole reason the status is carried.
+    var words = Object.prototype.hasOwnProperty.call(REWIND_STATUS, rewind.status)
+      ? REWIND_STATUS[rewind.status]
+      : "";
+    if (words === "" && rows.length === 0) words = NO_CHECKPOINTS_YET;
+    if (rewind.note) words = words === "" ? rewind.note : rewind.note + " " + words;
+    if (words === "" && rewind.truncated) {
+      words = "Older turns are not shown — this session has more checkpoints than the engine lists at once.";
+    }
+    rewindStatusText.textContent = words;
+    rewindStatusText.classList.toggle("hidden", words === "");
+
+    for (var i = 0; i < rows.length; i += 1) rewindList.appendChild(rewindRow(rows[i], i));
+    highlightRewindRow(rows.length === 0 ? -1 : Math.min(Math.max(activeRewindRow, 0), rows.length - 1));
+  }
+
+  function highlightRewindRow(index) {
+    activeRewindRow = index;
+    var children = rewindList.childNodes;
+    for (var i = 0; i < children.length; i += 1) {
+      if (children[i] && children[i].classList) {
+        children[i].classList.toggle("active", i === index);
+      }
+    }
+  }
+
+  function renderRewind(view) {
+    rewind = {
+      status: typeof view.status === "string" ? view.status : "loading",
+      checkpoints: Array.isArray(view.checkpoints) ? view.checkpoints : [],
+      truncated: view.truncated === true,
+      note: typeof view.note === "string" ? view.note : ""
+    };
+    if (rewindOpen()) renderRewindList();
+  }
+
   /* ---- host messages -------------------------------------------------- */
 
   function renderState(state) {
@@ -2987,6 +3328,171 @@ const CLIENT_SOURCE = String.raw`
     post({ type: "discardChanges" });
   }
 
+  /* ---- workflows ------------------------------------------------------ */
+
+  /*
+   * One catalog row: the pipeline's name, its ceiling, its shape, and a chip
+   * per role carrying the lane THE ENGINE derived.
+   *
+   * The lane chips are the reason this row is two lines rather than one. A
+   * pipeline's name says nothing about whether it can rewrite your checkout;
+   * '@developer write' does, and that is the sentence a person needs before
+   * they press Run rather than after.
+   */
+  function workflowRow(workflow) {
+    var row = button("wf-row");
+    var top = el("div", "wf-row-top");
+    top.appendChild(el("span", "wf-name", workflow.label));
+    top.appendChild(el("span", "wf-budget", workflowBudget(workflow.budgetUsd)));
+    row.appendChild(top);
+    var shape = String(workflow.stages) + " stage" + (workflow.stages === 1 ? "" : "s");
+    var meta = workflow.description === "" ? shape : shape + " · " + workflow.description;
+    row.appendChild(el("div", "wf-row-meta", meta));
+    if (workflow.roles.length > 0) {
+      var lanes = el("div", "wf-lanes");
+      for (var i = 0; i < workflow.roles.length; i += 1) {
+        var role = workflow.roles[i];
+        lanes.appendChild(el("span", "wf-lane lane-" + role.lane, "@" + role.label + " " + role.lane));
+      }
+      row.appendChild(lanes);
+    }
+    row.title = workflow.label + "\n" + workflow.source;
+    row.addEventListener("click", function () { startWorkflow(workflow); });
+    return row;
+  }
+
+  function workflowBudget(budgetUsd) {
+    return typeof budgetUsd === "number" ? "$" + budgetUsd.toFixed(2) : "unbounded";
+  }
+
+  /*
+   * Run it — with whatever is in the composer as '{{input}}'.
+   *
+   * The composer is the input box on purpose rather than a second field: a
+   * workflow's '{{input}}' is "the thing you were about to ask about", which is
+   * exactly what a person has already typed when they reach for '/workflow'.
+   *
+   * The CONFIRMATION is the host's. This page shows none of its own, because a
+   * webview button that says "are you sure" is a button, not a confirmation —
+   * the same rule the discard control follows. The host's modal names the
+   * ceiling and every role that can act.
+   */
+  function startWorkflow(workflow) {
+    var input = promptBox.value.trim();
+    closeWorkflows();
+    post(input === ""
+      ? { type: "runWorkflow", name: workflow.name }
+      : { type: "runWorkflow", name: workflow.name, input: input });
+  }
+
+  function openWorkflows() {
+    if (modelPopoverOpen()) closeModels(false);
+    if (modePopoverOpen()) closeModes(false);
+    closeSuggest();
+    wfCatalogOpen = true;
+    post({ type: "requestWorkflows" });
+    renderWorkflows();
+  }
+
+  function closeWorkflows() {
+    wfCatalogOpen = false;
+    renderWorkflows();
+  }
+
+  /*
+   * Paint the workflow section.
+   *
+   * The run card wins whenever there is a run: a person watching a pipeline
+   * spend money should not have the catalog sitting on top of it. The catalog
+   * shows only while '/workflow' has opened it AND the engine actually answered
+   * — an engine with no 'listWorkflows' gets a one-line sentence saying so
+   * rather than an empty list, because "this workspace defines no pipelines"
+   * and "this engine cannot tell me" are not the same news.
+   */
+  function renderWorkflows() {
+    var run = workflows.run;
+    var showRun = !!run;
+    var showCatalog = wfCatalogOpen && !showRun;
+    wfSection.classList.toggle("hidden", !showRun && !showCatalog);
+    wfCatalog.classList.toggle("hidden", !showCatalog);
+    wfRun.classList.toggle("hidden", !showRun);
+    var waiting = showRun && run.questions.length > 0;
+    wfSection.classList.toggle("wf-waiting", waiting);
+
+    if (showCatalog) {
+      clear(wfCatalogIcon);
+      wfCatalogIcon.appendChild(icon("tool"));
+      clear(wfList);
+      if (workflows.status === "unavailable") {
+        wfCatalogText.textContent = "Workflows";
+        wfList.appendChild(el("div", "wf-row-meta",
+          "This engine is too old to list workflows — upgrade the Arcturn CLI."));
+      } else if (workflows.status !== "ready") {
+        wfCatalogText.textContent = "Workflows";
+        wfList.appendChild(el("div", "wf-row-meta", "Loading…"));
+      } else if (workflows.workflows.length === 0) {
+        wfCatalogText.textContent = "Workflows";
+        wfList.appendChild(el("div", "wf-row-meta",
+          "No workflows here. Add one at .arcturn/workflows/<name>.md."));
+      } else {
+        var count = workflows.workflows.length;
+        wfCatalogText.textContent = String(count) + " workflow" + (count === 1 ? "" : "s");
+        for (var i = 0; i < workflows.workflows.length; i += 1) {
+          wfList.appendChild(workflowRow(workflows.workflows[i]));
+        }
+      }
+    }
+
+    if (showRun) {
+      clear(wfRunIcon);
+      wfRunIcon.appendChild(icon(waiting ? "warn" : "tool"));
+      wfRunText.textContent = "Workflow " + run.workflow;
+      wfRunMeta.textContent = runLine(run);
+      wfQuestions.classList.toggle("hidden", !waiting);
+      if (waiting) {
+        // Every question the stage raised, not just the first: a parallel stage
+        // can pause on several at once, and a person shown one of three would
+        // answer, watch the run pause again, and rightly wonder what happened.
+        wfQuestionText.textContent = run.questions.length === 1
+          ? run.questions[0].question
+          : run.questions.map(function (q) { return q.stepId + ": " + q.question; }).join("\n");
+        wfSendAnswer.disabled = wfBusy;
+      }
+    }
+
+    wfNote.textContent = workflows.note || "";
+    wfNote.classList.toggle("hidden", !workflows.note);
+  }
+
+  /*
+   * The card's one line.
+   *
+   * Built from the JOURNAL's numbers, which is why it says the same thing the
+   * terminal's '/workflow status' says about the same run. Counting the notices
+   * scrolling past instead would have been easier and would have drifted the
+   * first time a step was replayed from a resume rather than executed.
+   */
+  function runLine(run) {
+    var where = typeof run.stage === "number"
+      ? "stage " + run.stage + "/" + run.stageCount + " · " + run.stepsDone + "/" + run.stepsTotal + " steps"
+      : run.stepsDone + "/" + run.stepsTotal + " steps";
+    var spend = typeof run.spentUsd === "number" ? " · $" + run.spentUsd.toFixed(2) : "";
+    var ceiling = typeof run.budgetUsd === "number" ? " of " + workflowBudget(run.budgetUsd) : "";
+    return run.state + " · " + where + spend + ceiling;
+  }
+
+  /* The person's own words, forwarded verbatim. Never trimmed to a line. */
+  function sendWorkflowAnswer() {
+    var run = workflows.run;
+    if (!run || wfBusy) return;
+    var answer = wfAnswer.value.trim();
+    if (answer === "") { wfAnswer.focus(); return; }
+    wfBusy = true;
+    renderWorkflows();
+    post({ type: "resumeWorkflow", runId: run.runId, answer: wfAnswer.value });
+    wfAnswer.value = "";
+  }
+
   /* ---- wiring --------------------------------------------------------- */
 
   var STARTERS = [
@@ -3025,6 +3531,16 @@ const CLIENT_SOURCE = String.raw`
   // Review opens the diff for the whole set; the host picks when there is more
   // than one. Apply and Discard go to the host, which asks the engine — this
   // page writes nothing and confirms nothing.
+  wfClose.addEventListener("click", closeWorkflows);
+  wfSendAnswer.addEventListener("click", sendWorkflowAnswer);
+  // Ctrl/Cmd+Enter sends the answer, matching the composer. Plain Enter inserts
+  // a newline, because an ORG-ASK answer is prose and often more than one line.
+  wfAnswer.addEventListener("keydown", function (event) {
+    if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault();
+      sendWorkflowAnswer();
+    }
+  });
   dryRunReview.addEventListener("click", function () { post({ type: "showDiff" }); });
   dryRunApply.addEventListener("click", requestApply);
   dryRunDiscard.addEventListener("click", requestDiscard);
@@ -3038,6 +3554,17 @@ const CLIENT_SOURCE = String.raw`
   sessionsButton.addEventListener("click", function () {
     if (sessionsOpen()) closeSessions(true);
     else post({ type: "command", command: "sessions" });
+  });
+  $("rewind-back").addEventListener("click", function () { closeRewind(); });
+  // Escape leaves the picker. Deliberately the ONLY key bound here: there is
+  // no Enter and no arrow ring, because a list whose default action deletes
+  // files is a list that fires while somebody is still reading it. Rows are
+  // clicked, and the modal is what consent actually goes through.
+  document.addEventListener("keydown", function (event) {
+    if (event.key === "Escape" && rewindOpen()) {
+      if (typeof event.preventDefault === "function") event.preventDefault();
+      closeRewind();
+    }
   });
   $("sessions-back").addEventListener("click", function () { closeSessions(true); });
   sessionsNew.addEventListener("click", startNewSession);
@@ -3417,6 +3944,109 @@ const CLIENT_SOURCE = String.raw`
       // The host has answered, so whatever was in flight is over.
       dryRunBusy = false;
       renderDryRun();
+      return;
+    }
+    if (message.type === "workflows") {
+      var wv = message.view && typeof message.view === "object" ? message.view : {};
+      var wfStatus = wv.status === "ready" || wv.status === "unavailable" ? wv.status : "loading";
+      var listed = [];
+      var reportedWorkflows = Array.isArray(wv.workflows) ? wv.workflows : [];
+      for (var w = 0; w < reportedWorkflows.length; w += 1) {
+        var wf = reportedWorkflows[w];
+        if (!wf || typeof wf.name !== "string" || wf.name === "") continue;
+        // Rebuilt field by field, like every other list on this boundary. The
+        // lane is copied verbatim and never defaulted to something safer-
+        // sounding: 'unknown' and 'undeclared' are the two values that mean
+        // nobody can say what this role does, and rendering either as 'read'
+        // would be the page inventing reassurance the engine did not give.
+        var lanes = [];
+        var reportedRoles = Array.isArray(wf.roles) ? wf.roles : [];
+        for (var r = 0; r < reportedRoles.length; r += 1) {
+          var role = reportedRoles[r];
+          if (!role || typeof role.label !== "string") continue;
+          lanes.push({
+            label: role.label,
+            lane: typeof role.lane === "string" ? role.lane : "unknown"
+          });
+        }
+        listed.push({
+          name: wf.name,
+          label: typeof wf.label === "string" ? wf.label : wf.name,
+          description: typeof wf.description === "string" ? wf.description : "",
+          source: typeof wf.source === "string" ? wf.source : "",
+          stages: typeof wf.stages === "number" ? wf.stages : 0,
+          steps: typeof wf.steps === "number" ? wf.steps : 0,
+          budgetUsd: typeof wf.budgetUsd === "number" ? wf.budgetUsd : undefined,
+          roles: lanes
+        });
+      }
+      var reportedRun = wv.run && typeof wv.run === "object" ? wv.run : undefined;
+      var runRow;
+      if (reportedRun && typeof reportedRun.runId === "string" && reportedRun.runId !== "") {
+        var asked = [];
+        var reportedQuestions = Array.isArray(reportedRun.questions) ? reportedRun.questions : [];
+        for (var q = 0; q < reportedQuestions.length; q += 1) {
+          var question = reportedQuestions[q];
+          if (!question || typeof question.question !== "string") continue;
+          asked.push({
+            stepId: typeof question.stepId === "string" ? question.stepId : "",
+            question: question.question
+          });
+        }
+        runRow = {
+          runId: reportedRun.runId,
+          workflow: typeof reportedRun.workflow === "string" ? reportedRun.workflow : "",
+          state: typeof reportedRun.state === "string" ? reportedRun.state : "unknown",
+          stage: typeof reportedRun.stage === "number" ? reportedRun.stage : undefined,
+          stageCount: typeof reportedRun.stageCount === "number" ? reportedRun.stageCount : 0,
+          stepsDone: typeof reportedRun.stepsDone === "number" ? reportedRun.stepsDone : 0,
+          stepsTotal: typeof reportedRun.stepsTotal === "number" ? reportedRun.stepsTotal : 0,
+          spentUsd: typeof reportedRun.spentUsd === "number" ? reportedRun.spentUsd : undefined,
+          budgetUsd: typeof reportedRun.budgetUsd === "number" ? reportedRun.budgetUsd : undefined,
+          questions: asked
+        };
+      }
+      workflows = {
+        status: wfStatus,
+        workflows: listed,
+        run: runRow,
+        note: typeof wv.note === "string" ? wv.note : ""
+      };
+      // The host has answered, so whatever was in flight is over.
+      wfBusy = false;
+      renderWorkflows();
+      return;
+    }
+    if (message.type === "rewind") {
+      var rv = message.view && typeof message.view === "object" ? message.view : {};
+      var rewindStatus = rv.status === "ready" || rv.status === "off" ||
+        rv.status === "unavailable" ? rv.status : "loading";
+      var points = [];
+      var reportedPoints = Array.isArray(rv.checkpoints) ? rv.checkpoints : [];
+      for (var k = 0; k < reportedPoints.length; k += 1) {
+        var point = reportedPoints[k];
+        if (!point || typeof point.id !== "string" || point.id === "") continue;
+        if (typeof point.confirmation !== "string" || point.confirmation === "") continue;
+        // Rebuilt field by field, like every other list on this boundary. The
+        // two identity fields are required rather than defaulted: a row
+        // missing either is a row this page could not send, and rendering it
+        // would put a button on screen that does nothing.
+        points.push({
+          id: point.id,
+          confirmation: point.confirmation,
+          label: typeof point.label === "string" ? point.label : "",
+          timestamp: typeof point.timestamp === "number" ? point.timestamp : 0,
+          fileCount: typeof point.fileCount === "number" ? point.fileCount : 0,
+          deleteCount: typeof point.deleteCount === "number" ? point.deleteCount : 0,
+          detail: typeof point.detail === "string" ? point.detail : ""
+        });
+      }
+      renderRewind({
+        status: rewindStatus,
+        checkpoints: points,
+        truncated: rv.truncated === true,
+        note: typeof rv.note === "string" ? rv.note : ""
+      });
       return;
     }
     if (message.type === "commands") {

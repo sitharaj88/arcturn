@@ -8,6 +8,19 @@
 
 export type { AuthenticateFrame } from "./auth.js";
 export { isAuthenticateFrame, tokensMatch } from "./auth.js";
+export type {
+  BackgroundAdoption,
+  BackgroundAgentRecord,
+  BackgroundAgentRegistry,
+} from "./background-agents.js";
+export {
+  BACKGROUND_AGENT_TEXT_MAX_CHARS,
+  BACKGROUND_AGENTS_MAX_ROWS,
+  BACKGROUND_TRANSCRIPT_MAX_BYTES,
+  capTranscript,
+  projectBackgroundAgent,
+  projectBackgroundAgents,
+} from "./background-agents.js";
 export {
   REMOTE_BUILT_IN_COMMAND_VERBS,
   REMOTE_REACHABLE_BUILT_IN_COMMANDS,
@@ -27,6 +40,13 @@ export {
   PENDING_CHANGES_MAX_FILES,
 } from "./dry-run.js";
 export type {
+  OrgMemoryReadResult,
+  OrgMemoryRecord,
+  OrgMemoryStoreAccess,
+  OrgMemoryWriteResult,
+} from "./org-memory.js";
+export { projectOrgMemory, projectOrgMemoryEntry } from "./org-memory.js";
+export type {
   ContextQueryRequest,
   ContextRefusal,
   ContextResolver,
@@ -39,6 +59,22 @@ export {
   PROMPT_ATTACHMENT_MAX_BYTES,
   visionRefusalMessage,
 } from "./prompt-context.js";
+export type {
+  CheckpointListLimits,
+  CheckpointRewindFailure,
+  CheckpointRewindOutcome,
+  CheckpointTurnPreview,
+  SessionCheckpoints,
+} from "./rewind.js";
+export {
+  buildCheckpointList,
+  CHECKPOINT_ENTRY_MAX_FILES,
+  CHECKPOINT_LIST_MAX_BYTES,
+  CHECKPOINT_LIST_MAX_ENTRIES,
+  checkpointConfirmation,
+  projectCheckpoint,
+  workspaceRelative,
+} from "./rewind.js";
 export type {
   SessionExportLimits,
   TranscriptExporter,
@@ -59,6 +95,13 @@ export type {
   SessionHostOptions,
 } from "./session-host.js";
 export { DEFAULT_MAX_SESSIONS, SessionHost, SessionHostError } from "./session-host.js";
+export type {
+  AcceptedWorkflowRun,
+  WorkflowResult,
+  WorkflowResumeRequest,
+  WorkflowRunRequest,
+  WorkflowService,
+} from "./workflows.js";
 export type { ArcturnServerOptions, ArcturnServerStartOptions } from "./ws-server.js";
 export {
   ArcturnServer,

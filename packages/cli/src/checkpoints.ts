@@ -89,6 +89,44 @@ export interface CheckpointRestoreError {
   message: string;
 }
 
+/** What a restore would do to one path. See {@link CheckpointRestorePlan}. */
+export interface CheckpointRestoreStep {
+  /** Absolute path, exactly as the manifest recorded it. */
+  path: string;
+  /**
+   * `"restore"` — the pre-image is written back over the file.
+   * `"delete"` — the file did not exist at that point and is removed.
+   * `"refuse"` — the path fails {@link CreateCheckpointStoreOptions.restoreRoot}
+   *   and is left alone; `reason` says why.
+   */
+  action: "restore" | "delete" | "refuse";
+  /** Why a `"refuse"` step is refused. Absent otherwise. */
+  reason?: string;
+}
+
+/**
+ * Everything a restore to one turn would do, without doing any of it.
+ *
+ * Exists so a *picker* can be honest. A menu offering "rewind to here" without
+ * saying what it costs is a menu somebody clicks by accident, and the cost is
+ * not something a caller can compute for itself — it is the union of the
+ * earliest snapshot per path from that turn to the end of the manifest, and
+ * the confinement decision on each one.
+ *
+ * Deliberately the *same* computation {@link CheckpointStore.restore} applies:
+ * `restore` is this plan plus the writes, so there is exactly one place that
+ * decides which paths are in range and which are refused. A second preview
+ * that walked the manifest with its own rules would eventually show a file
+ * count that a restore then disagreed with, and the disagreement would only
+ * be visible on somebody's disk.
+ */
+export interface CheckpointRestorePlan {
+  /** The turn this plan restores to. */
+  turnId: string;
+  /** One step per distinct path, in manifest order. */
+  steps: CheckpointRestoreStep[];
+}
+
 /** Outcome of {@link CheckpointStore.restore}. */
 export interface CheckpointRestoreResult {
   /** Paths whose content was written back from a blob. */
@@ -132,12 +170,26 @@ export interface CheckpointStore {
   listTurns(): Promise<CheckpointTurnSummary[]>;
 
   /**
+   * What {@link CheckpointStore.restore} would do for `turnId`, without
+   * touching a single file.
+   *
+   * @param turnId - Turn a caller is considering rewinding to.
+   * @returns The steps, including the ones that would be refused.
+   * @throws When `turnId` does not name a recorded turn.
+   */
+  planRestore(turnId: string): Promise<CheckpointRestorePlan>;
+
+  /**
    * Restore the workspace to how it looked immediately before `turnId`.
    *
    * For `turnId` and every turn recorded after it, each touched path's
    * *earliest* snapshot in that range is applied: files get their
    * pre-change content written back, and files whose earliest record is
    * "absent" (never existed before the range) are deleted.
+   *
+   * Applies exactly {@link CheckpointStore.planRestore}'s steps and nothing
+   * else, so what a caller was shown and what a caller gets are one
+   * computation.
    *
    * @param turnId - Turn to rewind to.
    * @returns Paths restored, paths deleted, and any failures encountered.
@@ -148,6 +200,13 @@ export interface CheckpointStore {
 
 const MANIFEST_FILE = "manifest.jsonl";
 const BLOBS_DIR = "blobs";
+
+/**
+ * The one sentence a confinement refusal gets, quoted by both the plan and the
+ * restore so a preview and its outcome cannot word the same refusal
+ * differently.
+ */
+const OUTSIDE_RESTORE_ROOT = "outside the workspace restore root; skipped";
 
 function isMissing(error: unknown): boolean {
   return (
@@ -253,6 +312,35 @@ class FileCheckpointStore implements CheckpointStore {
     return summaries;
   }
 
+  async planRestore(turnId: string): Promise<CheckpointRestorePlan> {
+    const entries = await this.#readManifest();
+    const startIndex = entries.findIndex((entry) => entry.kind === "turn" && entry.id === turnId);
+    if (startIndex === -1) {
+      throw new Error(`checkpoints: unknown turn id ${JSON.stringify(turnId)}`);
+    }
+
+    const earliestByPath = new Map<string, CheckpointFileRecord>();
+    for (let i = startIndex; i < entries.length; i++) {
+      const entry = entries[i]!;
+      if (entry.kind !== "file") continue;
+      if (!earliestByPath.has(entry.path)) earliestByPath.set(entry.path, entry);
+    }
+
+    const steps: CheckpointRestoreStep[] = [];
+    for (const record of earliestByPath.values()) {
+      if (!this.#insideRestoreRoot(record.path)) {
+        steps.push({
+          path: record.path,
+          action: "refuse",
+          reason: OUTSIDE_RESTORE_ROOT,
+        });
+        continue;
+      }
+      steps.push({ path: record.path, action: record.blob === null ? "delete" : "restore" });
+    }
+    return { turnId, steps };
+  }
+
   async restore(turnId: string): Promise<CheckpointRestoreResult> {
     const entries = await this.#readManifest();
     const startIndex = entries.findIndex((entry) => entry.kind === "turn" && entry.id === turnId);
@@ -272,15 +360,12 @@ class FileCheckpointStore implements CheckpointStore {
     const errors: CheckpointRestoreError[] = [];
 
     for (const record of earliestByPath.values()) {
-      if (this.#restoreRoot !== undefined) {
-        const resolved = resolve(record.path);
-        if (resolved !== this.#restoreRoot && !resolved.startsWith(this.#restoreRoot + sep)) {
-          errors.push({
-            path: record.path,
-            message: "outside the workspace restore root; skipped",
-          });
-          continue;
-        }
+      // The same gate `planRestore` reports, read from the same function: a
+      // preview that computed confinement separately from the writer is how a
+      // picker comes to promise a restore the store then refuses.
+      if (!this.#insideRestoreRoot(record.path)) {
+        errors.push({ path: record.path, message: OUTSIDE_RESTORE_ROOT });
+        continue;
       }
       if (record.blob === null) {
         try {
@@ -302,6 +387,21 @@ class FileCheckpointStore implements CheckpointStore {
     }
 
     return { restored, deleted, errors };
+  }
+
+  /**
+   * Whether a manifest-recorded path may be written by a restore.
+   *
+   * The one gate, read by both {@link FileCheckpointStore.planRestore} and
+   * {@link FileCheckpointStore.restore}. A manifest is an append-only file on
+   * disk that a tool with a wide `cwd` — or a tamperer — can have put an
+   * out-of-tree path into, and this is the only thing standing between such a
+   * record and a write outside the workspace.
+   */
+  #insideRestoreRoot(path: string): boolean {
+    if (this.#restoreRoot === undefined) return true;
+    const resolved = resolve(path);
+    return resolved === this.#restoreRoot || resolved.startsWith(this.#restoreRoot + sep);
   }
 
   /** Read the file at `path` (or note its absence) and store it content-addressed. */

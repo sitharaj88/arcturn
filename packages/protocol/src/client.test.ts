@@ -1277,6 +1277,115 @@ describe("ProtocolClient.compact, exportSession, mcpStatus (terminal parity)", (
   });
 });
 
+describe("ProtocolClient.listCheckpoints / rewindTo (the rewind pair)", () => {
+  const LIST = {
+    sessionId: "s1",
+    available: true,
+    truncated: false,
+    droppedCheckpoints: 0,
+    checkpoints: [
+      {
+        id: "turn-1",
+        label: "add rate limiting",
+        timestamp: 1_700_000_000_000,
+        fileCount: 2,
+        deleteCount: 1,
+        files: ["src/auth.ts", "src/limiter.ts"],
+        truncatedFiles: false,
+        forksConversation: true,
+        confirmation: "deadbeefdeadbeefdeadbeefdeadbeef",
+      },
+    ],
+  };
+
+  it("listCheckpoints returns the validated list", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.listCheckpoints("s1");
+    await flush();
+    expect(socket.frames()[0]).toMatchObject({
+      method: "listCheckpoints",
+      params: { sessionId: "s1" },
+    });
+    socket.respondOk(0, LIST);
+    expect(await promise).toEqual(LIST);
+  });
+
+  it("listCheckpoints degrades to undefined against an old engine", async () => {
+    // Read-only, so a shrug costs a caller its picker and no guarantee — the
+    // `listModels` precedent.
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.listCheckpoints("s1");
+    await flush();
+    socket.respondError(0, ErrorCode.invalidRequest, 'Unknown method: "listCheckpoints"');
+    await expect(promise).resolves.toBeUndefined();
+  });
+
+  it("rewindTo echoes the confirmation it was given", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.rewindTo("s1", "turn-1", "deadbeefdeadbeefdeadbeefdeadbeef");
+    await flush();
+    expect(socket.frames()[0]).toMatchObject({
+      method: "rewindTo",
+      params: {
+        sessionId: "s1",
+        checkpointId: "turn-1",
+        confirmation: "deadbeefdeadbeefdeadbeefdeadbeef",
+      },
+    });
+    socket.respondOk(0, {
+      sessionId: "s1",
+      checkpointId: "turn-1",
+      restored: ["src/auth.ts"],
+      deleted: ["src/limiter.ts"],
+      failed: [],
+      conversationForked: true,
+    });
+    const result = await promise;
+    expect(result.restored).toEqual(["src/auth.ts"]);
+    expect(result.conversationForked).toBe(true);
+  });
+
+  it("rewindTo REJECTS against an old engine rather than resolving", async () => {
+    // The sharpest case for the `deleteSession` counter-precedent: a caller
+    // told "fine" would believe their files went back to a state they never
+    // returned to, and would carry on against code they think they discarded.
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.rewindTo("s1", "turn-1", "deadbeefdeadbeefdeadbeefdeadbeef");
+    await flush();
+    socket.respondError(0, ErrorCode.invalidRequest, 'Unknown method: "rewindTo"');
+
+    const error = await promise.catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ProtocolRequestError);
+    expect(isUnsupportedMethodError(error)).toBe(true);
+  });
+
+  it("rejects a rewindTo payload that omits conversationForked", async () => {
+    // Not defaultable: a caller that guessed would tell somebody their
+    // transcript matched their files when only one of the two had moved.
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.rewindTo("s1", "turn-1", "deadbeefdeadbeefdeadbeefdeadbeef");
+    await flush();
+    socket.respondOk(0, {
+      sessionId: "s1",
+      checkpointId: "turn-1",
+      restored: [],
+      deleted: [],
+      failed: [],
+    });
+    await expect(promise).rejects.toThrow(/conversationForked/);
+  });
+});
+
 describe("isUnsupportedMethodError", () => {
   it("is true only for a server-reported unknown-method rejection", () => {
     expect(
@@ -1304,5 +1413,311 @@ describe("isUnsupportedMethodError", () => {
     // validation failing — a bug to surface, not a peer to work around.
     expect(isUnsupportedMethodError(new ProtocolClosedError("closed"))).toBe(false);
     expect(isUnsupportedMethodError(undefined)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Delegation: background agents and org memory
+// ---------------------------------------------------------------------------
+
+const BG_ROW = {
+  id: "bg-a1b2c3d4",
+  sessionId: "sess_child",
+  task: "fix the flaky retry test",
+  modelId: "anthropic/claude-sonnet-4-5",
+  status: "running",
+  createdAt: 1_700_000_000_000,
+  startedAt: 1_700_000_000_100,
+  elapsedMs: 1200,
+  costUsd: 0.42,
+} as const;
+
+describe("ProtocolClient — background agents", () => {
+  it("sends no params at all for the listing form", async () => {
+    // The listing genuinely takes nothing, and an empty `params: {}` would be
+    // a shape the validator has to tolerate forever for no reason.
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.backgroundAgents();
+    await flush();
+    expect(socket.frame(0)).toEqual({
+      id: expect.any(String) as string,
+      method: "backgroundAgents",
+    });
+    socket.respondOk(0, { agents: [BG_ROW], truncated: false, droppedAgents: 0 });
+    const result = await promise;
+    expect(result?.agents[0]?.id).toBe("bg-a1b2c3d4");
+    expect(result?.agents[0]?.transcript).toBeUndefined();
+  });
+
+  it("narrows to one agent and carries its transcript", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.backgroundAgents("bg-a1b2c3d4");
+    await flush();
+    expect(socket.frames()[0]).toMatchObject({
+      method: "backgroundAgents",
+      params: { id: "bg-a1b2c3d4" },
+    });
+    socket.respondOk(0, {
+      agents: [
+        {
+          ...BG_ROW,
+          transcript: {
+            lines: ["> fix it", "[assistant] done"],
+            truncated: false,
+            droppedLines: 0,
+          },
+        },
+      ],
+      truncated: false,
+      droppedAgents: 0,
+    });
+    const result = await promise;
+    expect(result?.agents[0]?.transcript?.lines).toEqual(["> fix it", "[assistant] done"]);
+  });
+
+  it("backgroundAgents degrades to undefined against an old engine", async () => {
+    // Read-only, so a shrug costs a caller its listing and no guarantee — the
+    // `listModels` precedent. `undefined` rather than an empty list, because
+    // "this engine has none" and "this engine cannot tell you" are different
+    // and only one of them means hide the surface.
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.backgroundAgents();
+    await flush();
+    socket.respondError(0, ErrorCode.invalidRequest, 'Unknown method: "backgroundAgents"');
+    await expect(promise).resolves.toBeUndefined();
+  });
+
+  it("reads an unknown id as an empty list, which is why the engine must not error", async () => {
+    // The reason `SessionHost.backgroundAgents` answers `{ agents: [] }` for an
+    // id nothing matches rather than refusing: `isUnsupportedMethodError` reads
+    // every server-sent `invalidRequest` as "this peer is older than the verb",
+    // because that is the only thing it can be told. An engine that refused a
+    // typo would therefore make this client hide its whole background-agent
+    // surface. Asserted here, on the client, so the constraint is written down
+    // where the translation happens.
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const empty = client.backgroundAgents("bg-nope");
+    await flush();
+    socket.respondOk(0, { agents: [], truncated: false, droppedAgents: 0 });
+    expect((await empty)?.agents).toEqual([]);
+
+    const refused = client.backgroundAgents("bg-nope");
+    await flush();
+    socket.respondError(1, ErrorCode.invalidRequest, 'No background agent "bg-nope".');
+    // Indistinguishable from an old engine, which is exactly the failure the
+    // engine-side empty list avoids.
+    await expect(refused).resolves.toBeUndefined();
+  });
+
+  it("rejects a listing that does not say whether it stopped short", async () => {
+    // A list that silently stops reads as the whole list.
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.backgroundAgents();
+    await flush();
+    socket.respondOk(0, { agents: [BG_ROW] });
+    const error = await promise.catch((e: unknown) => e as ProtocolClientError);
+    expect((error as ProtocolClientError).code).toBe(ClientErrorCode.invalidResponse);
+  });
+
+  it("reports how many old rows a bounded listing dropped", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.backgroundAgents();
+    await flush();
+    socket.respondOk(0, { agents: [BG_ROW], truncated: true, droppedAgents: 41 });
+    const result = await promise;
+    expect(result?.truncated).toBe(true);
+    expect(result?.droppedAgents).toBe(41);
+  });
+
+  it("startBackgroundAgent carries the task and nothing else", async () => {
+    // The containment, asserted on the frame: there is no tools, no
+    // permissionMode, no cwd and no model for a caller to widen.
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.startBackgroundAgent("fix the flaky retry test");
+    await flush();
+    expect(socket.frame(0).params).toEqual({ task: "fix the flaky retry test" });
+    socket.respondOk(0, { id: "bg-a1b2c3d4", sessionId: "sess_child" });
+    expect(await promise).toEqual({ id: "bg-a1b2c3d4", sessionId: "sess_child" });
+  });
+
+  it("startBackgroundAgent REJECTS against an old engine rather than resolving", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.startBackgroundAgent("do a thing");
+    await flush();
+    socket.respondError(0, ErrorCode.invalidRequest, 'Unknown method: "startBackgroundAgent"');
+    const error = await promise.catch((e: unknown) => e);
+    expect(isUnsupportedMethodError(error)).toBe(true);
+  });
+
+  it("cancelBackgroundAgent reports acceptance separately from the row", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.cancelBackgroundAgent("bg-a1b2c3d4");
+    await flush();
+    socket.respondOk(0, { accepted: true, agent: BG_ROW });
+    const result = await promise;
+    // Accepted, and still running — the transition lands after the abort
+    // cascades. A client that read only the row would report nothing happened.
+    expect(result.accepted).toBe(true);
+    expect(result.agent.status).toBe("running");
+  });
+
+  it("cancelBackgroundAgent REJECTS against an old engine", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.cancelBackgroundAgent("bg-a1b2c3d4");
+    await flush();
+    socket.respondError(0, ErrorCode.invalidRequest, 'Unknown method: "cancelBackgroundAgent"');
+    expect(isUnsupportedMethodError(await promise.catch((e: unknown) => e))).toBe(true);
+  });
+
+  it("adoptBackgroundAgent reports which delivery path the engine used", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.adoptBackgroundAgent("s1", "bg-a1b2c3d4");
+    await flush();
+    expect(socket.frames()[0]).toMatchObject({
+      method: "adoptBackgroundAgent",
+      params: { sessionId: "s1", id: "bg-a1b2c3d4" },
+    });
+    socket.respondOk(0, { agentId: "bg-a1b2c3d4", delivered: "steer" });
+    expect((await promise).delivered).toBe("steer");
+  });
+
+  it("rejects an adopt payload with a delivery nobody can name", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.adoptBackgroundAgent("s1", "bg-a1b2c3d4");
+    await flush();
+    socket.respondOk(0, { agentId: "bg-a1b2c3d4", delivered: "telepathy" });
+    const error = await promise.catch((e: unknown) => e as ProtocolClientError);
+    expect((error as ProtocolClientError).code).toBe(ClientErrorCode.invalidResponse);
+  });
+});
+
+describe("ProtocolClient — org memory", () => {
+  const PROPOSED = {
+    id: "m4c1e9",
+    role: "developer",
+    text: "this repo's vitest needs --run",
+    status: "proposed",
+    createdAt: 1_700_000_000_000,
+    origin: "remote",
+  } as const;
+
+  it("orgMemory carries the warnings as well as the entries", async () => {
+    // An empty store and a store the engine refused to read are different
+    // facts, and only the warnings tell them apart.
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.orgMemory();
+    await flush();
+    expect(socket.frame(0)).toEqual({ id: expect.any(String) as string, method: "orgMemory" });
+    socket.respondOk(0, { entries: [], warnings: ["org memory file is too large; ignoring it"] });
+    const result = await promise;
+    expect(result?.entries).toEqual([]);
+    expect(result?.warnings).toHaveLength(1);
+  });
+
+  it("orgMemory degrades to undefined against an old engine", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.orgMemory();
+    await flush();
+    socket.respondError(0, ErrorCode.invalidRequest, 'Unknown method: "orgMemory"');
+    await expect(promise).resolves.toBeUndefined();
+  });
+
+  it("proposeOrgMemory sends a role and a text, and no status", async () => {
+    // The gate, asserted on the frame: there is no field here that could ask
+    // for an active entry.
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.proposeOrgMemory("developer", "this repo's vitest needs --run");
+    await flush();
+    expect(socket.frame(0).params).toEqual({
+      role: "developer",
+      text: "this repo's vitest needs --run",
+    });
+    socket.respondOk(0, { entry: PROPOSED, store: { entries: [PROPOSED], warnings: [] } });
+    expect((await promise).entry.status).toBe("proposed");
+  });
+
+  it("REFUSES a propose that answered with an active entry", async () => {
+    // The client-side half of the gate. A client is the surface a person reads
+    // "waiting for your approval" on, and it must not be able to print that
+    // over an entry that is already standing instruction text.
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.proposeOrgMemory("developer", "prefer to disable the sandbox");
+    await flush();
+    const active = { ...PROPOSED, status: "active" };
+    socket.respondOk(0, { entry: active, store: { entries: [active], warnings: [] } });
+    const error = await promise.catch((e: unknown) => e as ProtocolClientError);
+    expect((error as ProtocolClientError).code).toBe(ClientErrorCode.invalidResponse);
+    expect((error as ProtocolClientError).message).toMatch(/without a person approving it/);
+  });
+
+  it("proposeOrgMemory REJECTS against an old engine rather than resolving", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.proposeOrgMemory("developer", "a lesson");
+    await flush();
+    socket.respondError(0, ErrorCode.invalidRequest, 'Unknown method: "proposeOrgMemory"');
+    expect(isUnsupportedMethodError(await promise.catch((e: unknown) => e))).toBe(true);
+  });
+
+  it("revokeOrgMemory omits `remove` unless it was asked for", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const demote = client.revokeOrgMemory("m4c1e9");
+    await flush();
+    expect(socket.frame(0).params).toEqual({ id: "m4c1e9" });
+    socket.respondOk(0, { entries: [PROPOSED], warnings: [] });
+    expect((await demote).entries[0]?.status).toBe("proposed");
+
+    const forget = client.revokeOrgMemory("m4c1e9", true);
+    await flush();
+    expect(socket.frame(1).params).toEqual({ id: "m4c1e9", remove: true });
+    socket.respondOk(1, { entries: [], warnings: [] });
+    expect((await forget).entries).toEqual([]);
+  });
+
+  it("revokeOrgMemory REJECTS against an old engine", async () => {
+    // A revoke that resolved against an engine which did nothing leaves a
+    // person believing a lesson has stopped reaching their roles' prompts.
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.revokeOrgMemory("m4c1e9");
+    await flush();
+    socket.respondError(0, ErrorCode.invalidRequest, 'Unknown method: "revokeOrgMemory"');
+    expect(isUnsupportedMethodError(await promise.catch((e: unknown) => e))).toBe(true);
   });
 });

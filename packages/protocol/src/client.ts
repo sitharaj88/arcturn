@@ -30,30 +30,45 @@
  */
 
 import type {
+  AdoptBackgroundAgentResult,
   AgentEvent,
   ApplyChangesResult,
+  BackgroundAgentList,
+  CancelBackgroundAgentResult,
+  CheckpointList,
   CommandList,
   CompactionSummary,
   ContextResolution,
   DiscardChangesResult,
   McpStatus,
   ModelCatalog,
+  OrgMemoryList,
+  OrgMemoryProposal,
   PendingChanges,
   PermissionDecision,
   PermissionMode,
   PermissionScope,
   PermissionState,
   PromptAttachment,
+  RewindResult,
   SessionExport,
   SessionHeader,
   SessionHistory,
+  StartedBackgroundAgent,
   TranscriptFormat,
+  WorkflowCatalog,
+  WorkflowRunHandle,
+  WorkflowRuns,
 } from "@arcturn/types";
 import { PROTOCOL_VERSION } from "@arcturn/types";
 import { ErrorCode } from "./messages.js";
 import { RequestIdGenerator } from "./request-id.js";
 import {
+  validateAdoptBackgroundAgentResult,
   validateApplyChangesResult,
+  validateBackgroundAgentList,
+  validateCancelBackgroundAgentResult,
+  validateCheckpointList,
   validateClientRequest,
   validateCommandList,
   validateCompactionSummary,
@@ -61,12 +76,19 @@ import {
   validateDiscardChangesResult,
   validateMcpStatus,
   validateModelCatalog,
+  validateOrgMemoryList,
+  validateOrgMemoryProposal,
   validatePendingChanges,
   validatePermissionState,
+  validateRewindResult,
   validateServerMessage,
   validateSessionExport,
   validateSessionHeader,
   validateSessionHistory,
+  validateStartedBackgroundAgent,
+  validateWorkflowCatalog,
+  validateWorkflowRunHandle,
+  validateWorkflowRuns,
 } from "./validate.js";
 
 /** Default per-request deadline, in milliseconds. */
@@ -652,6 +674,262 @@ export interface ProtocolClient {
    */
   discardChanges(sessionId: string, paths?: readonly string[]): Promise<DiscardChangesResult>;
   /**
+   * List the background agents this engine knows about, or fetch one with its
+   * transcript.
+   *
+   * Optional, on the same terms as {@link ProtocolClient.listModels}: it only
+   * reads, so an older engine's `invalidRequest` becomes `undefined` and a
+   * caller shows no background-agent surface at all. That is the right
+   * degradation here rather than an empty list, because "this engine has none"
+   * and "this engine cannot tell you" are different things and only one of
+   * them means the button should be hidden.
+   *
+   * @param id - Narrow to one agent and include its rendered transcript. Omit
+   *   for the whole listing, newest first, without transcripts.
+   * @returns The agents, or `undefined` when the engine has no such verb.
+   */
+  backgroundAgents(id?: string): Promise<BackgroundAgentList | undefined>;
+  /**
+   * Start one background agent on `task`.
+   *
+   * **This spends money.** The engine caps what it can spend it on — the
+   * task is the only thing this call carries, and the agent's tools,
+   * permission mode, working directory and model all come from the engine's
+   * own defaults — but it does not cap *how much*, any more than a `/bg` typed
+   * at a terminal does. Treat it the way a client treats `prompt`.
+   *
+   * Deliberately not given the `undefined` treatment
+   * {@link ProtocolClient.backgroundAgents} gets: an older engine's
+   * `invalidRequest` rejects, because a caller told "fine" by an engine that
+   * ignored this would poll forever for an agent that was never started.
+   *
+   * @param task - What the agent should do. Its sole prompt.
+   * @returns The id to ask about, and the child's session id.
+   * @throws {ProtocolRequestError} `invalidRequest` for an empty task, or from
+   *   an engine with no background-agent manager wired.
+   */
+  startBackgroundAgent(task: string): Promise<StartedBackgroundAgent>;
+  /**
+   * Abort one background agent.
+   *
+   * `accepted: false` is not an error: it means there was nothing to cancel.
+   * The agent row that comes back usually still says `running`, because the
+   * abort cascades through the child's run loop and settles afterwards — poll
+   * {@link ProtocolClient.backgroundAgents} to watch it land.
+   *
+   * Not degradable, for the reason {@link ProtocolClient.discardChanges} is
+   * not: a cancel that resolved against an engine which did nothing would
+   * leave a user certain they had stopped spending money they are still
+   * spending.
+   *
+   * @param id - The agent's id.
+   * @returns Whether the cancellation was taken, and the agent as it stands.
+   * @throws {ProtocolRequestError} `invalidRequest` for an unknown id, or from
+   *   an engine that has no such verb.
+   */
+  cancelBackgroundAgent(id: string): Promise<CancelBackgroundAgentResult>;
+  /**
+   * Deliver a finished background agent's result into a live session.
+   *
+   * The engine composes the message and chooses `steer` or `prompt` depending
+   * on whether the session is mid-run; the result says which happened. The
+   * text is delivered **unexpanded** — a background agent's answer is written
+   * by a model, and mentions in it are not mentions a person typed.
+   *
+   * Not degradable: an adopt that resolved against an engine which did nothing
+   * would show a caller a turn that never started.
+   *
+   * @param sessionId - The live session to deliver into. `openSession` first.
+   * @param id - The background agent whose result to adopt.
+   * @returns Which delivery path the engine used.
+   * @throws {ProtocolRequestError} `sessionNotFound` when the session is not
+   *   live; `invalidRequest` when the agent is still running, produced no
+   *   output, or does not exist.
+   */
+  adoptBackgroundAgent(sessionId: string, id: string): Promise<AdoptBackgroundAgentResult>;
+  /**
+   * Read the org-memory store — the per-role lessons appended to a role's
+   * prompt on later runs.
+   *
+   * Read `warnings` as well as `entries`: an empty store and a store the
+   * engine refused to read are different, and only the warnings tell them
+   * apart.
+   *
+   * Optional, on the same terms as {@link ProtocolClient.listModels}.
+   *
+   * @returns Every entry, proposed and active, or `undefined` when the engine
+   *   has no such verb.
+   */
+  orgMemory(): Promise<OrgMemoryList | undefined>;
+  /**
+   * File a **proposed** org-memory entry. It reaches no prompt.
+   *
+   * There is no counterpart that approves one, and there will not be: an
+   * active entry is standing instruction text in every later run of its role,
+   * and the gate on it is a person at the machine typing `/org memory
+   * approve`. A client's job is to make proposing easy and to show what is
+   * waiting — not to grant it.
+   *
+   * Not degradable: a proposal that resolved against an engine which did
+   * nothing would show a queue of suggestions that do not exist.
+   *
+   * @param role - The role the lesson is for.
+   * @param text - One line, at most 160 characters. Over-long text is refused
+   *   rather than clipped, because clipping can invert a lesson.
+   * @returns The entry as filed — always `proposed` — and the store.
+   * @throws {ProtocolRequestError} `invalidRequest` when the store's bounds
+   *   refuse the text, or from an engine with no org-memory store wired.
+   */
+  proposeOrgMemory(role: string, text: string): Promise<OrgMemoryProposal>;
+  /**
+   * Take an org-memory entry back: demote it to `proposed`, or delete it.
+   *
+   * Allowed over the wire where approving is not, because this can only ever
+   * *reduce* what later runs are told.
+   *
+   * Not degradable, for the reason {@link ProtocolClient.discardChanges} is
+   * not: a revoke that resolved against an engine which did nothing leaves a
+   * person believing a lesson has stopped reaching their roles' prompts.
+   *
+   * @param id - The entry's id.
+   * @param remove - `true` deletes it outright (**irreversible** — confirm
+   *   with the user first). Omitted, it is demoted and stays visible.
+   * @returns The store as it now stands.
+   * @throws {ProtocolRequestError} `invalidRequest` for an unknown id, or from
+   *   an engine that has no such verb.
+   */
+  revokeOrgMemory(id: string, remove?: boolean): Promise<OrgMemoryList>;
+  /**
+   * Ask which earlier turns this session could be rewound to, and what each
+   * would cost.
+   *
+   * Read the rows before offering any of them: each carries `fileCount`,
+   * `deleteCount` and the paths themselves, which is what makes a picker
+   * honest about a choice that deletes files. Read `available` too — `false`
+   * means this engine keeps no checkpoints at all, which is a different story
+   * from an empty list on an engine that does.
+   *
+   * Optional, on the same terms as {@link ProtocolClient.listModels}: it only
+   * reads, so an older engine's `invalidRequest` becomes `undefined` and a
+   * caller offers no rewind.
+   *
+   * @param sessionId - Session to ask about.
+   * @returns The rewindable turns, newest first, or `undefined` when the
+   *   engine has no such verb.
+   */
+  listCheckpoints(sessionId: string): Promise<CheckpointList | undefined>;
+  /**
+   * Restore a session's files to a checkpoint and fork its conversation back
+   * to the same point. **Destructive and irreversible** — it writes files and
+   * it deletes files.
+   *
+   * Confirm with the user first, the way a discard is confirmed, and confirm
+   * against what {@link ProtocolClient.listCheckpoints} reported for *this*
+   * row: `confirmation` is that row's own token, and an engine whose plan has
+   * moved since the list was taken refuses rather than rewinding to something
+   * the user never saw.
+   *
+   * Deliberately **not** given the `undefined` treatment `listCheckpoints`
+   * gets, and this is the sharpest asymmetry in this interface: an apply that
+   * silently did not happen tells a reviewer their change landed, and a rewind
+   * that silently did not happen tells a user their files went back to a state
+   * they never returned to — so they carry on building on code they believe
+   * they discarded. An older engine's `invalidRequest` rejects.
+   *
+   * @param sessionId - Session to rewind.
+   * @param checkpointId - The row's `id`.
+   * @param confirmation - That same row's `confirmation`.
+   * @returns What was rewritten, what was deleted, what was refused, and
+   *   whether the transcript forked too.
+   * @throws {ProtocolRequestError} `sessionBusy` while the session is running
+   *   a turn, `sessionNotFound`, or `invalidRequest` for an unknown
+   *   checkpoint, a stale confirmation, an engine with no checkpoint store, or
+   *   an engine that does not implement the verb.
+   */
+  rewindTo(sessionId: string, checkpointId: string, confirmation: string): Promise<RewindResult>;
+  /**
+   * The workflow catalog: every markdown pipeline this engine discovered, with
+   * the ceilings it declares and the lane the engine **derives** for each role
+   * it dispatches to.
+   *
+   * **Degrades to `undefined`** on the `listModels` precedent — it reads, so an
+   * engine that predates the verb costs a client its workflow menu and nothing
+   * else. A client that gets `undefined` offers no workflow surface rather than
+   * guessing at one.
+   *
+   * @returns The catalog, or `undefined` from an engine too old to have it.
+   */
+  listWorkflows(): Promise<WorkflowCatalog | undefined>;
+  /**
+   * Start a workflow run, and follow it on the session's event stream.
+   *
+   * **Spends real money, and a write-lane role's patch lands in the user's
+   * checkout when its step succeeds.** Resolves as soon as the run is
+   * *accepted* — not when it finishes; see {@link WorkflowRunHandle}.
+   *
+   * `budgetUsd` may only ever **lower** the workflow file's own `budgetUsd:`.
+   * A larger value is refused (`invalidRequest`, naming both figures) rather
+   * than clamped, so a client never renders a ceiling the engine is not
+   * enforcing. Read the file's own from {@link ProtocolClient.listWorkflows}
+   * first and the refusal never has to happen.
+   *
+   * **Does not degrade.** An engine that predates this verb rejects with
+   * `invalidRequest` like any other failure, because a client told "started"
+   * by an engine that did nothing would report a verdict nobody produced.
+   *
+   * @param sessionId - Session whose event stream carries the run.
+   * @param name - Workflow name, as `listWorkflows` reported it.
+   * @param options - `input` splices into `{{input}}`; `budgetUsd` lowers the
+   *   run's ceiling.
+   * @returns The accepted run: its id, its shape, and the limits in force.
+   * @throws {ProtocolRequestError} `sessionNotFound`, `sessionBusy`, or
+   *   `invalidRequest` for an unknown workflow, a budget above the file's own,
+   *   an engine with no workflow support, or one that does not implement the
+   *   verb.
+   */
+  runWorkflow(
+    sessionId: string,
+    name: string,
+    options?: { input?: string; budgetUsd?: number },
+  ): Promise<WorkflowRunHandle>;
+  /**
+   * What a run reached — live or finished, started here or in a terminal.
+   *
+   * Read from the run journal the engine already keeps, so a run interrupted
+   * by a crash reports the same thing here that `/workflow status` prints.
+   *
+   * **Degrades to `undefined`** on the `listModels` precedent. A `runId` this
+   * engine has no journal for answers **zero rows** rather than an error, so
+   * "no such run" stays distinguishable from "this engine is too old" — see
+   * `ClientRequest`'s `workflowStatus`.
+   *
+   * @param runId - One run, with its per-step breakdown. Omit for the listing.
+   * @returns The runs, or `undefined` from an engine too old to have the verb.
+   */
+  workflowStatus(runId?: string): Promise<WorkflowRuns | undefined>;
+  /**
+   * Re-enter an interrupted run, optionally answering its `ORG-ASK:`.
+   *
+   * Completed steps are replayed from the journal rather than executed again,
+   * and an applied patch is not applied twice — that is the engine's promise,
+   * reached through this verb rather than re-implemented behind it.
+   *
+   * Resolves on acceptance, exactly as {@link ProtocolClient.runWorkflow} does,
+   * and **does not degrade** for the same reason plus one of its own: an answer
+   * that silently went nowhere leaves a run paused forever.
+   *
+   * @param sessionId - Session whose event stream carries the resumed run.
+   * @param runId - The run to re-enter.
+   * @param answer - The human's reply to the paused stage. Omit to re-surface
+   *   the question instead.
+   * @returns The accepted run, with `resumed: true`.
+   * @throws {ProtocolRequestError} `sessionNotFound`, `sessionBusy`, or
+   *   `invalidRequest` for an unknown run, a run that already finished, a
+   *   workflow file that is no longer discoverable, an engine with no workflow
+   *   support, or one that does not implement the verb.
+   */
+  resumeWorkflow(sessionId: string, runId: string, answer?: string): Promise<WorkflowRunHandle>;
+  /**
    * Subscribe to server-pushed session events.
    *
    * @returns An unsubscribe function; calling it more than once is harmless.
@@ -1015,6 +1293,174 @@ class ProtocolClientImpl implements ProtocolClient {
       await this.#call("discardChanges", {
         sessionId,
         ...(paths === undefined ? {} : { paths: [...paths] }),
+      }),
+    );
+  }
+
+  async backgroundAgents(id?: string): Promise<BackgroundAgentList | undefined> {
+    let result: unknown;
+    try {
+      // The params object is omitted entirely rather than sent as `{}` when
+      // there is no id: the listing form of this verb genuinely takes nothing,
+      // and an empty object would be a shape the validator has to tolerate
+      // forever for no reason.
+      result = await this.#call("backgroundAgents", ...(id === undefined ? [] : [{ id }]));
+    } catch (error) {
+      // Same reasoning as `listModels`: only a *server-reported* rejection can
+      // mean "I do not know this verb". An unknown agent id is the caller's
+      // problem rather than the engine's age, and it arrives as an
+      // `invalidRequest` naming the id — which `isUnsupportedMethodError` does
+      // not match, so it still throws.
+      if (error instanceof ProtocolRequestError && isUnsupportedMethodError(error)) {
+        return undefined;
+      }
+      throw error;
+    }
+    return parseBackgroundAgentList(result);
+  }
+
+  async startBackgroundAgent(task: string): Promise<StartedBackgroundAgent> {
+    // No unsupported-method translation: see the interface doc. An agent that
+    // was never started must not resolve.
+    return parseStartedBackgroundAgent(await this.#call("startBackgroundAgent", { task }));
+  }
+
+  async cancelBackgroundAgent(id: string): Promise<CancelBackgroundAgentResult> {
+    return parseCancelBackgroundAgentResult(await this.#call("cancelBackgroundAgent", { id }));
+  }
+
+  async adoptBackgroundAgent(sessionId: string, id: string): Promise<AdoptBackgroundAgentResult> {
+    return parseAdoptBackgroundAgentResult(
+      await this.#call("adoptBackgroundAgent", { sessionId, id }),
+    );
+  }
+
+  async orgMemory(): Promise<OrgMemoryList | undefined> {
+    let result: unknown;
+    try {
+      result = await this.#call("orgMemory");
+    } catch (error) {
+      if (error instanceof ProtocolRequestError && isUnsupportedMethodError(error)) {
+        return undefined;
+      }
+      throw error;
+    }
+    return parseOrgMemoryList(result);
+  }
+
+  async proposeOrgMemory(role: string, text: string): Promise<OrgMemoryProposal> {
+    // No unsupported-method translation, and the `parseOrgMemoryProposal`
+    // below is the second half of the same discipline: it refuses a response
+    // whose entry is not `proposed`, so an engine that somehow filed one
+    // active cannot have a client render it as merely "suggested".
+    return parseOrgMemoryProposal(await this.#call("proposeOrgMemory", { role, text }));
+  }
+
+  async revokeOrgMemory(id: string, remove?: boolean): Promise<OrgMemoryList> {
+    return parseOrgMemoryList(
+      await this.#call("revokeOrgMemory", {
+        id,
+        ...(remove === undefined ? {} : { remove }),
+      }),
+    );
+  }
+
+  async listCheckpoints(sessionId: string): Promise<CheckpointList | undefined> {
+    let result: unknown;
+    try {
+      result = await this.#call("listCheckpoints", { sessionId });
+    } catch (error) {
+      // Same reasoning as `listModels`: only a *server-reported* rejection can
+      // mean "I do not know this verb". A `sessionNotFound` is the caller's
+      // problem, not the engine's age; an engine with no checkpoint store
+      // answers `available: false` rather than erroring, so that case cannot
+      // reach here either.
+      if (error instanceof ProtocolRequestError && isUnsupportedMethodError(error)) {
+        return undefined;
+      }
+      throw error;
+    }
+    return parseCheckpointList(result);
+  }
+
+  async rewindTo(
+    sessionId: string,
+    checkpointId: string,
+    confirmation: string,
+  ): Promise<RewindResult> {
+    // No unsupported-method translation: see the interface doc. A rewind that
+    // did not happen must not resolve — the user would keep working on files
+    // they believe are gone.
+    return parseRewindResult(
+      await this.#call("rewindTo", { sessionId, checkpointId, confirmation }),
+    );
+  }
+
+  async listWorkflows(): Promise<WorkflowCatalog | undefined> {
+    let result: unknown;
+    try {
+      result = await this.#call("listWorkflows");
+    } catch (error) {
+      // Same reasoning as `listModels`: only a *server-reported* rejection can
+      // mean "I do not know this verb", and this one reads, so a client that
+      // gets nothing offers no workflow menu — which is exactly true.
+      if (error instanceof ProtocolRequestError && isUnsupportedMethodError(error)) {
+        return undefined;
+      }
+      throw error;
+    }
+    return parseWorkflowCatalog(result);
+  }
+
+  async runWorkflow(
+    sessionId: string,
+    name: string,
+    options: { input?: string; budgetUsd?: number } = {},
+  ): Promise<WorkflowRunHandle> {
+    // No unsupported-method translation: see the interface doc. A pipeline that
+    // did not start must not resolve as though it had — the caller would read a
+    // verdict nobody produced.
+    return parseWorkflowRunHandle(
+      await this.#call("runWorkflow", {
+        sessionId,
+        name,
+        ...(options.input === undefined ? {} : { input: options.input }),
+        ...(options.budgetUsd === undefined ? {} : { budgetUsd: options.budgetUsd }),
+      }),
+    );
+  }
+
+  async workflowStatus(runId?: string): Promise<WorkflowRuns | undefined> {
+    let result: unknown;
+    try {
+      result = await this.#call("workflowStatus", runId === undefined ? {} : { runId });
+    } catch (error) {
+      // Same reasoning as `listModels`. It is also why the engine answers an
+      // unknown run id with zero rows rather than an `invalidRequest`: this
+      // branch cannot tell an in-band refusal from an engine that predates the
+      // verb, so a read verb must never produce one — see `pendingChanges`.
+      if (error instanceof ProtocolRequestError && isUnsupportedMethodError(error)) {
+        return undefined;
+      }
+      throw error;
+    }
+    return parseWorkflowRuns(result);
+  }
+
+  async resumeWorkflow(
+    sessionId: string,
+    runId: string,
+    answer?: string,
+  ): Promise<WorkflowRunHandle> {
+    // No unsupported-method translation either, and for the sharper half of
+    // `runWorkflow`'s reason: an `ORG-ASK` answer that resolved against an
+    // engine which never received it leaves a run paused forever while the
+    // person who answered believes it is moving again.
+    return parseWorkflowRunHandle(
+      await this.#call("resumeWorkflow", {
+        sessionId,
+        runId,
+        ...(answer === undefined ? {} : { answer }),
       }),
     );
   }
@@ -1453,6 +1899,146 @@ function parseDiscardChangesResult(result: unknown): DiscardChangesResult {
     throw new ProtocolClientError(
       ClientErrorCode.invalidResponse,
       `Invalid discardChanges result: ${validation.error}`,
+    );
+  }
+  return validation.value;
+}
+
+/** Parse a `backgroundAgents` result, rejecting anything off-contract. */
+function parseBackgroundAgentList(result: unknown): BackgroundAgentList {
+  const validation = validateBackgroundAgentList(result);
+  if (!validation.ok) {
+    throw new ProtocolClientError(
+      ClientErrorCode.invalidResponse,
+      `Invalid backgroundAgents result: ${validation.error}`,
+    );
+  }
+  return validation.value;
+}
+
+/** Parse a `startBackgroundAgent` result, rejecting anything off-contract. */
+function parseStartedBackgroundAgent(result: unknown): StartedBackgroundAgent {
+  const validation = validateStartedBackgroundAgent(result);
+  if (!validation.ok) {
+    throw new ProtocolClientError(
+      ClientErrorCode.invalidResponse,
+      `Invalid startBackgroundAgent result: ${validation.error}`,
+    );
+  }
+  return validation.value;
+}
+
+/** Parse a `cancelBackgroundAgent` result, rejecting anything off-contract. */
+function parseCancelBackgroundAgentResult(result: unknown): CancelBackgroundAgentResult {
+  const validation = validateCancelBackgroundAgentResult(result);
+  if (!validation.ok) {
+    throw new ProtocolClientError(
+      ClientErrorCode.invalidResponse,
+      `Invalid cancelBackgroundAgent result: ${validation.error}`,
+    );
+  }
+  return validation.value;
+}
+
+/** Parse an `adoptBackgroundAgent` result, rejecting anything off-contract. */
+function parseAdoptBackgroundAgentResult(result: unknown): AdoptBackgroundAgentResult {
+  const validation = validateAdoptBackgroundAgentResult(result);
+  if (!validation.ok) {
+    throw new ProtocolClientError(
+      ClientErrorCode.invalidResponse,
+      `Invalid adoptBackgroundAgent result: ${validation.error}`,
+    );
+  }
+  return validation.value;
+}
+
+/** Parse an `orgMemory`/`revokeOrgMemory` result, rejecting anything off-contract. */
+function parseOrgMemoryList(result: unknown): OrgMemoryList {
+  const validation = validateOrgMemoryList(result);
+  if (!validation.ok) {
+    throw new ProtocolClientError(
+      ClientErrorCode.invalidResponse,
+      `Invalid org memory result: ${validation.error}`,
+    );
+  }
+  return validation.value;
+}
+
+/**
+ * Parse a `proposeOrgMemory` result, rejecting anything off-contract —
+ * including, specifically, an entry that came back `active`.
+ *
+ * That check lives in `validateOrgMemoryProposal` and is the client-side half
+ * of the gate: a client is the surface a person reads "proposed — waiting for
+ * your approval" on, and it must not be able to print that over an entry that
+ * is already in force.
+ */
+function parseOrgMemoryProposal(result: unknown): OrgMemoryProposal {
+  const validation = validateOrgMemoryProposal(result);
+  if (!validation.ok) {
+    throw new ProtocolClientError(
+      ClientErrorCode.invalidResponse,
+      `Invalid proposeOrgMemory result: ${validation.error}`,
+    );
+  }
+  return validation.value;
+}
+
+/** Parse a `listCheckpoints` result, rejecting anything off-contract. */
+function parseCheckpointList(result: unknown): CheckpointList {
+  const validation = validateCheckpointList(result);
+  if (!validation.ok) {
+    throw new ProtocolClientError(
+      ClientErrorCode.invalidResponse,
+      `Invalid listCheckpoints result: ${validation.error}`,
+    );
+  }
+  return validation.value;
+}
+
+/** Parse a `listWorkflows` result, rejecting anything off-contract. */
+function parseWorkflowCatalog(result: unknown): WorkflowCatalog {
+  const validation = validateWorkflowCatalog(result);
+  if (!validation.ok) {
+    throw new ProtocolClientError(
+      ClientErrorCode.invalidResponse,
+      `Invalid listWorkflows result: ${validation.error}`,
+    );
+  }
+  return validation.value;
+}
+
+/** Parse a `runWorkflow` / `resumeWorkflow` result. */
+function parseWorkflowRunHandle(result: unknown): WorkflowRunHandle {
+  const validation = validateWorkflowRunHandle(result);
+  if (!validation.ok) {
+    throw new ProtocolClientError(
+      ClientErrorCode.invalidResponse,
+      `Invalid workflow run handle: ${validation.error}`,
+    );
+  }
+  return validation.value;
+}
+
+/** Parse a `workflowStatus` result. */
+function parseWorkflowRuns(result: unknown): WorkflowRuns {
+  const validation = validateWorkflowRuns(result);
+  if (!validation.ok) {
+    throw new ProtocolClientError(
+      ClientErrorCode.invalidResponse,
+      `Invalid workflowStatus result: ${validation.error}`,
+    );
+  }
+  return validation.value;
+}
+
+/** Parse a `rewindTo` result, rejecting anything off-contract. */
+function parseRewindResult(result: unknown): RewindResult {
+  const validation = validateRewindResult(result);
+  if (!validation.ok) {
+    throw new ProtocolClientError(
+      ClientErrorCode.invalidResponse,
+      `Invalid rewindTo result: ${validation.error}`,
     );
   }
   return validation.value;

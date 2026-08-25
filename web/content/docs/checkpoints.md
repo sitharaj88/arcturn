@@ -65,6 +65,35 @@ in-memory link to its conversation leaf — only the files are restored; you get
 restored. The conversation link for this turn predates this process, so the transcript
 was left in place.` rather than a guessed fork point.
 
+## Rewinding from a remote client
+
+`/rewind` was a terminal-only flow until the protocol grew two verbs for it. A client
+attached to `arcturn serve` — the VS Code panel, the browser client, `arcturn attach` —
+calls `listCheckpoints` for the turns and their prices, then `rewindTo` for one of them.
+See [Server mode](/docs/server-mode#rewinding-to-a-checkpoint) for the payloads.
+
+Two things differ from the terminal, and both are about a socket being reachable by anyone
+holding the serve token:
+
+- **Every row carries what it would cost.** The terminal's picker shows how many files
+  changed *during* a turn; the wire reports the plan a rewind would actually apply — the
+  union of the earliest snapshot per path from that turn onward — split into how many files
+  are rewritten and how many are **deleted**. A picker that could not say what a choice
+  costs would not be an honest picker.
+- **`rewindTo` echoes a confirmation.** It is a digest of that plan, copied from the row the
+  client rendered, so a client cannot rewind to a state it never showed the user: if a turn
+  has run since the picker was painted, the plan has changed, the digest no longer matches
+  and the engine refuses rather than proceeding.
+
+Everything dangerous is the same code. The manifest walk, the workspace confinement, the
+content-addressed blobs and the atomic writes are this store's; the conversation fork is the
+same branch resume the terminal performs. There is no second restorer, and the extension
+never writes or unlinks a workspace file itself.
+
+A remote rewind is also **refused while a run is in flight** (`sessionBusy`), which is the
+same refusal the terminal makes with "A run is in progress; press Esc to interrupt it before
+rewinding."
+
 ## Interplay with dry-run
 
 Checkpoints wrap *outside* the dry-run overlay: the snapshot is taken from the real path
@@ -93,5 +122,7 @@ every branch stays walkable by resuming its own leaf. That combination is what m
   content-addressed-blob shape, but for *why* a line exists rather than restoring it.
 - [Replay & bisect](/docs/replay-bisect) — a different way to go back in time: re-run
   prompts instead of restoring files.
+- [Server mode](/docs/server-mode#rewinding-to-a-checkpoint) — `listCheckpoints` and
+  `rewindTo`, the two verbs that make this reachable from a remote client.
 - The [accountability feature page](/features/accountability) shows `/rewind`'s picker
   and confirmation flow end to end.

@@ -18,7 +18,8 @@
  * `setModel`, `respondToPermission`, `listModels`, `listSessions`,
  * `createSession`, `openSession`, `sessionHistory`, `deleteSession`,
  * `resolveContext`, `permissionState`, `setPermissionMode`, `listCommands`,
- * `pendingChanges`, `applyChanges`, `discardChanges`.
+ * `pendingChanges`, `applyChanges`, `discardChanges`, `listCheckpoints`,
+ * `rewindTo`.
  * Every message in the webview→host union
  * below lands on exactly one of those, on a VS Code command the extension
  * already contributes, or on nothing at all (`toggle` is view state; `copy` is
@@ -50,8 +51,12 @@ import type {
 } from "../serve/engine.js";
 import {
   MAX_CHANGE_SELECTION,
+  MAX_CHECKPOINT_ID_LENGTH,
   MAX_CONTEXT_QUERY_LENGTH,
   MAX_PROMPT_ATTACHMENTS,
+  MAX_WORKFLOW_INPUT_LENGTH,
+  MAX_WORKFLOW_NAME_LENGTH,
+  MAX_WORKFLOW_RUN_ID_LENGTH,
 } from "../serve/engine.js";
 import type { ChatViewModel } from "./chat-state.js";
 import {
@@ -61,10 +66,12 @@ import {
 } from "./connection-card.js";
 import type { DryRunView } from "./dry-run.js";
 import { escapeCodicons } from "./picker.js";
+import type { RewindView } from "./rewind.js";
 import type { CommandOption } from "./webview-commands.js";
 import type { ModelOption } from "./webview-models.js";
 import { PERMISSION_MODE_IDS } from "./webview-permission.js";
 import type { SessionOption } from "./webview-sessions.js";
+import type { WorkflowView } from "./workflows.js";
 
 /** Ceiling on a prompt, mirroring nothing in particular — just not unbounded. */
 export const MAX_PROMPT_LENGTH = 100_000;
@@ -386,6 +393,33 @@ export type HostMessage =
    * has no such verb — because they are three different sentences.
    */
   | { type: "dryRun"; view: DryRunView }
+  /**
+   * The workflow catalog, and the run the panel is following.
+   *
+   * A whole-view message rather than a catalog plus progress deltas, for the
+   * reason `dryRun` is one: the host owns what the card acts on. A card that
+   * tallied its own progress from the narration arriving on the event stream
+   * would drift from `/workflow status` in a terminal looking at the same run —
+   * the notices are narration, the journal these numbers come from is the
+   * record.
+   *
+   * `status` carries the three different reasons there might be no workflow
+   * surface — not asked yet, this workspace defines none, this engine has no
+   * such verb — because they are three different sentences.
+   */
+  | { type: "workflows"; view: WorkflowView }
+  /**
+   * The turns this session could be rewound to, and what each would cost.
+   *
+   * A whole-view message rather than a list, for the reason `dryRun` is one:
+   * the host owns what the picker acts on, and a picker holding its own copy
+   * could offer a rewind whose price the engine no longer agrees with — which
+   * is precisely what the engine's echoed confirmation refuses. `status`
+   * carries the four different reasons there might be no picker (not asked
+   * yet, this engine keeps no checkpoints, this engine has no such verb, or a
+   * refusal to report) because they are four different sentences.
+   */
+  | { type: "rewind"; view: RewindView }
   | {
       type: "session";
       sessionId?: string;
@@ -485,6 +519,55 @@ export type WebviewMessage =
    * confirmation.
    */
   | { type: "discardChanges" }
+  /** Ask which turns this session could be rewound to. Read-only. */
+  | { type: "requestCheckpoints" }
+  /** Ask for the workflow catalog. Read-only; nothing is started. */
+  | { type: "requestWorkflows" }
+  /**
+   * Start a workflow run. **Spends real money, and a write-lane role's patch
+   * lands in the user's checkout when its step succeeds.**
+   *
+   * The host confirms with a native modal naming the spend ceiling and every
+   * role that can act before anything starts — `dialog.ts`'s discipline for
+   * `deleteSession` and `dry-run.ts`'s for `discardChanges`, applied to the one
+   * control on this surface that spends money. A webview button is not a
+   * confirmation.
+   *
+   * The panel deliberately carries **no budget**: the engine accepts one only
+   * to *lower* the workflow file's own ceiling, and a number typed into a
+   * webview is not a decision a person made about money. The file's ceiling is
+   * shown in the modal and enforced by the engine; a box for it in the panel
+   * would mostly be an offer to raise it, which the engine then refuses.
+   */
+  | { type: "runWorkflow"; name: string; input?: string }
+  /**
+   * Re-enter an interrupted run, carrying the answer to its `ORG-ASK:`.
+   *
+   * The answer is the person's own words, forwarded verbatim — the panel never
+   * summarises a question and never answers one. Sent with no `answer` it asks
+   * the engine to re-surface the question instead, which is what the terminal's
+   * bare `/workflow resume <runId>` does.
+   */
+  | { type: "resumeWorkflow"; runId: string; answer?: string }
+  /**
+   * Restore files to a checkpoint and fork the conversation. **Irreversible.**
+   *
+   * The host confirms with a native modal naming the file count and the files
+   * before anything happens — `dialog.ts`'s discipline for `deleteSession` and
+   * `dry-run.ts`'s for `discardChanges`, applied to the one control on this
+   * surface that both overwrites and unlinks a person's files. A webview
+   * button is not a confirmation.
+   *
+   * The restore itself is the engine's `rewindTo` verb: this extension never
+   * writes a workspace file and never unlinks one (RFC 0004 §0), which is also
+   * the only version that inherits the engine's workspace confinement and its
+   * mid-run `sessionBusy`.
+   *
+   * `confirmation` is carried back verbatim from the row the page rendered, so
+   * the engine can refuse a rewind whose cost has changed since — the page is
+   * a courier for it, never an author of one.
+   */
+  | { type: "rewindTo"; checkpointId: string; confirmation: string }
   | { type: "copy"; text: string };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -599,6 +682,46 @@ export function parseWebviewMessage(value: unknown): WebviewMessage | undefined 
       return { type: "requestCommands" };
     case "requestDryRun":
       return { type: "requestDryRun" };
+    case "requestCheckpoints":
+      return { type: "requestCheckpoints" };
+    case "requestWorkflows":
+      return { type: "requestWorkflows" };
+    case "runWorkflow": {
+      // The name is identity — it is what `runWorkflow` is sent — so it gets
+      // the shape rules `setModel`'s id gets: bounded, and no control
+      // character, because it reaches a native modal and the Output channel.
+      // Whether it names a workflow this engine has is the engine's answer to
+      // give, and it gives it by naming the ones it does have.
+      const raw = value.name;
+      if (typeof raw !== "string") return undefined;
+      const name = raw.trim();
+      if (name === "" || name.length > MAX_WORKFLOW_NAME_LENGTH) return undefined;
+      if (hasControlCharacter(name)) return undefined;
+      const input = value.input;
+      if (input === undefined) return { type: "runWorkflow", name };
+      // `{{input}}` is prose a person typed into the composer, so newlines are
+      // legal here in a way they are not for an id — a pasted PR description is
+      // exactly what this field is for. Bounded on the engine's own terms.
+      if (typeof input !== "string") return undefined;
+      if (input.length > MAX_WORKFLOW_INPUT_LENGTH) return undefined;
+      return { type: "runWorkflow", name, input };
+    }
+    case "resumeWorkflow": {
+      const rawId = value.runId;
+      if (typeof rawId !== "string") return undefined;
+      const runId = rawId.trim();
+      if (runId === "" || runId.length > MAX_WORKFLOW_RUN_ID_LENGTH) return undefined;
+      if (hasControlCharacter(runId)) return undefined;
+      const answer = value.answer;
+      if (answer === undefined) return { type: "resumeWorkflow", runId };
+      // A human's answer to a design question. Multi-line on purpose, and
+      // never trimmed to a single line: the engine splices it in place of the
+      // asking step's output, and truncating it here would put words in a
+      // person's mouth.
+      if (typeof answer !== "string") return undefined;
+      if (answer.length > MAX_WORKFLOW_INPUT_LENGTH) return undefined;
+      return { type: "resumeWorkflow", runId, answer };
+    }
     case "discardChanges":
       // No payload: the *whole* pending set, which is what the card's Discard
       // offers. The host names the files in a modal before anything happens.
@@ -751,6 +874,23 @@ export function parseWebviewMessage(value: unknown): WebviewMessage | undefined 
         paths.push(entry);
       }
       return { type: "applyChanges", paths };
+    }
+    case "rewindTo": {
+      // The one message on this boundary that ends in somebody's files being
+      // **deleted**, so both fields are rebuilt with a ceiling and neither is
+      // optional. `confirmation` in particular is required rather than
+      // defaulted: it is the page's proof that it rendered the cost the engine
+      // computed, and a message that could arrive without one would make "the
+      // user was shown this" indistinguishable from "the page did not bother".
+      // Whether either value names anything real is the engine's answer to
+      // give, and `rewindTo` gives it.
+      const id = value.checkpointId;
+      const confirmation = value.confirmation;
+      if (typeof id !== "string" || typeof confirmation !== "string") return undefined;
+      if (id === "" || id.length > MAX_CHECKPOINT_ID_LENGTH) return undefined;
+      if (confirmation === "" || confirmation.length > MAX_CHECKPOINT_ID_LENGTH) return undefined;
+      if (hasControlCharacter(id) || hasControlCharacter(confirmation)) return undefined;
+      return { type: "rewindTo", checkpointId: id, confirmation };
     }
     case "detach": {
       const raw = value.id;

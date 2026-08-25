@@ -155,6 +155,14 @@ injected into a role's prompt. That gate exists because a memory entry becomes s
 instruction text in later runs, which is not something a model should be able to grant
 itself.
 
+That gate is why `arcturn serve` exposes `/org memory` in three parts and not four: a
+remote client can read the store, **propose** an entry and revoke or delete one, and there
+is no verb that approves. An engine cannot tell a frame a person clicked from a frame an
+agent sent, and `add` is live precisely because you typed it. `/bg` is reachable in full;
+`/team` and `/scout` are not reachable at all. See
+[Server mode](/docs/server-mode#background-agents) and
+[Teams](/docs/teams#from-a-remote-client).
+
 ## Related
 
 - [Getting started](/docs/getting-started) — installation and first run

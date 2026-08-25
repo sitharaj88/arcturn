@@ -55,6 +55,13 @@ import {
 import { createEngineSession, type EngineSession } from "./engine-session.js";
 import { describePermissionRequest } from "./permission-queue.js";
 import { escapeCodicons, modelPickItems } from "./picker.js";
+import {
+  type CheckpointRow,
+  confirmsRewind,
+  describeRewind,
+  type RewindView,
+  toRewindView,
+} from "./rewind.js";
 import { CostStatusBar } from "./status-bar.js";
 import { SidebarViewProvider } from "./view.js";
 import type { CommandOption } from "./webview-commands.js";
@@ -73,6 +80,17 @@ import {
 } from "./webview-messages.js";
 import type { ModelOption } from "./webview-models.js";
 import type { SessionOption } from "./webview-sessions.js";
+import {
+  EMPTY_WORKFLOW_VIEW,
+  isRunLive,
+  projectWorkflow,
+  projectWorkflowRun,
+  RUN_WORKFLOW,
+  runConfirmation,
+  type WorkflowOption,
+  type WorkflowRunRow,
+  type WorkflowView,
+} from "./workflows.js";
 
 /**
  * Builder A's resolved CLI.
@@ -236,6 +254,21 @@ export function activateSidebar(
           return;
         case "discardChanges":
           void discardChanges();
+          return;
+        case "requestCheckpoints":
+          void publishRewind();
+          return;
+        case "requestWorkflows":
+          void publishWorkflows();
+          return;
+        case "runWorkflow":
+          void startWorkflow(message.name, message.input);
+          return;
+        case "resumeWorkflow":
+          void resumeWorkflow(message.runId, message.answer);
+          return;
+        case "rewindTo":
+          void rewindTo(message.checkpointId, message.confirmation);
           return;
         case "abort":
           void withEngine((session) => session.controller?.abort());
@@ -849,6 +882,259 @@ export function activateSidebar(
     pendingContent.clear();
   }
 
+  /* ---- workflows ------------------------------------------------------ */
+
+  /**
+   * The workflow catalog, as the engine last reported it.
+   *
+   * Cleared on a new connection for the reason the command list is: a new
+   * engine is a different build with a different workspace, and a catalog
+   * carried across would offer to run a pipeline this engine has never heard
+   * of. `catalogUnavailable` is the third state — an engine with no
+   * `listWorkflows` at all — kept apart from an empty catalog because "this
+   * workspace defines no pipelines" and "this engine cannot tell me" are not
+   * the same news.
+   */
+  let workflowCatalog: WorkflowOption[] | undefined;
+  let workflowsUnavailable = false;
+  /**
+   * The run this panel is following, and the ceiling the engine said is in
+   * force for it.
+   *
+   * The ceiling is remembered from the run *handle* rather than re-derived
+   * from the catalog, and that is the whole point of the handle echoing it: a
+   * run started with a lowered budget is bounded by the lowered one, and a
+   * card that showed the file's number would be showing a ceiling nobody is
+   * enforcing.
+   */
+  let workflowRun: { runId: string; budgetUsd?: number } | undefined;
+  let workflowRunRow: WorkflowRunRow | undefined;
+  let workflowRefreshQueued = false;
+
+  /** Post the workflow surface as it stands, fetching the catalog if needed. */
+  async function publishWorkflows(note?: string): Promise<void> {
+    const view: WorkflowView = {
+      ...EMPTY_WORKFLOW_VIEW,
+      status: workflowsUnavailable ? "unavailable" : workflowCatalog ? "ready" : "loading",
+      workflows: workflowCatalog ?? [],
+      ...(workflowRunRow === undefined ? {} : { run: workflowRunRow }),
+      ...(note === undefined ? {} : { note }),
+    };
+    provider.postWorkflows(view);
+    if (view.status !== "loading") return;
+    if (engine === undefined || engine.status !== "ready") return;
+    await fetchWorkflows();
+  }
+
+  async function fetchWorkflows(): Promise<void> {
+    try {
+      // `undefined` is an engine with no such verb — or no controller at all,
+      // which is the same outcome for this surface and the same conflation
+      // `fetchDryRun` makes: either way the panel does not know what this
+      // engine can run, so it offers no catalog rather than an empty one.
+      const catalog = await ensureEngine().controller?.listWorkflows();
+      if (catalog === undefined) {
+        workflowsUnavailable = true;
+        workflowCatalog = undefined;
+      } else {
+        workflowsUnavailable = false;
+        workflowCatalog = catalog.workflows.map(projectWorkflow);
+      }
+    } catch (error) {
+      log(
+        `sidebar: workflows unavailable: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      workflowsUnavailable = true;
+      workflowCatalog = undefined;
+    }
+    await publishWorkflows();
+  }
+
+  /**
+   * Forget the run this panel was following, keeping the catalog.
+   *
+   * A session switch, in either direction. The catalog is the *engine's* and is
+   * still true; the run is the *session's*, and a card carried across would be
+   * showing a pipeline whose notices this panel no longer receives, with an
+   * Answer button pointed at a session the user has left. The run itself is
+   * unaffected — it keeps going, and `workflowStatus` still finds it, which is
+   * the whole reason that verb is not session-scoped.
+   */
+  function forgetWorkflowRun(): void {
+    workflowRun = undefined;
+    workflowRunRow = undefined;
+  }
+
+  /** Forget the whole workflow surface. A new engine. */
+  function clearWorkflows(): void {
+    workflowCatalog = undefined;
+    workflowsUnavailable = false;
+    forgetWorkflowRun();
+  }
+
+  /**
+   * Start a pipeline, after a native modal that says what it will do.
+   *
+   * The confirmation is here rather than in the page because a webview button
+   * that says "are you sure" is a button, not a confirmation — `dialog.ts`'s
+   * rule for `deleteSession` and `dry-run.ts`'s for `discardChanges`, applied
+   * to the one control on this surface that spends money *and* can rewrite a
+   * checkout. What the modal names is the spend ceiling and every role that can
+   * act, because neither is inferable from a pipeline's name.
+   *
+   * No budget is sent. The engine accepts one only to *lower* the file's own
+   * ceiling, and a number typed into a webview is not a decision a person made
+   * about money; the file's ceiling is what the modal quotes and what the
+   * engine enforces.
+   */
+  async function startWorkflow(name: string, input?: string): Promise<void> {
+    if (workflowCatalog === undefined) await fetchWorkflows();
+    const workflow = workflowCatalog?.find((candidate) => candidate.name === name);
+    if (workflow === undefined) {
+      await publishWorkflows(`No workflow named "${escapeCodicons(name)}" on this engine.`);
+      return;
+    }
+    const { message, detail } = runConfirmation(workflow);
+    const choice = await vscode.window.showWarningMessage(
+      message,
+      { modal: true, detail },
+      RUN_WORKFLOW,
+    );
+    if (choice !== RUN_WORKFLOW) return;
+
+    try {
+      const controller = ensureEngine().controller;
+      if (controller === undefined) {
+        await publishWorkflows("Not connected to an engine.");
+        return;
+      }
+      const handle = await controller.runWorkflow(workflow.name, input);
+      workflowRun = {
+        runId: handle.runId,
+        ...(handle.budgetUsd === undefined ? {} : { budgetUsd: handle.budgetUsd }),
+      };
+      // A run that has only just been accepted has journalled a header and
+      // nothing else, so the card is seeded from the handle and then corrected
+      // by the journal on the first refresh. Seeding from the *handle* rather
+      // than from the catalog is what makes the ceiling right for a run whose
+      // budget was lowered.
+      workflowRunRow = {
+        runId: handle.runId,
+        workflow: workflow.label,
+        state: "running",
+        stageCount: handle.stages,
+        stepsDone: 0,
+        stepsTotal: handle.steps,
+        questions: [],
+        ...(handle.budgetUsd === undefined ? {} : { budgetUsd: handle.budgetUsd }),
+      };
+      await publishWorkflows();
+      await refreshWorkflowRun();
+    } catch (error) {
+      await publishWorkflows(workflowRefusal(error, "run"));
+    }
+  }
+
+  /**
+   * Re-enter a paused run with the person's answer.
+   *
+   * Forwarded verbatim — this panel never summarises a question and never
+   * answers one. A resume with no answer asks the engine to re-surface the
+   * question, which is what the terminal's bare `/workflow resume` does; the
+   * engine refuses that as "needs an answer, not a nudge" and the sentence
+   * lands on the card.
+   */
+  async function resumeWorkflow(runId: string, answer?: string): Promise<void> {
+    try {
+      const controller = ensureEngine().controller;
+      if (controller === undefined) {
+        await publishWorkflows("Not connected to an engine.");
+        return;
+      }
+      const handle = await controller.resumeWorkflow(runId, answer);
+      workflowRun = {
+        runId: handle.runId,
+        ...(handle.budgetUsd === undefined ? {} : { budgetUsd: handle.budgetUsd }),
+      };
+      await refreshWorkflowRun();
+    } catch (error) {
+      await publishWorkflows(workflowRefusal(error, "resume"));
+    }
+  }
+
+  /**
+   * Re-read the run journal and repaint.
+   *
+   * **The journal, not the narration.** A run publishes its progress as
+   * `notice` events on the session stream — which is what the transcript
+   * renders, and what tells this panel that something moved — but the numbers
+   * on the card come from `workflowStatus`, which folds the same append-only
+   * record `/workflow status` prints. A card that counted the notices would
+   * drift the first time a resumed run replayed a finished step instead of
+   * executing it.
+   */
+  async function refreshWorkflowRun(): Promise<void> {
+    const following = workflowRun;
+    if (following === undefined) return;
+    try {
+      const answer = await ensureEngine().controller?.workflowStatus(following.runId);
+      const row = answer?.runs[0];
+      // Zero rows is a run this engine has no journal for — it was pruned, or
+      // the engine was replaced. The card stops following rather than showing
+      // a run nobody can resume.
+      if (row === undefined) {
+        if (answer !== undefined) {
+          workflowRun = undefined;
+          workflowRunRow = undefined;
+        }
+      } else {
+        workflowRunRow = projectWorkflowRun(row, following.budgetUsd);
+        // A settled run stops being followed, so a later notice from an
+        // ordinary turn does not keep polling a journal that will not change.
+        if (!isRunLive(row.state) && row.questions.length === 0) workflowRun = undefined;
+      }
+    } catch (error) {
+      log(
+        `sidebar: workflow status unavailable: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    await publishWorkflows();
+  }
+
+  /**
+   * A notice arrived; the journal has probably moved.
+   *
+   * Coalesced to one refresh in flight plus at most one queued, so a stage that
+   * publishes six notices in a burst costs two round trips rather than six.
+   * This is the whole of "how a client follows a run": the session's own event
+   * stream says *when*, and the run journal says *what* — no second channel,
+   * and no timer that keeps polling a panel nobody is looking at.
+   */
+  function onWorkflowTick(): void {
+    if (workflowRun === undefined || workflowRefreshQueued) return;
+    workflowRefreshQueued = true;
+    void Promise.resolve().then(async () => {
+      workflowRefreshQueued = false;
+      await refreshWorkflowRun();
+    });
+  }
+
+  /** The failure the card prints, in words a user can act on. */
+  function workflowRefusal(error: unknown, verb: string): string {
+    if (isUnsupportedMethodError(error)) {
+      return `This engine is too old to ${verb} workflows — upgrade the Arcturn CLI.`;
+    }
+    const reason = error instanceof Error ? error.message : String(error);
+    if (/sessionBusy/i.test(reason) || /running a (turn|workflow)/i.test(reason)) {
+      return `This session is busy. Stop what it is doing, or wait, and ${verb} then.`;
+    }
+    // The engine's own sentence, quoted rather than paraphrased: a budget
+    // refusal already names both figures and a missing workflow already names
+    // the ones this engine has, and rewriting either would lose the number the
+    // user needs.
+    return `The engine refused: ${escapeCodicons(reason)}`;
+  }
+
   /** The rows the card is currently showing, or `[]` when it is showing none. */
   function pendingRows(): PendingChangeRow[] {
     return dryRun?.status === "ready" ? dryRun.changes : [];
@@ -1032,6 +1318,175 @@ export function activateSidebar(
         await publishDryRun(note);
       }
     });
+  }
+
+  /* ---- rewind --------------------------------------------------------- */
+
+  /**
+   * The turns this session could be rewound to, cached for this session.
+   *
+   * The same shape the review card has, and cleared on the same two events: a
+   * new connection may be a different engine, and a new session has its own
+   * checkpoints. A picker carried across either would be offering to restore
+   * files from a conversation nobody is in.
+   */
+  let rewind: RewindView | undefined;
+  let rewindInFlight: Promise<void> | undefined;
+
+  /** Post the picker as it stands, fetching it first when it is not known. */
+  async function publishRewind(note?: string): Promise<void> {
+    const view = rewind ?? { status: "loading" as const, checkpoints: [], truncated: false };
+    provider.postRewind({ ...view, ...(note === undefined ? {} : { note }) });
+    if (view.status !== "loading") return;
+    if (engine === undefined || engine.status !== "ready") return;
+    rewindInFlight ??= fetchRewind().finally(() => {
+      rewindInFlight = undefined;
+    });
+    await rewindInFlight;
+  }
+
+  async function fetchRewind(): Promise<void> {
+    try {
+      // `undefined` is an engine with no such verb — or no controller at all,
+      // the same conflation `fetchDryRun` makes and for the same reason:
+      // either way this panel cannot rewind, so it offers no affordance.
+      // `available: false` is the third case, an engine that has the verb and
+      // keeps no checkpoints. `toRewindView` is the one place all three are
+      // told apart.
+      rewind = toRewindView(await ensureEngine().controller?.listCheckpoints());
+    } catch (error) {
+      log(
+        `sidebar: checkpoints unavailable: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      rewind = { status: "unavailable", checkpoints: [], truncated: false };
+    }
+    await publishRewind();
+  }
+
+  /** Re-read the checkpoints and repaint, in one paint. See {@link refreshDryRun}. */
+  async function refreshRewind(): Promise<void> {
+    if (engine === undefined || engine.status !== "ready") {
+      rewind = undefined;
+      await publishRewind();
+      return;
+    }
+    rewind = undefined;
+    await fetchRewind();
+  }
+
+  /** The rows the picker is currently showing. */
+  function checkpointRows(): CheckpointRow[] {
+    return rewind?.status === "ready" ? rewind.checkpoints : [];
+  }
+
+  /**
+   * Restore files to a checkpoint and fork the conversation, after asking.
+   *
+   * Three things are deliberate, and all three are the discipline
+   * `deleteSession` and `discardChanges` already keep, applied to the control
+   * that has more to lose than either.
+   *
+   * **The list is re-read first**, so the modal names what rewinding would do
+   * *now* rather than what the picker was showing when the user last looked.
+   * That also means the `confirmation` sent is the current one — and if the
+   * cost has moved, the engine refuses rather than rewinding to something
+   * nobody saw.
+   *
+   * **The confirmation is a native modal naming the files.** Not a webview
+   * button and not a toast: this overwrites files and deletes files, and a
+   * stray click in a list must not be able to do that.
+   *
+   * **The restore is the engine's `rewindTo` verb.** This extension never
+   * writes a workspace file and never unlinks one (RFC 0004 §0), which is also
+   * the only version that inherits the engine's workspace confinement and its
+   * mid-run refusal.
+   *
+   * Afterwards the panel **re-opens the session**, which re-fetches
+   * `sessionHistory` and rebuilds the transcript from it. There is no second
+   * transcript path and this does not invent one: the replay is what the panel
+   * already does for every session switch, pointed at the branch the engine is
+   * now on.
+   */
+  async function rewindTo(checkpointId: string, confirmation: string): Promise<void> {
+    await withEngine(async (session) => {
+      const controller = session.controller;
+      if (controller === undefined) return;
+      await refreshRewind();
+      const row = checkpointRows().find((candidate) => candidate.id === checkpointId);
+      if (row === undefined) {
+        await publishRewind("That turn is no longer listed. The list below is the current one.");
+        return;
+      }
+      if (row.confirmation !== confirmation) {
+        // The page clicked a row costing one thing and the engine now says it
+        // costs another — a turn ran in between. The engine would refuse this
+        // too, and that refusal is the guarantee; catching it here just means
+        // the user is not shown a modal describing a set they never chose from.
+        await publishRewind(
+          "That turn changed while the list was open — a run has happened since. The costs below are the current ones.",
+        );
+        return;
+      }
+      const prompt = describeRewind(row);
+      const choice = await vscode.window.showWarningMessage(
+        prompt.message,
+        { modal: true, detail: prompt.detail },
+        prompt.confirmLabel,
+      );
+      if (!confirmsRewind(choice, prompt)) return;
+
+      let result: Awaited<ReturnType<typeof controller.rewindTo>>;
+      try {
+        // The row's own confirmation — identical to the page's by the check
+        // above, and this is the copy that came from the engine on this
+        // refresh, so nothing the page holds becomes an argument.
+        result = await controller.rewindTo(row.id, row.confirmation);
+      } catch (error) {
+        const note = rewindRefusal(error);
+        log(`sidebar: could not rewind to ${checkpointId}: ${note}`);
+        await publishRewind(note);
+        return;
+      }
+
+      for (const failure of result.failed) {
+        log(`sidebar: could not restore ${failure.path}: ${failure.message}`);
+      }
+      if (result.failed.length > 0) {
+        void vscode.window.showWarningMessage(
+          `Arcturn restored ${String(result.restored.length)} file(s) and deleted ${String(result.deleted.length)}; ${String(result.failed.length)} could not be touched. ${escapeCodicons(result.failed[0]?.message ?? "")}`,
+        );
+      }
+      if (!result.conversationForked) {
+        // The engine restored the files and said the transcript could not
+        // move. Saying so is the whole point: the conversation on screen now
+        // describes work that is no longer on disk.
+        void vscode.window.showInformationMessage(
+          "Arcturn restored the files, but could not fork the conversation to match — the transcript above still describes work that is no longer on disk.",
+        );
+      }
+      // The fork reaches the panel through `sessionHistory`, which is what
+      // re-opening the session does — no second transcript path.
+      await openSession(controller.sessionId);
+      await refreshRewind();
+    });
+  }
+
+  /**
+   * The failure the picker prints, in words a user can act on.
+   *
+   * The three the engine raises by design are all actionable, and the stale
+   * confirmation is quoted rather than paraphrased because the engine's own
+   * sentence already says what to do about it.
+   */
+  function rewindRefusal(error: unknown): string {
+    if (isUnsupportedMethodError(error)) {
+      return "This Arcturn engine is too old to rewind — upgrade the Arcturn CLI.";
+    }
+    const reason = error instanceof Error ? error.message : String(error);
+    if (/sessionBusy/i.test(reason) || /running a turn/i.test(reason)) {
+      return "A run is in flight. Stop it, or wait for it to finish, and rewind then.";
+    }
+    return `The engine refused: ${escapeCodicons(reason)}`;
   }
 
   /**
@@ -1236,6 +1691,15 @@ export function activateSidebar(
       // this panel's account of it and a stale one across a switch is a card
       // describing a review the user is no longer in.
       await refreshDryRun();
+      // Checkpoints ARE the session's, so a stale picker across a switch would
+      // offer to restore another conversation's files.
+      await refreshRewind();
+      // A run belongs to the session whose stream carries it. The catalog is
+      // the engine's and survives, but the card must not: it would be showing
+      // a pipeline whose notices this panel is no longer subscribed to, with an
+      // Answer button that resumes it into a session the user has left.
+      forgetWorkflowRun();
+      await publishWorkflows();
       await publishSessions();
     });
   }
@@ -1317,6 +1781,11 @@ export function activateSidebar(
     publishSession();
     await publishPermission();
     await refreshDryRun();
+    await refreshRewind();
+    // Same argument as `openSession`'s: the run belonged to the session that is
+    // no longer on screen.
+    forgetWorkflowRun();
+    await publishWorkflows();
     await publishSessions();
     await provider.reveal();
   }
@@ -1382,6 +1851,7 @@ export function activateSidebar(
           if (wasRunning && !state.running) void refreshDryRun();
           wasRunning = state.running;
         },
+        onNotice: onWorkflowTick,
         onCost: (cost) => {
           statusBar.update(cost);
           provider.postCost(costLabel(cost));
@@ -1408,6 +1878,14 @@ export function activateSidebar(
             // that survived the reconnect would be offering to apply changes
             // this engine is not holding.
             clearDryRun();
+            // Same argument, and a sharper one: a checkpoint list from the
+            // last engine names turns this one never recorded, and every row
+            // in it offers to delete files.
+            rewind = undefined;
+            // Same argument again: a workflow catalog from the last engine
+            // names pipelines this one may not have, and a run card carried
+            // across would offer to resume a journal this engine cannot read.
+            clearWorkflows();
             // A path resolved against the last workspace means nothing in this
             // one, and a chip carried across a reconnect is a chip the engine
             // never agreed to.

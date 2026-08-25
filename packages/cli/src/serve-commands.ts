@@ -104,10 +104,12 @@ export type ServedCommandExpansion =
  * object, so a name like `constructor` cannot match something off a prototype.
  *
  * Scoped to the built-ins **this wire** lists. The terminal has more of them,
- * and a skill named `rewind` is shadowed there while working here — but that is
+ * and a skill named `theme` is shadowed there while working here — but that is
  * a property of the reachable-subset rule `listCommands` is built on, not
- * something this function can fix without inventing a `/rewind` the wire cannot
- * run.
+ * something this function can fix without inventing a `/theme` the wire cannot
+ * run. (`rewind` used to be the example here; it stopped being one when
+ * `listCheckpoints`/`rewindTo` made the command reachable, which is the
+ * subset growing rather than the rule bending.)
  *
  * @param name - A normalized command name, without its slash.
  */

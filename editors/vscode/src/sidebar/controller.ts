@@ -24,6 +24,7 @@
 import type {
   AgentEvent,
   ApplyChangesResult,
+  CheckpointList,
   ContextResolution,
   DiscardChangesResult,
   PendingChanges,
@@ -32,8 +33,12 @@ import type {
   PermissionState,
   PromptAttachment,
   ProtocolClient,
+  RewindResult,
   SessionHeader,
   SessionHistory,
+  WorkflowCatalog,
+  WorkflowRunHandle,
+  WorkflowRuns,
 } from "../serve/engine.js";
 import {
   type ChatState,
@@ -64,6 +69,20 @@ export interface ControllerHost {
     request: PermissionRequest,
     args: Record<string, unknown> | undefined,
   ) => Promise<PermissionAnswer>;
+  /**
+   * A `notice` arrived on this session's stream.
+   *
+   * The one hook the workflow surface needs, and deliberately the *only* one:
+   * a run narrates onto this stream (there is no second event channel), so a
+   * notice is the signal that the run journal has probably moved. The embedder
+   * decides what to do with that — the panel re-reads `workflowStatus`, which
+   * is the record, rather than trying to parse progress out of the prose.
+   *
+   * Fired for every notice, not only a workflow's: this controller has no way
+   * to tell them apart and should not pretend to, and the embedder already
+   * knows whether it is following a run.
+   */
+  onNotice?: () => void;
   /** Redacted diagnostics. */
   onDiagnostic?: (line: string) => void;
 }
@@ -179,6 +198,72 @@ export interface SessionController {
    * while they wait for the next apply.
    */
   discardChanges(paths?: readonly string[]): Promise<DiscardChangesResult>;
+  /**
+   * Ask which earlier turns this session could be rewound to, and what each
+   * would cost.
+   *
+   * Read-only. `undefined` means this engine predates the verb — the caller
+   * offers no rewind at all, which is honest: that engine could not have
+   * rewound anything either. An engine that *has* the verb but keeps no
+   * checkpoints answers `available: false`, which is a different story again
+   * and must not be rendered as "no turns to go back to".
+   */
+  listCheckpoints(): Promise<CheckpointList | undefined>;
+  /**
+   * Restore files to a checkpoint and fork the conversation. **Irreversible**
+   * — it writes files and it deletes files. Confirm first.
+   *
+   * Not degradable, on the `applyChanges` precedent and for a sharper reason:
+   * an apply reported as done that did not happen tells a reviewer their
+   * change landed, and a rewind reported as done that did not happen tells a
+   * user their files went back to a state they never returned to.
+   *
+   * @param checkpointId - The row's `id`.
+   * @param confirmation - That same row's `confirmation`, so the engine can
+   *   refuse a rewind whose cost has changed since the picker was rendered.
+   */
+  rewindTo(checkpointId: string, confirmation: string): Promise<RewindResult>;
+  /**
+   * The workflow catalog: every markdown pipeline this engine discovered, its
+   * ceilings, and the lane the engine **derived** for each role it dispatches
+   * to.
+   *
+   * Read-only. `undefined` means this engine predates the verb — the caller
+   * offers no workflow surface at all, which is honest: that engine could not
+   * have run one over the wire either.
+   */
+  listWorkflows(): Promise<WorkflowCatalog | undefined>;
+  /**
+   * Start a workflow run on this session. **Spends real money, and a
+   * write-lane role's patch lands in the user's checkout when its step
+   * succeeds.** Confirm first.
+   *
+   * Resolves when the run is *accepted*, not when it finishes — a pipeline
+   * outlives every request deadline, so the outcome arrives on this session's
+   * event stream and in the run journal `workflowStatus` reads.
+   *
+   * Not degradable, on the `rewindTo` precedent and for its own reason: a
+   * caller told "started" by an engine that did nothing would report a verdict
+   * nobody produced.
+   */
+  runWorkflow(name: string, input?: string): Promise<WorkflowRunHandle>;
+  /**
+   * What a run reached, from the durable run journal.
+   *
+   * Read-only, and not session-scoped on the wire: a run started in a terminal
+   * is as legible here as one started from this panel. `undefined` means the
+   * engine predates the verb; a run id it has no journal for answers zero rows.
+   */
+  workflowStatus(runId?: string): Promise<WorkflowRuns | undefined>;
+  /**
+   * Re-enter an interrupted run, carrying the human's answer to its
+   * `ORG-ASK:`.
+   *
+   * The answer is forwarded verbatim. Not degradable, on `runWorkflow`'s terms
+   * plus one of its own: an answer that silently went nowhere leaves a run
+   * paused forever while the person who answered believes it is moving.
+   */
+  resumeWorkflow(runId: string, answer?: string): Promise<WorkflowRunHandle>;
   /** Expand or collapse one transcript block. */
   toggle(blockId: string): void;
   /** Unsubscribe, and deny any permission request still outstanding. */
@@ -252,6 +337,7 @@ export function createSessionController(options: SessionControllerOptions): Sess
       }
     }
     if (event.type === "permissionRequest") permissions.enqueue(event.request);
+    if (event.type === "notice") host.onNotice?.();
 
     const nextCost = reduceCost(cost, event);
     if (nextCost !== cost) {
@@ -317,6 +403,15 @@ export function createSessionController(options: SessionControllerOptions): Sess
     pendingChanges: (path?: string) => client.pendingChanges(sessionId, path),
     applyChanges: (paths?: readonly string[]) => client.applyChanges(sessionId, paths),
     discardChanges: (paths?: readonly string[]) => client.discardChanges(sessionId, paths),
+    listCheckpoints: () => client.listCheckpoints(sessionId),
+    rewindTo: (checkpointId: string, confirmation: string) =>
+      client.rewindTo(sessionId, checkpointId, confirmation),
+    listWorkflows: () => client.listWorkflows(),
+    runWorkflow: (name: string, input?: string) =>
+      client.runWorkflow(sessionId, name, input === undefined ? {} : { input }),
+    workflowStatus: (runId?: string) => client.workflowStatus(runId),
+    resumeWorkflow: (runId: string, answer?: string) =>
+      client.resumeWorkflow(sessionId, runId, answer),
     toggle(blockId: string): void {
       notify(toggleBlock(state, blockId));
     },

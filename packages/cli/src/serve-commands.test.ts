@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { REMOTE_REACHABLE_BUILT_IN_COMMANDS } from "@arcturn/server";
 import { describe, expect, it } from "vitest";
-import { createBuiltInCommands } from "./commands.js";
+import { createCommandRegistry } from "./commands.js";
 import { expandServedCommand, serveCommandDescriptors } from "./serve-commands.js";
 import { loadSkills, type Skill } from "./skills.js";
 
@@ -18,16 +18,40 @@ async function library(files: Record<string, string>): Promise<readonly Skill[]>
 }
 
 describe("the reachable built-ins are commands the terminal actually has", () => {
-  it("names no command createBuiltInCommands() does not define", () => {
+  it("names no command the terminal's own registry does not define", () => {
     // The third leg of the "two exports, one fact" discipline
     // (`permissions-wire.test.ts` holds the other two). `@arcturn/server`
     // decides *which* built-ins this wire can carry out; it does not get to
     // invent one. A `/delete` listed for `deleteSession` would be a command
     // that exists in the panel and nowhere else, which is exactly the
     // divergence RFC 0004 §0 forbids, pointed the other way.
-    const terminal = new Set(createBuiltInCommands().map((command) => command.name));
+    //
+    // Checked against `createCommandRegistry()` rather than
+    // `createBuiltInCommands()`, and the difference is the whole point of the
+    // rule. The truth condition is "the terminal really has this command", not
+    // "one particular factory defines it": `/workflow` comes from
+    // `createWorkflowCommands()` and `/bg` from `createBackgroundAgentCommands()`,
+    // both registered into the same registry a person types at. Narrowing the
+    // check to one factory would have failed a listing that is honest and
+    // passed one that is not.
+    const terminal = new Set(
+      createCommandRegistry()
+        .list()
+        .map((command) => command.name),
+    );
     for (const command of REMOTE_REACHABLE_BUILT_IN_COMMANDS) {
       expect(terminal).toContain(command.name);
+    }
+  });
+
+  it("still lists no command the registry knows nothing about, in either direction", () => {
+    // The reverse reading of the same fact, spelled out so the check above
+    // cannot be satisfied by a registry that grew a command *because* the wire
+    // listed one: every reachable name is a real, dispatchable terminal command
+    // with a `run`.
+    const registry = createCommandRegistry();
+    for (const command of REMOTE_REACHABLE_BUILT_IN_COMMANDS) {
+      expect(typeof registry.get(command.name)?.run).toBe("function");
     }
   });
 });

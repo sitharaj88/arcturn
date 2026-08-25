@@ -124,6 +124,19 @@ Every message is one of two shapes:
 { "id": "19", "method": "pendingChanges", "params": { "sessionId": "sess_abc" } }
 { "id": "20", "method": "applyChanges", "params": { "sessionId": "sess_abc", "paths": ["src/app.ts"] } }
 { "id": "21", "method": "discardChanges", "params": { "sessionId": "sess_abc" } }
+{ "id": "22", "method": "listCheckpoints", "params": { "sessionId": "sess_abc" } }
+{ "id": "23", "method": "rewindTo", "params": { "sessionId": "sess_abc", "checkpointId": "turn_7", "confirmation": "3f9c…" } }
+{ "id": "24", "method": "backgroundAgents" }
+{ "id": "25", "method": "startBackgroundAgent", "params": { "task": "fix the flaky retry test" } }
+{ "id": "26", "method": "cancelBackgroundAgent", "params": { "id": "bg-a1b2c3d4" } }
+{ "id": "27", "method": "adoptBackgroundAgent", "params": { "sessionId": "sess_abc", "id": "bg-a1b2c3d4" } }
+{ "id": "28", "method": "orgMemory" }
+{ "id": "29", "method": "proposeOrgMemory", "params": { "role": "developer", "text": "this repo's vitest needs --run" } }
+{ "id": "30", "method": "revokeOrgMemory", "params": { "id": "m4c1e9" } }
+{ "id": "31", "method": "listWorkflows" }
+{ "id": "32", "method": "runWorkflow", "params": { "sessionId": "sess_abc", "name": "ship-fix", "input": "the retry test flakes" } }
+{ "id": "33", "method": "workflowStatus", "params": { "runId": "20260825-a1b2c3" } }
+{ "id": "34", "method": "resumeWorkflow", "params": { "sessionId": "sess_abc", "runId": "20260825-a1b2c3", "answer": "per-tenant" } }
 ```
 
 ```json
@@ -971,6 +984,609 @@ refuse with `invalidRequest` and say why — "This engine is not running under `
 nothing is being held back: file edits reached the workspace as they were made" — which is
 the same thing the terminal's `/apply` prints for a session with no overlay.
 
+## Rewinding to a checkpoint
+
+Before a `write` or `edit` touches a file for the first time in a turn, the engine snapshots
+that file's content — or its absence. `/rewind` restores those snapshots and forks the
+conversation back to the same point; see [Checkpoints & /rewind](/docs/checkpoints) for the
+storage and its sharpest edge (a file changed only through `bash` was never snapshotted and
+will not come back).
+
+That loop was reachable only from a terminal. `built-in-commands.ts` named `/rewind` as *the*
+example of a command RFC 0005 §1.3 forbids listing, because no verb carried it. Two verbs now
+do, and `/rewind` is listed.
+
+### What a picker is told, before it offers anything
+
+```json
+{ "id": "22", "method": "listCheckpoints", "params": { "sessionId": "sess_abc" } }
+```
+
+```json
+{
+  "sessionId": "sess_abc",
+  "available": true,
+  "truncated": false,
+  "droppedCheckpoints": 0,
+  "checkpoints": [
+    {
+      "id": "turn_7",
+      "label": "add rate limiting to the login route",
+      "timestamp": 1787678419635,
+      "fileCount": 3,
+      "deleteCount": 1,
+      "files": ["src/auth.ts", "src/limiter.ts", "test/limiter.test.ts"],
+      "truncatedFiles": false,
+      "forksConversation": true,
+      "confirmation": "3f9c1d0ab7e24c5f8a1b2c3d4e5f6071"
+    }
+  ]
+}
+```
+
+Read-only. Every row carries **the plan a rewind to it would apply**, not a summary of what
+happened during that turn: `fileCount` is the union of the earliest snapshot per path from
+that turn to the end of the manifest, which is a number a client cannot compute for itself.
+`deleteCount` is split out because "3 files changed" and "3 files deleted" are not the same
+sentence, and a modal that folded them would let somebody approve the second while reading
+the first. Paths are workspace-relative and `/`-separated, the spelling `PendingChange.path`
+already uses.
+
+`forksConversation: false` means the engine can restore the files but not move the transcript
+— a turn resumed from disk has snapshots but no in-memory record of the entry it began at.
+The terminal says so rather than guessing a fork point; this reports the same fact so a client
+can say it *before* the user commits.
+
+`available: false` means this engine keeps no checkpoints at all. Kept apart from an empty
+list on purpose, exactly as [`pendingChanges`' `dryRun` flag is](#reviewing-a-dry-run):
+"nothing has been checkpointed yet" and "nothing is ever checkpointed here" are opposite
+pieces of news.
+
+### Rewinding
+
+```json
+{ "id": "23", "method": "rewindTo", "params": { "sessionId": "sess_abc", "checkpointId": "turn_7", "confirmation": "3f9c1d0ab7e24c5f8a1b2c3d4e5f6071" } }
+```
+
+```json
+{
+  "sessionId": "sess_abc",
+  "checkpointId": "turn_7",
+  "restored": ["src/auth.ts", "src/limiter.ts"],
+  "deleted": ["test/limiter.test.ts"],
+  "failed": [],
+  "conversationForked": true
+}
+```
+
+**The most destructive verb on this wire**: it writes files and it deletes files, and the
+terminal's own confirmation says so out loud — "restores and deletes files; cannot be undone".
+
+The restorer is the engine's own checkpoint store, the same object the TUI's `/rewind` drives.
+There is no second restorer: `@arcturn/server` never touches a file on this path, and a
+restore is confined to the session's working directory — which `createSession` already
+confined to the served workspace. A manifest record outside it is **reported in `failed` and
+skipped**, never written, and it never appears in a row's `files` either, because that list is
+what *would* happen rather than what was recorded.
+
+### Why this one verb echoes a confirmation
+
+`deleteSession` and `discardChanges` deliberately carry no wire-level confirmation, and that
+argument still holds: the confirmation belongs in a native modal where a person can read what
+they are losing, not in a two-phase token the engine keeps state for.
+
+`rewindTo` takes one anyway, because it differs in exactly the way that matters: **its
+parameters do not name what it destroys.** A `deleteSession` names its session; a
+`discardChanges` selection names its files as the engine just listed them. A `rewindTo` names
+an opaque turn id, and the files it deletes come from a manifest that grows with every turn.
+A client that displayed "this deletes 2 files", let a run append three more, and then sent the
+id would rewind something nobody was shown.
+
+So `confirmation` is a **digest of the plan**, copied from the row the client rendered. The
+engine recomputes the plan and compares; a mismatch is `invalidRequest` naming the drift, and
+the answer is to re-list. No server state, no expiry, nothing to evict — which is why it can
+be required without becoming the handshake `deleteSession` refused.
+
+### Refused mid-run
+
+`sessionBusy`, on `deleteSession`'s wider check rather than `setPermissionMode`'s narrower
+one: a prompt that has been accepted but is still resolving its context has not started the
+agent yet, and a restore landing there would rewrite files the run is about to read *and* fork
+the conversation it is about to append to. The TUI already refuses this — "A run is in
+progress; press Esc to interrupt it before rewinding" — and this is the same refusal, phrased
+for a client that can act on it.
+
+Not widened to every live session the way `applyChanges` is, and the difference is real: one
+`--dry-run` shadow tree is shared by the whole process, whereas a checkpoint store belongs to
+one session and is rooted at that session's own working directory.
+
+### After a rewind
+
+The conversation is forked and the host swaps the session's agent in place. Every connection
+attached to the session — not just the one that asked — is sent a `notice` saying so, and the
+transcript is re-read with [`sessionHistory`](#replaying-a-session), which now replays the
+branch the live agent is on rather than the newest entry in the file. There is no second
+transcript path.
+
+Nothing already in the session file is deleted: a rewind is a branch, exactly as resuming an
+older entry is.
+
+## Background agents
+
+`/bg <task>` starts a whole child conversation off the foreground thread, with its own
+session, its own tool loop and a durable JSON record under
+`~/.arcturn/background-agents/records/`. None of that rides a session's event stream, so
+before these verbs a remote client attached to a busy engine could not tell that four
+agents were running, what they had cost, or what they had said.
+
+Four verbs, matching the terminal's four subverbs one for one:
+
+```json
+{ "id": "22", "method": "backgroundAgents" }
+{ "id": "23", "method": "backgroundAgents", "params": { "id": "bg-a1b2c3d4" } }
+{ "id": "24", "method": "startBackgroundAgent", "params": { "task": "fix the flaky retry test" } }
+{ "id": "25", "method": "cancelBackgroundAgent", "params": { "id": "bg-a1b2c3d4" } }
+{ "id": "26", "method": "adoptBackgroundAgent", "params": { "sessionId": "sess_abc", "id": "bg-a1b2c3d4" } }
+```
+
+None of them is session-scoped except `adoptBackgroundAgent`, which has to name the
+conversation it is delivering into. Background agents belong to the engine, so
+`backgroundAgents` is shaped like `mcpStatus` rather than like `permissionState`.
+
+### Metadata now, one transcript at a time
+
+`backgroundAgents` with no `id` answers with one row per agent, newest first, and **no
+transcripts**:
+
+```json
+{
+  "agents": [
+    {
+      "id": "bg-a1b2c3d4",
+      "sessionId": "sess_child",
+      "task": "fix the flaky retry test",
+      "modelId": "anthropic/claude-sonnet-4-5",
+      "status": "done",
+      "createdAt": 1787000000000,
+      "startedAt": 1787000000120,
+      "endedAt": 1787000042000,
+      "elapsedMs": 41880,
+      "costUsd": 0.18,
+      "finalText": "The retry helper reset its backoff on every call…"
+    }
+  ],
+  "truncated": false,
+  "droppedAgents": 0
+}
+```
+
+Both the rows and the strings in them are bounded, and both bounds are reported or stated
+rather than silent. `task`, `finalText` and `error` are **previews**, capped at 1000
+characters: `finalText` is model output and unbounded at the source, so a listing of a
+hundred agents that carried every answer in full would be the megabytes-long frame that
+wedges a socket exactly when somebody is trying to find out what their agents did. A client
+that wants the whole answer does not read it from there — the transcript carries the
+conversation, and `adoptBackgroundAgent` delivers the complete text into a session without
+it ever crossing that field. The listing itself keeps the newest 200 rows (a manager
+remembers every agent it ever started) and says `truncated` and `droppedAgents` when it
+drops the older ones, because a list that silently stops reads as the whole list.
+
+With an `id`, that one row also carries a `transcript`: the lines `/bg logs` prints, from
+the same renderer, bounded at 1 MiB and truncated **from the front** — the interesting end
+of an unattended run is the end. `truncated` and `droppedLines` say so rather than leaving
+it to be inferred.
+
+`status` is `running | done | failed | cancelled | interrupted`. There is no `queued`: an
+agent waiting behind the concurrency cap reports `running`, and the way to tell is that
+`startedAt` is absent. `interrupted` means the record was still `running` when a manager
+loaded it from disk — the process that owned it exited without finishing.
+
+An `id` that names nothing answers with an **empty list**, not an error. That is a
+contract requirement rather than a courtesy: this verb degrades like `listModels`, and a
+client cannot tell a server-sent `invalidRequest` for a typo from one for an unknown
+method, so refusing would make a mistyped id look like an engine too old to have the
+feature and hide the whole surface.
+
+### What a remotely-started agent is capped by
+
+`startBackgroundAgent` spends money, and its entire containment is that **it carries
+nothing but the task**. There is no `tools`, no `permissionMode`, no `cwd`, no `model` —
+not in the request type, not in the validator, and not in the interface the engine hands
+its manager. So a background agent started over this wire runs under exactly what a `/bg`
+typed at the terminal runs under:
+
+| Cap | Value | Set by |
+|---|---|---|
+| Permission mode | `default`, never `yolo` | the manager's default |
+| Tools | read-only plus `fetch`; `subagent` always removed | the manager's filter for a non-`yolo` mode |
+| Permission asks | denied — there is nobody to ask | no requester is attached to an unattended agent |
+| Working directory | the served workspace | the manager's default, refreshed from the runtime |
+| Model | the engine's current model | the manager's default, refreshed from the runtime |
+| Concurrency | 3 at a time, the rest queue FIFO | `DEFAULT_CONCURRENCY` |
+
+The practical shape of that: a background agent started over the wire **cannot write a
+file or run a shell command**, and cannot start further background agents or sub-agents.
+`packages/cli/src/delegation-wire.test.ts` asserts it on the filesystem — the agent is
+scripted to call `write`, and the file is not there afterwards.
+
+What is *not* capped is spend: `arcturn serve --max-cost` bounds each served session's own
+agent and does not reach a background agent, exactly as `/bg` at a terminal is not bounded
+by `--max-cost` either. That is parity, not safety; see the note at the end of this
+section.
+
+### Adopting a result
+
+`adoptBackgroundAgent` delivers a finished agent's answer into a live session. The engine
+composes the message — naming the agent, its task and its outcome, with the same function
+the terminal's `/bg adopt` uses — and chooses how to deliver it: `steer` when the session
+is mid-run, a fresh `prompt` when it is idle. The result says which happened, because the
+two are observably different and a client that rendered them the same would show a message
+appearing at a moment it cannot explain.
+
+**The text is delivered unexpanded.** No `@`-mention in it is resolved and no leading
+`/name` is expanded. That mirrors the terminal, and it is load-bearing rather than
+incidental: a background agent's final text is written by a model, so expanding mentions
+would let a child that wrote `@.env` in its answer make the parent read the file on the
+strength of somebody clicking "adopt". `prompt` expands the mentions a *person* typed.
+This is not that.
+
+Refused for an agent that is still running, for one that produced no output, and for a
+session that is not live.
+
+### One manager, one records directory
+
+The engine hands these verbs its **own** background-agent manager — the same instance a
+`/bg` in a terminal sharing the process would reach, with the same queue and the same
+concurrency cap. There is no second registry.
+
+That has a consequence worth knowing about. A manager corrects any record still `running`
+to `interrupted` when it loads the records directory, because a fresh manager is normally
+a fresh process and a live agent would have been reported by the manager that started it.
+`arcturn serve` is another process: an engine serving a workspace where a *separate*
+terminal is running `/bg` adopts the same directory at startup and will report that
+terminal's live agent as `interrupted` until the owning manager next persists it. The
+terminal's own view is never wrong, and the record repairs itself — but a panel can show a
+stale `interrupted` in the window between. Fixing it needs an owner lease in the record,
+which is a change to the manager rather than to this wire.
+
+## Org memory
+
+`/org memory` is a small, durable, per-role set of one-line lessons that are appended to
+that role's **system prompt** on later workflow runs. An `active` entry is therefore
+standing instruction text: text the model reads, every run, with no user action at all.
+Entries are `proposed` or `active`, and only `active` ones are ever rendered.
+
+Three verbs:
+
+```json
+{ "id": "27", "method": "orgMemory" }
+{ "id": "28", "method": "proposeOrgMemory", "params": { "role": "developer", "text": "this repo's vitest needs --run" } }
+{ "id": "29", "method": "revokeOrgMemory", "params": { "id": "m4c1e9" } }
+{ "id": "30", "method": "revokeOrgMemory", "params": { "id": "m4c1e9", "remove": true } }
+```
+
+`orgMemory` answers with every entry — proposed and active alike — sorted by role and then
+by id, plus the `warnings` the store's own bounds produced on read. Read the warnings: an
+empty `entries` from a store that was refused for exceeding its byte ceiling is a different
+fact from an empty store, and only the warnings tell them apart.
+
+`proposeOrgMemory` files an entry with `origin: "remote"`, so a person deciding whether to
+approve it can see that it arrived over a socket rather than being typed at the keyboard.
+The store's own bounds apply — one line, at most 160 characters, no `ORG-ASK:`/`ORG-HALT:`/
+`ARCTURN-PATCH:` marker, no fence delimiter — and over-long text is **refused, not
+truncated**, because clipping can invert a lesson. The refusal names the bound that was
+broken, and is passed through to the client rather than flattened into "invalid request".
+
+`revokeOrgMemory` demotes an `active` entry back to `proposed`, or with `remove: true`
+deletes it outright (irreversible; confirm with the user first, the way a discard is
+confirmed). Both answer with the store as it now stands.
+
+### There is no verb that approves one, and there will not be
+
+The gate on `proposed → active` is a person at the machine typing `/org memory approve`.
+This wire has no counterpart, and neither does `/org memory add`, which files an
+already-active entry because a person typed it.
+
+The reason is not that the caller is untrustworthy. A caller holding the serve token
+already has full tool execution as this user (see [Threat model](#threat-model)) and could
+do considerably worse than write a JSON file. The reason is **who is asserting**. The gate
+exists because an entry becoming standing instruction text is, in the CLI reference's
+words, "not something a model should be able to grant itself" — and an engine cannot tell a
+frame a person clicked from a frame an agent sent. `/org memory add` is live precisely
+*because* a person typed it at their own keyboard, and that fact does not survive a socket.
+
+This is the same answer [`permissionDecision`'s `scope`](#permissiondecision-grows-a-scope)
+already gives: a decision made over the wire may not outlive its session, because a rule
+that does is written by a person in their own config file. An org-memory entry outlives the
+session in exactly that sense — it is the next run's instructions.
+
+Proposing, revoking and deleting are allowed because of their **direction**: each can only
+reduce or leave unchanged what a later run is told. Approving is the only one that adds.
+
+What a client should build on this is the queue: show what is waiting, show its `origin`,
+and show the one command that approves it. A person then reads the sentence before it
+becomes an instruction, which is what the gate was for.
+
+The proof that the gate holds is not a status field. `packages/cli/src/delegation-wire.test.ts`
+proposes an entry over a real socket and then asks `loadOrgMemoryInjector` — the function
+`workflow.ts` calls to build a role's system prompt — what that role would be told. It is
+told nothing. Only after a local approve does the lesson appear.
+
+## Workflows
+
+[Workflows](/docs/workflows) are the feature this wire was quietest about for the longest.
+A markdown file's numbered list is real control flow: each stage runs in order, an `@role`
+dispatches to a named agent with its own tools and its own **lane**, `budgetUsd` caps what
+the whole run may spend, `stepTimeoutMs` caps a step, and an `ORG-ASK:` line stops the
+pipeline and waits for a person. A remote client attached to an engine full of pipelines
+could not see that any of them existed.
+
+Four verbs close that, and they split the way every other group on this wire splits —
+`listWorkflows` and `workflowStatus` read, `runWorkflow` and `resumeWorkflow` start work
+that spends money.
+
+### The catalog, and the lane it derives
+
+```json
+{ "id": "31", "method": "listWorkflows" }
+```
+
+```json
+{
+  "kind": "response",
+  "id": "31",
+  "result": {
+    "workflows": [
+      {
+        "name": "ship-fix",
+        "description": "Reproduce, patch and review one bug report",
+        "source": "/repo/.arcturn/workflows/ship-fix.md",
+        "stages": 3,
+        "steps": 4,
+        "budgetUsd": 15,
+        "stepTimeoutMs": 1800000,
+        "roles": [
+          { "name": "auditor", "lane": "read" },
+          { "name": "runner", "lane": "exec" },
+          { "name": "developer", "lane": "write" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+`lane` is the whole payload's reason for existing, and it is the value **the engine
+derives** — `roleDispatch` over the role file's declared `tools:`, the same function the
+dispatcher itself calls — not what the role's prose claims about itself. A reviewer whose
+description says "read-only" and whose `tools:` line says `read, edit` is reported
+`write`, because `write` is what will happen.
+
+Two of the five values are not lanes at all; they are the two honest shapes of *nobody can
+say*:
+
+| `lane` | What it means |
+| --- | --- |
+| `read` | No write tool and no shell. Cannot execute, cannot touch a file. |
+| `exec` | Declares `bash` and no write tool. Runs in a throwaway worktree; its diff is never captured. |
+| `write` | Declares `write`, `edit` or `multiedit`. Its patch is applied to your checkout when its step succeeds. |
+| `unknown` | The step names a role this engine has not loaded. The run fails pre-flight. |
+| `undeclared` | The role loaded but declares no `tools:`. Dispatch refuses it. |
+
+Reporting either of the last two as `read` would be the one wrong answer: it would tell a
+person a pipeline is harmless when the truth is that it cannot run at all.
+
+Not session-scoped — a workflow is a file the served workspace holds, so this is shaped
+like `listModels`.
+
+### Running one
+
+```json
+{ "id": "32", "method": "runWorkflow",
+  "params": { "sessionId": "sess_abc", "name": "ship-fix", "input": "the retry test flakes" } }
+```
+
+```json
+{
+  "kind": "response",
+  "id": "32",
+  "result": {
+    "runId": "20260825-a1b2c3",
+    "workflow": "ship-fix",
+    "sessionId": "sess_abc",
+    "stages": 3,
+    "steps": 4,
+    "budgetUsd": 15,
+    "stepTimeoutMs": 1800000,
+    "resumed": false
+  }
+}
+```
+
+**This spends real money, and a write-lane role's patch lands in your checkout the moment
+its step succeeds.** It is the most consequential verb on this wire.
+
+It answers on **acceptance**, not on completion. `prompt` resolves when the run ends, and
+that is right for one turn; a pipeline is minutes to hours, past every sane request
+deadline (`ProtocolClient`'s own default is 30 seconds), so a `runWorkflow` that answered
+at the end would hand a client a timeout for a run that is spending money perfectly
+happily. The response is therefore the accepted run — its id, its shape, and the ceilings
+in force — and the run itself is followed on the session's event stream.
+
+### `budgetUsd` may only ever lower the ceiling
+
+The workflow file's own `budgetUsd:` is the authority. A caller may pass a **smaller**
+number to bound this one run harder:
+
+```json
+{ "id": "32", "method": "runWorkflow",
+  "params": { "sessionId": "sess_abc", "name": "ship-fix", "budgetUsd": 5 } }
+```
+
+A larger one is refused — `invalidRequest`, naming both figures — rather than silently
+clamped:
+
+```text
+Workflow "ship-fix" sets budgetUsd: 15.00 in its own frontmatter, and a run started over
+the wire may only lower that ceiling — $500.00 would raise it. Ask for $15.00 or less, or
+edit /repo/.arcturn/workflows/ship-fix.md.
+```
+
+Refusing rather than clamping is deliberate. `listWorkflows` already published the file's
+ceiling, so the refusal is actionable; and a client told "fine" that got a different
+ceiling would render a number the engine is not enforcing. `0` and negatives are refused
+at the wire boundary for the opposite reason: `0` means "disabled" to the cost guard, so a
+"ceiling" of zero would widen an otherwise-bounded run.
+
+Nothing else here can be raised either, and none of it has a parameter. The file's
+`stepTimeoutMs`, each role's `maxTurns`, each role's declared `tools:` and the engine's
+permission rules all bind exactly as they do for the person at the terminal.
+
+### Following a run: no second channel
+
+A run narrates onto **the session's own event stream** — the one the client already
+subscribed to with `openSession`:
+
+- Each progress event becomes the same `notice` the terminal prints, from the same
+  function (`reportWorkflowEvent`). Stage starts, step starts with their lane, an applied
+  patch, a step that paused for a human, the run's own report and its final text.
+- Each step republishes its child agent onto that stream as a namespaced sub-agent, so a
+  client's existing sub-agent rows light up with no new logic.
+
+There is deliberately no workflow event channel and no `WorkflowEvent` on the wire. The
+durable half is `workflowStatus`, which reads the run journal the engine already writes —
+not a second record kept for the wire.
+
+The run's final text is capped at 64 KiB on the way onto the stream, and what is cut is
+*said* to be cut; the whole of it is still in the run's own directory under
+`~/.arcturn/workflow-runs/<runId>/`.
+
+### What a run reached
+
+```json
+{ "id": "33", "method": "workflowStatus", "params": { "runId": "20260825-a1b2c3" } }
+```
+
+```json
+{
+  "kind": "response",
+  "id": "33",
+  "result": {
+    "runs": [
+      {
+        "runId": "20260825-a1b2c3",
+        "workflow": "ship-fix",
+        "state": "paused",
+        "stage": 3,
+        "stageCount": 3,
+        "stepsDone": 3,
+        "stepsTotal": 4,
+        "spentUsd": 2.41,
+        "turns": 9,
+        "startedAt": 1756137600000,
+        "updatedAt": 1756137780000,
+        "questions": [
+          { "stepId": "3", "question": "per-tenant or per-user sessions?" }
+        ],
+        "steps": [
+          { "id": "1", "stage": 1, "status": "done", "tokens": 4200 },
+          { "id": "2", "stage": 2, "status": "done", "agent": "developer", "patch": "applied" },
+          { "id": "3", "stage": 3, "status": "paused", "agent": "lead" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Two shapes, one verb, on `pendingChanges`' terms: **`runId` omitted** is every recent run
+as a summary row, **`runId` given** is that one run plus its per-step breakdown. A listing
+is a menu and must stay small; the step rows are what a person opens one run to read.
+
+Not session-scoped, deliberately: runs live under the served home, so a run started in a
+terminal is exactly as legible here as one started over the wire — and a client can see
+the run it is about to resume without having started it.
+
+`state` is the one-glance answer, and two of its values are the reason it is not just a
+status: `stalled` is a run whose newest journal line is older than its own step deadline
+(the process writing it is gone), and `resumable` is one that stopped without a terminal
+line. Collapsing either into `running` would tell a person to keep waiting for a run
+nothing is running.
+
+A `runId` this engine has no journal for answers **zero rows**, not an error. That is not
+a softening: `isUnsupportedMethodError` reads every `invalidRequest` as "this engine does
+not know the verb", so a read that refused in-band would be indistinguishable from an
+older engine and a client would degrade it to `undefined`. It is the same rule
+`pendingChanges` keeps by answering `dryRun: false` instead of erroring.
+
+### The `ORG-ASK` gate, answered from a client
+
+A role that hits a real ambiguity emits a line beginning `ORG-ASK:` and the engine stops
+the run at a resumable cut point. Over this wire that is three things happening at once: a
+`notice` on the session stream (`Step 3 paused for a human answer: …`), a `paused` state
+on `workflowStatus`, and a `questions` array carrying every question the stage raised — a
+*stage* pauses, not a step, so a parallel stage whose branches each ask owes an answer for
+each of them.
+
+```json
+{ "id": "34", "method": "resumeWorkflow",
+  "params": { "sessionId": "sess_abc", "runId": "20260825-a1b2c3", "answer": "per-tenant" } }
+```
+
+Resume is not a re-run: completed steps are replayed from the journal rather than executed
+again, and a write-lane patch that already landed is probed with `git apply --check
+--reverse` before anything decides to apply it twice. That property belongs to the engine
+and is reached through this verb rather than re-implemented behind it.
+
+Resuming a paused run **without** an `answer` is refused with "needs an answer, not a
+nudge" and the questions are re-surfaced on the stream — which is what the terminal's bare
+`/workflow resume <runId>` does, and what lets a client offer "remind me" and "here is my
+answer" as the two different things they are.
+
+### Refused while the session is busy
+
+`runWorkflow` and `resumeWorkflow` answer `sessionBusy` when the session is mid-turn **or
+already running a pipeline**. Not because the two would corrupt each other — a workflow's
+steps are their own agents — but because that session's event stream is the only place
+either is visible, and two pipelines narrating into one transcript is a transcript nobody
+can read. `deleteSession` refuses for a session with a run in flight for a sharper reason:
+one of its steps may be applying a patch to your checkout at that moment.
+
+`abort` cancels both halves. A client's Stop button is one control, and a pipeline that
+kept spending after it was pressed — because the button only ever reached the session's
+own agent — would be the worst kind of unresponsive.
+
+### What a remotely-started run is capped by
+
+Everything a local one is, and one thing more:
+
+- The workflow file's own `budgetUsd:` and `stepTimeoutMs:`, unchanged — and a wire budget
+  can only lower the first.
+- Each role's declared `tools:`, which is what decides its lane. There is no parameter for
+  it and there will not be one.
+- Each role's `maxTurns`, clamped by the session's own `subagentMaxTurns`.
+- The engine's permission mode, composed with the **calling session's**: a run gets the
+  *stricter* of the two, so a client that put its session in `plan` cannot get a write or
+  exec lane out of an engine whose own mode is looser. The composition only ever narrows.
+
+And the one worth stating plainly rather than half-building: a workflow step's permission
+asks go to the **runtime's** requester, not to the calling session's. `arcturn serve`
+installs no requester on the runtime (each *session* agent gets its own), so an ask raised
+by a step fails closed and denies. In practice a write- or exec-lane role reaches its
+tools over the wire only on an engine already running in `yolo`, exactly as it would under
+`--print`. Routing those asks to the calling session would mean mutating the runtime's
+shared requester slot for the length of a run, which races every other session the same
+engine is hosting; the honest failure is better than the racy feature, and it errs closed.
+
+### Degradation
+
+`listWorkflows` and `workflowStatus` degrade to `undefined` on the `listModels` precedent —
+both read, and a client that gets nothing offers no workflow menu and no run view, which
+is exactly true. `runWorkflow` and `resumeWorkflow` do **not**: a client told "started" by
+an engine that ignored the request believes a review pipeline ran and merges on a verdict
+nobody produced, and an `ORG-ASK` answer that silently went nowhere leaves a run paused
+forever while the person who answered believes it is moving. Both reject.
+
 ## Reconnecting
 
 `{ method: "openSession", params: { sessionId } }` re-attaches to a session that already
@@ -1019,7 +1635,8 @@ prepared to reject or degrade for an older client rather than silently misbehave
 Adding an *optional* verb is not such a change, and `listModels`, `sessionHistory`,
 `deleteSession`, `resolveContext`, `permissionState`, `setPermissionMode`,
 `listCommands`, `compact`, `exportSession`, `mcpStatus`, `pendingChanges`,
-`applyChanges` and `discardChanges` did not bump it — nor did
+`applyChanges`, `discardChanges`, `listCheckpoints`, `rewindTo`, `listWorkflows`,
+`runWorkflow`, `workflowStatus` and `resumeWorkflow` did not bump it — nor did
 `prompt`'s optional
 `attachments` field or `permissionDecision`'s optional `scope`, which an older server
 validates and drops. An older
@@ -1029,9 +1646,11 @@ handles, and an older client simply never sends it — both halves keep working.
 **Optional is not the same as degradable**, and the two questions are decided separately.
 A `ProtocolClient` translates an older server's `invalidRequest` into `undefined` only
 where the shrug is true: `listModels`, `sessionHistory`, `resolveContext`,
-`permissionState`, `listCommands`, `exportSession`, `mcpStatus` and `pendingChanges` all
+`permissionState`, `listCommands`, `exportSession`, `mcpStatus`, `pendingChanges` and
+`listCheckpoints` all
 read, so a client that gets nothing shows nothing and has lost only a view. `deleteSession`,
-`setPermissionMode`, `compact`, `applyChanges` and `discardChanges` reject instead. For the
+`setPermissionMode`, `compact`, `applyChanges`, `discardChanges` and `rewindTo` reject
+instead. For the
 delete, "fine" would mean a session that was never deleted; for the mode it is worse — a
 panel told "fine" would show a `plan` chip over an engine still in `yolo`, and a user who
 believes they restricted an agent they did not restrict is the one outcome a permission
@@ -1041,9 +1660,39 @@ set, because they fail in opposite directions and both directions are bad: an ap
 reported as done that did not happen tells a reviewer their change landed while the file
 on disk says otherwise — and their next move is to discard the shadow tree that held the
 only copy — while a discard reported as done that did not happen leaves them certain their
-pending work is gone right up until the next apply lands it. `permissionDecision`'s `scope` is a field rather than a verb: an
+pending work is gone right up until the next apply lands it. `rewindTo` is sharper still,
+and it is the reason the rule is stated as "what would a shrug claim" rather than "is this
+new": a rewind reported as done that did not happen tells a user their files went back to a
+state they never returned to, so they carry on building on code they believe they discarded.
+`permissionDecision`'s `scope` is a field rather than a verb: an
 older server drops it and the allow lands as an allow-*once*, which narrows rather than
 widens — the only direction a permission field may move silently.
+
+The delegation verbs split the same way, and the split is worth reading because both
+halves are here. `backgroundAgents` and `orgMemory` **read**, so an older engine's
+`invalidRequest` becomes `undefined` and a client shows no background-agent surface and no
+memory queue — which is also the honest answer for an engine that has a verb but no manager
+or store wired, since to a client those are one piece of news. `startBackgroundAgent`,
+`cancelBackgroundAgent`, `adoptBackgroundAgent`, `proposeOrgMemory` and `revokeOrgMemory`
+**reject**, each for its own version of the same reason: a start that did not happen leaves
+a client polling forever for an agent nothing is producing; a cancel that did not happen
+leaves a person believing they stopped spending money they are still spending; an adopt
+that did not happen shows a turn that never started; a propose that did not happen shows a
+queue of suggestions that do not exist; and a revoke that did not happen leaves a person
+believing a lesson has stopped reaching their roles' prompts while it still does.
+
+The workflow verbs split the same way a fourth time, and they are the clearest
+illustration of why the question is decided per verb rather than per feature — one
+feature, four verbs, two answers. `listWorkflows` and `workflowStatus` **read**, so an
+older engine's `invalidRequest` becomes `undefined` and a client offers no workflow menu
+and no run view. `runWorkflow` and `resumeWorkflow` **reject**: they start work that
+spends real money and can apply a write-lane role's patch to your checkout, so a client
+told "started" by an engine that ignored the request believes a review pipeline ran and
+merges on a verdict nobody produced — and an `ORG-ASK` answer that silently went nowhere
+leaves a run paused forever while the person who answered believes it is moving. It is
+also why `workflowStatus` answers an unknown run id with zero rows rather than an
+`invalidRequest`: a read that refused in-band would be read by
+`isUnsupportedMethodError` as "this engine is too old" and shrugged away.
 
 A bump, by
 contrast, breaks in both directions: `SessionHeader.version` is stamped `1` and validated
@@ -1062,3 +1711,8 @@ session's own, so `/rewind`-style recovery does not cleanly isolate concurrently
 sessions from each other. A real `ArcturnRuntime` (as opposed to a minimal test stub) does
 supply `buildSessionAgent` and avoids this; it's called out here because it's the one gap
 worth knowing about before running several concurrent served sessions against one process.
+
+The same gap decides whether the rewind verbs work at all. `createServeHost` wires
+`listCheckpoints`/`rewindTo` only when the runtime supplies both `buildSessionAgent` and a
+conversation fork; a runtime without them answers `available: false`, which is the honest
+answer for a host that keeps no per-session checkpoints rather than an empty picker.

@@ -155,6 +155,48 @@ accounting, `/cost` and `--max-cost` would silently under-report a whole team's 
 `/team <goal>` folds each member's summed cost into the parent session's running total
 via `runtime.recordExternalCost(status.costUsd)` once the run settles.
 
+## From a remote client
+
+`arcturn serve` exposes `/bg` in full and `/team` not at all, and the asymmetry is
+deliberate rather than unfinished.
+
+**`/bg` is reachable, subverb for subverb.** `backgroundAgents` is the listing and
+`/bg logs`, `startBackgroundAgent` is `/bg <task>`, `cancelBackgroundAgent` is
+`/bg cancel` and `adoptBackgroundAgent` is `/bg adopt`. A remote client reaches the same
+manager a terminal in the same process does — same records directory, same queue, same
+concurrency cap — and a background agent started over the wire runs under exactly the caps
+a locally-started one does, because the verb carries a task and nothing else. See
+[Server mode](/docs/server-mode#background-agents) for the table and for the one wrinkle:
+a serve process adopting the records directory can briefly report another process's live
+agent as `interrupted`.
+
+**`/team` is not reachable, and two separate things have to change first.**
+
+1. *Reading a team's status is not read-only today.* The only way to reach a `TeamManager`
+   is to construct one, and construction rewrites every record still `"running"` to
+   `"interrupted"` — sound when a fresh manager really is a fresh process, and false in a
+   serve process running alongside a terminal that owns a live team. A status verb whose
+   first call declares somebody else's running team dead is not a status verb. The fix is
+   an owner lease in the record (a pid, or a process token), so a manager can tell "the
+   process that owned this is gone" from "this belongs to somebody else".
+2. *`merge` and `discard` have no mid-run guard.* `merge` runs `git apply` into your real
+   tree and `discard` deletes the patch files that are the only copy of a member's work,
+   and neither refuses while members are still running — a mid-run `discard` would remove
+   worktrees out from under live agents. Every write verb on the wire refuses `sessionBusy`
+   rather than racing (`applyChanges`, `rewindTo`, `setPermissionMode`), and there is
+   nothing for those verbs to refuse *with* until the manager can answer "is this team
+   still going".
+
+Neither is a protocol problem, which is why neither was solved with a protocol change.
+
+**`/scout` is not reachable either**, and for a simpler reason: a scout run leaves nothing
+behind. It creates throwaway worktrees, races the approaches against a deadline, captures
+each diff into memory, deletes every worktree in a `finally`, and returns a report that
+exists only as printed text. There is nothing for a listing verb to list and nothing for a
+cancel verb to name, so a `startScout` would be one request that blocks for minutes, cannot
+be reported on, cannot be cancelled, and hands back worktrees that are already gone. Making
+it reachable means giving scouts durable records first.
+
 ## Choosing between them
 
 - **`subagent`** — you need an answer to fold back into the current turn, right now, and

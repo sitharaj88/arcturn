@@ -50,6 +50,50 @@ about appearance**; see "does not cover" below. It is deliberately strict
 (`appendChild(undefined)` throws, as a browser would) so that a passing test is
 a statement about the script and not about the stub.
 
+### The destructive controls, and where each half is proved
+
+Four controls on this surface cannot be undone: deleting a session, discarding
+pending dry-run changes, **rewinding to a checkpoint** — which overwrites files
+*and* deletes them — and **running a workflow**, which spends real money and
+applies a write-lane role's patch to the checkout the moment its step succeeds.
+None of them is testable end to end from a webview, so each is split
+deliberately and both halves are driven:
+
+| Half | Lives in | Driven by |
+| --- | --- | --- |
+| What the modal names | `dialog.ts`, `dry-run.ts`, `rewind.ts`, `workflows.ts` | `dialog.test.ts`, `dry-run.test.ts`, `rewind.test.ts`, `workflows.test.ts` |
+| What the picker shows before the click | `rewind.ts` (`projectCheckpoint`), `workflows.ts` (`projectWorkflow`) | `rewind.test.ts`, `workflows.test.ts`, `webview-render.test.ts` |
+| That the page cannot act on its own | `webview-messages.ts` | `webview-messages.test.ts` |
+| That the host routes it at the engine | `index.ts` | `index.test.ts` |
+| That the files actually move | the engine | `packages/cli/src/serve-rewind.test.ts` |
+| That the money ceiling actually binds | the engine | `packages/cli/src/workflow-wire.test.ts` |
+
+The last row is the one that matters and it is deliberately *not* here: the
+only honest assertion for "the files went back" is reading them off a disk, so
+it lives next to the real checkpoint store, over a real socket, with a real
+agent that really writes files. A returned status is what looked right while
+the `@`-mention bug sent nothing.
+
+Two panel-side claims are worth naming because they are safety properties
+rather than presentation: the rewind list has **no Enter action** (a picker
+whose default key deletes files is a picker that fires while somebody is still
+reading it), and the page carries the engine's `confirmation` token back
+**verbatim** — a page that regenerated it would be vouching for a cost it did
+not compute, and the engine's staleness check would never fire.
+
+The workflow surface adds two more of the same kind. The catalog renders the
+lane the **engine** derived for each role and never computes one
+(`workflows.test.ts` drives all five values, `unknown` and `undeclared`
+included, because rendering either as `read` would be the panel inventing
+reassurance nobody gave). And the panel sends **no budget at all**: the engine
+accepts one only to *lower* a workflow file's own ceiling, and a number typed
+into a webview is not a decision a person made about money, so the boundary
+drops the field rather than forwarding it (`webview-messages.test.ts`). What
+binds the ceiling is asserted where it can be asserted honestly — over a real
+socket against a real engine, in `packages/cli/src/workflow-wire.test.ts`,
+where a workflow declaring `budgetUsd: 0.01` really does abort on stage 1 and
+leave stages 2 and 3 with no journal rows at all.
+
 ## Running them
 
 ```sh
@@ -238,6 +282,20 @@ part of fixing the bug it caught.
 
 Written down rather than faked. Each of these is a claim in RFC 0004 that this
 suite does not settle.
+
+**No panel surface for `/bg` or `/org memory`, deliberately.** The engine now
+lists both in `listCommands`, because the wire genuinely carries them out —
+four verbs for `/bg`, three for `/org memory`. This panel has no
+background-agent view and no memory queue, so `BUILTIN_ACTIONS` names neither
+and `runnableCommands` drops both rows rather than offering a menu entry that
+does nothing (RFC 0005 §3). `webview-commands.test.ts` asserts exactly that,
+which is the test that keeps the omission honest rather than accidental: if
+somebody adds a row without a surface, it fails. Building the surfaces — a list
+of running agents with logs/cancel/adopt, and a queue of proposed lessons
+showing each entry's `origin` and the `/org memory approve` that activates it —
+is panel work, and one line in `BUILTIN_ACTIONS` per surface when it lands.
+Approving a lesson stays a terminal action either way: there is no verb for it
+and there is not going to be one.
 
 **Needs a real `arcturn` binary.** Everything past the spawn: the `arcturn
 serve` startup handshake, the loopback WebSocket connection, `authenticate`,

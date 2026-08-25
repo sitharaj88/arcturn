@@ -202,8 +202,16 @@ function defaultToolsForMode(mode: PermissionMode, tools: readonly Tool[]): Tool
   return tools.filter((tool) => names.has(tool.definition.name));
 }
 
-/** Render a background agent's transcript so far as plain lines. */
-function formatTranscript(messages: readonly Message[]): string[] {
+/**
+ * Render a background agent's transcript so far as plain lines.
+ *
+ * Exported because there are now two front-ends for it: the terminal's
+ * `/bg logs`, and the `backgroundAgents` verb's transcript (see
+ * `serve-background.ts`). One renderer for both, so a transcript cannot read
+ * one way in a terminal and another over a socket — the rule
+ * `exportMarkdown`/`exportHtml` already keep for `/export`.
+ */
+export function formatBackgroundTranscript(messages: readonly Message[]): string[] {
   const lines: string[] = [];
   for (const message of messages) {
     if (message.role === "user") {
@@ -586,7 +594,24 @@ export class BackgroundAgentManager {
   }
 }
 
-const managers = new WeakMap<ArcturnRuntime, BackgroundAgentManager>();
+/**
+ * The slice of {@link ArcturnRuntime} a manager is built and refreshed from.
+ *
+ * Widened from `ArcturnRuntime` itself so `arcturn serve` can reach the same
+ * memoized manager the terminal does without `@arcturn/cli`'s serve path having
+ * to hold a full runtime — and, more usefully, so this function's real
+ * dependencies are written down. A real `ArcturnRuntime` satisfies it
+ * structurally; nothing about the existing callers changed.
+ */
+export interface BackgroundAgentHost {
+  readonly paths: { readonly home: string };
+  readonly llm: LLMClient;
+  readonly model: ModelSpec;
+  readonly tools: readonly Tool[];
+  readonly cwd: string;
+}
+
+const managers = new WeakMap<BackgroundAgentHost, BackgroundAgentManager>();
 
 /**
  * Get (or lazily create) the {@link BackgroundAgentManager} bound to one
@@ -601,7 +626,7 @@ const managers = new WeakMap<ArcturnRuntime, BackgroundAgentManager>();
  * every call, so a `/model` switch or a newly attached MCP server is picked
  * up by the next background agent started without an explicit override.
  */
-export function getBackgroundAgentManager(runtime: ArcturnRuntime): BackgroundAgentManager {
+export function getBackgroundAgentManager(runtime: BackgroundAgentHost): BackgroundAgentManager {
   let manager = managers.get(runtime);
   if (!manager) {
     manager = new BackgroundAgentManager({
@@ -650,7 +675,7 @@ async function logsRun(manager: BackgroundAgentManager, ui: CommandUi, id: strin
     return;
   }
   const messages = await manager.transcript(id);
-  const lines = messages ? formatTranscript(messages) : [];
+  const lines = messages ? formatBackgroundTranscript(messages) : [];
   if (lines.length === 0) {
     ui.notice("info", `No transcript yet for ${id} (${status.status}).`);
     return;
@@ -672,6 +697,43 @@ function cancelRun(manager: BackgroundAgentManager, ui: CommandUi, id: string): 
   ui.notice("warn", `Background agent ${id} is already ${status.status}.`);
 }
 
+/**
+ * What `/bg adopt` injects for one agent, or why there is nothing to inject.
+ *
+ * Extracted from the command handler so the `adoptBackgroundAgent` verb
+ * composes the *same sentence* the terminal does — see `serve-background.ts`.
+ * Two adopt paths writing their own wording is how one event comes to be
+ * described two ways in one session's history, and the wording is what the
+ * model reads.
+ *
+ * A union rather than a throw so a caller can render the refusal wherever it
+ * renders refusals; `@arcturn/server` turns the `refusal` branch into an
+ * `invalidRequest` and the terminal turns it into a warning.
+ *
+ * @param status - The agent's current status, from the manager.
+ */
+export function backgroundAdoption(
+  status: BackgroundAgentStatus,
+): { text: string } | { refusal: string } {
+  if (status.status === "running") {
+    return {
+      refusal: `Background agent ${status.id} is still running; ask for its transcript instead.`,
+    };
+  }
+  const text = status.finalText?.trim();
+  const body =
+    text && text !== "" ? text : status.error ? `(no output; ${status.error})` : undefined;
+  if (body === undefined) {
+    return { refusal: `Background agent ${status.id} produced no output to adopt.` };
+  }
+  const suffix = status.status === "done" ? "" : ` (${status.status})`;
+  return {
+    text:
+      `Background agent ${status.id} finished "${oneLine(status.task, 60)}"${suffix} ` +
+      `with this result:\n\n${body}`,
+  };
+}
+
 /** `run()` for `/bg adopt <id>`. */
 async function adoptRun(
   manager: BackgroundAgentManager,
@@ -688,15 +750,12 @@ async function adoptRun(
     ui.notice("warn", `Background agent ${id} is still running; see /bg logs ${id}.`);
     return;
   }
-  const text = status.finalText?.trim();
-  const body =
-    text && text !== "" ? text : status.error ? `(no output; ${status.error})` : undefined;
-  if (!body) {
-    ui.notice("warn", `Background agent ${id} produced no output to adopt.`);
+  const adoption = backgroundAdoption(status);
+  if ("refusal" in adoption) {
+    ui.notice("warn", adoption.refusal);
     return;
   }
-  const suffix = status.status === "done" ? "" : ` (${status.status})`;
-  const injected = `Background agent ${id} finished "${oneLine(status.task, 60)}"${suffix} with this result:\n\n${body}`;
+  const injected = adoption.text;
   if (runtime.agent.isRunning) {
     runtime.agent.steer(injected);
     ui.notice("info", `Queued the result of ${id} for the current run.`);

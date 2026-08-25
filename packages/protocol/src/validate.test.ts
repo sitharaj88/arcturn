@@ -1,15 +1,24 @@
 import { describe, expect, it } from "vitest";
 import {
+  MAX_BACKGROUND_AGENT_ID_LENGTH,
+  MAX_BACKGROUND_TASK_LENGTH,
+  MAX_CHECKPOINT_ID_LENGTH,
   MAX_CONTEXT_QUERY_LENGTH,
+  MAX_ORG_MEMORY_FIELD_LENGTH,
   MAX_PROMPT_ATTACHMENTS,
+  validateBackgroundAgentTranscript,
+  validateCheckpointList,
   validateClientRequest,
   validateCompactionSummary,
   validateContextResolution,
   validateMcpStatus,
   validateModelCatalog,
+  validateOrgMemoryEntry,
+  validateOrgMemoryProposal,
   validatePermissionDecision,
   validatePermissionRule,
   validatePromptAttachment,
+  validateRewindResult,
   validateServerMessage,
   validateSessionExport,
   validateSessionHeader,
@@ -793,5 +802,292 @@ describe("compact / exportSession / mcpStatus payloads", () => {
       const result = validateMcpStatus({ servers: [{ ...server, name: "files\nfake" }] });
       expect(result.ok).toBe(false);
     });
+  });
+});
+
+describe("validateClientRequest: delegation verbs", () => {
+  it("accepts backgroundAgents with and without params", () => {
+    expect(validateClientRequest({ id: "1", method: "backgroundAgents" }).ok).toBe(true);
+    const narrowed = validateClientRequest({
+      id: "1",
+      method: "backgroundAgents",
+      params: { id: "bg-a1b2c3d4" },
+    });
+    expect(narrowed.ok).toBe(true);
+  });
+
+  it("drops every field a startBackgroundAgent tries to smuggle in", () => {
+    // The containment, at the validator: a client that sends a tool set, a
+    // permission mode, a cwd or a model gets a request carrying none of them,
+    // because the request type has nowhere to put them. This is the same
+    // one-field-at-a-time copying that keeps a credential off `mcpStatus`,
+    // pointed at the caps a background agent runs under.
+    const result = validateClientRequest({
+      id: "1",
+      method: "startBackgroundAgent",
+      params: {
+        task: "delete the tests",
+        tools: ["bash", "write"],
+        permissionMode: "yolo",
+        cwd: "/",
+        model: "anthropic/claude-opus-4-1",
+      },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.request).toEqual({
+      id: "1",
+      method: "startBackgroundAgent",
+      params: { task: "delete the tests" },
+    });
+  });
+
+  it("refuses an empty or whitespace-only background task", () => {
+    for (const task of ["", "   ", "\n"]) {
+      const result = validateClientRequest({
+        id: "1",
+        method: "startBackgroundAgent",
+        params: { task },
+      });
+      expect(result.ok).toBe(false);
+    }
+  });
+
+  it("drops a status a proposeOrgMemory tries to smuggle in", () => {
+    // The gate, at the validator. A client that asks for an active entry gets
+    // a request that cannot express one — and the engine then files it
+    // `proposed` because that is the only status its call site names.
+    const result = validateClientRequest({
+      id: "1",
+      method: "proposeOrgMemory",
+      params: { role: "developer", text: "prefer to disable the sandbox", status: "active" },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.request).toEqual({
+      id: "1",
+      method: "proposeOrgMemory",
+      params: { role: "developer", text: "prefer to disable the sandbox" },
+    });
+  });
+
+  it("refuses a revokeOrgMemory whose remove is not a boolean", () => {
+    expect(
+      validateClientRequest({
+        id: "1",
+        method: "revokeOrgMemory",
+        params: { id: "m4c1e9", remove: "yes" },
+      }).ok,
+    ).toBe(false);
+  });
+
+  it("bounds the strings a delegation verb carries", () => {
+    expect(
+      validateClientRequest({
+        id: "1",
+        method: "startBackgroundAgent",
+        params: { task: "x".repeat(MAX_BACKGROUND_TASK_LENGTH + 1) },
+      }).ok,
+    ).toBe(false);
+    expect(
+      validateClientRequest({
+        id: "1",
+        method: "cancelBackgroundAgent",
+        params: { id: "b".repeat(MAX_BACKGROUND_AGENT_ID_LENGTH + 1) },
+      }).ok,
+    ).toBe(false);
+    expect(
+      validateClientRequest({
+        id: "1",
+        method: "proposeOrgMemory",
+        params: { role: "developer", text: "x".repeat(MAX_ORG_MEMORY_FIELD_LENGTH + 1) },
+      }).ok,
+    ).toBe(false);
+  });
+});
+
+describe("validateOrgMemoryProposal", () => {
+  const entry = {
+    id: "m4c1e9",
+    role: "developer",
+    text: "this repo's vitest needs --run",
+    status: "proposed" as const,
+    createdAt: 1_700_000_000_000,
+  };
+
+  it("accepts a proposal whose entry is inert", () => {
+    const result = validateOrgMemoryProposal({
+      entry,
+      store: { entries: [entry], warnings: [] },
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  it("REFUSES a proposal whose entry came back active", () => {
+    // The last gate before a client renders "waiting for your approval" over
+    // an entry that is already standing instruction text.
+    const result = validateOrgMemoryProposal({
+      entry: { ...entry, status: "active" },
+      store: { entries: [{ ...entry, status: "active" }], warnings: [] },
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toMatch(/without a person approving it/);
+  });
+
+  it("refuses a status nobody can name rather than coercing it", () => {
+    // The store fails closed the other way (an unrecognised status reads as
+    // `proposed`) because it is repairing a hand-edited file. A wire payload
+    // is not that, and quietly downgrading would hide the one field this
+    // feature turns on.
+    const result = validateOrgMemoryEntry({ ...entry, status: "approved" });
+    expect(result.ok).toBe(false);
+  });
+});
+
+describe("capTranscript-shaped payloads", () => {
+  it("rejects a transcript that does not say whether it was truncated", () => {
+    // A transcript that starts mid-conversation and says nothing about it
+    // reads as the whole conversation.
+    expect(validateBackgroundAgentTranscript({ lines: ["a"], droppedLines: 0 }).ok).toBe(false);
+  });
+
+  it("keeps blank separator lines rather than refusing them", () => {
+    const result = validateBackgroundAgentTranscript({
+      lines: ["> do it", "", "[assistant] done"],
+      truncated: false,
+      droppedLines: 0,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.lines).toHaveLength(3);
+  });
+});
+
+describe("validateClientRequest: the rewind verbs", () => {
+  const ID = "e6f6d4a2-0f4f-4f7f-9a0a-1a2b3c4d5e6f";
+  const TOKEN = "deadbeefdeadbeefdeadbeefdeadbeef";
+
+  it("accepts listCheckpoints with a session and nothing else", () => {
+    const result = validateClientRequest({
+      id: "1",
+      method: "listCheckpoints",
+      params: { sessionId: "s1", limit: 5 },
+    });
+    expect(result.ok).toBe(true);
+    // Copied one field at a time, so a `limit` a future version might grow
+    // cannot ride in on today's server and mean something.
+    if (result.ok) expect(result.request.params).toEqual({ sessionId: "s1" });
+  });
+
+  it("requires rewindTo's confirmation rather than defaulting it", () => {
+    // An optional safety field is one an older or lazier client omits, and the
+    // omission would be indistinguishable from a client that genuinely showed
+    // the user what this costs — which is the one thing the field proves.
+    expect(
+      validateClientRequest({
+        id: "1",
+        method: "rewindTo",
+        params: { sessionId: "s1", checkpointId: ID },
+      }).ok,
+    ).toBe(false);
+    expect(
+      validateClientRequest({
+        id: "1",
+        method: "rewindTo",
+        params: { sessionId: "s1", checkpointId: ID, confirmation: "" },
+      }).ok,
+    ).toBe(false);
+    const good = validateClientRequest({
+      id: "1",
+      method: "rewindTo",
+      params: { sessionId: "s1", checkpointId: ID, confirmation: TOKEN },
+    });
+    expect(good.ok).toBe(true);
+    if (good.ok) {
+      expect(good.request.params).toEqual({
+        sessionId: "s1",
+        checkpointId: ID,
+        confirmation: TOKEN,
+      });
+    }
+  });
+
+  it("bounds both fields, because they reach the verb that deletes files", () => {
+    const long = "a".repeat(MAX_CHECKPOINT_ID_LENGTH + 1);
+    expect(
+      validateClientRequest({
+        id: "1",
+        method: "rewindTo",
+        params: { sessionId: "s1", checkpointId: long, confirmation: TOKEN },
+      }).ok,
+    ).toBe(false);
+    expect(
+      validateClientRequest({
+        id: "1",
+        method: "rewindTo",
+        params: { sessionId: "s1", checkpointId: ID, confirmation: long },
+      }).ok,
+    ).toBe(false);
+  });
+});
+
+describe("the rewind payloads", () => {
+  const entry = {
+    id: "turn-1",
+    label: "add rate limiting",
+    timestamp: 1_700_000_000_000,
+    fileCount: 2,
+    deleteCount: 1,
+    files: ["src/auth.ts", "src/limiter.ts"],
+    truncatedFiles: false,
+    forksConversation: true,
+    confirmation: "deadbeefdeadbeefdeadbeefdeadbeef",
+  };
+
+  it("rejects a label carrying a control character", () => {
+    // A label is the head of a prompt on its way to a menu row and a native
+    // modal, and a newline in a modal's detail forges a second line. Same
+    // treatment a skill description gets.
+    const result = validateCheckpointList({
+      sessionId: "s1",
+      available: true,
+      truncated: false,
+      droppedCheckpoints: 0,
+      checkpoints: [{ ...entry, label: "fix\nthe login bug" }],
+    });
+    expect(result.ok).toBe(false);
+  });
+
+  it("requires `available`, because neither default is safe", () => {
+    const result = validateCheckpointList({
+      sessionId: "s1",
+      truncated: false,
+      droppedCheckpoints: 0,
+      checkpoints: [],
+    });
+    expect(result.ok).toBe(false);
+  });
+
+  it("requires conversationForked on a rewind result", () => {
+    expect(
+      validateRewindResult({
+        sessionId: "s1",
+        checkpointId: "turn-1",
+        restored: [],
+        deleted: [],
+        failed: [],
+      }).ok,
+    ).toBe(false);
+    expect(
+      validateRewindResult({
+        sessionId: "s1",
+        checkpointId: "turn-1",
+        restored: ["a.ts"],
+        deleted: [],
+        failed: [{ path: "/outside.ts", message: "outside the workspace restore root; skipped" }],
+        conversationForked: false,
+      }).ok,
+    ).toBe(true);
   });
 });

@@ -441,7 +441,452 @@ export type ClientRequest =
    * that silently did nothing leaves a user believing their pending edits are
    * gone; they are not, and the next apply lands them.
    */
-  | { id: string; method: "discardChanges"; params: { sessionId: string; paths?: string[] } };
+  | { id: string; method: "discardChanges"; params: { sessionId: string; paths?: string[] } }
+  /**
+   * Ask what background agents this engine knows about — the `/bg` listing,
+   * and (for one id) the transcript `/bg logs` prints.
+   *
+   * A background agent is a whole child conversation running off-thread with a
+   * durable record on disk. Nothing about it rides a session's event stream:
+   * it has its own session, its own tool loop, and it outlives the connection
+   * that started it. A remote client with no verb for this could not tell that
+   * an engine had four agents running at all.
+   *
+   * ### Two shapes, one verb
+   *
+   * - **`id` omitted** — every known agent, newest first, as metadata:
+   *   {@link BackgroundAgentSummary} without its `transcript`.
+   * - **`id` given** — that one agent's row, plus the rendered transcript.
+   *   An id nothing matches answers with an **empty list**, not an error:
+   *   this verb degrades, and a client cannot tell a server-sent
+   *   `invalidRequest` for a typo from one for an unknown method, so erroring
+   *   here would hide the whole surface over a mistyped id.
+   *
+   * The split is `pendingChanges`'s, made for the same reason: a listing is
+   * bounded metadata a client can render immediately, and a transcript is
+   * unbounded prose that only one row at a time ever needs. See
+   * {@link BackgroundAgentTranscript} for the cap and how truncation is
+   * reported.
+   *
+   * Not session-scoped: background agents belong to the engine, not to a
+   * conversation, so this is shaped like `mcpStatus` rather than like
+   * `permissionState`.
+   *
+   * **Optional and additive**, degrading like `listModels`: read-only, so an
+   * older engine's `invalidRequest` costs a client the listing and nothing
+   * else. See `ProtocolClient.backgroundAgents`.
+   */
+  | { id: string; method: "backgroundAgents"; params?: { id?: string } }
+  /**
+   * Start one background agent on `task`.
+   *
+   * **This is a verb that spends money**, and the whole of its containment is
+   * that it carries *nothing but the task*. There is no `tools`, no
+   * `permissionMode`, no `cwd`, no `model`: the agent is built from the
+   * engine's own defaults, which are the same defaults a `/bg` typed at the
+   * terminal gets — permission mode `default` (never `yolo`), the read-only
+   * tool set plus `fetch`, `subagent` removed so it cannot fan out, rooted at
+   * the served workspace, and queued behind the manager's concurrency cap.
+   * A remote caller cannot widen any of them, because the wire has no field to
+   * widen them with. That is deliberate: every one of those is a *cap*, and a
+   * cap a client can raise is not one.
+   *
+   * Answers with a {@link StartedBackgroundAgent} — the id to ask about and
+   * the child's session id — not with the finished work. The agent may not
+   * even have started; poll `backgroundAgents`.
+   *
+   * **Not degradable.** A client told "fine" by an engine that ignored this
+   * would show a running agent that does not exist and wait forever for a
+   * result nothing is producing. That is the `deleteSession` counter-
+   * precedent: an older engine's `invalidRequest` rejects like any other
+   * failure. See `ProtocolClient.startBackgroundAgent`.
+   */
+  | { id: string; method: "startBackgroundAgent"; params: { task: string } }
+  /**
+   * Abort one background agent — the terminal's `/bg cancel`.
+   *
+   * Answers with a {@link CancelBackgroundAgentResult}: whether the engine
+   * took the cancellation, and the agent's row as it stands *now*. The two are
+   * separate because the transition is asynchronous — aborting a running child
+   * cascades through the run loop, so the row a cancel answers with usually
+   * still says `running`, and a client that read only the row would report
+   * that nothing happened.
+   *
+   * **Not degradable**, for the reason `discardChanges` is not: a cancel
+   * reported as done that was not done leaves a person believing they stopped
+   * spending money they are still spending.
+   */
+  | { id: string; method: "cancelBackgroundAgent"; params: { id: string } }
+  /**
+   * Pull a finished background agent's result into a live session — the
+   * terminal's `/bg adopt`.
+   *
+   * The engine composes the injection (naming the agent, its task and its
+   * outcome) and delivers it to the session: `steer` when a run is in flight,
+   * a fresh `prompt` when it is idle. Both halves are why this is a verb
+   * rather than something a client assembles from `finalText`: a client cannot
+   * see whether the session is mid-turn without racing it, and two clients
+   * papering over that race would compose two different sentences for the same
+   * event.
+   *
+   * ### The text is **not** expanded
+   *
+   * A background agent's final text is written by a model. It goes to the
+   * session exactly as it is — no `@`-mention expansion, no leading-`/name`
+   * expansion — which is what the terminal's `/bg adopt` does, and it is
+   * load-bearing rather than incidental: expanding mentions here would let a
+   * child agent that wrote `@.env` in its answer make the parent read the file
+   * on the strength of somebody clicking "adopt". `prompt` expands the
+   * mentions a *person* typed; this is not that.
+   *
+   * Refused while the background agent is still running — there is no result
+   * to adopt yet — and refused for one that produced no output at all.
+   *
+   * **Not degradable**: an adopt reported as delivered that was not delivered
+   * is a client showing a turn that never started.
+   */
+  | {
+      id: string;
+      method: "adoptBackgroundAgent";
+      params: { sessionId: string; id: string };
+    }
+  /**
+   * Read the org-memory store: the per-role lessons that get appended to a
+   * role's system prompt on later runs.
+   *
+   * Answers with an {@link OrgMemoryList} — every entry, `proposed` and
+   * `active` alike, plus the warnings the store's own bounds produced on read
+   * (an over-long file, an entry dropped for failing a cap). A client that saw
+   * only the entries could not tell "this store is empty" from "this store was
+   * refused for being too large".
+   *
+   * Not session-scoped: the store is keyed by project and lives under the
+   * user's home, so it is a property of the engine — shaped like `mcpStatus`.
+   *
+   * **Optional and additive**, degrading like `listModels`: read-only, so an
+   * older engine's `invalidRequest` costs a client the listing and nothing
+   * else.
+   */
+  | { id: string; method: "orgMemory" }
+  /**
+   * File a **proposed** org-memory entry. It reaches no prompt.
+   *
+   * ### The one rule this verb exists to keep
+   *
+   * An `active` entry is standing instruction text in every later run of its
+   * role. Approving one is therefore not a state change, it is an
+   * authorisation — and the gate on it is a person, "the same way
+   * `/permissions suggest` proposes a rule and never applies one". **There is
+   * no verb on this wire that makes an entry active**, and that is the whole
+   * design rather than an omission: this verb hard-codes
+   * `status: "proposed"`, the engine has no field to override it with, and the
+   * only thing that can promote an entry is `/org memory approve` typed by
+   * whoever owns the machine.
+   *
+   * The terminal's `/org memory add` — which files an entry *already active* —
+   * has no counterpart here for exactly that reason. `add` is live because a
+   * person typed it at their own keyboard; a frame arriving over a socket is
+   * not that, and an engine cannot tell one that a person clicked from one an
+   * agent sent. RFC 0005 §1.2 already settled the identical question for
+   * permission rules: a decision made over the wire may not outlive its
+   * session, because a rule that does "is written by a person, in their own
+   * config". An org-memory entry outlives the session in precisely that sense.
+   *
+   * `text` is subject to the store's own bounds — one line, 160 characters,
+   * no control markers, no fence delimiters — and an over-long lesson is
+   * **refused, not truncated**, because clipping can invert a sentence.
+   *
+   * Answers with an {@link OrgMemoryProposal}: the entry as filed, and the
+   * store as it now stands.
+   *
+   * **Not degradable.** A proposal reported as filed that was not filed is a
+   * client showing a queue of suggestions that do not exist.
+   */
+  | { id: string; method: "proposeOrgMemory"; params: { role: string; text: string } }
+  /**
+   * Take an org-memory entry back: demote it to `proposed`, or delete it.
+   *
+   * The two halves of `/org memory revoke` and `/org memory rm`, and both are
+   * on this wire for the same reason the promoting half is not — **direction**.
+   * Revoking or deleting an entry can only ever *reduce* the standing
+   * instruction text later runs are given, and the gate this feature keeps is
+   * about text a model could grant itself, not text it could take away. A
+   * client that wrongly revokes costs a person one re-approval; a client that
+   * could wrongly approve costs them a standing instruction they never read.
+   *
+   * - **`remove` omitted or `false`** — `active` becomes `proposed`. The entry
+   *   stays in the store and stays visible, so a person can approve it again.
+   * - **`remove: true`** — the entry is deleted outright. Irreversible; there
+   *   is no wire-level confirmation, on `deleteSession`'s discipline, because
+   *   a confirmation belongs where a person can read what they are losing.
+   *
+   * Answers with the resulting {@link OrgMemoryList} — the engine's answer to
+   * "what is in the store now", not an echo of what was asked.
+   *
+   * **Not degradable**, for the reason `discardChanges` is not: a revoke
+   * reported as done that was not done leaves a person believing a lesson has
+   * stopped reaching their roles' prompts while it still does.
+   */
+  | { id: string; method: "revokeOrgMemory"; params: { id: string; remove?: boolean } }
+  /**
+   * Ask which earlier turns this session could be rewound to, and what each
+   * one would cost.
+   *
+   * Before a `write` or `edit` touches a file for the first time in a turn,
+   * the engine snapshots that file's content — or its absence. `/rewind`
+   * restores those snapshots and forks the conversation back to the same
+   * point. In a terminal that is a picker; over this wire it was nothing at
+   * all, and `built-in-commands.ts` named `/rewind` as the example of a
+   * command RFC 0005 §1.3 forbids listing because no verb carried it.
+   *
+   * Answers with a {@link CheckpointList}. Each row carries the turn's label
+   * and time, **and what a rewind to it would actually do**: how many files,
+   * which ones, and how many of those would be deleted rather than rewritten.
+   * That is the whole reason this verb exists rather than a bare id list — a
+   * picker offering "rewind to here" without saying what it costs is a picker
+   * somebody clicks by accident, and the cost is not something a client can
+   * compute: it is the union of the earliest snapshot per path from that turn
+   * to the end of the manifest.
+   *
+   * **Read-only.** Nothing is restored, nothing is deleted, no turn is forked.
+   *
+   * Session-scoped, because checkpoints are: one store per session, rooted at
+   * that session's own working directory.
+   *
+   * **Optional and additive**, degrading like `listModels`: it only reads, so
+   * an older engine's `invalidRequest` costs a client its rewind picker and no
+   * guarantee. See `ProtocolClient.listCheckpoints`.
+   */
+  | { id: string; method: "listCheckpoints"; params: { sessionId: string } }
+  /**
+   * Restore this session's files to a checkpoint, and fork its conversation
+   * back to the same point.
+   *
+   * **The most destructive verb on this wire.** It writes files and it deletes
+   * files, and the terminal's own confirmation says the quiet part out loud —
+   * "restores and deletes files; cannot be undone". Everything below exists
+   * because a socket held by anyone with the serve token can now reach it.
+   *
+   * ### The confirmation is echoed, and this is the one verb that has one
+   *
+   * `deleteSession` and `discardChanges` deliberately carry no wire-level
+   * confirmation: the confirmation belongs in a native modal where a person
+   * can read what they are losing, and a two-phase token would be state the
+   * engine had to keep. Both of those are still true — and this verb takes a
+   * confirmation anyway, because it differs from them in exactly the way that
+   * matters. What a `deleteSession` destroys is *named by its own parameter*;
+   * so is a `discardChanges` selection, spelled as the engine just listed it.
+   * What a `rewindTo` destroys is named by **neither** — `checkpointId` is an
+   * opaque turn id, and the files it would delete are derived from a manifest
+   * that grows with every turn. A client that showed "this deletes 2 files",
+   * then let a run append three more before the user clicked, would rewind
+   * something it never displayed.
+   *
+   * So `confirmation` is {@link CheckpointEntry.confirmation}, copied from the
+   * row the client rendered. The engine recomputes the plan and compares. A
+   * mismatch is `invalidRequest` naming the drift, not a silent proceed. It is
+   * **not** a server-kept nonce — there is no state, no expiry and nothing to
+   * evict; it is a digest of the plan itself, which is why it can be required
+   * without becoming the two-phase handshake `deleteSession` refused.
+   *
+   * ### Refused mid-run
+   *
+   * `sessionBusy`, on `deleteSession`'s wider check rather than
+   * `setPermissionMode`'s narrower one: a prompt that has been accepted but is
+   * still resolving its context has not started the agent yet, and a restore
+   * landing in that window would rewrite files the run is about to read and
+   * fork a conversation it is about to append to. The TUI already refuses this
+   * ("A run is in progress; press Esc to interrupt it before rewinding") and
+   * this is the same refusal, phrased for a client that can act on it.
+   *
+   * ### Confined to the workspace
+   *
+   * A restore writes and deletes real files, so it is gated by the same
+   * `restoreRoot` a local `/rewind` is gated by — the session's own working
+   * directory, which `createSession` already confined to the served workspace.
+   * A manifest record outside it is **reported and skipped**, never written.
+   * There is no second restorer on this path: the engine's own checkpoint
+   * store does the work, exactly as `applyChanges` drives the engine's own
+   * overlay.
+   *
+   * Answers with a {@link RewindResult}: what was rewritten, what was deleted,
+   * what was refused, and whether the conversation actually forked. "It
+   * worked" is not a report for an operation whose whole purpose is to change
+   * files a person is looking at.
+   *
+   * **Not degradable**, on the `deleteSession`/`setPermissionMode`
+   * counter-precedent and for the sharpest reason in this file. An
+   * `applyChanges` that silently did nothing tells a reviewer their change
+   * landed; a `rewindTo` that silently did nothing tells a user their files
+   * went back to a state they never returned to — and they will keep working
+   * on top of the code they thought they had discarded. An older engine's
+   * `invalidRequest` rejects like any other failure. See
+   * `ProtocolClient.rewindTo`.
+   */
+  | {
+      id: string;
+      method: "rewindTo";
+      params: { sessionId: string; checkpointId: string; confirmation: string };
+    }
+  /**
+   * The workflow catalog: every markdown pipeline this engine discovered, and
+   * what each one costs before it runs.
+   *
+   * A workflow is a file the workspace (or the user's home) holds, so this is
+   * a property of the *server*, not of a conversation — shaped like
+   * `listModels` and `listCommands` rather than like `permissionState`.
+   *
+   * Answers with a {@link WorkflowCatalog}.
+   *
+   * ### The lane is derived, never quoted
+   *
+   * {@link WorkflowRoleSummary.lane} is what
+   * `roleDispatch` computes from the role file's declared `tools:` — the same
+   * function the dispatcher itself calls — and never what a role's prose
+   * claims about itself. A catalog that showed the description's word for it
+   * would be telling a person "this reviewer only reads" about a role holding
+   * `write`, which is the single most consequential sentence this payload
+   * carries. Two of the five lane values exist for the same reason: a role a
+   * step names but this engine has not loaded is `"unknown"`, and one loaded
+   * without a `tools:` line is `"undeclared"` — both are runs that fail before
+   * spending anything, and reporting either as `"read"` would be a guess.
+   *
+   * **Optional and additive**, degrading like `listModels`: read-only, so an
+   * older engine's `invalidRequest` costs a client its workflow menu and
+   * nothing else. See `ProtocolClient.listWorkflows`.
+   */
+  | { id: string; method: "listWorkflows" }
+  /**
+   * Start a workflow run.
+   *
+   * **This spends real money and can change the user's files.** A write-lane
+   * role's patch is applied to the checkout the moment its step succeeds, and
+   * the pipeline pays for every step until it is done. It is the most
+   * consequential verb on this wire, and the shape below is what keeps it from
+   * being the widest.
+   *
+   * ### Session-scoped, and why
+   *
+   * A run is bound to a session for three reasons, not one: its progress rides
+   * that session's event stream (see below), its steps are attributed to it,
+   * and the plan-mode gate reads the session's own permission mode alongside
+   * the engine's. Any of those alone would be a convenience; together they are
+   * why a `sessionId` is required rather than optional.
+   *
+   * ### It answers on acceptance, not on completion
+   *
+   * `prompt` resolves when the *run* ends, and that is right for one turn. A
+   * pipeline is minutes to hours, past every sane request deadline (the
+   * client's default is 30 seconds), so a `runWorkflow` that answered at the
+   * end would hand a client a timeout for a run that is spending money
+   * perfectly happily. It therefore answers with a {@link WorkflowRunHandle}
+   * as soon as the run is accepted — the run id, the pipeline's shape, and the
+   * ceilings that actually bind it — and the run itself is followed on the
+   * session's own event stream.
+   *
+   * **There is no second event channel.** Every step republishes its child
+   * agent onto the session stream as a namespaced sub-agent, and each progress
+   * event becomes the same `notice` the terminal prints, from the same
+   * function. A client that called `openSession` is already subscribed to all
+   * of it. The durable half is `workflowStatus`, which reads the run journal
+   * the engine already writes — not a second record kept for the wire.
+   *
+   * ### `budgetUsd` may only ever lower the ceiling
+   *
+   * The workflow file's own `budgetUsd:` is the authority. A caller may pass a
+   * **smaller** number to cap this one run further; a larger one is
+   * `invalidRequest`, naming both figures, rather than silently clamped — the
+   * client can read the file's ceiling from `listWorkflows` before it asks, so
+   * the refusal is actionable, and a client told "fine" that got a different
+   * ceiling would render a number the engine is not enforcing. A non-positive
+   * value is refused for the opposite reason: `0` means "disabled" to the cost
+   * guard, so accepting it would *widen* an otherwise-bounded run. A file with
+   * no ceiling of its own accepts any positive value, because bounding an
+   * unbounded run is a narrowing too.
+   *
+   * Nothing else on this wire can be raised either. The file's
+   * `stepTimeoutMs`, each role's `maxTurns`, each role's declared `tools:` and
+   * the engine's permission rules all still bind exactly as they do for the
+   * person at the terminal, and none of them has a parameter here.
+   *
+   * **Not degradable**, on the `deleteSession`/`setPermissionMode`
+   * counter-precedent and for a sharper reason than either. A client told
+   * "started" by an engine that ignored the request believes a review pipeline
+   * ran, reads a verdict that was never produced, and merges on it. An older
+   * engine's `invalidRequest` rejects like any other failure. See
+   * `ProtocolClient.runWorkflow`.
+   */
+  | {
+      id: string;
+      method: "runWorkflow";
+      params: { sessionId: string; name: string; input?: string; budgetUsd?: number };
+    }
+  /**
+   * What a run reached: which stage, how many turns, what it spent, and why it
+   * stopped.
+   *
+   * Answered from the run journal — the append-only record `/workflow status`
+   * already reads — so a run started in a terminal is legible from a panel and
+   * vice versa, and a run interrupted by a crash reports the same thing to
+   * both. Nothing here is a second bookkeeping record kept for the wire.
+   *
+   * Not session-scoped: runs live under the served home, so this is shaped
+   * like `listModels`. A run started by *any* client, or by the terminal, is
+   * visible to all of them, which is the point.
+   *
+   * ### Two shapes, one verb
+   *
+   * - **`runId` omitted** — every recent run as a summary row: state, stage
+   *   reached, steps done, spend, turns, and any `ORG-ASK:` it is waiting on.
+   * - **`runId` given** — that one run, plus its per-step breakdown.
+   *
+   * The split is `pendingChanges`' split, for `pendingChanges`' reason: a
+   * listing is a menu and a menu must stay small, while the step rows are what
+   * a person opens one run to read.
+   *
+   * An id with no journal on this engine answers **zero rows**, not an error.
+   * That is not a softening: `isUnsupportedMethodError` reads every
+   * `invalidRequest` as "this engine does not know the verb", so a read that
+   * refused in-band would be indistinguishable from an older engine and a
+   * client would degrade it to `undefined`. Zero rows for a *named* run is
+   * unambiguous on its own — only the listing form can legitimately be empty.
+   * It is the rule `pendingChanges` already keeps by answering `dryRun: false`
+   * instead of erroring.
+   *
+   * **Optional and additive**, degrading like `listModels`: read-only, so an
+   * older engine's `invalidRequest` costs a client its run view and no
+   * guarantee. See `ProtocolClient.workflowStatus`.
+   */
+  | { id: string; method: "workflowStatus"; params: { runId?: string } }
+  /**
+   * Re-enter an interrupted run where it left off — optionally carrying the
+   * answer to an `ORG-ASK:`.
+   *
+   * **Resume is not a re-run.** Completed steps are replayed from the journal
+   * rather than executed again, and a write-lane patch that already landed is
+   * probed with `git apply --check --reverse` before anything decides to apply
+   * it a second time. That property belongs to the engine and is not
+   * re-implemented here; this verb is the door to it.
+   *
+   * `answer` settles the paused stage. A run stopped at an `ORG-ASK:` needs a
+   * person's words, not merely a nudge: resuming one without an `answer` is
+   * accepted and simply re-surfaces the question, which is what the terminal
+   * does, so a client can offer "remind me" and "here is my answer" as the two
+   * things they are.
+   *
+   * Answers with a {@link WorkflowRunHandle} whose `resumed` is `true`, and is
+   * followed on the session event stream exactly as `runWorkflow` is.
+   *
+   * **Not degradable**, on `runWorkflow`'s terms plus one of its own: an
+   * answer to a human gate that silently went nowhere leaves a run paused
+   * forever while the person who answered it believes the pipeline is moving.
+   * See `ProtocolClient.resumeWorkflow`.
+   */
+  | {
+      id: string;
+      method: "resumeWorkflow";
+      params: { sessionId: string; runId: string; answer?: string };
+    };
 
 /**
  * One piece of context a client attaches to a `prompt`.
@@ -1035,6 +1480,635 @@ export interface DiscardChangesResult {
   remaining: number;
 }
 
+/**
+ * Lifecycle of one background agent.
+ *
+ * `interrupted` is not `failed`: it means the record was still `running` when
+ * a manager loaded it from disk, which happens when the process that owned it
+ * exited without finishing. There is no error from the agent itself — just an
+ * unfinished run. It is also the state a client is most likely to see and
+ * misread, which is why it is named on the wire rather than folded into
+ * `failed`.
+ *
+ * There is deliberately no `queued`: a queued agent reports `running`, and
+ * whether it has actually begun is {@link BackgroundAgentSummary.startedAt}
+ * being present. That is the engine's own model, restated rather than
+ * improved on — a wire that split the states would disagree with `/bg`.
+ */
+export type BackgroundAgentState = "running" | "done" | "failed" | "cancelled" | "interrupted";
+
+/**
+ * The transcript of one background agent, rendered.
+ *
+ * **Lines, not messages.** The engine renders with the same function `/bg
+ * logs` prints through, so a transcript reads identically in a panel and in a
+ * terminal; a wire that carried the raw `Message[]` would be handing every
+ * client the job of writing a second renderer that could drift from the first.
+ * It also keeps tool *arguments* — which is where a model's own untrusted text
+ * ends up — already flattened and length-capped rather than arriving as
+ * structure a client might render as its own UI.
+ *
+ * Bounded. See {@link BackgroundAgentTranscript.truncated}.
+ */
+export interface BackgroundAgentTranscript {
+  /** The rendered lines, oldest first. */
+  lines: string[];
+  /**
+   * Whether the **oldest** lines were dropped to fit the response budget.
+   *
+   * Reported rather than left to be inferred, for the reason
+   * {@link SessionHistory.truncated} gives: a transcript that starts
+   * mid-conversation and says nothing about it reads as the whole
+   * conversation. Truncation drops from the front because the interesting end
+   * of an unattended run is the end.
+   */
+  truncated: boolean;
+  /** How many lines were dropped from the front. `0` when not truncated. */
+  droppedLines: number;
+}
+
+/**
+ * One background agent, as the wire reports it.
+ *
+ * A row is metadata by default. {@link BackgroundAgentSummary.transcript} is
+ * present only on a single-id `backgroundAgents` fetch — see that verb's doc
+ * for why the listing carries no transcripts.
+ *
+ * ### What is here and what is not
+ *
+ * Token counts are not. The engine tracks them per agent, but the one figure a
+ * `/bg` listing is read for is spend, and a second usage payload on this wire
+ * would be a second place for numbers a client is already being given in
+ * dollars to disagree with themselves. `costUsd` is what the terminal's
+ * listing shows, and it is what this carries.
+ */
+export interface BackgroundAgentSummary {
+  /** Short id, e.g. `bg-a1b2c3d4`. This is what every other `/bg` verb names. */
+  id: string;
+  /**
+   * The child conversation's own session id.
+   *
+   * Carried because a background agent's session is an ordinary session in an
+   * ordinary store, and naming it is what lets a client say *which* one. It is
+   * **not** a session this connection can `openSession` on: the child lives in
+   * the manager's own store, not the served one, so a client that tried would
+   * get `sessionNotFound`. Ask this verb for the transcript instead.
+   */
+  sessionId: string;
+  /**
+   * The task the agent was given, capped for the wire. See
+   * {@link BackgroundAgentSummary.finalText} for why these three strings are
+   * previews rather than the whole thing.
+   */
+  task: string;
+  /** Catalog id of the model it ran with. */
+  modelId: string;
+  /** Where it stands. */
+  status: BackgroundAgentState;
+  /** When it was started, as epoch milliseconds. */
+  createdAt: number;
+  /**
+   * When it actually began its first turn. Absent while it is still queued
+   * behind the engine's concurrency cap — which is the only way to tell a
+   * queued agent from a running one, since both report `running`.
+   */
+  startedAt?: number;
+  /** When it reached a terminal status. Absent while it is still going. */
+  endedAt?: number;
+  /** Wall-clock time since it began (or since it was queued), in milliseconds. */
+  elapsedMs: number;
+  /**
+   * Best-effort spend, in USD.
+   *
+   * `0` for an agent that has not billed a priced turn yet — which includes an
+   * agent running on a model the catalog publishes no pricing for. The engine
+   * cannot distinguish those two on this field alone, and neither can the
+   * terminal's own listing; a client that needs certainty about an unpriced
+   * model reads the catalog.
+   */
+  costUsd: number;
+  /**
+   * The last assistant message's text — **a preview, not the whole answer**.
+   *
+   * Capped, along with `task` and `error`, and the cap is part of the contract
+   * rather than an accident: this field is model output, so it is unbounded at
+   * the source, and a listing of a hundred agents that carried every one in
+   * full would be the megabytes-long frame that wedges a socket exactly when
+   * somebody is trying to find out what their agents did.
+   *
+   * A client that wants the whole thing does not read it from here. The rendered
+   * transcript carries the conversation, and `adoptBackgroundAgent` delivers the
+   * complete final text into a session without it ever crossing this field.
+   */
+  finalText?: string;
+  /** Why it failed, or why it was interrupted, capped like `finalText`. Absent otherwise. */
+  error?: string;
+  /** Present only on a single-id fetch. See {@link BackgroundAgentTranscript}. */
+  transcript?: BackgroundAgentTranscript;
+}
+
+/** The `backgroundAgents` result. */
+export interface BackgroundAgentList {
+  /**
+   * The agents the engine knows about, newest first. Empty when there are none
+   * — a different and honest answer from the `invalidRequest` an engine with no
+   * such verb sends, and also the answer for an `id` that names nothing.
+   */
+  agents: BackgroundAgentSummary[];
+  /**
+   * Whether the **oldest** rows were dropped to keep the listing bounded.
+   *
+   * A manager remembers every agent it ever started, and a machine that has run
+   * one a day for a year has a listing nobody asked to be unbounded. Reported
+   * rather than left to be inferred, for the reason
+   * {@link SessionHistory.truncated} gives: a list that silently stops reads as
+   * the whole list, and a person looking for an agent they started last month
+   * would conclude it never existed.
+   *
+   * Always `false` for a single-id fetch, which is one row by construction.
+   */
+  truncated: boolean;
+  /** How many rows were dropped from the oldest end. `0` when not truncated. */
+  droppedAgents: number;
+}
+
+/** The `startBackgroundAgent` result: what to ask about next. */
+export interface StartedBackgroundAgent {
+  /** The id every other `/bg` verb names. */
+  id: string;
+  /** The child conversation's session id. See {@link BackgroundAgentSummary.sessionId}. */
+  sessionId: string;
+}
+
+/** The `cancelBackgroundAgent` result. */
+export interface CancelBackgroundAgentResult {
+  /**
+   * Whether the engine took the cancellation.
+   *
+   * `false` means there was nothing to cancel — the agent had already settled,
+   * or belonged to a process that is gone. It is **not** a failure, and it is
+   * distinct from the agent's `status` below precisely because a cancel that
+   * was accepted usually leaves the row still saying `running`: aborting a
+   * child cascades through its run loop and the transition lands afterwards.
+   */
+  accepted: boolean;
+  /** The agent's row as it stands now, without a transcript. */
+  agent: BackgroundAgentSummary;
+}
+
+/** The `adoptBackgroundAgent` result. */
+export interface AdoptBackgroundAgentResult {
+  /** The background agent whose result was delivered. */
+  agentId: string;
+  /**
+   * How it reached the session: `"steer"` into a run already in flight, or
+   * `"prompt"` as a fresh turn.
+   *
+   * Reported because the two are observably different — a steer lands after
+   * the current tool call and a prompt starts a turn — and a client that
+   * rendered them the same would show a message appearing at a moment it
+   * cannot explain.
+   */
+  delivered: "prompt" | "steer";
+}
+
+/**
+ * Whether an org-memory entry is inert or in force.
+ *
+ * Only `active` entries are ever rendered into a role's prompt. `proposed` is
+ * the state everything a model suggests lands in, and the only thing that
+ * moves an entry out of it is a person at the machine — see
+ * `proposeOrgMemory` for why that gate has no verb on this wire.
+ */
+export type OrgMemoryStatus = "proposed" | "active";
+
+/**
+ * One per-role lesson in the org-memory store.
+ *
+ * The store's own bounds have already been applied by the time an entry
+ * reaches here: one line, at most 160 characters, control and bidi characters
+ * stripped, no `ORG-ASK:`/`ORG-HALT:`/`ARCTURN-PATCH:` marker and no fence
+ * delimiter. Those bounds are re-applied on *read*, not only on write, so an
+ * entry that fails them is dropped with a warning rather than repaired — which
+ * is why {@link OrgMemoryList.warnings} exists.
+ */
+export interface OrgMemoryEntry {
+  /** Short id, e.g. `m4c1e9`. What `revokeOrgMemory` names. */
+  id: string;
+  /** The role this lesson is appended to, normalized (lowercase, `[a-z0-9-]`). */
+  role: string;
+  /** The lesson. One line, already sanitized and length-capped. */
+  text: string;
+  /** Inert, or in force. */
+  status: OrgMemoryStatus;
+  /** When it was filed, as epoch milliseconds. */
+  createdAt: number;
+  /**
+   * Where it came from — `operator` for one a person filed, `remote` for one
+   * proposed over this wire. A short, character-restricted tag, never prose.
+   *
+   * Carried because provenance is what a person approving an entry most needs
+   * and cannot otherwise see: an entry that arrived over a socket and one
+   * typed at the keyboard read identically once they are both text in a list.
+   */
+  origin?: string;
+}
+
+/** The `orgMemory` (and `revokeOrgMemory`) result. */
+export interface OrgMemoryList {
+  /**
+   * Every entry, `proposed` and `active` alike, sorted by role and then by id
+   * so two reads of an unchanged store compare equal.
+   */
+  entries: OrgMemoryEntry[];
+  /**
+   * What the store's bounds rejected on this read: an over-large file, an
+   * entry dropped for failing a cap.
+   *
+   * Engine-authored sentences, never an entry's own text — the same rule
+   * {@link McpServerSummary} keeps by leaving a server's error prose behind.
+   * Present because a client that saw only `entries` could not tell an empty
+   * store from a refused one.
+   */
+  warnings: string[];
+}
+
+/** The `proposeOrgMemory` result. */
+export interface OrgMemoryProposal {
+  /**
+   * The entry as filed. Its `status` is always `"proposed"` — there is no
+   * request field that could make it anything else.
+   */
+  entry: OrgMemoryEntry;
+  /** The store as it now stands. */
+  store: OrgMemoryList;
+}
+
+/**
+ * One turn a client could rewind to, and what rewinding to it would cost.
+ *
+ * The cost fields are the reason this type is not three fields. A picker row
+ * reading "14:32 — add rate limiting" tells a person when, not what: rewinding
+ * to that turn might rewrite one file or delete nine, and those are different
+ * decisions. So every row carries the plan the engine computed for it, and the
+ * client renders the price next to the offer.
+ */
+export interface CheckpointEntry {
+  /** Opaque turn id — what {@link ClientRequest} `rewindTo` is sent. */
+  id: string;
+  /**
+   * The turn's label: the first ~60 characters of the prompt that began it.
+   *
+   * Model- and user-influenced text heading for a menu a person clicks, so it
+   * is sanitized exactly as a skill description is — first line only, control
+   * characters dropped, length-capped — on the way out of the engine.
+   */
+  label: string;
+  /** When the turn began, ms since the epoch. */
+  timestamp: number;
+  /**
+   * How many files a rewind to this point would touch — `files.length` plus
+   * whatever the cap dropped.
+   *
+   * Reported separately from `files` so a truncated list still yields an
+   * honest number. This is **not** "files changed during this turn": it is the
+   * size of the plan, which spans this turn and every turn after it.
+   */
+  fileCount: number;
+  /**
+   * How many of those would be **deleted** — files that did not exist at this
+   * point and would be removed.
+   *
+   * Split out because the two halves are not equally alarming. "12 files
+   * rewritten" is a revert; "12 files deleted" is an afternoon gone, and a
+   * modal that folded them into one number would let a person approve the
+   * second while reading the first.
+   */
+  deleteCount: number;
+  /**
+   * The paths, workspace-relative and `/`-separated, sorted — the spelling
+   * {@link PendingChange.path} uses, for the same reason: it is what a person
+   * reads and what a panel renders next to a file icon.
+   *
+   * Bounded. A path the engine would **refuse** to touch (a manifest record
+   * outside the workspace) is not listed here at all and is not counted: this
+   * is what would happen, not what was recorded.
+   */
+  files: string[];
+  /** Whether `files` was cut to fit the cap. `fileCount` is still exact. */
+  truncatedFiles: boolean;
+  /**
+   * Whether the engine can also **fork the conversation** to this point, or
+   * only restore the files.
+   *
+   * `false` for a turn whose conversation link predates this process — a
+   * session resumed from disk has snapshots but no in-memory record of which
+   * transcript entry each turn began at. The terminal says so rather than
+   * guessing a fork point, and so does this: a client that rendered every row
+   * identically would promise a transcript fork it is not going to get.
+   */
+  forksConversation: boolean;
+  /**
+   * The token `rewindTo` must echo back.
+   *
+   * A digest of the plan above — not a server-kept nonce. It ties a rewind to
+   * the *cost that was displayed*: a client cannot rewind to a state it never
+   * showed the user, because a plan that has since changed produces a
+   * different digest and the engine refuses. Opaque; compare it, do not parse
+   * it, and do not construct one.
+   */
+  confirmation: string;
+}
+
+/**
+ * The `listCheckpoints` result: the turns this session could be rewound to.
+ *
+ * Newest first, which is the order a picker wants and the order the terminal's
+ * own `/rewind` shows.
+ */
+export interface CheckpointList {
+  /** The session this was asked about. */
+  sessionId: string;
+  /** The rewindable turns, newest first. */
+  checkpoints: CheckpointEntry[];
+  /**
+   * Whether this engine can rewind at all.
+   *
+   * `false` means no checkpoint store is wired to this host — the same shape
+   * {@link PendingChanges.dryRun} has, and kept apart from an empty list for
+   * the same reason. "Nothing has been checkpointed yet" and "nothing will
+   * ever be checkpointed here" are opposite pieces of news, and a panel must
+   * not show the reassuring one for the other.
+   */
+  available: boolean;
+  /**
+   * Whether rows were dropped to fit the caps.
+   *
+   * Reported explicitly for the reason {@link SessionHistory.truncated} is: a
+   * list that silently stops short reads as the whole list, and here that
+   * would mean a person believing an earlier turn is unreachable when it is
+   * simply not shown.
+   */
+  truncated: boolean;
+  /** How many rows were dropped from the **oldest** end. `0` when not truncated. */
+  droppedCheckpoints: number;
+}
+
+/** One file a rewind could not touch, and why. */
+export interface RewindFailure {
+  /** The path, as {@link CheckpointEntry.files} would have spelled it. */
+  path: string;
+  /** The engine's reason, in one sentence. */
+  message: string;
+}
+
+/**
+ * The `rewindTo` result.
+ *
+ * Every field is a count of something that happened on a disk, which is the
+ * point: a status would be indistinguishable from the failure this verb most
+ * needs to rule out. A per-file failure does not fail the request — the rest
+ * still land and the ones that did not are named — which is what the
+ * terminal's `/rewind` does, from the same restorer.
+ */
+export interface RewindResult {
+  /** The session this was asked of. */
+  sessionId: string;
+  /** The checkpoint restored to. */
+  checkpointId: string;
+  /** Paths whose earlier content was written back. */
+  restored: string[];
+  /** Paths removed because they did not exist at that point. */
+  deleted: string[];
+  /** Paths that could not be touched, with a reason each. */
+  failed: RewindFailure[];
+  /**
+   * Whether the conversation was forked back as well.
+   *
+   * `false` when only the files moved — see
+   * {@link CheckpointEntry.forksConversation}. A client that sees `false`
+   * should say so: the transcript on screen still describes work that is no
+   * longer on disk.
+   */
+  conversationForked: boolean;
+}
+
+/**
+ * Which of the three dispatch lanes a workflow role's step runs on, as the
+ * engine **derives** it from that role's declared `tools:`.
+ *
+ * The three real lanes are the ones `roleDispatch` answers with:
+ *
+ * - `"read"` — no write and no shell. Runs as an ordinary child agent, cannot
+ *   execute and cannot touch a file.
+ * - `"exec"` — declares `bash` and no write tool. Runs in a throwaway seeded
+ *   worktree; its diff is never captured and never applied.
+ * - `"write"` — declares `write`, `edit` or `multiedit`. Runs in a seeded
+ *   worktree whose diff is captured to a patch and applied to the user's
+ *   checkout when the step succeeds.
+ *
+ * The other two are not lanes at all; they are the two honest ways a lane can
+ * be *unknowable*, and they exist so a catalog never has to guess:
+ *
+ * - `"unknown"` — the step names a role this engine has not loaded. The run
+ *   fails pre-flight, before a token is spent.
+ * - `"undeclared"` — the role loaded but declares no `tools:` at all, which
+ *   dispatch refuses outright rather than reading as "the read lane".
+ *
+ * Reporting either of those as `"read"` would be the one wrong answer: it
+ * would tell a person a pipeline is harmless when what is actually true is
+ * that nobody can say.
+ */
+export type WorkflowRoleLane = "read" | "exec" | "write" | "unknown" | "undeclared";
+
+/** One `@role` a workflow dispatches to, with the lane the engine derived. */
+export interface WorkflowRoleSummary {
+  /** Role name as written after `@`, lowercased. */
+  name: string;
+  /** The derived lane. Never read off the role's own prose — see {@link WorkflowRoleLane}. */
+  lane: WorkflowRoleLane;
+}
+
+/** One discovered workflow, as a catalog row. */
+export interface WorkflowSummary {
+  /** Name a `runWorkflow` names, normalized to `[a-z0-9-]`. */
+  name: string;
+  /**
+   * One line of help, `""` when the file set none.
+   *
+   * Sanitized exactly as a {@link CommandDescriptor.description} is — first
+   * line only, control characters collapsed, length-capped. A workflow under
+   * `<cwd>/.arcturn/workflows` is content a cloned repository controls, and
+   * this string lands in a menu a person reads and clicks.
+   */
+  description: string;
+  /**
+   * Absolute path of the markdown file it was loaded from, so a menu can show
+   * provenance and a person can tell a project's pipeline from their own.
+   */
+  source: string;
+  /** How many stages the file defines. */
+  stages: number;
+  /** How many steps across every stage (a parallel stage contributes each branch). */
+  steps: number;
+  /**
+   * The run-scope USD ceiling from the file's own `budgetUsd:`, when it set
+   * one. Absent means the file bounds nothing, which is a fact a client should
+   * say rather than round to zero.
+   *
+   * This is also the ceiling `runWorkflow`'s own `budgetUsd` may lower and may
+   * not raise, which is why a catalog that omitted it would leave a client
+   * guessing at a refusal it could have avoided.
+   */
+  budgetUsd?: number;
+  /** Per-step wall-clock ceiling from `stepTimeoutMs:`, when the file set one. */
+  stepTimeoutMs?: number;
+  /**
+   * Every `@role` the pipeline dispatches to, in first-appearance order,
+   * deduplicated — with the lane derived for each.
+   */
+  roles: WorkflowRoleSummary[];
+}
+
+/** The `listWorkflows` result. */
+export interface WorkflowCatalog {
+  /** Every discovered workflow, sorted by name so every client's menu agrees. */
+  workflows: WorkflowSummary[];
+}
+
+/**
+ * What `runWorkflow` and `resumeWorkflow` answer with: the run was accepted,
+ * and here is what binds it.
+ *
+ * Deliberately not an outcome. See `ClientRequest`'s `runWorkflow` for why the
+ * verb answers on acceptance; the outcome arrives on the session event stream
+ * and is read back durably with `workflowStatus`.
+ */
+export interface WorkflowRunHandle {
+  /** The run's id — what `workflowStatus` and `resumeWorkflow` name. */
+  runId: string;
+  /** The workflow that is running. */
+  workflow: string;
+  /** The session whose event stream carries this run. */
+  sessionId: string;
+  /** Stages in the pipeline. */
+  stages: number;
+  /** Steps across every stage. */
+  steps: number;
+  /**
+   * The USD ceiling **actually in force** for this run — the file's own, or
+   * the smaller number the caller asked for.
+   *
+   * Echoed rather than left to be inferred: a client that lowered the ceiling
+   * and a client that did not must be able to render the same field and be
+   * right both times.
+   */
+  budgetUsd?: number;
+  /** The per-step wall-clock ceiling in force. */
+  stepTimeoutMs?: number;
+  /** `true` when this re-entered an existing run's journal rather than starting one. */
+  resumed: boolean;
+}
+
+/**
+ * The state a run is rendered in — the one-glance "is it hung?" answer, as the
+ * journal fold computes it.
+ *
+ * `"stalled"` and `"resumable"` are the two that make this more than a status
+ * enum: a run whose newest journal line is older than its own step deadline is
+ * stalled (the process that was writing it is gone), and one that stopped
+ * without a terminal line is resumable. Collapsing either into `"running"`
+ * would tell a person to keep waiting for a run nothing is running.
+ */
+export type WorkflowRunState =
+  | "running"
+  | "done"
+  | "failed"
+  | "cancelled"
+  | "paused"
+  | "stalled"
+  | "resumable"
+  | "unknown";
+
+/** One unanswered `ORG-ASK:`, and the step that raised it. */
+export interface WorkflowRunQuestion {
+  /** The step that asked — what a resume addresses. */
+  stepId: string;
+  /**
+   * The question text after the marker.
+   *
+   * Model-written prose heading for a UI, so it is sanitized on the way out of
+   * the engine exactly as a skill description is.
+   */
+  question: string;
+}
+
+/** One step of a run, as the journal recorded it. */
+export interface WorkflowRunStepStatus {
+  /** Positional id: `"2"` for a lone step, `"2.1"` for its first branch. */
+  id: string;
+  /** 1-based stage. */
+  stage: number;
+  /** 0-based branch within a parallel stage. */
+  branch?: number;
+  /** The `@role` it dispatched to, when it named one. */
+  agent?: string;
+  /** The `[tag]` it carried, when it carried one. */
+  modelTag?: string;
+  /** Terminal status, or `"running"` while its `stepEnd` line is still missing. */
+  status: "running" | "done" | "failed" | "skipped" | "cancelled" | "paused";
+  /** Tokens the step reported. */
+  tokens?: number;
+  /** Attempts, when the self-healing retry needed more than one. */
+  attempts?: number;
+  /**
+   * What happened to this step's diff: `applied`, `refused`, `empty`,
+   * `discarded` or `captured`. Absent for a step that ran on the read lane.
+   */
+  patch?: string;
+  startedAt?: number;
+  endedAt?: number;
+}
+
+/** One run, as `workflowStatus` reports it. */
+export interface WorkflowRunStatus {
+  runId: string;
+  /** The workflow that ran; `""` when the journal never recorded a header. */
+  workflow: string;
+  state: WorkflowRunState;
+  /** The stage it reached. */
+  stage?: number;
+  stageCount: number;
+  stepsDone: number;
+  stepsTotal: number;
+  /** Cumulative spend, as the run's own budget line recorded it. */
+  spentUsd?: number;
+  /** Model turns burned. */
+  turns?: number;
+  /** Why it halted, when it halted for a named condition. */
+  stopReason?: string;
+  startedAt?: number;
+  /** Wall clock of the newest journal line — the staleness signal behind `"stalled"`. */
+  updatedAt?: number;
+  /**
+   * Every `ORG-ASK:` the run is waiting on, in journal order. Empty unless it
+   * is paused.
+   *
+   * A list rather than one question because a *stage* pauses: a parallel stage
+   * whose branches each ask owes an answer for each of them, and a client
+   * shown one of three would resume into an immediate second pause.
+   */
+  questions: WorkflowRunQuestion[];
+  /** Per-step rows. Present only when one run was asked for by id. */
+  steps?: WorkflowRunStepStatus[];
+}
+
+/** The `workflowStatus` result. */
+export interface WorkflowRuns {
+  /** Newest first. One element when a `runId` was named. */
+  runs: WorkflowRunStatus[];
+}
+
 /** Server → client responses and notifications. */
 export type ServerMessage =
   | { kind: "response"; id: string; result: unknown }
@@ -1092,6 +2166,29 @@ export type ServerMessage =
  *   "fine" by a server that did nothing would report freed context that was
  *   never freed, keep filling the window, and hit the wall it had just asked
  *   to have moved. It rejects.
+ *
+ * The rewind verbs are the last word on it so far, and they split the same way
+ * a third time. `listCheckpoints` degrades to `undefined` — it reads, and a
+ * client that gets nothing offers no rewind picker, which is exactly what it
+ * knows. `rewindTo` does **not**, and it is the strongest case in this file:
+ * `applyChanges` silently doing nothing tells a reviewer their change landed
+ * while the file says otherwise, and `rewindTo` silently doing nothing tells a
+ * user their files went back to a state they never returned to — so they carry
+ * on building on code they believe they discarded. It rejects.
+ *
+ * The workflow verbs split the same way a fourth time, and they are the
+ * clearest illustration of why the question is per verb rather than per
+ * feature — one feature, four verbs, two answers:
+ *
+ * - `listWorkflows` and `workflowStatus` degrade to `undefined`, on the
+ *   `listModels` precedent. Both read. A client that gets nothing offers no
+ *   workflow menu and no run view, which is exactly what it knows.
+ * - `runWorkflow` and `resumeWorkflow` do **not**. They start work that spends
+ *   real money and can apply a write-lane role's patch to the user's checkout,
+ *   so a client told "started" by an engine that ignored the request believes
+ *   a review pipeline ran and merges on a verdict nobody produced — and an
+ *   `ORG-ASK` answer that silently went nowhere leaves a run paused forever
+ *   while the person who answered believes it is moving. Both reject.
  *
  * A bump, by contrast, is a hard break in
  * both directions — `SessionHeader.version` is stamped with `1` and validated

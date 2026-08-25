@@ -624,6 +624,39 @@ describe("the panel's own messages", () => {
     expect(ledger.messages.filter((m) => m.message.startsWith("Discard "))).toEqual([]);
   });
 
+  it("routes a rewind at the engine, and never at the filesystem", async () => {
+    const panel = open();
+    panel.send({ type: "requestCheckpoints" });
+    panel.send({
+      type: "rewindTo",
+      checkpointId: "turn-1",
+      confirmation: "deadbeefdeadbeefdeadbeefdeadbeef",
+    });
+    await Promise.resolve();
+    // The panel has no other way to restore or delete a file, which is the
+    // point: RFC 0004 §0 forbids the extension writing a workspace file, and a
+    // rewind performed here would be one no permission engine and no workspace
+    // confinement ever saw.
+    const dropped = (ledger.outputs[0]?.lines ?? []).filter((line) =>
+      line.includes("dropped an unrecognised webview message"),
+    );
+    expect(dropped).toHaveLength(0);
+  });
+
+  it("does not raise the rewind modal when the engine cannot act on it anyway", async () => {
+    const panel = open();
+    panel.send({
+      type: "rewindTo",
+      checkpointId: "turn-1",
+      confirmation: "deadbeefdeadbeefdeadbeefdeadbeef",
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    // Same rule the session delete and the discard keep: a confirmation the
+    // engine could not honour teaches the user their click did nothing.
+    expect(ledger.messages.filter((m) => m.message.startsWith("Rewind to "))).toEqual([]);
+  });
+
   it("replays the model list when the page reloads", async () => {
     const panel = open();
     panel.send({ type: "requestModels" });
@@ -686,5 +719,50 @@ describe("a pasted image, which is the one attachment with no path", () => {
     const panel = open();
     panel.send({ type: "attachImage", data: "AAAA", mimeType: "image/svg+xml" });
     expect(chips(panel)).toHaveLength(0);
+  });
+});
+
+describe("the workflow surface at the host seam", () => {
+  function open(): ReturnType<typeof fakeView> {
+    activate();
+    const panel = fakeView();
+    ledger.views[0]?.provider.resolveWebviewView(panel.view);
+    return panel;
+  }
+
+  it("answers a catalog request even while the engine is down", async () => {
+    const panel = open();
+    panel.send({ type: "requestWorkflows" });
+    await Promise.resolve();
+    const posts = panel.posted().filter((message) => message.type === "workflows");
+    expect(posts.length).toBeGreaterThan(0);
+    // "loading", not an empty catalog: the panel must not tell a user this
+    // workspace defines no pipelines when what happened is that nobody has
+    // asked yet. The same distinction the model list draws.
+    const view = posts.at(-1)?.view as { status: string; workflows: unknown[] };
+    expect(view.status).toBe("loading");
+    expect(view.workflows).toEqual([]);
+  });
+
+  it("raises a native modal before a run, and starts nothing when it is dismissed", async () => {
+    const panel = open();
+    panel.send({ type: "runWorkflow", name: "ship-fix" });
+    await Promise.resolve();
+    await Promise.resolve();
+    // The engine is down here, so the catalog fetch fails and the run never
+    // reaches a modal — what matters is that nothing was executed as a VS Code
+    // command and no engine call escaped, which is the containment this seam
+    // owns. The modal's own words are `workflows.test.ts`'s to prove.
+    expect(ledger.executed).toEqual([]);
+  });
+
+  it("drops a run message whose name the boundary refuses", () => {
+    const panel = open();
+    panel.send({ type: "runWorkflow", name: "" });
+    panel.send({ type: "resumeWorkflow", runId: "" });
+    const dropped = (ledger.outputs[0]?.lines ?? []).filter((line) =>
+      line.includes("dropped an unrecognised webview message"),
+    );
+    expect(dropped).toHaveLength(2);
   });
 });

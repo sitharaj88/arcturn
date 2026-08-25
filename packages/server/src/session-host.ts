@@ -7,19 +7,32 @@
 import { resolve, sep } from "node:path";
 import { type Agent, createSessionId } from "@arcturn/core";
 import {
+  validateBackgroundAgentList,
+  validateCheckpointList,
   validateCommandList,
   validateCompactionSummary,
   validateContextResolution,
   validateMcpStatus,
   validateModelCatalog,
+  validateOrgMemoryList,
+  validateOrgMemoryProposal,
   validatePermissionState,
+  validateRewindResult,
   validateSessionExport,
   validateSessionHistory,
+  validateWorkflowCatalog,
+  validateWorkflowRunHandle,
+  validateWorkflowRuns,
 } from "@arcturn/protocol";
 import type {
+  AdoptBackgroundAgentResult,
   AgentEvent,
   AgentEventListener,
   ApplyChangesResult,
+  BackgroundAgentList,
+  BackgroundAgentTranscript,
+  CancelBackgroundAgentResult,
+  CheckpointList,
   CommandDescriptor,
   CompactionSummary,
   ContextResolution,
@@ -27,6 +40,8 @@ import type {
   McpServerSummary,
   ModelCatalogEntry,
   ModelSpec,
+  OrgMemoryList,
+  OrgMemoryProposal,
   PendingChanges,
   PermissionDecision,
   PermissionMode,
@@ -35,13 +50,26 @@ import type {
   PermissionScope,
   PermissionState,
   PromptAttachment,
+  RewindFailure,
+  RewindResult,
   SessionExport,
   SessionHeader,
   SessionHistory,
   SessionStore,
+  StartedBackgroundAgent,
   TranscriptFormat,
   UserContent,
+  WorkflowRunHandle,
+  WorkflowRunStatus,
+  WorkflowSummary,
 } from "@arcturn/types";
+import type { BackgroundAgentRegistry } from "./background-agents.js";
+import {
+  BACKGROUND_TRANSCRIPT_MAX_BYTES,
+  capTranscript,
+  projectBackgroundAgent,
+  projectBackgroundAgents,
+} from "./background-agents.js";
 import {
   createDryRunReview,
   type DryRunOverlay,
@@ -49,6 +77,8 @@ import {
   type DryRunReview,
   type PendingChangesLimits,
 } from "./dry-run.js";
+import type { OrgMemoryStoreAccess } from "./org-memory.js";
+import { projectOrgMemory, projectOrgMemoryEntry } from "./org-memory.js";
 import {
   ContextRefusedError,
   type ContextResolver,
@@ -56,11 +86,19 @@ import {
   visionRefusalMessage,
 } from "./prompt-context.js";
 import {
+  buildCheckpointList,
+  type CheckpointListLimits,
+  checkpointConfirmation,
+  type SessionCheckpoints,
+  workspaceRelative,
+} from "./rewind.js";
+import {
   buildSessionExport,
   type SessionExportLimits,
   type TranscriptExporter,
 } from "./session-export.js";
 import { buildSessionHistory, type SessionHistoryLimits } from "./session-history.js";
+import type { AcceptedWorkflowRun, WorkflowResult, WorkflowService } from "./workflows.js";
 
 /** Machine-readable failure kinds surfaced by {@link SessionHost}. */
 export type SessionHostErrorCode = "sessionNotFound" | "sessionBusy" | "invalidRequest";
@@ -286,6 +324,124 @@ export interface SessionHostOptions {
    */
   pendingChangesLimits?: PendingChangesLimits;
   /**
+   * The engine's workflow surface, for the four `/workflow` verbs.
+   *
+   * One injection, four verbs, and deliberately one injection — the rule
+   * `createServeHost` keeps after the `resolveModel`/`modelCatalog` pair
+   * drifted apart once and became a real routing bug. `listWorkflows` shows a
+   * catalog, `runWorkflow` runs something out of it, `workflowStatus` reads
+   * the journal that run wrote and `resumeWorkflow` re-enters it; two of those
+   * reading different roots would mean running a pipeline nobody was shown, or
+   * resuming work nobody asked about.
+   *
+   * Injected for the reason {@link SessionHostOptions.dryRunOverlay} is: the
+   * workflow engine is `@arcturn/cli`'s, this package cannot depend on it, and
+   * the thing a remote caller reaches has to be *the same engine* the
+   * terminal's `/workflow` drives — same parser, same lane classifier, same run
+   * journal. See `workflows.ts` and `@arcturn/cli`'s `serve-workflows.ts`.
+   *
+   * Omitted, this host is an engine with no workflow support: the two reads
+   * answer empty and the two runs **refuse**, saying so. That split is the one
+   * this file draws everywhere — a read that finds nothing is honest, a run
+   * that quietly did not start is the failure the verb exists to prevent.
+   */
+  workflows?: WorkflowService;
+  /**
+   * The served runtime's per-session checkpoint machinery, for the rewind
+   * verbs.
+   *
+   * One injection, two verbs, and deliberately one injection — the rule
+   * `createServeHost` keeps after the `resolveModel`/`modelCatalog` pair
+   * drifted apart once and became a real routing bug. `listCheckpoints` reads
+   * this provider's plans and `rewindTo` applies them, so a client can never
+   * be shown a cost by one object and have a different one charged by another.
+   * Here the stakes are the highest on this wire: the two halves disagreeing
+   * would mean deleting files nobody was shown.
+   *
+   * Injected for the reason {@link SessionHostOptions.dryRunOverlay} is: the
+   * checkpoint store lives in `@arcturn/cli` (`createCheckpointStore`, wired
+   * per session by `buildSessionAgent`), this package cannot depend on it, and
+   * the restorer a remote client reaches has to be *the same object* the TUI's
+   * `/rewind` drives — workspace confinement, content-addressed blobs, atomic
+   * writes and all. See `rewind.ts`.
+   *
+   * Omitted, this host keeps no checkpoints: `listCheckpoints` answers
+   * `available: false` (a fact a client needs, not an error) and `rewindTo`
+   * refuses with a sentence saying so. That is different again from an engine
+   * that has no such verb at all, which a client learns from the
+   * `invalidRequest` an older server sends.
+   */
+  checkpoints?: SessionCheckpoints;
+  /**
+   * Bounds on the payload {@link SessionHost.listCheckpoints} returns. All
+   * default; see `rewind.ts`. Injectable so a test can prove the cap actually
+   * cuts without recording two hundred turns first — the same reason
+   * {@link SessionHostOptions.sessionHistoryLimits} is injectable.
+   */
+  checkpointListLimits?: CheckpointListLimits;
+  /**
+   * The engine's background-agent manager, for the `/bg` verbs.
+   *
+   * One injection, four verbs, and deliberately one injection — the rule
+   * `createServeHost` keeps after the `resolveModel`/`modelCatalog` pair
+   * drifted apart once and became a real routing bug.
+   * {@link SessionHost.backgroundAgents} lists and renders,
+   * {@link SessionHost.startBackgroundAgent} starts,
+   * {@link SessionHost.cancelBackgroundAgent} stops and
+   * {@link SessionHost.adoptBackgroundAgent} delivers a result. Splitting them
+   * would mean a client could be shown a listing by one registry and cancel an
+   * agent in another.
+   *
+   * Injected for the reason {@link SessionHostOptions.dryRunOverlay} is: the
+   * manager lives in `@arcturn/cli`, this package cannot depend on it, and the
+   * registry a remote client reaches has to be *the same object* the terminal's
+   * `/bg` drives — same records directory, same concurrency cap, same default
+   * tool set. See `background-agents.ts`.
+   *
+   * Note what the interface does **not** carry: {@link
+   * BackgroundAgentRegistry.start} takes a task and nothing else, where the
+   * manager's own `start` takes tools, a permission mode, a cwd and a model.
+   * That narrowing is the containment for the one verb here that spends money,
+   * and it is enforced by the type rather than remembered by a caller.
+   *
+   * Omitted, the four verbs refuse with a sentence saying this engine has no
+   * background-agent manager — which is different again from an engine that has
+   * no such verb at all, which a client learns from the `invalidRequest` an
+   * older server sends.
+   */
+  backgroundAgents?: BackgroundAgentRegistry;
+  /**
+   * Byte budget for the transcript {@link SessionHost.backgroundAgents}
+   * returns for one agent. Defaults to
+   * {@link BACKGROUND_TRANSCRIPT_MAX_BYTES}. Injectable so a test can prove the
+   * cap actually cuts without writing a megabyte of conversation first — the
+   * same reason {@link SessionHostOptions.sessionHistoryLimits} is injectable.
+   */
+  backgroundTranscriptMaxBytes?: number;
+  /**
+   * The engine's org-memory store, for the `/org memory` verbs.
+   *
+   * One injection, three verbs, same rule as above:
+   * {@link SessionHost.orgMemory} reads,
+   * {@link SessionHost.proposeOrgMemory} files an inert entry, and
+   * {@link SessionHost.revokeOrgMemory} takes one back.
+   *
+   * There is deliberately **no fourth verb that approves one**, and the
+   * interface is shaped so that there could not be: `propose` has no status
+   * parameter. An `active` entry is standing instruction text in every later
+   * run of its role, and the gate on it is a person at the machine. See
+   * `org-memory.ts` for the argument.
+   *
+   * Injected for the reason the overlay is: the store's path, its bounds, its
+   * sanitizer and its writer all live in `@arcturn/cli`, and the store a remote
+   * client reaches has to be the same file `/org memory` reads.
+   *
+   * Omitted, the three verbs refuse rather than reporting an empty store — an
+   * empty store and an engine that cannot find one are different answers, and
+   * only one of them means "nothing has been proposed yet".
+   */
+  orgMemory?: OrgMemoryStoreAccess;
+  /**
    * Maximum number of concurrently *live* sessions this host will hold (each
    * one is a full agent: LLM connection, tool set, in-memory history).
    * Without a cap, a client could `createSession` in a loop and exhaust
@@ -362,6 +518,21 @@ function unwrapDryRun<T>(result: DryRunResult<T>): T {
   return result.value;
 }
 
+/**
+ * The one refusal for an id no background agent answers to.
+ *
+ * Written once and shared by every verb that takes an id, so a client that
+ * mistypes one gets the same sentence — and the same next step — whichever verb
+ * it sent. Names the listing verb rather than the terminal's `/bg`, because the
+ * reader is a wire client.
+ */
+function unknownBackgroundAgent(id: string): string {
+  return (
+    `No background agent "${id}". Ask backgroundAgents (with no id) for the ones this engine ` +
+    "knows about."
+  );
+}
+
 const DEFAULT_PERMISSION_TIMEOUT_MS = 5 * 60 * 1000;
 /** See {@link SessionHostOptions.maxSessions}. */
 export const DEFAULT_MAX_SESSIONS = 16;
@@ -433,6 +604,25 @@ export class SessionHost {
   readonly #mcpStatus: (() => McpServerSummary[] | Promise<McpServerSummary[]>) | undefined;
   readonly #maxSessions: number;
   readonly #dryRun: DryRunReview;
+  readonly #backgroundAgents: BackgroundAgentRegistry | undefined;
+  readonly #backgroundTranscriptMaxBytes: number;
+  readonly #orgMemory: OrgMemoryStoreAccess | undefined;
+  readonly #checkpoints: SessionCheckpoints | undefined;
+  readonly #checkpointListLimits: CheckpointListLimits;
+  readonly #workflows: WorkflowService | undefined;
+  /**
+   * Workflow runs in flight, by the session whose stream carries them.
+   *
+   * Kept on the host rather than on {@link LiveSession} on purpose: a run
+   * outlives nothing else about a session but it *is* scoped to one, and this
+   * map is the only place two questions are answered — "may this session start
+   * another pipeline right now" and "what does `abort` on this session have to
+   * cancel besides the agent's turn".
+   *
+   * A run removes its own controller when it settles, so an idle session holds
+   * an empty set at most and the map is swept on eviction.
+   */
+  readonly #workflowRuns = new Map<string, Set<AbortController>>();
   readonly #sessions = new Map<string, LiveSession>();
 
   constructor(options: SessionHostOptions) {
@@ -458,6 +648,13 @@ export class SessionHost {
     this.#mcpStatus = options.mcpStatus;
     this.#maxSessions = options.maxSessions ?? DEFAULT_MAX_SESSIONS;
     this.#dryRun = createDryRunReview(options.dryRunOverlay, options.pendingChangesLimits ?? {});
+    this.#backgroundAgents = options.backgroundAgents;
+    this.#backgroundTranscriptMaxBytes =
+      options.backgroundTranscriptMaxBytes ?? BACKGROUND_TRANSCRIPT_MAX_BYTES;
+    this.#orgMemory = options.orgMemory;
+    this.#checkpoints = options.checkpoints;
+    this.#checkpointListLimits = options.checkpointListLimits ?? {};
+    this.#workflows = options.workflows;
   }
 
   /**
@@ -584,7 +781,19 @@ export class SessionHost {
       throw error;
     }
 
-    const history = buildSessionHistory(sessionId, entries, this.#sessionHistoryLimits);
+    // A live session's history is the branch its agent is actually holding.
+    // That only differs from "the newest entry in the file" in one situation,
+    // and it is the one `rewindTo` creates: a fork resumes at an older entry
+    // and appends nothing, so until the next turn the newest entry is the tip
+    // of the branch the fork walked away from. Replaying that would hand a
+    // client the pre-rewind conversation and call it the transcript.
+    const live = this.#sessions.get(sessionId);
+    const history = buildSessionHistory(
+      sessionId,
+      entries,
+      this.#sessionHistoryLimits,
+      live === undefined ? undefined : live.agent.leafEntryId,
+    );
     const validation = validateSessionHistory(history);
     if (!validation.ok) {
       throw new Error(`Session history is not a valid wire payload: ${validation.error}`);
@@ -631,6 +840,16 @@ export class SessionHost {
       throw new SessionHostError(
         "sessionBusy",
         `Session ${sessionId} is running a turn; abort it before deleting it`,
+      );
+    }
+    // A workflow is not a turn — `isBusy` cannot see one — but it is work in
+    // flight, and one of its steps may be applying a patch to the user's
+    // checkout at this moment. Deleting the session out from under it would
+    // silence the only stream reporting that.
+    if ((this.#workflowRuns.get(sessionId)?.size ?? 0) > 0) {
+      throw new SessionHostError(
+        "sessionBusy",
+        `Session ${sessionId} is running a workflow; abort it before deleting the session`,
       );
     }
 
@@ -939,13 +1158,23 @@ export class SessionHost {
   }
 
   /**
-   * Abort the session's current run. A no-op when idle.
+   * Abort the session's current run **and any workflow running on it**. A
+   * no-op when both are idle.
+   *
+   * The workflow half is not an extra: a client's Stop button is one control,
+   * and a pipeline that kept spending after it was pressed — because the button
+   * only ever reached the session's own agent — would be the worst kind of
+   * unresponsive. The signal is the same `AbortSignal` `runWorkflow` was
+   * started with, so in-flight steps are marked `cancelled` and nothing not yet
+   * started begins, exactly as `Ctrl+C` does in the terminal.
    *
    * @throws {SessionHostError} with code `sessionNotFound` when the session
    *   is not live.
    */
   abort(sessionId: string): void {
-    this.#require(sessionId).agent.abort();
+    const session = this.#require(sessionId);
+    for (const controller of this.#workflowRuns.get(sessionId) ?? []) controller.abort();
+    session.agent.abort();
   }
 
   /**
@@ -1377,6 +1606,773 @@ export class SessionHost {
   }
 
   /**
+   * The `/bg` listing, or one agent with its transcript.
+   *
+   * Not session-scoped: background agents belong to the engine. A client may
+   * ask for this before it has opened any session at all.
+   *
+   * Normalized against the wire contract on the way out — the discipline
+   * `listModels` applies, and it matters here for the reason it matters for
+   * `mcpStatus`: the registry is injected, so whatever the adapter hands over,
+   * only what the contract defines can reach a client. A field the manager's
+   * record grows tomorrow cannot ride along.
+   *
+   * An `id` that names no agent answers with an **empty list**. See the code
+   * for why that is a contract requirement and not a shrug.
+   *
+   * @param id - Narrow to one agent and include its rendered transcript.
+   * @throws {SessionHostError} `invalidRequest` when no registry was wired —
+   *   which a client reads as "no background-agent surface here", the same
+   *   single piece of news an older engine's unknown-method refusal is.
+   */
+  async backgroundAgents(id?: string): Promise<BackgroundAgentList> {
+    const registry = this.#requireBackgroundAgents();
+    let payload: BackgroundAgentList;
+    if (id === undefined) {
+      payload = projectBackgroundAgents(registry.list());
+    } else {
+      const record = registry.get(id);
+      // An id nothing matches answers with an **empty list**, not an error, and
+      // that is a contract requirement rather than a convenience. This verb
+      // degrades: `ProtocolClient.backgroundAgents` turns a server-sent
+      // `invalidRequest` into `undefined` because that is the only thing an
+      // older engine's unknown-method refusal can look like, and it cannot tell
+      // the two apart. An `invalidRequest` here would therefore reach a client
+      // as "this engine is too old" and hide the whole surface, over a typo.
+      // `pendingChanges` keeps the same discipline for the same reason, which
+      // is why it answers `dryRun: false` rather than erroring on a read.
+      if (!record) return { agents: [], truncated: false, droppedAgents: 0 };
+      const lines = (await registry.transcript(id)) ?? [];
+      const transcripts = new Map<string, BackgroundAgentTranscript>([
+        [record.id, capTranscript(lines, this.#backgroundTranscriptMaxBytes)],
+      ]);
+      payload = projectBackgroundAgents([record], transcripts);
+    }
+    const validation = validateBackgroundAgentList(payload);
+    if (!validation.ok) {
+      throw new Error(`Background agent listing is not a valid wire payload: ${validation.error}`);
+    }
+    return validation.value;
+  }
+
+  /**
+   * Start one background agent on `task`.
+   *
+   * **The whole of the containment is that this method takes one string.**
+   * Tools, permission mode, working directory and model are the engine's own
+   * defaults — the same ones a `/bg` typed at a terminal gets — and there is no
+   * parameter here, on the wire, or in {@link BackgroundAgentRegistry} to widen
+   * any of them. See `background-agents.ts`.
+   *
+   * Not refused mid-run, unlike `compact` or `applyChanges`: a background agent
+   * is by definition off-thread work, and refusing to start one while the
+   * foreground session happens to be mid-turn would refuse it at exactly the
+   * moment somebody wanted to delegate.
+   *
+   * @throws {SessionHostError} `invalidRequest` when no registry was wired, or
+   *   when the registry rejects the task (an empty one).
+   */
+  startBackgroundAgent(task: string): StartedBackgroundAgent {
+    const registry = this.#requireBackgroundAgents();
+    let started: { id: string; sessionId: string };
+    try {
+      started = registry.start(task);
+    } catch (error) {
+      throw new SessionHostError(
+        "invalidRequest",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    return { id: started.id, sessionId: started.sessionId };
+  }
+
+  /**
+   * Abort one background agent.
+   *
+   * Answers with `accepted` **and** the agent's row, because the two say
+   * different things: aborting a running child cascades through its run loop
+   * and the status transition lands afterwards, so the row a cancel answers
+   * with usually still reads `running`. A client that reported only the row
+   * would tell a person nothing happened.
+   *
+   * @throws {SessionHostError} `invalidRequest` when no registry was wired, or
+   *   when `id` names no agent.
+   */
+  cancelBackgroundAgent(id: string): CancelBackgroundAgentResult {
+    const registry = this.#requireBackgroundAgents();
+    // Looked up first so an unknown id refuses rather than answering
+    // `accepted: false`, which is the answer for an agent that exists and has
+    // already settled. Those are different facts and a client acts on them
+    // differently.
+    if (!registry.get(id)) throw new SessionHostError("invalidRequest", unknownBackgroundAgent(id));
+    const accepted = registry.cancel(id);
+    const after = registry.get(id);
+    if (!after) throw new SessionHostError("invalidRequest", unknownBackgroundAgent(id));
+    return { accepted, agent: projectBackgroundAgent(after) };
+  }
+
+  /**
+   * Deliver a finished background agent's result into a live session.
+   *
+   * ### The text is delivered unexpanded, and that is the point
+   *
+   * A background agent's final text is written by a model. It reaches the
+   * session exactly as the registry composed it — **not** through
+   * {@link SessionHost#buildPromptContent}, so no `@`-mention in it is
+   * resolved and no leading `/name` is expanded. That mirrors the terminal,
+   * whose `/bg adopt` calls `agent.prompt`/`agent.steer` directly, and the
+   * mirroring is load-bearing rather than incidental: expanding mentions here
+   * would let a child agent that wrote `@.env` into its answer make the parent
+   * read that file on the strength of somebody clicking "adopt". `prompt`
+   * expands the mentions a *person* typed. This is not that.
+   *
+   * ### Steer or prompt
+   *
+   * A session mid-run is steered — the message lands after the current tool
+   * call — and an idle one is prompted, which starts a turn and resolves when
+   * that turn ends, exactly as {@link SessionHost.prompt} does. The choice is
+   * made here rather than by a client because a client cannot observe
+   * "running" without racing it.
+   *
+   * @throws {SessionHostError} `sessionNotFound` when the session is not live;
+   *   `invalidRequest` when no registry was wired, when `id` names no agent,
+   *   or when the agent is still running or produced nothing to adopt.
+   */
+  async adoptBackgroundAgent(sessionId: string, id: string): Promise<AdoptBackgroundAgentResult> {
+    const registry = this.#requireBackgroundAgents();
+    const session = this.#require(sessionId);
+    const adoption = registry.adoption(id);
+    if (adoption === undefined) {
+      throw new SessionHostError("invalidRequest", unknownBackgroundAgent(id));
+    }
+    if ("refusal" in adoption) {
+      throw new SessionHostError("invalidRequest", adoption.refusal);
+    }
+    if (isBusy(session)) {
+      session.agent.steer(adoption.text);
+      return { agentId: id, delivered: "steer" };
+    }
+    // Claimed synchronously before the first await, for the reason
+    // `LiveSession.starting` exists: another wire request can arrive in the
+    // window, and a `prompt` that sailed past the busy check would fail deep
+    // inside `Agent` with a raw error.
+    session.starting = true;
+    try {
+      await session.agent.prompt(adoption.text);
+    } finally {
+      session.starting = false;
+    }
+    return { agentId: id, delivered: "prompt" };
+  }
+
+  /**
+   * Read the org-memory store.
+   *
+   * Not session-scoped: the store is keyed by project and lives under the
+   * user's home, so it is a property of the engine.
+   *
+   * Carries `warnings` as well as `entries` because the store re-applies its
+   * bounds on *read* and drops what fails them — an empty `entries` from a
+   * store that was refused for being over its byte ceiling is a different fact
+   * from an empty store, and only the warnings tell them apart.
+   *
+   * @throws {SessionHostError} `invalidRequest` when no store was wired.
+   */
+  async orgMemory(): Promise<OrgMemoryList> {
+    const store = this.#requireOrgMemory();
+    return this.#validOrgMemory(projectOrgMemory(await store.read()));
+  }
+
+  /**
+   * File a **proposed** org-memory entry.
+   *
+   * It reaches no prompt. There is no method on this host that makes an entry
+   * active, and {@link OrgMemoryStoreAccess.propose} has no status parameter to
+   * pass one through — see `org-memory.ts` for why that gate is a person rather
+   * than a field.
+   *
+   * The refusal for an over-long or marker-carrying lesson comes from the store
+   * itself and is passed through verbatim, because it names the bound that was
+   * broken and a caller needs to read that rather than "invalid request".
+   *
+   * @throws {SessionHostError} `invalidRequest` when no store was wired, or
+   *   when the store refuses the entry.
+   */
+  async proposeOrgMemory(role: string, text: string): Promise<OrgMemoryProposal> {
+    const store = this.#requireOrgMemory();
+    const result = await store.propose(role, text);
+    if ("error" in result) throw new SessionHostError("invalidRequest", result.error);
+    // Belt and braces, and the braces are the point: this host cannot file an
+    // active entry, but it is the last place that could *notice* one, and an
+    // entry that reached a client marked "proposed" while sitting active in the
+    // file would be the exact failure the whole gate exists to prevent.
+    if (result.value.status !== "proposed") {
+      throw new Error(
+        "Refusing to answer a propose with a non-proposed entry: an org-memory entry that " +
+          "reaches a role's prompt must be approved by a person.",
+      );
+    }
+    const proposal: OrgMemoryProposal = {
+      entry: projectOrgMemoryEntry(result.value),
+      store: projectOrgMemory(await store.read()),
+    };
+    const validation = validateOrgMemoryProposal(proposal);
+    if (!validation.ok) {
+      throw new Error(`Org memory proposal is not a valid wire payload: ${validation.error}`);
+    }
+    return validation.value;
+  }
+
+  /**
+   * Take an org-memory entry back: demote it to `proposed`, or delete it.
+   *
+   * Allowed over this wire where approving is not, because both directions only
+   * ever *reduce* the standing instruction text later runs are given.
+   *
+   * Answers with the resulting store — the engine's answer to "what is in there
+   * now", not an echo of the request, so a client never has to make a second
+   * round trip to find out what it did.
+   *
+   * @throws {SessionHostError} `invalidRequest` when no store was wired, or
+   *   when `id` names no entry.
+   */
+  async revokeOrgMemory(id: string, remove = false): Promise<OrgMemoryList> {
+    const store = this.#requireOrgMemory();
+    const result = await store.revoke(id, remove);
+    if ("error" in result) throw new SessionHostError("invalidRequest", result.error);
+    return this.#validOrgMemory(projectOrgMemory(result.value));
+  }
+
+  /** The registry, or the refusal for an engine assembled without one. */
+  #requireBackgroundAgents(): BackgroundAgentRegistry {
+    const registry = this.#backgroundAgents;
+    if (!registry) {
+      throw new SessionHostError(
+        "invalidRequest",
+        "This server was built without a background-agent manager, so it cannot run or report " +
+          "background agents. That is different from having none: an engine with a manager and " +
+          "no agents answers with an empty list.",
+      );
+    }
+    return registry;
+  }
+
+  /** The store, or the refusal for an engine assembled without one. */
+  #requireOrgMemory(): OrgMemoryStoreAccess {
+    const store = this.#orgMemory;
+    if (!store) {
+      throw new SessionHostError(
+        "invalidRequest",
+        "This server was built without an org-memory store, so it cannot read or file per-role " +
+          "lessons. That is different from an empty store, which answers with no entries.",
+      );
+    }
+    return store;
+  }
+
+  /** Normalize an org-memory payload against the wire contract on the way out. */
+  #validOrgMemory(payload: OrgMemoryList): OrgMemoryList {
+    const validation = validateOrgMemoryList(payload);
+    if (!validation.ok) {
+      throw new Error(`Org memory listing is not a valid wire payload: ${validation.error}`);
+    }
+    return validation.value;
+  }
+
+  /**
+   * Every workflow this engine discovered, with the ceilings it declares and
+   * the lane derived for each role it dispatches to.
+   *
+   * Not session-scoped: a workflow is a file the served workspace (or the
+   * user's home) holds, so this is shaped like {@link SessionHost.listModels}.
+   *
+   * Normalized against the wire contract on the way out — the discipline
+   * `listModels` applies, and the reason it matters here is the same reason it
+   * matters for `permissionState.tools`: `roles[].lane` is a closed
+   * enumeration, and it is the sentence a person reads before deciding whether
+   * a pipeline is safe to run.
+   *
+   * @returns The catalog, or `[]` when no workflow engine was wired.
+   */
+  async listWorkflows(): Promise<WorkflowSummary[]> {
+    if (!this.#workflows) return [];
+    const workflows = await this.#workflows.list();
+    const validation = validateWorkflowCatalog({ workflows });
+    if (!validation.ok) {
+      throw new Error(`Workflow catalog is not a valid wire payload: ${validation.error}`);
+    }
+    return validation.value.workflows;
+  }
+
+  /**
+   * What a run reached, from the durable run journal.
+   *
+   * Not session-scoped, deliberately: runs live under the served home, and a
+   * run started in a terminal is exactly as legible here as one started over
+   * the wire. Making this session-scoped would have meant a panel could not see
+   * the run it is about to resume unless the same session had started it.
+   *
+   * A `runId` with no journal answers zero rows rather than erroring, because
+   * on this wire an error from a *read* means "this engine does not know the
+   * verb" — `isUnsupportedMethodError` cannot tell the two apart. It is the
+   * rule `pendingChanges` keeps by reporting `dryRun: false`. The refusal path
+   * below is kept for a genuinely broken read, not for an absent run.
+   *
+   * @param runId - One run, with per-step rows; omit for the listing.
+   * @throws {SessionHostError} `invalidRequest` when the engine cannot read its
+   *   own run store at all.
+   */
+  async workflowStatus(runId?: string): Promise<WorkflowRunStatus[]> {
+    if (!this.#workflows) return [];
+    const result = await this.#workflows.status(runId);
+    if (!result.ok) throw new SessionHostError("invalidRequest", result.error);
+    const validation = validateWorkflowRuns({ runs: result.value });
+    if (!validation.ok) {
+      throw new Error(`Workflow status is not a valid wire payload: ${validation.error}`);
+    }
+    return validation.value.runs;
+  }
+
+  /**
+   * Start a workflow run on one session's event stream.
+   *
+   * ### What this method owns, and what it deliberately does not
+   *
+   * It owns the two refusals a client cannot make for itself — the session has
+   * to exist, and it has to be free — and the wiring that makes the run
+   * followable and cancellable. Everything else belongs to the engine behind
+   * {@link SessionHostOptions.workflows}: which workflows exist, whether the
+   * requested budget is legal, what a role's lane is, what a step may touch.
+   * Re-deciding any of that here would be the second workflow engine this
+   * package exists not to be.
+   *
+   * ### Refused while the session is busy
+   *
+   * `sessionBusy` when the session is mid-turn **or** already running a
+   * pipeline. Not because the two would corrupt each other — a workflow's steps
+   * are their own agents — but because this session's event stream is the only
+   * place either one is visible, and two pipelines narrating into one
+   * transcript is a transcript nobody can read. It hands the client something
+   * to do (wait, or open a second session) rather than producing a mess it
+   * cannot untangle afterwards.
+   *
+   * ### It answers on acceptance
+   *
+   * See `ClientRequest`'s `runWorkflow`: a pipeline outlives every sane request
+   * deadline, so the response is the accepted run and the run itself rides the
+   * session stream. The client is already subscribed; nothing new is opened.
+   *
+   * @param sessionId - Session whose stream carries the run.
+   * @param params - Workflow name, `{{input}}`, and a budget that may only
+   *   lower the file's own ceiling.
+   * @returns The accepted run: its id, its shape, and the limits in force.
+   * @throws {SessionHostError} `sessionNotFound`, `sessionBusy`, or
+   *   `invalidRequest` for an unknown workflow, an illegal budget, or a host
+   *   assembled with no workflow engine at all.
+   */
+  async runWorkflow(
+    sessionId: string,
+    params: { name: string; input?: string; budgetUsd?: number },
+  ): Promise<WorkflowRunHandle> {
+    const session = this.#requireIdleForWorkflow(sessionId, "start a workflow");
+    const workflows = this.#requireWorkflows("run a workflow");
+    const controller = this.#armWorkflowRun(sessionId);
+    try {
+      return this.#unwrapWorkflow(
+        await workflows.run({
+          sessionId,
+          name: params.name,
+          ...(params.input === undefined ? {} : { input: params.input }),
+          ...(params.budgetUsd === undefined ? {} : { budgetUsd: params.budgetUsd }),
+          permissionMode: session.agent.permissionMode,
+          emit: (event) => this.#fanOut(session, event),
+          signal: controller.signal,
+        }),
+        controller,
+        sessionId,
+      );
+    } catch (error) {
+      this.#disarmWorkflowRun(sessionId, controller);
+      throw error;
+    }
+  }
+
+  /**
+   * Re-enter an interrupted run, optionally with the answer to its `ORG-ASK:`.
+   *
+   * Exactly {@link SessionHost.runWorkflow}'s shape and exactly its refusals.
+   * That the resumed run does not redo finished work, and does not apply an
+   * already-applied patch a second time, is the engine's promise behind the
+   * injection — this method is the door to it and re-implements none of it.
+   *
+   * @param sessionId - Session whose stream carries the resumed run.
+   * @param params - The run to re-enter and, optionally, the human's answer.
+   * @throws {SessionHostError} On exactly `runWorkflow`'s terms, plus
+   *   `invalidRequest` for a run that already finished or whose workflow file
+   *   is no longer discoverable.
+   */
+  async resumeWorkflow(
+    sessionId: string,
+    params: { runId: string; answer?: string },
+  ): Promise<WorkflowRunHandle> {
+    const session = this.#requireIdleForWorkflow(sessionId, "resume a workflow");
+    const workflows = this.#requireWorkflows("resume a workflow");
+    const controller = this.#armWorkflowRun(sessionId);
+    try {
+      return this.#unwrapWorkflow(
+        await workflows.resume({
+          sessionId,
+          runId: params.runId,
+          ...(params.answer === undefined ? {} : { answer: params.answer }),
+          permissionMode: session.agent.permissionMode,
+          emit: (event) => this.#fanOut(session, event),
+          signal: controller.signal,
+        }),
+        controller,
+        sessionId,
+      );
+    } catch (error) {
+      this.#disarmWorkflowRun(sessionId, controller);
+      throw error;
+    }
+  }
+
+  /**
+   * The workflow engine, or the refusal for a host assembled without one.
+   *
+   * `invalidRequest` rather than an empty answer, which is
+   * {@link SessionHostOptions.transcriptExporter}'s treatment and for the same
+   * reason: this verb *starts* something, and a start that quietly did not
+   * happen is the failure it exists to prevent. The reads above answer `[]`
+   * instead, because "there are no workflows here" is a true sentence.
+   */
+  #requireWorkflows(verb: string): WorkflowService {
+    const workflows = this.#workflows;
+    if (!workflows) {
+      throw new SessionHostError(
+        "invalidRequest",
+        `This engine was assembled without a workflow engine, so it cannot ${verb}. ` +
+          "Refusing rather than reporting a run that never started.",
+      );
+    }
+    return workflows;
+  }
+
+  /** The live session, or the refusal when it is mid-turn or mid-pipeline. */
+  #requireIdleForWorkflow(sessionId: string, verb: string): LiveSession {
+    const session = this.#require(sessionId);
+    if (isBusy(session)) {
+      throw new SessionHostError(
+        "sessionBusy",
+        `Session ${sessionId} is running a turn; a workflow narrates into this session's ` +
+          `event stream and would interleave with it. Abort the run or wait for it to end, ` +
+          `then ${verb}.`,
+      );
+    }
+    if ((this.#workflowRuns.get(sessionId)?.size ?? 0) > 0) {
+      throw new SessionHostError(
+        "sessionBusy",
+        `Session ${sessionId} is already running a workflow. One session carries one ` +
+          "pipeline: abort it, or open a second session to run another alongside it.",
+      );
+    }
+    return session;
+  }
+
+  /** Register a controller for a run about to start, so `abort` can reach it. */
+  #armWorkflowRun(sessionId: string): AbortController {
+    const controller = new AbortController();
+    const runs = this.#workflowRuns.get(sessionId) ?? new Set<AbortController>();
+    runs.add(controller);
+    this.#workflowRuns.set(sessionId, runs);
+    return controller;
+  }
+
+  /** Forget a controller once its run has settled (or never started). */
+  #disarmWorkflowRun(sessionId: string, controller: AbortController): void {
+    const runs = this.#workflowRuns.get(sessionId);
+    if (!runs) return;
+    runs.delete(controller);
+    if (runs.size === 0) this.#workflowRuns.delete(sessionId);
+  }
+
+  /**
+   * Turn an accepted run into a handle, or a refusal into an `invalidRequest`.
+   *
+   * A refusal disarms the controller here rather than at each call site: the
+   * run never started, so leaving its controller in the map would make the next
+   * `runWorkflow` on that session answer `sessionBusy` for a pipeline that does
+   * not exist — a session wedged by a typo'd workflow name.
+   */
+  #unwrapWorkflow(
+    result: WorkflowResult<AcceptedWorkflowRun>,
+    controller: AbortController,
+    sessionId: string,
+  ): WorkflowRunHandle {
+    if (!result.ok) {
+      this.#disarmWorkflowRun(sessionId, controller);
+      throw new SessionHostError("invalidRequest", result.error);
+    }
+    const validation = validateWorkflowRunHandle(result.value.handle);
+    if (!validation.ok) {
+      this.#disarmWorkflowRun(sessionId, controller);
+      throw new Error(`Workflow run handle is not a valid wire payload: ${validation.error}`);
+    }
+    // The one thing `settled` is for. Without it a finished run would leave its
+    // controller in the map and the session would answer `sessionBusy` to every
+    // later `runWorkflow` — a session wedged by a pipeline that ended an hour
+    // ago. `settled` never rejects (see its doc), and the `catch` is belt and
+    // braces against an implementation that breaks that promise: a broken
+    // promise must not wedge the session either.
+    void result.value.settled
+      .catch(() => undefined)
+      .then(() => this.#disarmWorkflowRun(sessionId, controller));
+    return validation.value;
+  }
+
+  /**
+   * Which earlier turns this session could be rewound to, and what each would
+   * cost.
+   *
+   * **Read-only.** Nothing is restored, nothing is deleted, nothing is forked.
+   * The plans come from the engine's own checkpoint store — the same object
+   * `rewindTo` then applies — so the price a client shows and the price a
+   * rewind charges are one computation. See `rewind.ts`.
+   *
+   * Requires a **live** session, unlike {@link SessionHost.sessionHistory}:
+   * a rewind acts on the session's working directory and forks the agent
+   * holding its conversation, and a session nobody has opened has neither.
+   *
+   * @param sessionId - Session to list.
+   * @returns The rewindable turns, newest first, bounded, with truncation
+   *   reported. `available: false` when no checkpoint store is wired — which
+   *   is the honest answer for such a host, and not the same answer as an
+   *   engine with no such verb.
+   * @throws {SessionHostError} `sessionNotFound` when the session is not live.
+   * @throws When the projection is not a valid wire payload — a bug in this
+   *   package, worth reporting rather than serving a picker a person would
+   *   act on.
+   */
+  async listCheckpoints(sessionId: string): Promise<CheckpointList> {
+    const session = this.#require(sessionId);
+    if (!this.#checkpoints) {
+      return {
+        sessionId,
+        checkpoints: [],
+        available: false,
+        truncated: false,
+        droppedCheckpoints: 0,
+      };
+    }
+    const previews = await this.#checkpoints.list(sessionId);
+    const list = buildCheckpointList(
+      sessionId,
+      previews,
+      session.header.cwd,
+      this.#checkpointListLimits,
+    );
+    const validation = validateCheckpointList(list);
+    if (!validation.ok) {
+      throw new Error(`Checkpoint list is not a valid wire payload: ${validation.error}`);
+    }
+    return validation.value;
+  }
+
+  /**
+   * Restore this session's files to a checkpoint and fork its conversation to
+   * match. **The most destructive operation on this wire.**
+   *
+   * **The restorer is the engine's, not a client's.** All this does is drive
+   * the checkpoint store the served runtime built — the same object the TUI's
+   * `/rewind` drives — so the workspace confinement that refuses a manifest
+   * record outside the session's working directory, and the temp-file-plus-
+   * rename that keeps an interrupted restore from leaving half a file, are the
+   * same code a local user gets. There is no second restorer on this path and
+   * there must not be one. `@arcturn/server` writes nothing.
+   *
+   * **The confirmation has to match.** `confirmation` is
+   * {@link CheckpointEntry.confirmation} from the row the client rendered, and
+   * this recomputes the plan and compares before anything happens. That is not
+   * the two-phase handshake {@link SessionHost.deleteSession} refused — there
+   * is no state here, no expiry and nothing to evict; it is a digest of the
+   * plan itself. It exists because `rewindTo`'s parameters, unlike every other
+   * destructive verb's, do **not** name what it destroys: a client that showed
+   * "deletes 2 files", let a run append three more, and then sent the id would
+   * rewind something nobody saw. See `checkpointConfirmation`.
+   *
+   * **Refused mid-run**, with `sessionBusy`, and via {@link isBusy} rather
+   * than `agent.isRunning` alone — the check {@link SessionHost.deleteSession}
+   * and {@link SessionHost.compact} make, for a reason that applies twice over
+   * here. A prompt accepted but still resolving its context has not started
+   * the agent yet, and a restore landing in that window would rewrite files
+   * the run is about to read *and* fork the conversation it is about to append
+   * to. The TUI already refuses this ("A run is in progress; press Esc to
+   * interrupt it before rewinding") and this is the same refusal.
+   *
+   * Not widened to every live session the way {@link SessionHost.applyChanges}
+   * is, and the difference is real rather than an oversight: one `--dry-run`
+   * shadow tree is shared by every session on the process, so no single
+   * session's `isRunning` could answer "is it safe to write this tree back",
+   * whereas a checkpoint store belongs to one session and is rooted at that
+   * session's own working directory. What two served sessions genuinely share
+   * is the workspace — and they already write it concurrently through ordinary
+   * tool calls, which is a property of running two agents in one directory
+   * rather than something this verb introduces.
+   *
+   * **The fork is the host's to install.** The provider hands back the agent
+   * holding the forked conversation; this is what unsubscribes the old one,
+   * re-subscribes the observers and re-installs the permission requester, and
+   * then tells every watcher — including other connections — that the session
+   * moved, so nobody is left rendering a transcript that no longer describes
+   * the files on disk.
+   *
+   * @param sessionId - Session to rewind.
+   * @param checkpointId - The turn, as `listCheckpoints` reported its `id`.
+   * @param confirmation - That same row's `confirmation`.
+   * @returns What was rewritten, what was deleted, what was refused, and
+   *   whether the transcript forked too.
+   * @throws {SessionHostError} `sessionNotFound`, `sessionBusy` while this
+   *   session is running a turn, or `invalidRequest` when this engine keeps no
+   *   checkpoints, the id names no recorded turn, or the confirmation is stale.
+   */
+  async rewindTo(
+    sessionId: string,
+    checkpointId: string,
+    confirmation: string,
+  ): Promise<RewindResult> {
+    const session = this.#require(sessionId);
+    const checkpoints = this.#checkpoints;
+    if (!checkpoints) {
+      throw new SessionHostError(
+        "invalidRequest",
+        "This engine keeps no file checkpoints, so there is nothing to rewind to. " +
+          "listCheckpoints reports available:false for the same reason.",
+      );
+    }
+    if (isBusy(session)) {
+      throw new SessionHostError(
+        "sessionBusy",
+        `Session ${sessionId} is running a turn; files may not be restored and the ` +
+          "conversation may not be forked halfway through one. Abort the run or wait for it " +
+          "to end, then rewind.",
+      );
+    }
+
+    const root = resolve(session.header.cwd);
+    const previews = await checkpoints.list(sessionId);
+    const preview = previews.find((candidate) => candidate.id === checkpointId);
+    if (preview === undefined) {
+      throw new SessionHostError(
+        "invalidRequest",
+        `No checkpoint ${JSON.stringify(checkpointId)} in session ${sessionId}. ` +
+          "Ask listCheckpoints for the current set.",
+      );
+    }
+    const expected = checkpointConfirmation(preview, root);
+    if (expected !== confirmation) {
+      throw new SessionHostError(
+        "invalidRequest",
+        "This checkpoint no longer costs what it did when it was listed — the files a " +
+          "rewind would restore or delete have changed since. Nothing was touched. " +
+          "Call listCheckpoints again and confirm against the current row.",
+      );
+    }
+
+    // Re-checked immediately before the restore. The plan above is a
+    // filesystem read, and a `prompt` arriving during it would claim the
+    // session on a later microtask — the same window `LiveSession.starting`
+    // exists for. This narrows it to the restore itself, which `#swapAgent`'s
+    // abort covers on the same belt-and-braces terms `#evict` does.
+    if (isBusy(session)) {
+      throw new SessionHostError(
+        "sessionBusy",
+        `Session ${sessionId} started a turn while its checkpoints were being read; nothing ` +
+          "was restored. Abort the run or wait for it to end, then rewind.",
+      );
+    }
+
+    const outcome = await checkpoints.rewind(sessionId, checkpointId);
+    if (outcome.agent !== undefined) this.#swapAgent(sessionId, session, outcome.agent);
+
+    const result: RewindResult = {
+      sessionId,
+      checkpointId,
+      restored: outcome.restored.map((path) => workspaceRelative(root, path)),
+      deleted: outcome.deleted.map((path) => workspaceRelative(root, path)),
+      failed: outcome.failed.map(
+        (failure): RewindFailure => ({
+          path: workspaceRelative(root, failure.path),
+          message: failure.message,
+        }),
+      ),
+      conversationForked: outcome.agent !== undefined,
+    };
+    // Normalized against the wire contract on the way out, like every other
+    // result this host builds.
+    const validation = validateRewindResult(result);
+    if (!validation.ok) {
+      throw new Error(`Rewind result is not a valid wire payload: ${validation.error}`);
+    }
+    return validation.value;
+  }
+
+  /**
+   * Put a forked agent in place of the one a live session was holding.
+   *
+   * Everything a session's identity is made of has to move with it: the event
+   * subscription that fans out to observers, and the permission requester that
+   * turns a tool call into a `permissionRequest` frame. Leaving either on the
+   * old agent would give a session that still renders — and a permission ask
+   * nobody is listening for.
+   *
+   * The **observers themselves are kept**. A rewind is not a delete: the same
+   * connections are still attached to the same session id, and dropping their
+   * subscriptions would silently stop the transcript they are watching. What
+   * they are told instead is a `notice`, before any new event can arrive, so a
+   * client that was not the one asking learns the conversation moved and can
+   * replay it — through `sessionHistory`, which is the one transcript path.
+   *
+   * @param sessionId - Session being forked, for the notice.
+   * @param session - Its live record, mutated in place.
+   * @param next - The agent holding the forked conversation.
+   */
+  #swapAgent(sessionId: string, session: LiveSession, next: Agent): void {
+    for (const [requestId, pending] of session.pendingPermissions) {
+      clearTimeout(pending.timer);
+      pending.resolve({
+        requestId,
+        behavior: "deny",
+        message: "This session was rewound to an earlier turn.",
+      });
+    }
+    session.pendingPermissions.clear();
+    session.unsubscribe();
+    // Belt and braces, the way `#evict` aborts: the busy check ran before the
+    // restore, but a run could have started in the gap, and an agent still
+    // appending to a conversation this host no longer serves is worse than an
+    // aborted one.
+    session.agent.abort();
+
+    session.unsubscribe = next.subscribe((event: AgentEvent) => {
+      for (const listener of [...session.observers]) {
+        try {
+          listener(event);
+        } catch {
+          // An observer must never be able to break fan-out to the others.
+        }
+      }
+    });
+    next.permissions.setRequester(this.#permissionRequester(session.pendingPermissions));
+    session.agent = next;
+
+    this.#fanOut(session, {
+      type: "notice",
+      level: "info",
+      text: `Session ${sessionId} was rewound to an earlier turn; its conversation was forked. Replay it with sessionHistory.`,
+    });
+  }
+
+  /**
    * Refuse when **any** live session is mid-run.
    *
    * Wider than {@link SessionHost.setPermissionMode}'s check on purpose, and
@@ -1531,6 +2527,13 @@ export class SessionHost {
    * `ArcturnServer`) to detach as they tear down their own transport state.
    */
   dispose(): void {
+    // Workflow runs first: a pipeline outlives the turn that started it, so a
+    // shutdown that only aborted agents would leave steps still spending after
+    // the socket is gone.
+    for (const runs of this.#workflowRuns.values()) {
+      for (const controller of runs) controller.abort();
+    }
+    this.#workflowRuns.clear();
     for (const session of this.#sessions.values()) {
       for (const [requestId, pending] of session.pendingPermissions) {
         clearTimeout(pending.timer);
@@ -1567,6 +2570,11 @@ export class SessionHost {
     // an agent appending to a session file that no longer exists is worse than
     // an aborted run.
     session.agent.abort();
+    // A deleted session's pipeline goes with it: its steps narrate into a
+    // stream that is about to stop existing, and it was journalling against a
+    // session nobody can reach any more.
+    for (const controller of this.#workflowRuns.get(sessionId) ?? []) controller.abort();
+    this.#workflowRuns.delete(sessionId);
 
     this.#fanOut(session, {
       type: "notice",
@@ -1607,25 +2615,24 @@ export class SessionHost {
     return session;
   }
 
-  #register(header: SessionHeader, agent: Agent): LiveSession {
-    const observers = new Set<AgentEventListener>();
-    const pendingPermissions = new Map<string, PendingPermission>();
-
-    const unsubscribe = agent.subscribe((event: AgentEvent) => {
-      for (const listener of [...observers]) {
-        try {
-          listener(event);
-        } catch {
-          // An observer must never be able to break fan-out to the others.
-        }
-      }
-    });
-
-    // The prompt receives the request id the client will quote back, so
-    // decisions are matched by identity. Inferring the pairing by arrival
-    // order would desync the moment the engine settled a request from its
-    // rules without ever prompting.
-    const requester: PermissionPrompt = (request) => {
+  /**
+   * The permission bridge for one session's agent.
+   *
+   * The prompt receives the request id the client will quote back, so
+   * decisions are matched by identity. Inferring the pairing by arrival order
+   * would desync the moment the engine settled a request from its rules
+   * without ever prompting.
+   *
+   * Factored out of {@link SessionHost.#register} because a session can get a
+   * *second* agent — {@link SessionHost.#swapAgent}, when a rewind forks the
+   * conversation — and a requester built twice is a requester that can be
+   * built two ways. Both doors install this one.
+   *
+   * @param pendingPermissions - The live session's own map, which the returned
+   *   requester writes into and the client's decisions resolve out of.
+   */
+  #permissionRequester(pendingPermissions: Map<string, PendingPermission>): PermissionPrompt {
+    return (request) => {
       const requestId = request.id;
       return new Promise<PermissionDecision>((resolve) => {
         const timer = setTimeout(() => {
@@ -1640,7 +2647,23 @@ export class SessionHost {
         pendingPermissions.set(requestId, { resolve, timer, request });
       });
     };
-    agent.permissions.setRequester(requester);
+  }
+
+  #register(header: SessionHeader, agent: Agent): LiveSession {
+    const observers = new Set<AgentEventListener>();
+    const pendingPermissions = new Map<string, PendingPermission>();
+
+    const unsubscribe = agent.subscribe((event: AgentEvent) => {
+      for (const listener of [...observers]) {
+        try {
+          listener(event);
+        } catch {
+          // An observer must never be able to break fan-out to the others.
+        }
+      }
+    });
+
+    agent.permissions.setRequester(this.#permissionRequester(pendingPermissions));
 
     const session: LiveSession = {
       header,

@@ -266,11 +266,20 @@ describe("RFC 0005 §1.3 — listCommands on the real serve path", () => {
     expect(byName.get("export")).toMatchObject({ kind: "builtin" });
     expect(byName.get("mcp")).toMatchObject({ kind: "builtin" });
     expect(byName.get("cost")).toMatchObject({ kind: "builtin" });
-    // `/rewind` is still the one RFC 0005 §1.3 names: no verb restores a
-    // checkpoint, so listing it would be the menu that lies. `/todos` is
-    // absent for the other half of the rule — its data rides the event stream
-    // like `/cost`'s does, but no client has a surface for it to open.
-    expect(byName.has("rewind")).toBe(false);
+    // `/workflow` is listed because all four of its subverbs are on this wire
+    // — `listWorkflows`, `runWorkflow`, `workflowStatus`, `resumeWorkflow` —
+    // which is the same rule that keeps the row below out.
+    expect(byName.get("workflow")).toMatchObject({ kind: "builtin" });
+    // `/rewind` is the entry RFC 0005 §1.3 named as the menu that lies, and it
+    // stayed out for exactly as long as that was true. `listCheckpoints` and
+    // `rewindTo` exist now, so it is listed — which is the rule working rather
+    // than an exception to it.
+    expect(byName.get("rewind")).toMatchObject({ kind: "builtin" });
+    // `/theme` is the standing example instead: a terminal concern with
+    // nothing behind it on this wire. `/todos` is absent for the other half of
+    // the rule — its data rides the event stream like `/cost`'s does, but no
+    // client has a surface for it to open.
+    expect(byName.has("theme")).toBe(false);
     expect(byName.has("todos")).toBe(false);
 
     // Skills first, built-ins after — the order RFC 0005 §2 renders.

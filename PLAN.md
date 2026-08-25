@@ -236,6 +236,30 @@ than inherited from whatever the emulator happened to be set to.
 
 ## Remaining follow-ups
 
+`isUnsupportedMethodError` reads every server-sent `invalidRequest` as "this
+peer predates the verb", so a legitimate refusal — an unknown run id, an
+unknown background-agent id, a missing exporter — collapses into "the engine
+is too old" and a client hides a whole surface over a typo. Three separate
+verbs hit this independently and each worked around it by answering an empty
+result instead of refusing. That is the right per-verb answer, but the shared
+predicate is the defect: it needs a distinguishable code (or an error field)
+so a refusal and an absence stop being one piece of news.
+
+Delegation, left unexposed deliberately and needing CLI work first:
+`/team` needs an owner lease in its record — constructing a `TeamManager`
+rewrites every still-running record to `interrupted`, so a read-only status
+verb would declare a terminal's live team dead — plus a mid-run guard on
+`merge`/`discard`. `/scout` has no durable record at all, so there is nothing
+to list or cancel. `/bg` spend is not folded into `--max-cost`, and its
+records have the same cross-process ownership gap.
+
+A workflow step's permission asks go to the runtime's requester rather than
+the calling session's, and `arcturn serve` installs none, so they fail closed.
+Routing them would mean holding `setPermissionRequester` for a whole run — a
+process-wide mutation racing every other hosted session — so it is recorded
+rather than half-fixed.
+
+
 A resumed session silently reverts to the server's default model rather than
 the one it was last switched to. `Agent.setModel` writes the id into the
 session's `state` entry and `materializeBranch` reads it back, but
