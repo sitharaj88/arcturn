@@ -24,6 +24,7 @@ import type { ResolvedCliLike } from "../serve/args.js";
 import type { SocketFactory } from "../serve/connect.js";
 import {
   isUnsupportedMethodError,
+  type PermissionMode,
   type PromptAttachment,
   type WebSocketLike,
 } from "../serve/engine.js";
@@ -46,9 +47,14 @@ import { describePermissionRequest } from "./permission-queue.js";
 import { escapeCodicons, modelPickItems } from "./picker.js";
 import { CostStatusBar } from "./status-bar.js";
 import { SidebarViewProvider } from "./view.js";
+import type { CommandOption } from "./webview-commands.js";
+import { contextGlob, narrowCandidates } from "./webview-context.js";
 import {
+  type CommandListStatus,
   type ContextItem,
   type ModelListStatus,
+  type PermissionStateStatus,
+  projectCommandOption,
   projectContextItem,
   projectModelOption,
   projectSessions,
@@ -78,6 +84,15 @@ export type ResolvedCli = ResolvedCliLike;
  * value lives on {@link SidebarViewProvider}; this is the seam's spelling of it.
  */
 export const SIDEBAR_VIEW_ID = SidebarViewProvider.viewId;
+
+/**
+ * How many paths the workspace index is asked for before the picker narrows.
+ *
+ * Free — `findFiles` is the editor's own index and costs no engine round trip
+ * — so this is generous, and `narrowCandidates` is what turns it into the
+ * handful of paths that actually get resolved.
+ */
+const MAX_INDEX_MATCHES = 400;
 
 /** Command ids this module registers. Builder A declares them in the manifest. */
 export const SIDEBAR_COMMANDS = {
@@ -152,7 +167,25 @@ export function activateSidebar(
           void attachPaths(message.paths);
           return;
         case "detach":
-          if (attached.delete(message.id)) publishContext();
+          if (attached.delete(message.id)) {
+            pasted.delete(message.id);
+            publishContext();
+          }
+          return;
+        case "attachImage":
+          attachPastedImage(message.data, message.mimeType);
+          return;
+        case "browseForFiles":
+          void browseForFiles();
+          return;
+        case "requestPermission":
+          void publishPermission();
+          return;
+        case "setPermissionMode":
+          void applyPermissionMode(message.mode);
+          return;
+        case "requestCommands":
+          void publishCommands();
           return;
         case "abort":
           void withEngine((session) => session.controller?.abort());
@@ -243,6 +276,36 @@ export function activateSidebar(
    */
   let attached = new Map<string, ContextItem>();
 
+  /**
+   * The bytes behind a pasted-image chip, keyed by the chip's id.
+   *
+   * Held here and **not** sent to the page, which is the difference between a
+   * chip row and a copy of the clipboard: the page is told a pasted image
+   * exists and how big it is, and the megabytes stay on this side until
+   * `prompt` carries them. RFC 0005 §1.1 blesses inline data for images and
+   * only for images — a file that exists on disk is read by the engine from
+   * its path, where the permission engine can see the read happen.
+   */
+  let pasted = new Map<string, { data: string; mimeType: string }>();
+  let pastedCount = 0;
+
+  /**
+   * Tell the user, once, that this engine cannot take attachments.
+   *
+   * Once per connection rather than once per attempt: a drag that drops four
+   * files must not stack four identical toasts, which is the toast storm
+   * RFC 0004 §1 says the reconnect card exists to avoid.
+   */
+  let announcedNoContext = false;
+  function announceNoContext(): void {
+    log("sidebar: this arcturn engine cannot resolve context paths");
+    if (announcedNoContext) return;
+    announcedNoContext = true;
+    void vscode.window.showWarningMessage(
+      "This Arcturn engine is too old to attach files — upgrade the CLI to use @ mentions and attachments in the panel.",
+    );
+  }
+
   /** Push the chip row as it stands. */
   function publishContext(): void {
     provider.postContext([...attached.values()]);
@@ -252,7 +315,63 @@ export function activateSidebar(
   function clearContext(): void {
     if (attached.size === 0) return;
     attached = new Map();
+    pasted = new Map();
     publishContext();
+  }
+
+  /**
+   * Take a pasted or dropped image, which has no path.
+   *
+   * No `resolveContext` round trip, because there is nothing to resolve: the
+   * bytes are already here and confinement has nothing to say about a
+   * clipboard. The chip is therefore `ok` from the moment it appears — the
+   * boundary has already checked the base64 and the mime type against the
+   * engine's own allowlist, so the one thing this chip must not do (appear,
+   * then be refused when the turn is sent) cannot happen.
+   *
+   * @param data - Base64, validated at the boundary.
+   * @param mimeType - One of the engine's four image types.
+   */
+  function attachPastedImage(data: string, mimeType: string): void {
+    pastedCount += 1;
+    const id = `pasted:${String(pastedCount)}`;
+    pasted.set(id, { data, mimeType });
+    attached.set(id, {
+      id,
+      // No path, honestly: this image is not anywhere on disk, and inventing a
+      // filename for it would make a chip claim a file the engine cannot read.
+      path: "",
+      label: `Pasted ${mimeType.replace("image/", "").toUpperCase()}`,
+      // Base64 is 4 characters per 3 bytes, padding included.
+      bytes: Math.floor((data.length * 3) / 4),
+      kind: "image",
+      ok: true,
+    });
+    publishContext();
+  }
+
+  /**
+   * The native file dialog, and what it attaches.
+   *
+   * The dialog is the *host's* because a webview cannot read a path off a
+   * `File`: a drop or an `<input type=file>` inside the page yields bytes with
+   * no name the engine could resolve, and a picker that could not name what it
+   * picked would attach nothing. Everything it returns goes through
+   * `attachPaths`, so a file chosen here is resolved by the engine exactly like
+   * one typed after an `@`.
+   */
+  async function browseForFiles(): Promise<void> {
+    const picked = await vscode.window.showOpenDialog({
+      canSelectMany: true,
+      canSelectFolders: false,
+      openLabel: "Attach",
+      title: "Attach files to this Arcturn message",
+      ...(vscode.workspace.workspaceFolders?.[0] === undefined
+        ? {}
+        : { defaultUri: vscode.workspace.workspaceFolders[0].uri }),
+    });
+    if (picked === undefined || picked.length === 0) return;
+    await attachPaths(picked.map((uri) => uri.fsPath));
   }
 
   /**
@@ -264,12 +383,82 @@ export function activateSidebar(
    */
   async function resolveContext(query: string): Promise<void> {
     await withEngine(async (session) => {
-      const resolution = await session.controller?.resolveContext(query);
-      provider.postContextCandidates(
-        query,
-        resolution === undefined ? [] : [projectContextItem(resolution)],
-      );
+      const controller = session.controller;
+      if (controller === undefined) {
+        provider.postContextCandidates(query, []);
+        return;
+      }
+      const items: ContextItem[] = [];
+      for (const candidate of await candidatePaths(query)) {
+        const resolution = await controller.resolveContext(candidate);
+        if (resolution === undefined) {
+          // The verb itself is missing. Reported as *unavailable* rather than
+          // as an empty list, because "the workspace has no file like that"
+          // and "this engine cannot answer" are two different sentences and
+          // only one of them is true here. The picker closes on this.
+          announceNoContext();
+          provider.postContextCandidates(query, [], "unavailable");
+          return;
+        }
+        items.push(projectContextItem(resolution));
+      }
+      provider.postContextCandidates(query, items);
     });
+  }
+
+  /**
+   * What a query might mean, before the engine is asked about any of it.
+   *
+   * Two sources, in this order.
+   *
+   * The **query itself**, always, when the user typed one. That is what makes
+   * `@../../etc/passwd` answerable: the file index will never offer a path
+   * outside the workspace, and the engine's refusal — with its reason — is
+   * exactly what the picker should show for one. It is also the path for a
+   * file that exists but is excluded from search.
+   *
+   * Then **VS Code's own file index**, through `findFiles`. Using the editor's
+   * index rather than walking the disk here is deliberate: it already respects
+   * `files.exclude` and `search.exclude`, so a workspace that hides
+   * `node_modules` hides it from this picker too, with no exclude list of this
+   * extension's own to drift from the user's.
+   *
+   * Note what this is *not*: reading a file. RFC 0005 §3 forbids the panel
+   * assembling context — "the panel never reads a file to build a prompt" —
+   * and nothing here opens one. What comes back is a list of names, each of
+   * which is then handed to `resolveContext` so that every size and every
+   * refusal on screen is the engine's own answer.
+   */
+  async function candidatePaths(query: string): Promise<string[]> {
+    const trimmed = query.trim();
+    const folder = vscode.workspace.workspaceFolders?.[0];
+    if (folder === undefined) return trimmed === "" ? [] : [trimmed];
+    let found: readonly vscode.Uri[] = [];
+    try {
+      found = await vscode.workspace.findFiles(
+        new vscode.RelativePattern(folder, contextGlob(trimmed)),
+        undefined,
+        MAX_INDEX_MATCHES,
+      );
+    } catch (error) {
+      // A failed search is not a reason to deny the picker the one candidate
+      // the user actually typed.
+      log(
+        `sidebar: workspace search failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    const root = folder.uri.fsPath.replace(/[/\\]+$/, "");
+    const relative = found.map((uri) =>
+      uri.fsPath.startsWith(`${root}/`) || uri.fsPath.startsWith(`${root}\\`)
+        ? uri.fsPath.slice(root.length + 1).replace(/\\/g, "/")
+        : uri.fsPath,
+    );
+    const narrowed = narrowCandidates(relative);
+    if (trimmed === "") return narrowed;
+    return [trimmed, ...narrowed.filter((path) => path !== trimmed)].slice(
+      0,
+      narrowed.length === 0 ? 1 : narrowed.length,
+    );
   }
 
   /**
@@ -284,10 +473,14 @@ export function activateSidebar(
     await withEngine(async (session) => {
       const controller = session.controller;
       if (controller === undefined) return;
-      for (const path of paths) {
+      for (const entry of paths) {
+        const path = toWorkspacePath(entry);
         const resolution = await controller.resolveContext(path);
         if (resolution === undefined) {
-          log("sidebar: this arcturn engine cannot resolve context paths");
+          // A drop or a picked file that produced nothing at all is the worst
+          // version of this failure: the user did something deliberate and the
+          // panel looked broken. Said out loud, once.
+          announceNoContext();
           return;
         }
         const item = projectContextItem(resolution);
@@ -298,6 +491,32 @@ export function activateSidebar(
       }
       publishContext();
     });
+  }
+
+  /**
+   * Turn whatever a drop gave the page into something the engine can resolve.
+   *
+   * A drag from the VS Code explorer or from the OS puts `file:///…` URIs on
+   * the dataTransfer, and the page forwards them verbatim — deliberately. A
+   * URI is not a path: it is percent-encoded, it spells a Windows drive letter
+   * with a leading slash, and a page doing that arithmetic itself would be
+   * quietly wrong on one platform. `vscode.Uri` already does it correctly, and
+   * it lives here.
+   *
+   * Anything that is not a `file:` URI is passed through untouched, which is
+   * every path the `@` picker and the file dialog produce.
+   */
+  function toWorkspacePath(entry: string): string {
+    if (!entry.toLowerCase().startsWith("file://")) return entry;
+    try {
+      const uri = vscode.Uri.parse(entry, true);
+      return uri.scheme === "file" ? uri.fsPath : entry;
+    } catch {
+      // A malformed URI is not a path this extension should guess at; the
+      // engine's own refusal, with its reason, is a better answer than one
+      // invented here.
+      return entry;
+    }
   }
 
   /**
@@ -312,6 +531,11 @@ export function activateSidebar(
     const items: PromptAttachment[] = [];
     for (const item of attached.values()) {
       if (!item.ok) continue;
+      const bytes = pasted.get(item.id);
+      if (bytes !== undefined) {
+        items.push({ kind: "image", data: bytes.data, mimeType: bytes.mimeType });
+        continue;
+      }
       items.push(
         item.kind === "image"
           ? { kind: "image", path: item.path }
@@ -322,6 +546,165 @@ export function activateSidebar(
       );
     }
     return items;
+  }
+
+  /**
+   * The session's permission regime, cached for this session.
+   *
+   * `undefined` mode with `unavailable` status is an engine older than
+   * `permissionState`, and the two are kept apart on purpose: "I have not
+   * asked yet" and "this engine cannot tell me" produce different chips, and
+   * neither of them produces a chip that says `default`. Cleared with the
+   * connection and with the session, because both change the answer.
+   */
+  let permission: { mode?: string; tools: string[] } | undefined;
+  let permissionUnavailable = false;
+  let permissionInFlight: Promise<void> | undefined;
+
+  function permissionStatus(): PermissionStateStatus {
+    if (permissionUnavailable) return "unavailable";
+    return permission === undefined ? "loading" : "ready";
+  }
+
+  /**
+   * Post the mode chip and the capability line as they stand, fetching them
+   * first when they are not known yet.
+   *
+   * @param note - Why the last mode change did not take, when it did not.
+   *   Carried on the same message as the mode so the chip snaps back to what
+   *   is actually in force in the same paint that explains why.
+   */
+  async function publishPermission(note?: string): Promise<void> {
+    const status = permissionStatus();
+    provider.postPermission({
+      status,
+      ...(permission?.mode === undefined ? {} : { mode: permission.mode }),
+      tools: permission?.tools ?? [],
+      ...(note === undefined ? {} : { note }),
+    });
+    if (status !== "loading") return;
+    if (engine === undefined || engine.status !== "ready") return;
+    permissionInFlight ??= fetchPermission().finally(() => {
+      permissionInFlight = undefined;
+    });
+    await permissionInFlight;
+  }
+
+  async function fetchPermission(): Promise<void> {
+    try {
+      const state = await ensureEngine().controller?.permissionState();
+      if (state === undefined) {
+        // Either no controller or no verb. Both mean the panel does not know
+        // the mode, and the chip says exactly that rather than picking one.
+        permissionUnavailable = true;
+        permission = { tools: [] };
+      } else {
+        permissionUnavailable = false;
+        permission = { mode: state.mode, tools: [...state.tools] };
+      }
+    } catch (error) {
+      log(
+        `sidebar: permission state unavailable: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      permissionUnavailable = true;
+      permission = { tools: [] };
+    }
+    await publishPermission();
+  }
+
+  /**
+   * Change the session's permission mode, and say what actually happened.
+   *
+   * Three outcomes, three different sentences, and not one of them is silence.
+   * The engine's *own* answer sets the chip — a mode is a request, and the
+   * state that comes back is the mode in force — so a `yolo` that a deny rule
+   * outranks still shows what the engine says it is.
+   *
+   * A refusal never moves the chip. `setPermissionMode` deliberately rejects
+   * rather than degrading against an older engine (see `ProtocolClient`), and
+   * that rejection is repeated to the user verbatim in its own words: a panel
+   * that showed `plan` over a session still in `yolo` would have told somebody
+   * the agent will not write, right before it writes.
+   */
+  async function applyPermissionMode(mode: PermissionMode): Promise<void> {
+    await withEngine(async (session) => {
+      const controller = session.controller;
+      if (controller === undefined) return;
+      try {
+        const state = await controller.setPermissionMode(mode);
+        permissionUnavailable = false;
+        permission = { mode: state.mode, tools: [...state.tools] };
+        await publishPermission();
+      } catch (error) {
+        const note = permissionRefusal(error);
+        log(`sidebar: could not switch to ${mode} mode: ${note}`);
+        await publishPermission(note);
+      }
+    });
+  }
+
+  /**
+   * The failure the chip prints, in the words a user can act on.
+   *
+   * `sessionBusy` and "too old" are the two the engine raises by design, and
+   * both are actionable; anything else is quoted rather than paraphrased.
+   */
+  function permissionRefusal(error: unknown): string {
+    if (isUnsupportedMethodError(error)) {
+      return "This engine is too old to change permission modes — upgrade the Arcturn CLI.";
+    }
+    const reason = error instanceof Error ? error.message : String(error);
+    if (/sessionBusy/i.test(reason) || /run is in flight/i.test(reason)) {
+      return "A run is in flight. Stop it, or wait for it to finish, and try again.";
+    }
+    return `The engine refused: ${escapeCodicons(reason)}`;
+  }
+
+  /**
+   * What a `/` could invoke here, cached for this connection.
+   *
+   * The same shape as the model catalog, for the same reasons: skills are
+   * files that change far less often than the menu is opened, and "this engine
+   * cannot tell me" is reported as itself rather than as an empty list of
+   * skills.
+   */
+  let commands: CommandOption[] | undefined;
+  let commandsUnavailable = false;
+  let commandsInFlight: Promise<void> | undefined;
+
+  async function publishCommands(): Promise<void> {
+    const status: CommandListStatus = commandsUnavailable
+      ? "unavailable"
+      : commands === undefined
+        ? "loading"
+        : "ready";
+    provider.postCommands({ status, commands: commands ?? [] });
+    if (status !== "loading") return;
+    if (engine === undefined || engine.status !== "ready") return;
+    commandsInFlight ??= fetchCommands().finally(() => {
+      commandsInFlight = undefined;
+    });
+    await commandsInFlight;
+  }
+
+  async function fetchCommands(): Promise<void> {
+    try {
+      const listed = await ensureEngine().listCommands();
+      if (listed === undefined) {
+        commandsUnavailable = true;
+        commands = [];
+      } else {
+        commandsUnavailable = false;
+        commands = listed.map(projectCommandOption);
+      }
+    } catch (error) {
+      log(
+        `sidebar: command list unavailable: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      commandsUnavailable = true;
+      commands = [];
+    }
+    await publishCommands();
   }
 
   function configuredModel(): string | undefined {
@@ -478,6 +861,13 @@ export function activateSidebar(
       clearContext();
       repaintTranscript();
       publishSession();
+      // The mode is a property of the session, not of the engine: a different
+      // session may be running under a different one, and a chip carried
+      // across the switch would be describing the conversation the user just
+      // left. The tools do not change, but they arrive on the same message.
+      permission = undefined;
+      permissionUnavailable = false;
+      await publishPermission();
       await publishSessions();
     });
   }
@@ -554,7 +944,10 @@ export function activateSidebar(
     repaintTranscript();
     // A session that exists now was not in the cached list.
     sessions = undefined;
+    permission = undefined;
+    permissionUnavailable = false;
     publishSession();
+    await publishPermission();
     await publishSessions();
     await provider.reveal();
   }
@@ -617,6 +1010,14 @@ export function activateSidebar(
             catalog = undefined;
             catalogUnavailable = false;
             selectedModel = undefined;
+            // A new engine may be a different build with different verbs, a
+            // different skill set on disk and a different permission config.
+            // Cleared rather than re-fetched, like the session list: a panel
+            // that is showing a menu asks for itself.
+            commands = undefined;
+            commandsUnavailable = false;
+            permission = undefined;
+            permissionUnavailable = false;
             // A path resolved against the last workspace means nothing in this
             // one, and a chip carried across a reconnect is a chip the engine
             // never agreed to.

@@ -18,12 +18,15 @@
 import * as vscode from "vscode";
 import type { ChatViewModel } from "./chat-state.js";
 import type { ConnectionReport } from "./connection-card.js";
+import type { CommandOption } from "./webview-commands.js";
 import { createNonce, renderSidebarHtml } from "./webview-html.js";
 import {
+  type CommandListStatus,
   type ConnectionStatus,
   type ContextItem,
   type HostMessage,
   type ModelListStatus,
+  type PermissionStateStatus,
   parseWebviewMessage,
   type SessionListStatus,
   type WebviewMessage,
@@ -51,6 +54,29 @@ export interface SessionListView {
   sessions: SessionOption[];
   current?: string;
   cwd?: string;
+}
+
+/** The session's permission regime as the panel last saw it. */
+export interface PermissionView {
+  status: PermissionStateStatus;
+  /** The mode in force. Absent when the engine did not say. */
+  mode?: string;
+  /** Tool names, for the capability line. */
+  tools: string[];
+  /**
+   * Why the last mode change did not take.
+   *
+   * Deliberately part of the *same* view as the mode, so a refusal and the
+   * mode still in force are one message and cannot arrive out of order: the
+   * chip snaps back and the sentence appears in one paint.
+   */
+  note?: string;
+}
+
+/** The `/` menu as the panel last saw it. */
+export interface CommandListView {
+  status: CommandListStatus;
+  commands: CommandOption[];
 }
 
 /** What the provider needs from the extension host. */
@@ -86,6 +112,8 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
   #lastModels: ModelListView | undefined;
   #lastSession: SessionSummary | undefined;
   #lastSessions: SessionListView | undefined;
+  #lastPermission: PermissionView | undefined;
+  #lastCommands: CommandListView | undefined;
   /** What the composer is holding, replayed on reload. See {@link SidebarViewProvider.postContext}. */
   #lastContext: ContextItem[] | undefined;
   /**
@@ -205,8 +233,37 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
    * something the user is typing right now, and replaying a stale one into a
    * reloaded page would re-open a picker nobody asked for.
    */
-  postContextCandidates(query: string, items: ContextItem[]): void {
-    this.#post({ type: "contextCandidates", query, items });
+  postContextCandidates(
+    query: string,
+    items: ContextItem[],
+    status: "ready" | "unavailable" = "ready",
+  ): void {
+    this.#post({ type: "contextCandidates", query, items, status });
+  }
+
+  /**
+   * Push the session's permission regime: the mode chip and the capability
+   * line in the empty state.
+   *
+   * @param view - See {@link PermissionView}.
+   */
+  postPermission(view: PermissionView): void {
+    // A note is about one attempt, not about the state: remembering it would
+    // replay "this engine is too old" into a panel that was reloaded an hour
+    // later, next to a chip that has been correct the whole time.
+    const { note: _note, ...remembered } = view;
+    this.#lastPermission = remembered;
+    this.#post(permissionMessage(view));
+  }
+
+  /**
+   * Push what a `/` could invoke here.
+   *
+   * @param view - See {@link CommandListView}.
+   */
+  postCommands(view: CommandListView): void {
+    this.#lastCommands = view;
+    this.#post({ type: "commands", status: view.status, commands: view.commands });
   }
 
   /** Push the session the panel is attached to. */
@@ -271,6 +328,14 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
     if (this.#lastSession !== undefined) this.#post(sessionMessage(this.#lastSession));
     if (this.#lastSessions !== undefined) this.#post(sessionsMessage(this.#lastSessions));
     if (this.#lastContext !== undefined) this.#post({ type: "context", items: this.#lastContext });
+    if (this.#lastPermission !== undefined) this.#post(permissionMessage(this.#lastPermission));
+    if (this.#lastCommands !== undefined) {
+      this.#post({
+        type: "commands",
+        status: this.#lastCommands.status,
+        commands: this.#lastCommands.commands,
+      });
+    }
     // Last, so the view it opens is already holding the list it will show. One
     // shot: a reload the user did not ask for must not re-open the view.
     if (this.#pendingShowSessions) {
@@ -302,6 +367,17 @@ function sessionsMessage(view: SessionListView): HostMessage {
     sessions: view.sessions,
     ...(view.current === undefined || view.current === "" ? {} : { current: view.current }),
     ...(view.cwd === undefined || view.cwd === "" ? {} : { cwd: view.cwd }),
+  };
+}
+
+/** Build the `permission` message, omitting what the engine did not say. */
+function permissionMessage(view: PermissionView): HostMessage {
+  return {
+    type: "permission",
+    status: view.status,
+    ...(view.mode === undefined || view.mode === "" ? {} : { mode: view.mode }),
+    tools: view.tools,
+    ...(view.note === undefined || view.note === "" ? {} : { note: view.note }),
   };
 }
 

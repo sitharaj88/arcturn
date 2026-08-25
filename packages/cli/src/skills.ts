@@ -153,9 +153,23 @@ function splitArguments(args: string): string[] {
   return words;
 }
 
+/** Every token {@link expandTemplate} understands, matched in one pass. */
+const TEMPLATE_TOKEN = /\$(ARGUMENTS|CWD|SKILL_DIR|[1-9])/g;
+
 /**
  * Expand `$ARGUMENTS`, `$1`..`$9`, `$CWD` and (optionally) `$SKILL_DIR` in a
  * prompt template.
+ *
+ * **One pass, deliberately.** Substituted text is never re-scanned: a
+ * template's own tokens expand, and what they expand *to* is final. This used
+ * to be four sequential `replaceAll`/`replace` calls, which meant argument
+ * text was still on the table when the later tokens were substituted — so an
+ * argument of `$SKILL_DIR/../../etc/passwd` came back with the skill folder's
+ * real absolute path spliced in, handing the caller both a path outside the
+ * workspace and the fact of where the skill library lives. That was survivable
+ * while the only caller was a person typing into their own terminal; RFC 0005
+ * §1.3 makes `args` remote-caller text on the serve path, and remote text that
+ * can name substitution tokens is an injection channel.
  *
  * @param template - The raw template body.
  * @param args - Full argument string for `$ARGUMENTS` and positional splits.
@@ -164,10 +178,14 @@ function splitArguments(args: string): string[] {
  */
 function expandTemplate(template: string, args: string, cwd: string, skillDir?: string): string {
   const positional = splitArguments(args);
-  let out = template.replaceAll("$ARGUMENTS", args).replaceAll("$CWD", cwd);
-  if (skillDir !== undefined) out = out.replaceAll("$SKILL_DIR", skillDir);
-  out = out.replace(/\$([1-9])/g, (_match, digit: string) => positional[Number(digit) - 1] ?? "");
-  return out;
+  return template.replace(TEMPLATE_TOKEN, (match, token: string) => {
+    if (token === "ARGUMENTS") return args;
+    if (token === "CWD") return cwd;
+    // A plain `<name>.md` has no folder, and has always left the token alone
+    // rather than substituting an empty string for it.
+    if (token === "SKILL_DIR") return skillDir ?? match;
+    return positional[Number(token) - 1] ?? "";
+  });
 }
 
 /** One file discovered on disk, before it is parsed into a {@link Skill}. */

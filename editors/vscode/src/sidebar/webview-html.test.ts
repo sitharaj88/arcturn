@@ -96,6 +96,53 @@ describe("renderSidebarHtml", () => {
     expect(page).toMatch(/<button[^>]*id="sessions-new"/);
   });
 
+  it("puts every composer control in the tab order, not behind a hover", () => {
+    const page = html();
+    // RFC 0005 §2's composer is one control, and all of it is reachable: the
+    // two things on the left, the two chips, and the two menus they open.
+    expect(page).toMatch(/<button[^>]*id="attach"/);
+    expect(page).toMatch(/<button[^>]*id="context"/);
+    expect(page).toMatch(/<button[^>]*id="mode"/);
+    expect(page).toMatch(/<button[^>]*id="mode-close"/);
+  });
+
+  it("announces the @ and / menus as a listbox the composer controls", () => {
+    const page = html();
+    // The composer *is* the search box for both menus — focus never leaves the
+    // textarea — so the combobox relationship hangs off the textarea rather
+    // than off a field of the popover's own.
+    expect(page).toMatch(/id="prompt"[^>]*aria-haspopup="listbox"/s);
+    expect(page).toMatch(/id="prompt"[^>]*aria-controls="suggest"/s);
+    expect(page).toMatch(/id="suggest-list"[^>]*role="listbox"/s);
+    // The mode popover deliberately is *not* a listbox: it has no search box
+    // to own the arrow keys, so its four modes are focusable buttons in a
+    // labelled group rather than options with nothing driving them.
+    expect(page).toMatch(/id="mode-list"[^>]*role="group"/s);
+    expect(page).toMatch(/id="mode"[^>]*aria-haspopup="listbox"/s);
+    // A refused mode change is announced, not just tinted.
+    expect(page).toMatch(/id="mode-status"[^>]*aria-live="polite"/s);
+  });
+
+  it("puts the @ / and menus above the composer rather than over it", () => {
+    // Load-bearing placement: `.suggest` is anchored with `bottom: 100%`, so it
+    // floats above whatever `#dock` holds. Moved out of `#dock` it would
+    // position against `#root` and silently cover the message being written —
+    // which is the one thing a list completing that message must not do.
+    const page = html();
+    const dock = page.indexOf('<div id="dock">');
+    const suggest = page.indexOf('id="suggest"');
+    const composer = page.indexOf('<div class="composer">');
+    expect(dock).toBeGreaterThan(-1);
+    expect(suggest).toBeGreaterThan(dock);
+    expect(suggest).toBeLessThan(composer);
+    expect(SIDEBAR_STYLE).toMatch(/#dock \{[^}]*position: relative/s);
+    expect(SIDEBAR_STYLE).toMatch(/\.suggest \{[^}]*bottom: 100%/s);
+  });
+
+  it("gives the chip row a list role, so what is attached is enumerable", () => {
+    expect(html()).toMatch(/id="chips"[^>]*role="list"/s);
+  });
+
   it("gives the model list the roles a screen reader needs to announce it", () => {
     const page = html();
     expect(page).toMatch(/id="model"[^>]*aria-haspopup="listbox"/s);
@@ -215,6 +262,34 @@ describe("the client script", () => {
     // And every keyframe animation the sheet defines is inside the sheet the
     // override applies to — no motion is smuggled in from anywhere else.
     expect((SIDEBAR_STYLE.match(/@keyframes/g) ?? []).length).toBeGreaterThan(2);
+  });
+
+  it("makes room for two chips at 300px by dropping the hint from the picture only", () => {
+    // The webview's viewport is the sidebar, so this media query is a
+    // container query. `display: none` rather than a shrink because an
+    // ellipsised "Enter to s…" is worse than nothing — and the textarea's
+    // aria-describedby still reads the element, because accname includes a
+    // referenced node whether or not it is rendered.
+    expect(SIDEBAR_STYLE).toMatch(
+      /@media \(max-width: 380px\)[^}]*\{[^}]*\.hint \{ display: none; \}/s,
+    );
+    expect(html()).toMatch(/id="prompt"[^>]*aria-describedby="hint"/s);
+  });
+
+  it("truncates the model chip before the mode chip, which is the one that lies when cut", () => {
+    // "Claude Sonne…" still names a model and the full id is one click away;
+    // "Accept edi…" names nothing, and the mode is a four-way choice about what
+    // the agent may do to somebody's files.
+    expect(SIDEBAR_STYLE).toMatch(/#model \{[^}]*flex: 1 1 auto/s);
+    expect(SIDEBAR_STYLE).toMatch(/#mode \{[^}]*flex-shrink: 0\.15/s);
+    // And neither is ever removed at a narrow width.
+    expect(SIDEBAR_STYLE).not.toMatch(/@media \(max-width: 380px\)[^}]*#(model|mode)/s);
+  });
+
+  it("wraps the chip row rather than scrolling it sideways", () => {
+    // Horizontal overflow is the panel's one unrecoverable layout failure, and
+    // a strip of chips is the newest thing that could cause it.
+    expect(SIDEBAR_STYLE).toMatch(/\.chips \{[^}]*flex-wrap: wrap/s);
   });
 
   it("keeps long code inside its own box rather than widening a 300px panel", () => {

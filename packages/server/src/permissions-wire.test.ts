@@ -19,6 +19,10 @@ import {
 import type { AgentEvent, LLMClient, PermissionRule, Tool } from "@arcturn/types";
 import { afterEach, describe, expect, it } from "vitest";
 import { WebSocket } from "ws";
+import {
+  REMOTE_BUILT_IN_COMMAND_VERBS,
+  REMOTE_REACHABLE_BUILT_IN_COMMANDS,
+} from "./built-in-commands.js";
 import { SessionHost, type SessionHostOptions } from "./session-host.js";
 import {
   createGatedLLM,
@@ -506,5 +510,18 @@ describe("RFC 0005 §1.3 — listCommands", () => {
   it("answers an empty list rather than throwing when nothing was wired", async () => {
     const { client } = await harness(createScriptedLLM([textTurn("hi")]), []);
     expect(await client.listCommands()).toEqual({ commands: [] });
+  });
+
+  it("names the verbs behind every built-in it lists, and lists every built-in it names", () => {
+    // Two exports, one fact. The list decides what a menu offers; the verb map
+    // decides what the serve path's `/name` refusal tells a client to call
+    // instead. A built-in in one and not the other is either a menu entry with
+    // no advice behind it or advice for a command nobody is offered.
+    expect(Object.keys(REMOTE_BUILT_IN_COMMAND_VERBS).sort()).toEqual(
+      REMOTE_REACHABLE_BUILT_IN_COMMANDS.map((command) => command.name).sort(),
+    );
+    for (const verbs of Object.values(REMOTE_BUILT_IN_COMMAND_VERBS)) {
+      expect(verbs.length).toBeGreaterThan(0);
+    }
   });
 });

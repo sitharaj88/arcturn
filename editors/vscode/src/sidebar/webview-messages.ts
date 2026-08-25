@@ -17,25 +17,32 @@
  * RFC 0004 §0 freezes what a client may drive: `prompt`, `steer`, `abort`,
  * `setModel`, `respondToPermission`, `listModels`, `listSessions`,
  * `createSession`, `openSession`, `sessionHistory`, `deleteSession`,
- * `resolveContext`. Every message in the webview→host union
+ * `resolveContext`, `permissionState`, `setPermissionMode`, `listCommands`.
+ * Every message in the webview→host union
  * below lands on exactly one of those, on a VS Code command the extension
  * already contributes, or on nothing at all (`toggle` is view state; `copy` is
- * the clipboard). No message here invents a verb — the last two on that list
- * were added to the *engine* first, exactly as §0 prescribes, which is why
- * `deleteSession` below is a wire verb this file forwards rather than an
- * extension-side `fs.unlink`. And `setModel` in
+ * the clipboard; `browseForFiles` is a native dialog). No message here invents
+ * a verb — the last seven on that list were added to the *engine* first,
+ * exactly as §0 prescribes, which is why `deleteSession` below is a wire verb
+ * this file forwards rather than an extension-side `fs.unlink`, and why
+ * `setPermissionMode` is a wire verb rather than a mode the panel enforces on
+ * its own. And `setModel` in
  * particular is validated as a *string with a ceiling*, not against a
  * catalog: the catalog is the server's and the server validates the id, which
  * is where that check belongs and where `picker.ts`'s free-text row has always
- * left it.
+ * left it. `setPermissionMode` is the deliberate exception — it *is* checked
+ * against a fixed set, because it is the one message here that changes what
+ * the agent is allowed to do.
  *
  * Pure, so both directions are testable with no `vscode` and no DOM.
  */
 
 import type {
+  CommandDescriptor,
   ContextKind,
   ContextResolution,
   ModelCatalogEntry,
+  PermissionMode,
   SessionHeader,
 } from "../serve/engine.js";
 import { MAX_CONTEXT_QUERY_LENGTH, MAX_PROMPT_ATTACHMENTS } from "../serve/engine.js";
@@ -46,7 +53,9 @@ import {
   type ConnectionActionId,
 } from "./connection-card.js";
 import { escapeCodicons } from "./picker.js";
+import type { CommandOption } from "./webview-commands.js";
 import type { ModelOption } from "./webview-models.js";
+import { PERMISSION_MODE_IDS } from "./webview-permission.js";
 import type { SessionOption } from "./webview-sessions.js";
 
 /** Ceiling on a prompt, mirroring nothing in particular — just not unbounded. */
@@ -77,6 +86,32 @@ export const MAX_COPY_LENGTH = 100_000;
  * rather than a length assertion about a format this extension does not own.
  */
 export const MAX_SESSION_ID_LENGTH = 200;
+/**
+ * Ceiling on the base64 of one pasted image.
+ *
+ * ~6.8 MB of base64, so ~5 MB of pixels — comfortably above a full-screen
+ * retina screenshot and well below "a paste can hand the host an unbounded
+ * string". The engine caps the whole attachment budget on its own side too;
+ * this is the ceiling on what crosses the *webview* boundary, which is the one
+ * this file is responsible for.
+ */
+export const MAX_IMAGE_DATA_LENGTH = 6_800_000;
+
+/**
+ * Image types the engine will actually take, mirroring `validate.ts`'s
+ * `IMAGE_MIME_TYPES` on purpose.
+ *
+ * Checked here rather than left to the round trip because the point of the
+ * chip is to say what will happen *before* a turn is spent (RFC 0005 §4). A
+ * paste of an SVG is refused at this boundary with the chip never appearing,
+ * rather than accepted, shown, and then rejected by the engine when the user
+ * presses Enter. `image/svg+xml` is not on the list for a second reason worth
+ * naming: an SVG is a document that can carry script, not a bitmap.
+ */
+const IMAGE_MIME_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"] as const;
+
+/** Standard base64, padding included, and nothing else. */
+const BASE64 = /^[A-Za-z0-9+/]+={0,2}$/;
 
 /**
  * One thing the composer is holding, or one candidate the picker is offering.
@@ -142,6 +177,31 @@ export function projectContextItem(resolution: ContextResolution): ContextItem {
   };
 }
 
+/**
+ * Project one `listCommands` entry into a menu row.
+ *
+ * Rebuilt field by field for the reason {@link projectModelOption} gives, and
+ * with one thing this projection does that the model one does not: it
+ * **escapes**. A skill's `description` is frontmatter from a markdown file
+ * under `<cwd>/.arcturn/skills`, which is to say content a cloned repository
+ * controls; `source` is a path on the user's disk. Both reach a rendered field
+ * — the menu here, and a `showErrorMessage` on the failure path in `index.ts`,
+ * where VS Code's `IconLabel` expands `$(name)` into a real glyph. A skill
+ * described as `$(verified) Trusted by Arcturn` would otherwise render with a
+ * badge the engine never gave it. See `picker.ts`'s `escapeCodicons`, and
+ * `ContextItem`, which had exactly this finding once already.
+ *
+ * @param descriptor - One row of `listCommands`.
+ */
+export function projectCommandOption(descriptor: CommandDescriptor): CommandOption {
+  return {
+    name: descriptor.name,
+    description: escapeCodicons(descriptor.description),
+    kind: descriptor.kind === "builtin" ? "builtin" : "skill",
+    ...(descriptor.source === undefined ? {} : { source: escapeCodicons(descriptor.source) }),
+  };
+}
+
 /** Commands the webview may ask the host to run. */
 export const WEBVIEW_COMMANDS = ["model", "sessions", "newSession"] as const;
 
@@ -175,6 +235,28 @@ export type ModelListStatus = "loading" | "ready" | "unavailable";
  * refusing to give.
  */
 export type SessionListStatus = "loading" | "ready" | "disconnected" | "failed";
+
+/**
+ * Where the session's permission state stands.
+ *
+ * `"unavailable"` is the honest answer for an engine older than
+ * `permissionState` (`ProtocolClient.permissionState` resolves `undefined`),
+ * and it is a *different* thing from `"default"`: the panel does not know the
+ * mode, so it says so and offers no chip that claims one. RFC 0005 §3 — a
+ * capability is never implied by an affordance, and neither is a restriction.
+ */
+export type PermissionStateStatus = "loading" | "ready" | "unavailable";
+
+/**
+ * Where the command list stands.
+ *
+ * `"unavailable"` is an engine older than `listCommands`. The `/` menu then
+ * shows nothing at all rather than an empty list of skills, because "this
+ * workspace has no skills" and "this engine cannot tell me" are not the same
+ * news — the same distinction {@link SessionListStatus} draws, for the same
+ * reason.
+ */
+export type CommandListStatus = "loading" | "ready" | "unavailable";
 
 /** Host → webview. */
 export type HostMessage =
@@ -229,8 +311,48 @@ export type HostMessage =
    * thing a chip row must never do.
    */
   | { type: "context"; items: ContextItem[] }
-  /** The answer to one `resolveContext`, echoing the query it answers. */
-  | { type: "contextCandidates"; query: string; items: ContextItem[] }
+  /**
+   * The answer to one `resolveContext`, echoing the query it answers.
+   *
+   * `status` is the difference between "the workspace has no file like that"
+   * and "this engine has no `resolveContext`, so nothing here can be
+   * answered honestly" — and they are not the same news. On `"unavailable"`
+   * the panel closes the picker rather than showing an empty one, which is
+   * the same choice the `/` menu makes for an engine with no `listCommands`.
+   */
+  | {
+      type: "contextCandidates";
+      query: string;
+      items: ContextItem[];
+      status?: "ready" | "unavailable";
+    }
+  /**
+   * The session's permission regime, as the engine last reported it.
+   *
+   * `mode` is present only when `status` is `"ready"`, and the page treats its
+   * absence as "unknown" rather than as `"default"` — see
+   * `webview-permission.ts` for why that distinction is the whole point of
+   * this message.
+   */
+  | {
+      type: "permission";
+      status: PermissionStateStatus;
+      /** The mode in force. Absent when the engine did not say. */
+      mode?: string;
+      /** The names of the tools this session holds, for the capability line. */
+      tools: string[];
+      /**
+       * Why the last `setPermissionMode` did not take, when it did not.
+       *
+       * Carried on the *same* message as the mode so the two cannot disagree:
+       * a refusal arrives with the mode still in force, and the chip snaps
+       * back to it in the same paint that shows the sentence. Rendered as
+       * text; escaped by the host before it gets here.
+       */
+      note?: string;
+    }
+  /** What a `/` could invoke here, projected field by field. */
+  | { type: "commands"; status: CommandListStatus; commands: CommandOption[] }
   | {
       type: "session";
       sessionId?: string;
@@ -275,6 +397,28 @@ export type WebviewMessage =
   | { type: "attach"; paths: string[] }
   /** Drop one chip, by the `id` the host gave it. */
   | { type: "detach"; id: string }
+  /**
+   * Attach an image that has no path — a paste, or a drop from outside the
+   * filesystem. The only inbound message carrying bytes rather than a
+   * reference, and the only kind of attachment for which the engine accepts
+   * inline data at all (RFC 0005 §1.1); a file that exists on disk is read by
+   * the engine from its path, where the permission engine can see it.
+   */
+  | { type: "attachImage"; data: string; mimeType: string }
+  /**
+   * Open the host's native file dialog and attach whatever comes back.
+   *
+   * The dialog is the *host's* — `vscode.window.showOpenDialog` — because a
+   * webview cannot read a path off a `File` object and a picker that could not
+   * name what it picked would be a picker that attached nothing.
+   */
+  | { type: "browseForFiles" }
+  /** Ask for the session's permission mode and tool set. */
+  | { type: "requestPermission" }
+  /** Ask the session to run under a different mode from the next turn. */
+  | { type: "setPermissionMode"; mode: PermissionMode }
+  /** Ask for the `/` menu's contents. */
+  | { type: "requestCommands" }
   | { type: "copy"; text: string };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -383,6 +527,38 @@ export function parseWebviewMessage(value: unknown): WebviewMessage | undefined 
       return { type: "requestModels" };
     case "requestSessions":
       return { type: "requestSessions" };
+    case "requestPermission":
+      return { type: "requestPermission" };
+    case "requestCommands":
+      return { type: "requestCommands" };
+    case "browseForFiles":
+      return { type: "browseForFiles" };
+    case "setPermissionMode": {
+      // Against the engine's own four names, not a shape check: this is the
+      // one message on this boundary that changes what the agent is allowed to
+      // do, and a mode the engine does not recognise must not reach it as a
+      // string it might interpret. `PERMISSION_MODE_IDS` is typed
+      // `PermissionMode[]`, so a fifth mode added to the engine is a compile
+      // error here rather than a mode the panel silently cannot offer.
+      const mode = value.mode;
+      if (typeof mode !== "string") return undefined;
+      if (!(PERMISSION_MODE_IDS as readonly string[]).includes(mode)) return undefined;
+      return { type: "setPermissionMode", mode: mode as PermissionMode };
+    }
+    case "attachImage": {
+      // The only message that carries bytes. Three checks, each closing a
+      // different hole: the alphabet (so nothing but base64 reaches `atob` on
+      // the engine's side), the ceiling (so a paste is bounded), and the mime
+      // type against the engine's own allowlist (so a chip never appears for
+      // an image the turn would be refused for).
+      const data = value.data;
+      const mimeType = value.mimeType;
+      if (typeof data !== "string" || typeof mimeType !== "string") return undefined;
+      if (data === "" || data.length > MAX_IMAGE_DATA_LENGTH) return undefined;
+      if (!BASE64.test(data)) return undefined;
+      if (!(IMAGE_MIME_TYPES as readonly string[]).includes(mimeType)) return undefined;
+      return { type: "attachImage", data, mimeType };
+    }
     case "action": {
       // The card's buttons are the only thing that sends this, and the host
       // turns an id into a VS Code command. Accepting an arbitrary string here

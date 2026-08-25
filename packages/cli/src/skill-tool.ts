@@ -205,11 +205,22 @@ function levenshtein(a: string, b: string): number {
  * merely happens to be a similar length — ties broken by edit distance, then
  * name, for a deterministic order.
  *
+ * Exported because RFC 0005 §1.3's `/name` expansion refuses an unrecognised
+ * command on the serve path and owes the same "did you mean" — the same
+ * question against the same registry, so it gets the same answer rather than a
+ * second ranking that drifts.
+ *
+ * Typed against `{ name }` rather than `Skill` only so that caller can rank a
+ * built-in's name alongside a skill's; nothing else about it changes.
+ *
  * @param name - The (normalized) name that was not found.
- * @param skills - The current skill collection to search.
+ * @param candidates - The current command collection to search.
  */
-function nearestMatches(name: string, skills: readonly Skill[]): string[] {
-  const scored = skills.map((skill) => {
+export function nearestMatches(
+  name: string,
+  candidates: readonly { readonly name: string }[],
+): string[] {
+  const scored = candidates.map((skill) => {
     const substring = skill.name.includes(name) || name.includes(skill.name);
     const distance = levenshtein(name, skill.name);
     return { name: skill.name, substring, distance };

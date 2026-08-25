@@ -30,8 +30,9 @@ async function harness(
   answer: (request: PermissionRequest) => Promise<PermissionAnswer> = async () => ({
     behavior: "allow",
   }),
+  autoRespond: boolean | ((frame: { method: string }) => unknown) = true,
 ): Promise<Harness> {
-  const socket = new FakeSocket({ autoRespond: true });
+  const socket = new FakeSocket({ autoRespond });
   const chats: ChatViewModel[] = [];
   const costs: CostState[] = [];
   const asked: PermissionRequest[] = [];
@@ -446,5 +447,111 @@ describe("createSessionController: replayed history", () => {
     expect(h.controller.state.blocks).toMatchObject([
       { kind: "tool", toolCallId: "tc1", name: "bash", status: "ok", result: "README.md" },
     ]);
+  });
+});
+
+/**
+ * A harness that leaves one method unanswered, so a test can hand the client
+ * the exact response — or the exact rejection — it is about. `FakeSocket`'s
+ * `autoRespond` answers everything with `{}`, which is what the suites above
+ * want and precisely what a test about a *parsed* result cannot use.
+ */
+function unanswered(method: string): Parameters<typeof harness>[1] {
+  return (frame) => (frame.method === method ? undefined : {});
+}
+
+/** Reject the last frame the way `ws-server.ts` does. */
+function rejectLast(h: Harness, code: string, message: string): void {
+  const frames = h.socket.frames();
+  const last = frames[frames.length - 1];
+  h.socket.emit({ kind: "response", id: last?.id, error: { code, message } });
+}
+
+describe("the permission verbs RFC 0005 §1.2 added", () => {
+  const state = {
+    sessionId: SESSION,
+    mode: "plan",
+    rules: [],
+    tools: ["read", "fetch"],
+  };
+
+  it("reads the session's mode and tool set through permissionState", async () => {
+    const h = await harness(undefined, unanswered("permissionState"));
+    const promise = h.controller.permissionState();
+    await flush();
+    expect(h.socket.lastFrame("permissionState")?.params).toEqual({ sessionId: SESSION });
+    h.socket.respondOk(h.socket.frames().length - 1, state);
+    expect(await promise).toMatchObject({ mode: "plan", tools: ["read", "fetch"] });
+  });
+
+  it("reports an engine too old for the verb as nothing known, never as default", async () => {
+    const h = await harness(undefined, unanswered("permissionState"));
+    const promise = h.controller.permissionState();
+    await flush();
+    rejectLast(h, "invalidRequest", 'Unknown method: "permissionState"');
+    expect(await promise).toBeUndefined();
+  });
+
+  it("asks the engine to change mode and returns what the engine says it now is", async () => {
+    const h = await harness(undefined, unanswered("setPermissionMode"));
+    const promise = h.controller.setPermissionMode("yolo");
+    await flush();
+    expect(h.socket.lastFrame("setPermissionMode")?.params).toEqual({
+      sessionId: SESSION,
+      mode: "yolo",
+    });
+    h.socket.respondOk(h.socket.frames().length - 1, { ...state, mode: "yolo" });
+    expect((await promise).mode).toBe("yolo");
+  });
+
+  it("rejects rather than degrading when the engine is too old to change modes", async () => {
+    const h = await harness(undefined, unanswered("setPermissionMode"));
+    const promise = h.controller.setPermissionMode("plan");
+    await flush();
+    rejectLast(h, "invalidRequest", 'Unknown method: "setPermissionMode"');
+    // A chip showing `plan` over a session still in `yolo` is the failure this
+    // refusal exists to prevent, so the caller is told, not reassured.
+    await expect(promise).rejects.toThrow(/setPermissionMode/);
+  });
+
+  it("passes a mid-run refusal through rather than swallowing it", async () => {
+    const h = await harness(undefined, unanswered("setPermissionMode"));
+    const promise = h.controller.setPermissionMode("plan");
+    await flush();
+    rejectLast(h, "sessionBusy", "A run is in flight");
+    await expect(promise).rejects.toThrow(/run is in flight/);
+  });
+});
+
+describe("allow for this session", () => {
+  it("sends the engine's own suggested rule, session-scoped, with the scope named", async () => {
+    const h = await harness(async () => ({
+      behavior: "allow",
+      persistRule: { tool: "bash", specifier: "git *", action: "allow", scope: "session" },
+    }));
+    emit(h, {
+      type: "permissionRequest",
+      request: {
+        ...permissionRequest,
+        suggestedRule: { tool: "bash", specifier: "git *", action: "allow" },
+      },
+    });
+    await h.controller.permissions.drain();
+    expect(h.socket.lastFrame("permissionDecision")?.params).toEqual({
+      sessionId: SESSION,
+      decision: {
+        requestId: "req-1",
+        behavior: "allow",
+        persistRule: { tool: "bash", specifier: "git *", action: "allow", scope: "session" },
+      },
+      scope: "session",
+    });
+  });
+
+  it("names no scope for a plain one-off allow", async () => {
+    const h = await harness();
+    emit(h, { type: "permissionRequest", request: permissionRequest });
+    await h.controller.permissions.drain();
+    expect(h.socket.lastFrame("permissionDecision")?.params).not.toHaveProperty("scope");
   });
 });

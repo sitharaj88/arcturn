@@ -19,6 +19,14 @@
  *
  * Pure: the nonce and the webview's `cspSource` are parameters, so the whole
  * page is assertable in a test with no `vscode` and no DOM.
+ *
+ * One placement here is load-bearing rather than incidental: `#suggest` — the
+ * `@` picker and the `/` menu — lives **inside** `#dock` rather than beside
+ * `#model-popover`, because the stylesheet anchors it to the top of the dock
+ * (`bottom: 100%`) so it floats above the composer instead of over it. A list
+ * that completes what you are typing must not cover what you are typing.
+ * Moving that element out of `#dock` would leave it positioned against
+ * `#root` and silently put it back on top of the composer.
  */
 
 import { randomBytes } from "node:crypto";
@@ -113,6 +121,7 @@ export function renderSidebarHtml(options: SidebarHtmlOptions): string {
       <h1 class="empty-title">Arcturn</h1>
       <p class="empty-line">The agent behind the CLI, working in this workspace &mdash; it reads
         your files, runs commands, and asks before anything it cannot undo.</p>
+      <p id="capability" class="empty-line capability hidden"></p>
       <div id="starters" class="starters"></div>
     </div>
     <div id="turns"></div>
@@ -147,6 +156,12 @@ export function renderSidebarHtml(options: SidebarHtmlOptions): string {
   </section>
 
   <div id="dock">
+    <div id="suggest" class="popover suggest hidden" role="dialog" aria-modal="false"
+      aria-label="Insert into the message">
+      <div id="suggest-status" class="popover-status hidden"></div>
+      <div id="suggest-list" class="popover-list" role="listbox" aria-label="Suggestions"></div>
+    </div>
+
     <section id="plan-card" class="plan-card hidden open" aria-label="Plan">
       <button id="plan-toggle" class="disclosure" type="button" aria-expanded="true"
         aria-controls="plan-body">
@@ -166,16 +181,25 @@ export function renderSidebarHtml(options: SidebarHtmlOptions): string {
     </div>
 
     <div class="composer">
+      <div id="chips" class="chips hidden" role="list" aria-label="Attached context"></div>
       <div id="grow" class="grow" data-value="">
         <textarea id="prompt" rows="1" aria-label="Message Arcturn" aria-describedby="hint"
+          aria-haspopup="listbox" aria-expanded="false" aria-controls="suggest"
           placeholder="Ask Arcturn to do something&hellip;"></textarea>
       </div>
       <div class="composer-bar">
+        <button id="attach" class="tool-button" type="button"></button>
+        <button id="context" class="tool-button" type="button"></button>
         <button id="model" class="chip" type="button" aria-haspopup="listbox"
           aria-expanded="false" aria-controls="model-popover">
           <span id="model-icon"></span>
           <span id="model-label" class="chip-label">Select model</span>
           <span id="model-caret"></span>
+        </button>
+        <button id="mode" class="chip" type="button" aria-haspopup="listbox"
+          aria-expanded="false" aria-controls="mode-popover">
+          <span id="mode-icon"></span>
+          <span id="mode-label" class="chip-label">Permissions</span>
         </button>
         <span id="hint" class="hint"></span>
         <button id="abort" class="send stop hidden" type="button" aria-label="Stop"></button>
@@ -194,6 +218,16 @@ export function renderSidebarHtml(options: SidebarHtmlOptions): string {
     </div>
     <div id="model-status" class="popover-status"></div>
     <div id="model-list" class="popover-list" role="listbox" aria-label="Models"></div>
+  </div>
+
+  <div id="mode-popover" class="popover hidden" role="dialog" aria-modal="false"
+    aria-label="Permission mode">
+    <div class="popover-head">
+      <h2 class="popover-title">What Arcturn may do</h2>
+      <button id="mode-close" class="icon-button" type="button"></button>
+    </div>
+    <div id="mode-status" class="popover-status hidden" role="status" aria-live="polite"></div>
+    <div id="mode-list" class="popover-list" role="group" aria-label="Permission modes"></div>
   </div>
 </div>
 <script nonce="${nonce}">${SIDEBAR_SCRIPT}</script>

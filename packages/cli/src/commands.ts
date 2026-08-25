@@ -109,6 +109,51 @@ export interface SlashCommand {
   run(context: CommandContext): void | Promise<void>;
 }
 
+/** A slash line split into the name that was typed and the rest of it. */
+export interface ParsedCommandLine {
+  /** The command name, lowercased, without its leading slash. */
+  name: string;
+  /** Everything after the first whitespace run, trimmed. Empty when there was none. */
+  args: string;
+  /**
+   * Whether `name` has the shape of a command name — `[A-Za-z0-9-]+`, the
+   * charset `skills.ts` normalizes a skill name into — rather than merely
+   * being whatever preceded the first space.
+   *
+   * The terminal ignores this and treats every leading slash as a command
+   * attempt, because a person typing there has a completion menu open and can
+   * see the mistake. `serve-commands.ts` uses it: a chat composer is where
+   * `/etc/hosts is wrong, fix it` gets typed, and refusing that as an unknown
+   * command would be worse than the typo it is guarding against. Read the
+   * divergence in that file — it is deliberate, and written down there.
+   */
+  wellFormed: boolean;
+}
+
+/**
+ * Split a submitted line into a command name and its arguments.
+ *
+ * The single parser for `/name args`, shared by {@link CommandRegistry.dispatch}
+ * (the terminal) and the serve path's command expansion, so the two cannot
+ * come to disagree about where a name ends — which is exactly how one skill
+ * would end up with two behaviours.
+ *
+ * @param input - Raw submitted text.
+ * @returns The split, or `undefined` when the trimmed input does not start
+ *   with `/` and is therefore not a command line at all.
+ */
+export function parseCommandLine(input: string): ParsedCommandLine | undefined {
+  const trimmed = input.trim();
+  if (!trimmed.startsWith("/")) return undefined;
+  const space = trimmed.search(/\s/);
+  const raw = space === -1 ? trimmed.slice(1) : trimmed.slice(1, space);
+  return {
+    name: raw.toLowerCase(),
+    args: space === -1 ? "" : trimmed.slice(space + 1).trim(),
+    wellFormed: /^[A-Za-z0-9-]+$/.test(raw),
+  };
+}
+
 /** Outcome of {@link CommandRegistry.dispatch}. */
 export type DispatchResult =
   | { handled: false }
@@ -172,12 +217,13 @@ export class CommandRegistry {
     input: string,
     context: Omit<CommandContext, "args" | "commands">,
   ): Promise<DispatchResult> {
-    const trimmed = input.trim();
-    if (!trimmed.startsWith("/")) return { handled: false };
+    const parsed = parseCommandLine(input);
+    if (!parsed) return { handled: false };
 
-    const space = trimmed.search(/\s/);
-    const name = (space === -1 ? trimmed.slice(1) : trimmed.slice(1, space)).toLowerCase();
-    const args = space === -1 ? "" : trimmed.slice(space + 1).trim();
+    // `wellFormed` is deliberately not consulted here: in the terminal every
+    // leading slash is a command attempt, and always has been. See
+    // {@link ParsedCommandLine.wellFormed}.
+    const { name, args } = parsed;
     const command = this.#commands.get(name);
     if (!command) {
       context.ui.notice("warn", `Unknown command "/${name}". Try /help.`);

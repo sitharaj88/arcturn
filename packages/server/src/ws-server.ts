@@ -357,7 +357,11 @@ export class ArcturnServer {
         );
         return { ok: true };
       case "steer":
-        this.#sessionHost.steer(request.params.sessionId, request.params.text);
+        // Awaited, unlike the fire-and-forget it once was: `steer` now expands
+        // mentions and a leading `/name` through the same resolver `prompt`
+        // uses, so a refusal has to reach the client as this request's error
+        // rather than vanishing into an unhandled rejection.
+        await this.#sessionHost.steer(request.params.sessionId, request.params.text);
         return { ok: true };
       case "abort":
         this.#sessionHost.abort(request.params.sessionId);

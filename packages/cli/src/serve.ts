@@ -303,6 +303,14 @@ export function createServeHost(
   options: { maxCostUsd?: number; maxAttachmentBytes?: number } = {},
 ): SessionHost {
   const resolveModel = serveModelResolver(runtime.env);
+  // One closure, two consumers: the `/` menu (`commands`, below) and the
+  // expander that runs what the menu offered (`contextResolver`, below that).
+  // They are the same feature seen from two sides — a listed command must be
+  // one `prompt` can expand, and an expandable one must be listed — so they
+  // read one array rather than each reaching for `runtime.skills` themselves.
+  // This is the `resolveModel`/`modelCatalog` lesson applied before it bites:
+  // that pair got separated once and drifted into a real routing bug.
+  const skills = (): readonly Skill[] => runtime.skills ?? [];
   return new SessionHost({
     agentFactory: (opts) => buildServedAgent(runtime, opts, options.maxCostUsd, resolveModel),
     // ---- Store injection: one store, four verbs, deliberately one line. ----
@@ -334,11 +342,18 @@ export function createServeHost(
     // three share one workspace-confinement gate and one set of size caps
     // *because* they share one resolver; wiring a second would be how the
     // preview a picker shows and the file a prompt reads start disagreeing.
-    contextResolver: createContextResolver(
-      options.maxAttachmentBytes === undefined
+    //
+    // It also expands a leading `/name` into the named skill's body — RFC 0005
+    // §1.3's other half. Listing a command a `prompt` could not run would be
+    // the lying menu §3 rules out, and the `skill` tool is not a substitute:
+    // that is the model *noticing* text and choosing to act on it, which is
+    // not the same thing as a command running.
+    contextResolver: createContextResolver({
+      skills,
+      ...(options.maxAttachmentBytes === undefined
         ? {}
-        : { maxAttachmentBytes: options.maxAttachmentBytes },
-    ),
+        : { maxAttachmentBytes: options.maxAttachmentBytes }),
+    }),
     // ---- Model injection: both halves, deliberately adjacent. ----
     // These are one feature, not two. `modelCatalog` is what a remote picker
     // is *offered*; `resolveModel` is what a pick actually *does* — which
@@ -371,7 +386,7 @@ export function createServeHost(
     // The built-ins folded in alongside are chosen in `@arcturn/server` — the
     // package that knows which verbs exist, and therefore which commands this
     // wire can actually carry out. See `serve-commands.ts`.
-    commands: () => serveCommandDescriptors(runtime.skills ?? []),
+    commands: () => serveCommandDescriptors(skills()),
   });
 }
 

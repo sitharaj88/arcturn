@@ -45,8 +45,11 @@
  * by looking at it: element creation, event wiring, and CSS.
  */
 
+import { COMMAND_MENU_SOURCE } from "./webview-commands.js";
+import { CONTEXT_SOURCE } from "./webview-context.js";
 import { MARKDOWN_SOURCE } from "./webview-markdown.js";
 import { MODEL_LIST_SOURCE } from "./webview-models.js";
+import { PERMISSION_SOURCE } from "./webview-permission.js";
 import { SESSION_LIST_SOURCE } from "./webview-sessions.js";
 import { TRANSCRIPT_SOURCE } from "./webview-transcript.js";
 
@@ -628,6 +631,14 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
 .empty-mark { color: var(--vscode-textLink-foreground); }
 .empty-title { margin: 0; font-size: 1.1em; font-weight: 600; }
 .empty-line { margin: 0; max-width: 34ch; color: var(--arc-muted); font-size: 0.92em; }
+/*
+ * The capability line. Quieter than the sentence above it because it is a
+ * *fact about this engine* rather than a description of the product, and it is
+ * only ever present when 'permissionState' actually answered — an engine that
+ * did not report its tools leaves this element hidden and the empty state
+ * reads exactly as it did before the line existed.
+ */
+.capability { font-size: 0.85em; opacity: 0.85; }
 .starters { display: flex; flex-direction: column; gap: 6px; width: 100%; margin-top: 8px; }
 .starter {
   display: flex;
@@ -673,6 +684,7 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
 /* ---- dock: plan, permission, composer -------------------------------- */
 
 #dock {
+  position: relative;
   flex: none;
   border-top: 1px solid var(--arc-border);
   background: var(--vscode-sideBar-background);
@@ -707,12 +719,118 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
   background: var(--vscode-inputValidation-warningBackground, transparent);
 }
 
+/*
+ * One control, not a text box with buttons bolted on (RFC 0005 §2).
+ *
+ * Everything the composer holds lives inside this one border: the chip row on
+ * top, the textarea, and the bar with attach and context on the left, the two
+ * chips in the middle and send on the right. The border is what makes it read
+ * as a single object — a chip row *above* an input, with its own outline,
+ * would read as two.
+ *
+ * Judged at 300px, which is the only width that matters here. What that forces
+ * is the '.hint' rule below: with two chips in the bar there is no room for a
+ * sentence, so at narrow widths the hint stops being *displayed* while staying
+ * in the accessibility tree — the textarea's 'aria-describedby' points at it,
+ * and accname includes a referenced element whether or not it is rendered.
+ * A sighted user at 300px loses "Enter to send"; a screen reader user does
+ * not lose anything at any width.
+ */
 .composer {
   border: 1px solid var(--vscode-input-border, var(--arc-border));
   border-radius: var(--arc-radius);
   background: var(--vscode-input-background);
 }
 .composer:focus-within { border-color: var(--vscode-focusBorder); }
+.composer.dropping { border-color: var(--vscode-focusBorder); }
+
+/* ---- context chips --------------------------------------------------- */
+
+/*
+ * A render of the host's attachment set and nothing else. Wrapping rather than
+ * scrolling: at 300px three chips are two rows, and a horizontally scrolling
+ * strip inside a panel that cannot scroll sideways is a place things go to be
+ * lost.
+ */
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 6px 6px 0;
+}
+.context-chip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 1px 2px 1px 6px;
+  border: 1px solid var(--arc-border);
+  border-radius: 999px;
+  font-size: 0.82em;
+  background: var(--arc-surface);
+}
+.context-chip .chip-icon { color: var(--arc-muted); }
+/*
+ * A path is truncated at its head, because the basename is what identifies
+ * it. Setting an rtl direction does that in one line and was what this used —
+ * but it reorders bidi-neutral characters, so a leading slash moved to the
+ * end and /etc/passwd rendered as etc/passwd/. A chip whose whole job is to
+ * report a refused path may not show a path that is not the path. Two spans
+ * instead: the directory shrinks and ellipsises, the basename never does,
+ * and nothing is reordered.
+ */
+.chip-name {
+  min-width: 0;
+  display: flex;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.chip-dir {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chip-base { flex: none; }
+.chip-size { flex: none; color: var(--arc-muted); font-variant-numeric: tabular-nums; }
+/*
+ * A chip the engine refused. Marked by colour *and* by the sentence next to
+ * it, never by colour alone: the reason is the whole reason the round trip
+ * happened, and a user who cannot see the tint still reads why.
+ */
+.context-chip.chip-bad { border-color: var(--arc-warn); }
+.context-chip.chip-bad .chip-icon, .context-chip.chip-bad .chip-size { color: var(--arc-warn); }
+.chip-remove {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  color: var(--arc-muted);
+  background: transparent;
+  cursor: pointer;
+}
+.chip-remove:hover { color: var(--vscode-foreground); background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground)); }
+
+.tool-button {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  color: var(--vscode-icon-foreground, var(--arc-muted));
+  background: transparent;
+  cursor: pointer;
+}
+.tool-button:hover { color: var(--vscode-foreground); background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground)); }
+.tool-button:disabled { opacity: 0.4; cursor: default; }
 /*
  * Auto-growing textarea with no measured pixel height: the wrapper is a
  * one-cell grid holding the textarea and a hidden ::after that mirrors the
@@ -752,14 +870,15 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
 .composer-bar {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   padding: 4px 6px 6px;
 }
 .chip {
   display: flex;
   align-items: center;
   gap: 5px;
-  max-width: 60%;
+  min-width: 0;
+  flex: 0 1 auto;
   padding: 2px 6px 2px 7px;
   border: 1px solid var(--arc-border);
   border-radius: 999px;
@@ -782,6 +901,40 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
   text-overflow: ellipsis;
   text-align: right;
 }
+/*
+ * The 300px rule. The webview's viewport *is* the sidebar, so a viewport media
+ * query is a container query here — and below this width the bar has two icon
+ * buttons, two chips and a send button to fit, which is exactly the room a
+ * sentence does not have. Hidden rather than shrunk: an ellipsised "Enter to
+ * s…" is worse than nothing, and the textarea's aria-describedby still reads
+ * this element, because accname includes a referenced node whether or not it
+ * is displayed.
+ */
+@media (max-width: 380px) {
+  .hint { display: none; }
+  .composer-bar { gap: 3px; }
+}
+/*
+ * Which chip gives ground, worked out at 300px.
+ *
+ * Inside a 300px panel the bar has about 270px, and after the two icon
+ * buttons, the send button and the gaps there are roughly 184px left for two
+ * chips that want about 260px. Something truncates, and it matters which.
+ *
+ * "Claude Sonne…" still identifies a model, and the full id is in the chip's
+ * title and one click away in the list. "Accept edi…" identifies nothing — the
+ * mode is a four-way choice about what the agent may do to your files, and
+ * half of one of those words is a chip that lies by omission. So the model
+ * absorbs nearly all of the shrinking (flex-shrink 1 against a large basis)
+ * and the mode gives ground only as a last resort. Neither is ever removed:
+ * a bar that dropped the mode chip at a narrow width would hide the control
+ * most worth checking exactly when there is least room to check it.
+ */
+#model { flex: 1 1 auto; min-width: 3em; }
+#mode { flex: 0 1 auto; flex-shrink: 0.15; min-width: 3em; }
+#mode.mode-yolo { color: var(--arc-warn); border-color: var(--arc-warn); }
+#mode.mode-plan { color: var(--vscode-textLink-foreground); }
+#mode.mode-unknown .chip-label { font-style: italic; }
 .send {
   display: flex;
   align-items: center;
@@ -881,6 +1034,109 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
 .model-row:hover .model-meta, .model-row.active .model-meta { color: inherit; opacity: 0.8; }
 .model-id { font-family: var(--vscode-editor-font-family); }
 .popover-empty { padding: 12px 10px; color: var(--arc-muted); font-size: 0.9em; text-align: center; }
+.popover-title { flex: 1 1 auto; margin: 0; font-size: 0.95em; font-weight: 600; }
+
+/* ---- the @ picker and the / menu -------------------------------------- */
+
+/*
+ * One popover for both, and deliberately so: what a user is doing in each case
+ * is *typing in the composer*, and the list is a completion of what they have
+ * typed rather than a separate place to search. So there is no search box here
+ * — the composer is the search box — focus never leaves the textarea, and the
+ * arrow keys, Enter and Escape are handled on it. That is the one structural
+ * difference from the model popover above, which is opened by clicking a chip
+ * and therefore has a field of its own to type into.
+ *
+ * It is shorter than the model list because it sits directly over the
+ * composer: a 420px sheet would cover the message being written, and the
+ * message is the thing the list is *about*.
+ */
+/*
+ * Anchored to the top of the dock rather than to the bottom of the panel.
+ *
+ * 'bottom: 100%' inside a relatively positioned #dock puts the list directly
+ * above everything the dock holds — the plan card, the permission line and the
+ * composer — with no measured pixel and no inline style, so the message being
+ * written stays visible while the list is up. That is the difference between
+ * this and the model popover, which deliberately sits over the composer
+ * because nothing is being typed into it.
+ */
+.suggest {
+  top: auto;
+  bottom: 100%;
+  left: 8px;
+  right: 8px;
+  margin-bottom: 4px;
+  max-height: min(46vh, 300px);
+}
+.suggest-row {
+  display: block;
+  width: 100%;
+  padding: 5px 7px;
+  border: none;
+  border-radius: 4px;
+  font: inherit;
+  text-align: left;
+  color: var(--vscode-foreground);
+  background: transparent;
+  cursor: pointer;
+}
+.suggest-row:hover, .suggest-row.active {
+  color: var(--vscode-list-activeSelectionForeground, var(--vscode-foreground));
+  background: var(--vscode-list-activeSelectionBackground, var(--vscode-list-hoverBackground));
+}
+.suggest-top { display: flex; align-items: center; gap: 6px; }
+.suggest-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.suggest-size { flex: none; font-size: 0.8em; color: var(--arc-muted); font-variant-numeric: tabular-nums; }
+.suggest-meta {
+  margin-left: 22px;
+  font-size: 0.8em;
+  color: var(--arc-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.suggest-row:hover .suggest-meta, .suggest-row.active .suggest-meta,
+.suggest-row:hover .suggest-size, .suggest-row.active .suggest-size { color: inherit; opacity: 0.8; }
+/* A candidate the engine refused: the reason is the row's whole content. */
+.suggest-row.suggest-bad .suggest-name { text-decoration: line-through; opacity: 0.75; }
+.suggest-row.suggest-bad .suggest-meta { color: var(--arc-warn); }
+
+/* ---- the permission mode popover -------------------------------------- */
+
+.mode-row {
+  display: block;
+  width: 100%;
+  padding: 6px 7px;
+  border: none;
+  border-radius: 4px;
+  font: inherit;
+  text-align: left;
+  color: var(--vscode-foreground);
+  background: transparent;
+  cursor: pointer;
+}
+.mode-row:hover, .mode-row.active {
+  color: var(--vscode-list-activeSelectionForeground, var(--vscode-foreground));
+  background: var(--vscode-list-activeSelectionBackground, var(--vscode-list-hoverBackground));
+}
+.mode-top { display: flex; align-items: center; gap: 6px; }
+.mode-name { flex: 1 1 auto; min-width: 0; font-weight: 600; }
+/*
+ * The grant sentence wraps rather than ellipsising. It is the only thing on
+ * this surface that changes what the agent may do to somebody's working
+ * directory, and half of it is not enough to choose by.
+ */
+.mode-grants { margin-left: 22px; font-size: 0.85em; color: var(--arc-muted); }
+.mode-row:hover .mode-grants, .mode-row.active .mode-grants { color: inherit; opacity: 0.85; }
+.mode-row.mode-current .mode-name { color: var(--vscode-textLink-foreground); }
+#mode-status { color: var(--arc-warn); }
 
 /* ---- sessions: the history view, in the panel -------------------------- */
 
@@ -993,7 +1249,8 @@ const CLIENT_SOURCE = String.raw`
    * dropped rather than dispatched.
    */
   var KNOWN_HOST_MESSAGES = {
-    state: 1, connection: 1, cost: 1, models: 1, session: 1, sessions: 1, showSessions: 1
+    state: 1, connection: 1, cost: 1, models: 1, session: 1, sessions: 1, showSessions: 1,
+    context: 1, contextCandidates: 1, permission: 1, commands: 1
   };
 
   var SVG_NS = "http://www.w3.org/2000/svg";
@@ -1046,6 +1303,13 @@ const CLIENT_SOURCE = String.raw`
             ["path", stroked({ d: "M6.4 4.5V3.3h3.2v1.2" })],
             ["path", stroked({ d: "M4.6 4.5l.6 8.2h5.6l.6-8.2" })],
             ["path", stroked({ d: "M6.9 6.9v3.6M9.1 6.9v3.6" })]],
+    paperclip: [["path", stroked({ d: "M11.6 7.3l-4.3 4.3a2.4 2.4 0 0 1-3.4-3.4l5.1-5.1a1.6 1.6 0 0 1 2.3 2.3l-5 5a.8.8 0 0 1-1.2-1.1l4.5-4.5" })]],
+    at: [["circle", stroked({ cx: "8", cy: "8", r: "2.3" })],
+         ["path", stroked({ d: "M10.3 5.7v3a1.8 1.8 0 0 0 3.5 0 5.9 5.9 0 1 0-2.3 4.6" })]],
+    shield: [["path", stroked({ d: "M8 1.9l5 1.9v4.1c0 3-2.1 5.2-5 6.2-2.9-1-5-3.2-5-6.2V3.8z" })]],
+    image: [["rect", stroked({ x: "2.1", y: "3.1", width: "11.8", height: "9.8", rx: "1.5" })],
+            ["circle", stroked({ cx: "5.7", cy: "6.4", r: "1.1" })],
+            ["path", stroked({ d: "M2.4 11.2l3.3-3 2.6 2.3 2.2-2 3.1 2.8" })]],
     copy: [["rect", stroked({ x: "5.6", y: "5.6", width: "8", height: "8", rx: "1.4" })],
            ["path", stroked({ d: "M11 4.1V3.7A1.3 1.3 0 0 0 9.7 2.4H3.7A1.3 1.3 0 0 0 2.4 3.7v6a1.3 1.3 0 0 0 1.3 1.3h.4" })]],
     warning: [["path", stroked({ d: "M8 2.4l6 10.4H2z" })],
@@ -1151,6 +1415,19 @@ const CLIENT_SOURCE = String.raw`
   var modelList = $("model-list");
   var planCount = $("plan-count");
   var permissionText = $("permission-text");
+  var chipRow = $("chips");
+  var attachButton = $("attach");
+  var contextButton = $("context");
+  var suggestBox = $("suggest");
+  var suggestStatus = $("suggest-status");
+  var suggestList = $("suggest-list");
+  var modeChip = $("mode");
+  var modeLabel = $("mode-label");
+  var modePopover = $("mode-popover");
+  var modeStatus = $("mode-status");
+  var modeList = $("mode-list");
+  var capability = $("capability");
+  var composerBox = modeChip.parentNode ? modeChip.parentNode.parentNode : undefined;
 
   $("brand").appendChild(icon("sparkle"));
   $("empty-mark").appendChild(icon("sparkle"));
@@ -1166,6 +1443,15 @@ const CLIENT_SOURCE = String.raw`
   $("model-close").appendChild(icon("close"));
   $("model-close").setAttribute("aria-label", "Close");
   $("model-icon").appendChild(icon("sparkle"));
+  $("mode-icon").appendChild(icon("shield"));
+  $("mode-close").appendChild(icon("close"));
+  $("mode-close").setAttribute("aria-label", "Close");
+  attachButton.appendChild(icon("paperclip"));
+  attachButton.setAttribute("aria-label", "Attach files");
+  attachButton.title = "Attach files";
+  contextButton.appendChild(icon("at"));
+  contextButton.setAttribute("aria-label", "Add context");
+  contextButton.title = "Add workspace files as context";
   $("model-caret").appendChild(icon("chevronDown"));
   $("plan-chevron").appendChild(icon("chevron", "chevron"));
   $("permission-icon").appendChild(icon("warning"));
@@ -1186,6 +1472,21 @@ const CLIENT_SOURCE = String.raw`
   var sessions = { status: "loading", list: [], current: undefined, cwd: "" };
   var activeSessionRow = -1;
   var planOpen = true;
+  /* ---- RFC 0005 §2 state ---------------------------------------------- */
+  /* The host owns the attachment set; this is only ever a render of it. */
+  var chips = [];
+  /*
+   * The one popover shared by '@' and '/'. 'kind' is which of the two is open,
+   * 'trigger' is the token in the composer it is completing, and 'query' is
+   * what the last request asked for — an answer to anything else is dropped,
+   * because a slow round trip must not repopulate a list the user has already
+   * typed past.
+   */
+  var suggest = { kind: "", trigger: undefined, rows: [], active: -1, query: undefined };
+  var suggestTimer = 0;
+  var commands = { status: "loading", list: [] };
+  var permissionView = { status: "loading", mode: undefined, tools: [], note: "" };
+  var activeModeRow = -1;
   /*
    * Motion bookkeeping. hydrated is false for the first paint of a transcript
    * and for the first after a session switch, so a restored conversation does
@@ -1641,6 +1942,10 @@ const CLIENT_SOURCE = String.raw`
     stopButton.classList.toggle("hidden", !running);
     stopButton.disabled = !running;
     modelChip.disabled = !ready();
+    modeChip.disabled = !ready();
+    attachButton.disabled = !ready();
+    contextButton.disabled = !ready();
+    if (!ready()) closeSuggest();
     starterButtons.forEach(function (node) { node.disabled = !ready(); });
 
     var words = [];
@@ -1666,8 +1971,401 @@ const CLIENT_SOURCE = String.raw`
     if (!ready() || text.trim() === "") return;
     post({ type: "send", text: text });
     promptBox.value = "";
+    // The menu was completing a token that has just left the box with the
+    // message. Leaving it open would have it offering rows for text nobody
+    // can see any more.
+    closeSuggest();
     syncComposer();
     promptBox.focus();
+  }
+
+  /* ---- context chips -------------------------------------------------- */
+
+  /*
+   * The chip row is a render of the host's attachment set and nothing else.
+   *
+   * Removing a chip posts 'detach' and then does *nothing*: the row stays
+   * exactly as it is until a fresh 'context' message arrives without it. The
+   * host owns that set because the host is what 'send' actually attaches, and
+   * a page that removed a chip optimistically could show a prompt carrying one
+   * file while the wire carried another. Same argument as the session list's
+   * delete, one surface along.
+   */
+  function renderChips() {
+    clear(chipRow);
+    chipRow.classList.toggle("hidden", chips.length === 0);
+    for (var i = 0; i < chips.length; i += 1) {
+      chipRow.appendChild(contextChip(chips[i]));
+    }
+  }
+
+  /*
+   * Split a path so the directory can shrink and the basename cannot. The
+   * basename identifies the file, so '…/sidebar/index.ts' says more than
+   * 'editors/vscode/src/si…'. Built as two text nodes rather than by setting
+   * a direction, because reordering turned '/etc/passwd' into 'etc/passwd/'.
+   */
+  function pathName(cls, label) {
+    var wrap = el("span", cls);
+    var cut = label.lastIndexOf("/");
+    if (cut === -1) {
+      wrap.appendChild(el("span", "chip-base", label));
+      return wrap;
+    }
+    wrap.appendChild(el("span", "chip-dir", label.slice(0, cut + 1)));
+    wrap.appendChild(el("span", "chip-base", label.slice(cut + 1)));
+    return wrap;
+  }
+
+  function contextChip(item) {
+    var wrap = el("span", "context-chip" + (item.ok ? "" : " chip-bad"));
+    wrap.setAttribute("role", "listitem");
+    var mark = el("span", "chip-icon");
+    mark.appendChild(icon(item.kind === "image" ? "image" : item.ok ? "file" : "warning"));
+    wrap.appendChild(mark);
+    wrap.appendChild(pathName("chip-name", item.label));
+    var meta = contextMeta(item);
+    if (meta !== "") wrap.appendChild(el("span", "chip-size", meta));
+    wrap.title = item.label + (meta === "" ? "" : "\n" + meta);
+    var remove = button("chip-remove", "Remove " + item.label);
+    remove.appendChild(icon("close"));
+    remove.addEventListener("click", function () { post({ type: "detach", id: item.id }); });
+    wrap.appendChild(remove);
+    return wrap;
+  }
+
+  /* ---- the @ picker and the / menu ------------------------------------ */
+
+  /*
+   * Both menus are completions of what is in the composer, so both are driven
+   * from one place: every keystroke asks 'triggerAt' what token the caret is
+   * in, and the answer decides which menu is open, or that none is.
+   *
+   * The caret is read from selectionStart when the host provides one. A
+   * textarea that does not report a caret falls back to the end of the value,
+   * which is where it is while somebody is typing — the case this feature
+   * exists for.
+   */
+  function caretAt() {
+    var at = promptBox.selectionStart;
+    return typeof at === "number" ? at : promptBox.value.length;
+  }
+
+  function suggestOpen() { return !suggestBox.classList.contains("hidden"); }
+
+  function closeSuggest() {
+    if (!suggestOpen() && suggest.kind === "") return;
+    suggestBox.classList.add("hidden");
+    suggest = { kind: "", trigger: undefined, rows: [], active: -1, query: undefined };
+    promptBox.setAttribute("aria-expanded", "false");
+    promptBox.removeAttribute("aria-activedescendant");
+  }
+
+  /**
+   * Decide what the composer's current token means, and act on it.
+   *
+   * Called from every input event. It is deliberately cheap and idempotent:
+   * the trigger is recomputed rather than tracked, so a paste, an arrow key or
+   * a click that moves the caret all land in the same place as typing.
+   */
+  function syncSuggest() {
+    var trigger = triggerAt(promptBox.value, caretAt());
+    if (trigger === undefined || !ready()) { closeSuggest(); return; }
+    if (trigger.marker === "/") {
+      suggest.kind = "command";
+      suggest.trigger = trigger;
+      if (commands.status === "loading") post({ type: "requestCommands" });
+      renderCommandMenu();
+      return;
+    }
+    suggest.kind = "context";
+    suggest.trigger = trigger;
+    requestCandidates(trigger.query);
+  }
+
+  /*
+   * One request per pause, not one per keystroke. Every candidate the picker
+   * shows costs the host a resolveContext round trip — that is what makes the
+   * sizes real — so a fast typist must not leave a hundred of them in flight.
+   */
+  function requestCandidates(query) {
+    if (suggestTimer) window.clearTimeout(suggestTimer);
+    suggestTimer = window.setTimeout(function () {
+      suggestTimer = 0;
+      if (suggest.kind !== "context") return;
+      suggest.query = query;
+      post({ type: "resolveContext", query: query });
+    }, 90);
+  }
+
+  function renderCandidates(query, items, status) {
+    // An answer to a query the user has already typed past is not an answer to
+    // anything on screen.
+    if (suggest.kind !== "context" || suggest.query !== query) return;
+    // An engine with no resolveContext cannot answer this honestly, and every
+    // row would be a guess about a size. The picker closes rather than showing
+    // an empty list, which would read as "your workspace has no files" — the
+    // same choice the '/' menu makes for an engine with no listCommands.
+    if (status === "unavailable") { closeSuggest(); return; }
+    var shown = orderCandidates(items, suggest.trigger ? suggest.trigger.query : "");
+    renderSuggestRows(shown, contextRow, "No workspace file matches that.");
+  }
+
+  function contextRow(item, index) {
+    var row = button("suggest-row" + (item.ok ? "" : " suggest-bad"));
+    row.setAttribute("role", "option");
+    row.setAttribute("id", "suggest-row-" + String(index));
+    var top = el("div", "suggest-top");
+    var mark = el("span", "chip-icon");
+    mark.appendChild(icon(item.kind === "image" ? "image" : item.ok ? "file" : "warning"));
+    top.appendChild(mark);
+    top.appendChild(pathName("suggest-name", item.label));
+    row.appendChild(top);
+    var meta = contextMeta(item);
+    if (meta !== "") row.appendChild(el("div", "suggest-meta", meta));
+    row.title = item.label + (meta === "" ? "" : "\n" + meta);
+    row.addEventListener("click", function () { chooseCandidate(item); });
+    return row;
+  }
+
+  /**
+   * Attach the chosen file, and take the '@…' back out of the composer.
+   *
+   * The mention does not survive its own picker. The engine expands mentions
+   * on the serve path *and* injects attachments, so leaving the text in would
+   * inject the same file twice — and the chip row would stop being the whole
+   * truth about what the next prompt carries. See 'webview-context.ts'.
+   *
+   * A candidate the engine refused is still clickable, and still attaches: the
+   * host keeps it as a chip that says why, which is a better answer than a row
+   * that does nothing when clicked.
+   */
+  function chooseCandidate(item) {
+    if (suggest.trigger !== undefined) {
+      var next = applyTrigger(promptBox.value, suggest.trigger, "");
+      promptBox.value = next.text;
+      if (typeof promptBox.setSelectionRange === "function") {
+        promptBox.setSelectionRange(next.caret, next.caret);
+      }
+    }
+    post({ type: "attach", paths: [item.path] });
+    closeSuggest();
+    syncComposer();
+    promptBox.focus();
+  }
+
+  function renderCommandMenu() {
+    if (commands.status === "unavailable") { closeSuggest(); return; }
+    var typed = suggest.trigger ? suggest.trigger.query : "";
+    var shown = orderCommands(filterCommands(runnableCommands(commands.list), typed));
+    if (commands.status === "loading") {
+      renderSuggestRows([], commandRow, "Loading this workspace's commands…");
+      return;
+    }
+    renderSuggestRows(shown, commandRow, "No command matches that.");
+  }
+
+  function commandRow(command, index) {
+    var row = button("suggest-row");
+    row.setAttribute("role", "option");
+    row.setAttribute("id", "suggest-row-" + String(index));
+    var top = el("div", "suggest-top");
+    var mark = el("span", "chip-icon");
+    mark.appendChild(icon(command.kind === "skill" ? "sparkle" : "tool"));
+    top.appendChild(mark);
+    top.appendChild(el("span", "suggest-name", "/" + command.name));
+    top.appendChild(el("span", "suggest-size", command.kind === "skill" ? "skill" : "built-in"));
+    row.appendChild(top);
+    var meta = commandMeta(command);
+    if (meta !== "") row.appendChild(el("div", "suggest-meta", meta));
+    row.title = "/" + command.name + (meta === "" ? "" : "\n" + meta);
+    row.addEventListener("click", function () { chooseCommand(command); });
+    return row;
+  }
+
+  /**
+   * A skill is inserted; a built-in runs the panel surface it names.
+   *
+   * RFC 0005 §1.3 keeps skill execution on 'prompt' — a skill is prompt text,
+   * and a second execution path would give one skill two behaviours. A
+   * built-in is different: '/model' in the terminal opens a picker, so
+   * '/model' here opens the picker this panel already has rather than sending
+   * the model a message about wanting to change models.
+   */
+  function chooseCommand(command) {
+    var action = builtinAction(command);
+    if (suggest.trigger !== undefined) {
+      var insert = action === "" ? commandInsert(command) : "";
+      var next = applyTrigger(promptBox.value, suggest.trigger, insert);
+      promptBox.value = next.text;
+      if (typeof promptBox.setSelectionRange === "function") {
+        promptBox.setSelectionRange(next.caret, next.caret);
+      }
+    }
+    closeSuggest();
+    syncComposer();
+    if (action === "model") { openModels(); return; }
+    if (action === "permissions") { openModes(); return; }
+    if (action === "sessions") { post({ type: "command", command: "sessions" }); return; }
+    if (action === "clear") { post({ type: "command", command: "newSession" }); return; }
+    promptBox.focus();
+  }
+
+  function renderSuggestRows(rows, build, emptyWords) {
+    clear(suggestList);
+    suggest.rows = [];
+    for (var i = 0; i < rows.length; i += 1) {
+      var node = build(rows[i], i);
+      suggest.rows.push({ el: node, value: rows[i] });
+      suggestList.appendChild(node);
+    }
+    var words = rows.length === 0 ? emptyWords : "";
+    suggestStatus.textContent = words;
+    suggestStatus.classList.toggle("hidden", words === "");
+    suggestBox.classList.remove("hidden");
+    promptBox.setAttribute("aria-expanded", "true");
+    highlightSuggestion(rows.length === 0 ? -1 : 0);
+  }
+
+  function highlightSuggestion(index) {
+    suggest.active = index;
+    for (var i = 0; i < suggest.rows.length; i += 1) {
+      suggest.rows[i].el.classList.toggle("active", i === index);
+    }
+    if (index >= 0 && suggest.rows[index]) {
+      promptBox.setAttribute("aria-activedescendant", "suggest-row-" + String(index));
+      suggest.rows[index].el.scrollIntoView({ block: "nearest" });
+    } else {
+      promptBox.removeAttribute("aria-activedescendant");
+    }
+  }
+
+  /** Enter, arrows and Escape belong to the list while one is open. */
+  function suggestKey(event) {
+    if (!suggestOpen()) return false;
+    if (event.key === "Escape") { closeSuggest(); return true; }
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      if (suggest.rows.length === 0) return true;
+      var step = event.key === "ArrowDown" ? 1 : -1;
+      highlightSuggestion((suggest.active + step + suggest.rows.length) % suggest.rows.length);
+      return true;
+    }
+    if (event.key === "Enter" || event.key === "Tab") {
+      if (suggest.active < 0 || !suggest.rows[suggest.active]) return false;
+      var value = suggest.rows[suggest.active].value;
+      if (suggest.kind === "command") chooseCommand(value);
+      else chooseCandidate(value);
+      return true;
+    }
+    return false;
+  }
+
+  /* ---- the permission mode chip --------------------------------------- */
+
+  function renderModeChip() {
+    var mode = permissionView.status === "ready" ? permissionView.mode : undefined;
+    modeLabel.textContent = modeChipLabel(mode);
+    modeChip.classList.toggle("mode-yolo", mode === "yolo");
+    modeChip.classList.toggle("mode-plan", mode === "plan");
+    modeChip.classList.toggle("mode-unknown", mode === undefined);
+    var summary = modeSummary(mode);
+    modeChip.title = mode === undefined
+      ? "This engine has not reported a permission mode."
+      : "Permission mode: " + modeChipLabel(mode) + "\n" + summary;
+  }
+
+  function renderCapability() {
+    var words = permissionView.status === "ready" ? capabilityLine(permissionView.tools) : "";
+    capability.textContent = words;
+    capability.classList.toggle("hidden", words === "");
+  }
+
+  var MODE_UNAVAILABLE =
+    "This engine is too old to report or change permission modes — upgrade the Arcturn CLI.";
+
+  function modePopoverOpen() { return !modePopover.classList.contains("hidden"); }
+
+  function openModes() {
+    if (modelPopoverOpen()) closeModels(false);
+    closeSuggest();
+    modePopover.classList.remove("hidden");
+    modeChip.setAttribute("aria-expanded", "true");
+    renderModeList();
+    post({ type: "requestPermission" });
+    // Focus lands on the mode in force, or on the least permissive one when
+    // the engine has not said: the popover opens under the keyboard, and the
+    // row a stray Enter would pick is never the one that gives most away.
+    var landing = activeModeRow >= 0 ? activeModeRow : 0;
+    if (modeRows[landing]) modeRows[landing].el.focus();
+  }
+
+  function closeModes(refocus) {
+    modePopover.classList.add("hidden");
+    modeChip.setAttribute("aria-expanded", "false");
+    if (refocus) modeChip.focus();
+  }
+
+  var modeRows = [];
+
+  function renderModeList() {
+    clear(modeList);
+    modeRows = [];
+    var words = permissionView.status === "unavailable" ? MODE_UNAVAILABLE : permissionView.note;
+    modeStatus.textContent = words;
+    modeStatus.classList.toggle("hidden", !words);
+    // Not a disabled list: an engine that cannot report a mode cannot change
+    // one either, so the rows are simply not offered. A row that looked
+    // pressable and did nothing would be the affordance RFC 0005 §3 refuses.
+    if (permissionView.status === "unavailable") return;
+    var current = permissionView.status === "ready" ? permissionView.mode : undefined;
+    for (var i = 0; i < PERMISSION_MODES.length; i += 1) {
+      var row = modeRow(PERMISSION_MODES[i], i, current);
+      modeRows.push({ el: row, id: PERMISSION_MODES[i].id });
+      modeList.appendChild(row);
+      if (PERMISSION_MODES[i].id === current) activeModeRow = i;
+    }
+  }
+
+  /*
+   * A real button, reached with Tab, rather than a 'role="option"' the way the
+   * model and session lists do it.
+   *
+   * Those two are driven from a search box that owns the arrow keys and points
+   * 'aria-activedescendant' at a row; this popover has no search box — four
+   * modes need no filtering — so there is nothing for a listbox pattern to
+   * hang off. Four focusable buttons in a labelled group is the whole
+   * behaviour, and it is completely keyboard-usable without a roving tabindex
+   * to maintain. A 'role="option"' with no listbox driving it would be the
+   * half-implemented version of this.
+   */
+  function modeRow(mode, index, current) {
+    var row = button("mode-row" + (mode.id === current ? " mode-current" : ""));
+    row.setAttribute("aria-pressed", mode.id === current ? "true" : "false");
+    row.setAttribute("id", "mode-row-" + String(index));
+    var top = el("div", "mode-top");
+    var mark = el("span", "chip-icon");
+    mark.appendChild(icon(mode.id === current ? "check" : "shield"));
+    top.appendChild(mark);
+    top.appendChild(el("span", "mode-name", mode.label));
+    row.appendChild(top);
+    row.appendChild(el("div", "mode-grants", mode.grants));
+    row.title = mode.label + "\n" + mode.grants;
+    row.addEventListener("click", function () { chooseMode(mode.id); });
+    return row;
+  }
+
+  /**
+   * Ask, and wait to be told.
+   *
+   * The chip is *not* moved here, unlike the model chip one section up, and
+   * the difference is the whole of RFC 0005 §1.2. A model that fails to switch
+   * costs a user a wrong label; a mode that fails to switch costs them the
+   * belief that the agent will ask before it writes. So nothing on screen
+   * changes until 'permissionState' comes back saying what the mode now is.
+   */
+  function chooseMode(mode) {
+    post({ type: "setPermissionMode", mode: mode });
+    closeModes(true);
   }
 
   /* ---- model popover -------------------------------------------------- */
@@ -2037,6 +2735,12 @@ const CLIENT_SOURCE = String.raw`
       renderEngineOutput("");
       renderActions([]);
       if (models.status !== "ready") post({ type: "requestModels" });
+      // The chip and the capability line are both about *this* engine, and a
+      // connection that came back may be a different one. Asked for eagerly,
+      // unlike the session list, because both are on screen the moment the
+      // panel is: a mode chip that stayed blank until somebody clicked it
+      // would be a chip that says nothing when it matters most.
+      post({ type: "requestPermission" });
       // A connection that came back is a different session store; a list that
       // is on screen has to be told so, and nothing else has to be asked at all.
       if (sessionsOpen()) post({ type: "requestSessions" });
@@ -2073,6 +2777,18 @@ const CLIENT_SOURCE = String.raw`
     sessions = { status: status, list: list, current: current, cwd: cwd };
     renderSessionsCwd(cwd);
     if (sessionsOpen()) renderSessionList();
+  }
+
+  function renderPermission(status, mode, tools, note) {
+    permissionView = { status: status, mode: mode, tools: tools, note: note };
+    renderModeChip();
+    renderCapability();
+    if (modePopoverOpen()) renderModeList();
+  }
+
+  function renderCommands(status, list) {
+    commands = { status: status, list: list };
+    if (suggest.kind === "command") renderCommandMenu();
   }
 
   /* ---- wiring --------------------------------------------------------- */
@@ -2168,13 +2884,149 @@ const CLIENT_SOURCE = String.raw`
     if (event.key === "Escape") { event.preventDefault(); closeSessions(true); }
   });
 
-  promptBox.addEventListener("input", syncComposer);
+  promptBox.addEventListener("input", function () {
+    syncComposer();
+    syncSuggest();
+  });
+  // A click or an arrow key moves the caret without changing the value, and
+  // the token under the caret is what decides whether a menu belongs open.
+  promptBox.addEventListener("click", syncSuggest);
+  promptBox.addEventListener("keyup", function (event) {
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight" ||
+        event.key === "Home" || event.key === "End") {
+      syncSuggest();
+    }
+  });
+  promptBox.addEventListener("blur", function () { closeSuggest(); });
+  /*
+   * Focus must not leave the textarea when a row is clicked.
+   *
+   * Without this the sequence is: mousedown blurs the composer, blur closes
+   * the popover, the row is removed from the document, and the click that was
+   * about to land on it never happens. Preventing the default on mousedown
+   * stops the focus change while leaving the click itself intact — which is
+   * also the behaviour the rest of this surface assumes, since the composer is
+   * the search box and the arrow keys are bound to it.
+   */
+  suggestBox.addEventListener("mousedown", function (event) {
+    if (typeof event.preventDefault === "function") event.preventDefault();
+  });
   promptBox.addEventListener("keydown", function (event) {
+    // The list gets first refusal on Enter, the arrows and Escape: while a
+    // menu is up, Enter is "insert this", not "send the message". It hands
+    // Enter back when no row is highlighted, so a menu showing nothing never
+    // swallows a send.
+    if (suggestKey(event)) { event.preventDefault(); return; }
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
       send();
     }
   });
+
+  /*
+   * The '@' button types an '@' rather than opening the list directly, so the
+   * button and the keystroke are one code path: whatever the picker does for
+   * somebody who typed the character, it does for somebody who clicked.
+   */
+  contextButton.addEventListener("click", function () {
+    if (!ready()) return;
+    var at = caretAt();
+    var value = promptBox.value;
+    var needsSpace = at > 0 && !/\s$/.test(value.slice(0, at));
+    var insert = (needsSpace ? " " : "") + "@";
+    promptBox.value = value.slice(0, at) + insert + value.slice(at);
+    var caret = at + insert.length;
+    if (typeof promptBox.setSelectionRange === "function") {
+      promptBox.setSelectionRange(caret, caret);
+    }
+    promptBox.focus();
+    syncComposer();
+    syncSuggest();
+  });
+  attachButton.addEventListener("click", function () {
+    if (!ready()) return;
+    post({ type: "browseForFiles" });
+  });
+
+  modeChip.addEventListener("click", function () {
+    if (modePopoverOpen()) closeModes(true);
+    else openModes();
+  });
+  $("mode-close").addEventListener("click", function () { closeModes(true); });
+  modePopover.addEventListener("keydown", function (event) {
+    if (event.key === "Escape") { event.preventDefault(); closeModes(true); }
+  });
+
+  /*
+   * Drag and drop, and paste, land in the same place a picked file does: the
+   * host's attachment set.
+   *
+   * A drop is read as 'text/uri-list', which is what VS Code's explorer and
+   * the OS both put on a drag — and the URIs are forwarded *verbatim*. Turning
+   * 'file:///…' into a path is arithmetic about somebody's filesystem, and it
+   * belongs on the host, where 'vscode.Uri' already does it correctly on every
+   * platform. A page that did its own would be wrong about Windows drive
+   * letters and percent-encoding, quietly.
+   */
+  document.addEventListener("dragover", function (event) {
+    if (!ready()) return;
+    if (typeof event.preventDefault === "function") event.preventDefault();
+    if (composerBox && composerBox.classList) composerBox.classList.add("dropping");
+  });
+  document.addEventListener("dragleave", function () {
+    if (composerBox && composerBox.classList) composerBox.classList.remove("dropping");
+  });
+  document.addEventListener("drop", function (event) {
+    if (composerBox && composerBox.classList) composerBox.classList.remove("dropping");
+    if (!ready()) return;
+    var transfer = event.dataTransfer;
+    if (!transfer) return;
+    if (typeof event.preventDefault === "function") event.preventDefault();
+    var list = typeof transfer.getData === "function" ? transfer.getData("text/uri-list") : "";
+    var uris = String(list || "").split(/[\r\n]+/).filter(function (line) {
+      // '#' comments are part of the text/uri-list format.
+      return line !== "" && line.charAt(0) !== "#";
+    });
+    if (uris.length > 0) { post({ type: "attach", paths: uris }); return; }
+    readImages(transfer.items);
+  });
+  promptBox.addEventListener("paste", function (event) {
+    if (!ready()) return;
+    var data = event.clipboardData;
+    if (!data || !data.items) return;
+    readImages(data.items);
+  });
+
+  /*
+   * A pasted or dropped image has no path — there is nothing on disk for the
+   * engine to read — so it travels as bytes. RFC 0005 §1.1 accepts inline data
+   * for images and only for images, which is why nothing else on this page
+   * ever sends one.
+   *
+   * The data URL prefix is split off here rather than sent: the host's
+   * boundary validates base64 and a mime type, not a URL, and forwarding the
+   * scheme would put a parser between the clipboard and the wire.
+   */
+  function readImages(items) {
+    if (!items || typeof window.FileReader !== "function") return;
+    for (var i = 0; i < items.length; i += 1) {
+      var entry = items[i];
+      if (!entry || entry.kind !== "file") continue;
+      if (typeof entry.type !== "string" || entry.type.indexOf("image/") !== 0) continue;
+      var file = typeof entry.getAsFile === "function" ? entry.getAsFile() : undefined;
+      if (!file) continue;
+      (function (mimeType) {
+        var reader = new window.FileReader();
+        reader.onload = function () {
+          var url = String(reader.result || "");
+          var comma = url.indexOf(",");
+          if (comma === -1 || url.indexOf(";base64,") === -1) return;
+          post({ type: "attachImage", data: url.slice(comma + 1), mimeType: mimeType });
+        };
+        reader.readAsDataURL(file);
+      })(entry.type);
+    }
+  }
 
   modelChip.addEventListener("click", function () {
     if (modelPopoverOpen()) closeModels(true);
@@ -2204,6 +3056,9 @@ const CLIENT_SOURCE = String.raw`
     if (event.key === "Escape") { event.preventDefault(); closeModels(true); }
   });
   document.addEventListener("click", function (event) {
+    if (modePopoverOpen() && !modePopover.contains(event.target) && !modeChip.contains(event.target)) {
+      closeModes(false);
+    }
     if (!modelPopoverOpen()) return;
     if (popover.contains(event.target) || modelChip.contains(event.target)) return;
     closeModels(false);
@@ -2302,9 +3157,81 @@ const CLIENT_SOURCE = String.raw`
       );
       return;
     }
+    if (message.type === "context") {
+      chips = contextItems(message.items);
+      renderChips();
+      return;
+    }
+    if (message.type === "contextCandidates") {
+      if (typeof message.query !== "string") return;
+      renderCandidates(
+        message.query,
+        contextItems(message.items),
+        message.status === "unavailable" ? "unavailable" : "ready"
+      );
+      return;
+    }
+    if (message.type === "permission") {
+      var permStatus = message.status === "ready" || message.status === "unavailable"
+        ? message.status : "loading";
+      var tools = [];
+      var reported = Array.isArray(message.tools) ? message.tools : [];
+      for (var t = 0; t < reported.length; t += 1) {
+        if (typeof reported[t] === "string" && reported[t] !== "") tools.push(reported[t]);
+      }
+      renderPermission(
+        permStatus,
+        typeof message.mode === "string" && message.mode !== "" ? message.mode : undefined,
+        tools,
+        typeof message.note === "string" ? message.note : ""
+      );
+      return;
+    }
+    if (message.type === "commands") {
+      var commandStatus = message.status === "ready" || message.status === "unavailable"
+        ? message.status : "loading";
+      var rows = [];
+      var listed = Array.isArray(message.commands) ? message.commands : [];
+      for (var c = 0; c < listed.length; c += 1) {
+        var entry = listed[c];
+        if (!entry || typeof entry.name !== "string" || entry.name === "") continue;
+        // Rebuilt field by field, like every other boundary in this extension.
+        rows.push({
+          name: entry.name,
+          description: typeof entry.description === "string" ? entry.description : "",
+          kind: entry.kind === "builtin" ? "builtin" : "skill",
+          source: typeof entry.source === "string" ? entry.source : undefined
+        });
+      }
+      renderCommands(commandStatus, rows);
+      return;
+    }
   });
 
+  /** Rebuild a context list field by field, like every other inbound list. */
+  function contextItems(raw) {
+    var out = [];
+    var list = Array.isArray(raw) ? raw : [];
+    for (var i = 0; i < list.length; i += 1) {
+      var entry = list[i];
+      if (!entry || typeof entry.id !== "string" || entry.id === "") continue;
+      out.push({
+        id: entry.id,
+        path: typeof entry.path === "string" ? entry.path : "",
+        label: typeof entry.label === "string" && entry.label !== "" ? entry.label : entry.id,
+        bytes: typeof entry.bytes === "number" ? entry.bytes : 0,
+        kind: typeof entry.kind === "string" ? entry.kind : "file",
+        ok: entry.ok === true,
+        reason: typeof entry.reason === "string" ? entry.reason : undefined
+      });
+    }
+    return out;
+  }
+
   renderChip();
+  renderModeChip();
+  renderCapability();
+  renderChips();
   renderSessionsCwd("");
   syncComposer();
   post({ type: "ready" });
@@ -2323,5 +3250,8 @@ export const SIDEBAR_SCRIPT = [
   MODEL_LIST_SOURCE,
   SESSION_LIST_SOURCE,
   TRANSCRIPT_SOURCE,
+  CONTEXT_SOURCE,
+  COMMAND_MENU_SOURCE,
+  PERMISSION_SOURCE,
   CLIENT_SOURCE,
 ].join("\n");

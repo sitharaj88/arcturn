@@ -11,8 +11,8 @@
  *
  * The verbs used are exactly the ones RFC 0004 §1 lists — `prompt`, `steer`,
  * `abort`, `setModel`, `respondToPermission`, `onEvent` — plus
- * `resolveContext`, which RFC 0005 §1.1 added to the *engine* first, exactly as
- * §0 prescribes, and nothing else.
+ * `resolveContext`, `permissionState` and `setPermissionMode`, which RFC 0005
+ * added to the *engine* first, exactly as §0 prescribes, and nothing else.
  *
  * History is folded in the same way live events are, through {@link reduceChat}
  * and nothing else. That is the whole reason the engine replays `AgentEvent`s
@@ -24,7 +24,9 @@
 import type {
   AgentEvent,
   ContextResolution,
+  PermissionMode,
   PermissionRequest,
+  PermissionState,
   PromptAttachment,
   ProtocolClient,
   SessionHeader,
@@ -120,6 +122,28 @@ export interface SessionController {
   abort(): Promise<void>;
   /** Switch the session's model. */
   setModel(modelId: string): Promise<void>;
+  /**
+   * Read the mode this session runs under, and the tools it holds.
+   *
+   * Read-only. `undefined` means this engine predates the verb — the caller
+   * shows no mode chip and no capability line rather than guessing `default`,
+   * which is the mode most engines are in and therefore the most convincing
+   * wrong answer a panel could give.
+   */
+  permissionState(): Promise<PermissionState | undefined>;
+  /**
+   * Ask the session to run under a different mode from the next turn.
+   *
+   * Deliberately **not** given the `undefined` treatment `permissionState`
+   * gets, and the asymmetry is the point (see `ProtocolClient`'s own doc): an
+   * engine too old for the verb, or one mid-run, *rejects*, and the caller
+   * says so. A resolve here would leave a panel showing `plan` over a session
+   * still in `yolo`.
+   *
+   * @returns The engine's own answer to "what am I now" — read it rather than
+   *   assuming the mode you asked for is the mode you got.
+   */
+  setPermissionMode(mode: PermissionMode): Promise<PermissionState>;
   /** Expand or collapse one transcript block. */
   toggle(blockId: string): void;
   /** Unsubscribe, and deny any permission request still outstanding. */
@@ -143,7 +167,18 @@ export function createSessionController(options: SessionControllerOptions): Sess
 
   const permissions = new PermissionQueue({
     ask: (request) => host.askPermission(request, toolArgs.get(request.toolCallId)),
-    respond: (decision) => client.respondToPermission(sessionId, decision),
+    // The scope is named only when there is a rule to scope. RFC 0005 §1.2
+    // gives the verb an optional `scope` so "allow once" and "allow for this
+    // session" are distinguishable *at the moment of asking* rather than
+    // inferred later from whether a rule happened to be attached — and the
+    // only scope this wire accepts is the one that dies with the session, so
+    // there is nothing here that could persist to a file a person owns.
+    respond: (decision) =>
+      client.respondToPermission(
+        sessionId,
+        decision,
+        decision.persistRule === undefined ? {} : { scope: "session" },
+      ),
     onError: (error, request) => {
       host.onDiagnostic?.(
         `permission ${request.id} (${request.toolName}): ${
@@ -242,6 +277,8 @@ export function createSessionController(options: SessionControllerOptions): Sess
     resolveContext: (query: string) => client.resolveContext(sessionId, query),
     abort: () => client.abort(sessionId),
     setModel: (modelId: string) => client.setModel(sessionId, modelId),
+    permissionState: () => client.permissionState(sessionId),
+    setPermissionMode: (mode: PermissionMode) => client.setPermissionMode(sessionId, mode),
     toggle(blockId: string): void {
       notify(toggleBlock(state, blockId));
     },

@@ -4,9 +4,15 @@
  * Split out of the `vscode` adapter so the decision — which is a security
  * decision — is testable without a window. The rules:
  *
- * - "Allow always" is offered **only** when the engine attached a
+ * - "Allow for this session" is offered **only** when the engine attached a
  *   `suggestedRule`. The extension never invents a rule to persist; it can
- *   only offer the one the engine already computed.
+ *   only offer the one the engine already computed — and it names the scope it
+ *   is actually asking for. The button said "Allow always" until RFC 0005
+ *   §1.2 made the scope explicit on the wire, and "always" was never true:
+ *   `permissionDecision` rejects any scope but `session`, so the rule dies
+ *   with the session. A rule that outlives one is written by a person, in
+ *   their own config file, and a button that implied otherwise was promising
+ *   a persistence the engine refuses to perform.
  * - Every outcome that is not an explicit allow is a **denial**. A dismissed
  *   modal (Escape, or VS Code's own Cancel) and an unrecognised button both
  *   deny, because the alternative — treating "no answer" as consent — is the
@@ -17,8 +23,13 @@ import type { DescribedPermission, PermissionAnswer } from "./permission-queue.j
 
 /** Button: run it once. */
 export const ALLOW = "Allow";
-/** Button: run it, and persist the engine's suggested rule for this session. */
-export const ALLOW_ALWAYS = "Allow always";
+/**
+ * Button: run it, and hold the engine's suggested rule for the rest of this
+ * session.
+ *
+ * The label says the scope out loud because the scope is the whole promise.
+ */
+export const ALLOW_SESSION = "Allow for this session";
 /** Button: refuse. */
 export const DENY = "Deny";
 
@@ -28,7 +39,7 @@ export const DENY = "Deny";
  * @param described - The rendered request.
  */
 export function permissionChoices(described: DescribedPermission): string[] {
-  return described.suggestedRule === undefined ? [ALLOW, DENY] : [ALLOW, ALLOW_ALWAYS, DENY];
+  return described.suggestedRule === undefined ? [ALLOW, DENY] : [ALLOW, ALLOW_SESSION, DENY];
 }
 
 /**
@@ -42,7 +53,7 @@ export function answerFromChoice(
   described: DescribedPermission,
 ): PermissionAnswer {
   if (choice === ALLOW) return { behavior: "allow" };
-  if (choice === ALLOW_ALWAYS) {
+  if (choice === ALLOW_SESSION) {
     return described.suggestedRule === undefined
       ? { behavior: "allow" }
       : { behavior: "allow", persistRule: described.suggestedRule };

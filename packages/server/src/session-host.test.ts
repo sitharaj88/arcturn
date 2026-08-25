@@ -236,7 +236,9 @@ describe("SessionHost", () => {
   it("prompt/steer/abort/setModel reject sessionNotFound for an unknown session", async () => {
     const { host } = buildHost(createScriptedLLM([textTurn("hi")]));
     await expect(host.prompt("nope", "hi")).rejects.toBeInstanceOf(SessionHostError);
-    expect(() => host.steer("nope", "hi")).toThrow(SessionHostError);
+    // `steer` rejects rather than throwing synchronously: it now expands
+    // mentions and `/name` through the same resolver `prompt` uses.
+    await expect(host.steer("nope", "hi")).rejects.toBeInstanceOf(SessionHostError);
     expect(() => host.abort("nope")).toThrow(SessionHostError);
     expect(() => host.setModel("nope", "some/model")).toThrow(SessionHostError);
     expect(() => host.observe("nope", () => undefined)).toThrow(SessionHostError);

@@ -286,6 +286,56 @@ the row on screen" test exists to prevent is the one that cannot be caught
 downstream — a panel claiming a session is gone while the user is still looking
 at the dialog asking whether to delete it.
 
+**Needs a real engine, for the composer's four new surfaces.** RFC 0005 §2
+landed the `@` picker, the `/` menu, the mode chip and the capability line. The
+unit suite drives all four end to end against fixtures — `webview-render.test.ts`
+runs the shipped script for the picker's rows, the chip row, the menu's grouping
+and insertion, the mode chip and the capability line; `webview-context.test.ts`,
+`webview-commands.test.ts` and `webview-permission.test.ts` drive the scoring,
+the grouping and the wording directly. What no suite covers is the round trip:
+
+- That `resolveContext` answers with the byte count a `stat` would give, so a
+  chip reading `4.2 KB` is the size the model actually receives. Every number
+  in the picker and on every chip is the engine's; none of them has been
+  compared against a real file.
+- That the paths `workspace.findFiles` returns resolve, byte for byte, against
+  the *session's* `cwd`. The extension makes them workspace-relative and the
+  engine resolves them against its own root; if those two roots ever disagree
+  the picker reports every file as outside the workspace, which would look like
+  a broken engine rather than a mismatch.
+- That a prompt carrying `attachments` reaches the model with the file's
+  contents in it — the acceptance test RFC 0005 §4 asks for ("attach a file
+  with `@`, send, and see the model answer about the file's contents").
+- That a pasted image arrives as a vision block, **and** that pasting one into
+  a model with no vision is refused with a reason before the turn is spent.
+  The panel's half is covered: the boundary validates base64 and the mime type
+  against the engine's own allowlist, and a chip appears with the size. The
+  engine's refusal is unobserved. Related and also unobserved: that detaching a
+  pasted chip actually drops its bytes host-side — the page is never sent them,
+  so nothing on the page can prove it; only `pendingAttachments` against a live
+  engine can.
+- That `setPermissionMode` takes effect on the *next turn* — RFC 0005 §4's
+  "switch to `plan` and watch a write get refused". The panel proves it posts
+  the verb and that the chip moves only on the engine's answer; whether the
+  agent then behaves differently is the engine's claim.
+- That `permissionState.tools` names the tools this build actually holds, which
+  is the whole basis of the capability line. If an engine reported `fetch` it
+  did not have, the panel would say it can browse the web, truthfully repeating
+  a false answer.
+- That `listCommands` returns the skills a workspace really has. The menu's
+  filter (`runnableCommands`) is covered against fixtures including a built-in
+  the panel has no surface for; that the engine's own list matches what
+  `loadSkills` found on disk is untested here.
+
+**Drag and drop, specifically.** A drop into the webview is read as
+`text/uri-list` and the URIs are forwarded to the host verbatim, which turns
+them into paths with `vscode.Uri`. The unit suite drives the page's half
+against a stub `dataTransfer`. What nobody has watched: that VS Code's own
+explorer actually puts `text/uri-list` on the drag into a webview, that a drop
+from Finder / Explorer does too, and that a Windows drive-letter URI
+round-trips to the path the engine expects. If the first of those is false the
+feature silently does nothing, and no test in this repository would notice.
+
 **Markdown the parser does not implement.** Tables, reference links, setext
 headings, HTML blocks (deliberately — raw HTML renders as text, and there is a
 test for that), and nested emphasis of three or more markers. A model that
@@ -343,6 +393,30 @@ of it is asserted anywhere:
   panel; that `overflow-y: hidden` on a folded block reads as folded rather
   than as broken; that the fade sits exactly over the cut; and that a
   paragraph followed by its code block reads as one unit at that width.
+- **The composer at 300px, which is the width it was designed for.** The bar
+  now carries two icon buttons, a model chip, a mode chip and send; the hint
+  is dropped below 380px by a viewport media query (the webview's viewport
+  *is* the sidebar, so that query is a container query). Reasoned, not seen.
+  What needs a narrow sidebar and a real Chromium: that the model chip
+  ellipsises before the mode chip does rather than the other way round; that
+  three attached chips wrap to a second row instead of widening the panel;
+  that a chip's right-to-left ellipsis actually keeps the basename visible;
+  that the `@` popover lands *over* the composer and not behind it; and that
+  the whole thing still reads as one control rather than five.
+- **That the hint stays in the accessibility tree when it is `display: none`.**
+  The claim is that accname includes a node referenced by `aria-describedby`
+  whether or not it is rendered, so a screen-reader user at 300px still hears
+  "Enter to send". That is what the specification says; nobody has put a screen
+  reader on a 300px sidebar and listened.
+- **The mode chip's tint.** `yolo` is warning-coloured and `plan` is link-
+  coloured, on top of the word itself — colour is never the only carrier. That
+  the two read as *more* and *less* permissive at a glance, in light, dark and
+  high-contrast, is a human claim.
+- **That the picker feels like a picker.** The 90ms debounce, whether twelve
+  rows is the right number at 300px, whether the fuzzy ranking puts the file
+  somebody meant in the first row often enough to trust — all of it was
+  reasoned against a scoring function with unit tests, and none of it has been
+  used to find a file in a real repository.
 - **That the three kinds of code are actually distinguishable.** Inline code is
   a bordered chip, a fence is a titled card, tool output is a rule-marked pre.
   The rules are written; whether they separate at a glance in light, dark and

@@ -71,6 +71,9 @@ class StubNode {
   className = "";
   disabled = false;
   value = "";
+  /** A textarea's caret. The `@` and `/` menus read it to find the token. */
+  selectionStart = 0;
+  selectionEnd = 0;
   title = "";
   type = "";
   scrollTop = 0;
@@ -146,6 +149,10 @@ class StubNode {
   }
   focus(): void {}
   scrollIntoView(): void {}
+  setSelectionRange(start: number, end: number): void {
+    this.selectionStart = start;
+    this.selectionEnd = end;
+  }
 
   /** Every descendant, self first — the query primitive the assertions use. */
   walk(): StubNode[] {
@@ -207,6 +214,12 @@ interface Panel {
   send: (message: unknown) => void;
   posted: { type: string; [key: string]: unknown }[];
   root: StubNode;
+  /** Run every timer the script scheduled — the composer's debounce lives on one. */
+  flushTimers: () => void;
+  /** Fire a document-level event, which is where drop and dismiss listeners live. */
+  onDocument: (type: string, event: Record<string, unknown>) => void;
+  /** Type into the composer the way a person does: value, caret, then input. */
+  type: (text: string) => void;
 }
 
 /** Render the real page, run the real script, hand back a way to drive it. */
@@ -222,18 +235,45 @@ function mount(): Panel {
   const posted: { type: string; [key: string]: unknown }[] = [];
   const handlers: Listener[] = [];
 
+  const documentListeners: Record<string, Listener[]> = {};
+  const timers: (() => void)[] = [];
   const document = {
     createElement: (tag: string) => new StubNode(tag),
     createElementNS: (_ns: string, tag: string) => new StubNode(tag),
     createTextNode: (value: string) => new StubText(value),
     getElementById: (id: string) => byId.get(id) ?? null,
-    addEventListener: () => {},
+    addEventListener: (type: string, handler: Listener) => {
+      const existing = documentListeners[type];
+      if (existing === undefined) documentListeners[type] = [handler];
+      else existing.push(handler);
+    },
   };
+  /**
+   * A FileReader that answers synchronously with a data URL, which is the
+   * shape the paste path reads. Nothing here decodes anything: the script's
+   * job is to split the prefix off and hand the base64 to the host.
+   */
+  class StubFileReader {
+    result = "";
+    onload: (() => void) | undefined;
+    onerror: (() => void) | undefined;
+    readAsDataURL(file: { dataUrl?: string }): void {
+      this.result = file.dataUrl ?? "data:image/png;base64,AAAA";
+      this.onload?.();
+    }
+  }
   const win = {
     addEventListener: (type: string, handler: Listener) => {
       if (type === "message") handlers.push(handler);
     },
-    setTimeout: () => 0,
+    setTimeout: (handler: () => void) => {
+      timers.push(handler);
+      return timers.length;
+    },
+    clearTimeout: (id: number) => {
+      if (typeof id === "number" && id > 0) timers[id - 1] = () => {};
+    },
+    FileReader: StubFileReader,
   };
 
   const run = new Function("document", "window", "setTimeout", "acquireVsCodeApi", script) as (
@@ -248,16 +288,33 @@ function mount(): Panel {
     }),
   );
 
+  const lookup = (id: string): StubNode => {
+    const node = byId.get(id);
+    if (node === undefined) throw new Error(`the page has no #${id}`);
+    return node;
+  };
+
   return {
     root,
     posted,
-    byId: (id) => {
-      const node = byId.get(id);
-      if (node === undefined) throw new Error(`the page has no #${id}`);
-      return node;
-    },
+    byId: lookup,
     send: (message) => {
       for (const handler of handlers) handler({ data: message });
+    },
+    flushTimers: () => {
+      for (const run of timers.splice(0)) run();
+    },
+    onDocument: (type, event) => {
+      for (const handler of documentListeners[type] ?? []) {
+        handler({ preventDefault: () => {}, stopPropagation: () => {}, ...event });
+      }
+    },
+    type: (text) => {
+      const prompt = lookup("prompt");
+      prompt.value = text;
+      prompt.selectionStart = text.length;
+      prompt.selectionEnd = text.length;
+      prompt.dispatch("input");
     },
   };
 }
@@ -1375,5 +1432,438 @@ describe("deleting a session from the history list", () => {
     expect(row?.getAttribute("id")).toBe("session-row-0");
     expect(row?.parentNode?.getAttribute("role")).toBe("presentation");
     expect(deletes()[0]?.parentNode).toBe(row?.parentNode);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* RFC 0005 §2 — the composer                                          */
+/* ------------------------------------------------------------------ */
+
+const contextItems = [
+  {
+    id: "src/auth.ts",
+    path: "src/auth.ts",
+    label: "src/auth.ts",
+    bytes: 4300,
+    kind: "file",
+    ok: true,
+  },
+  {
+    id: "docs/plan.md",
+    path: "docs/plan.md",
+    label: "docs/plan.md",
+    bytes: 812,
+    kind: "file",
+    ok: true,
+  },
+];
+
+describe("the @ context picker", () => {
+  it("asks the host what a mention resolves to, rather than guessing", () => {
+    panel.type("@auth");
+    panel.flushTimers();
+    expect(panel.posted.at(-1)).toEqual({ type: "resolveContext", query: "auth" });
+  });
+
+  it("shows the engine's own size on every row, which is the point of the round trip", () => {
+    panel.type("@auth");
+    panel.flushTimers();
+    panel.send({ type: "contextCandidates", query: "auth", items: contextItems });
+    const rows = panel.byId("suggest-list").all("suggest-row");
+    expect(rows).toHaveLength(2);
+    expect(rows[0]?.textContent).toContain("src/auth.ts");
+    expect(rows[0]?.textContent).toContain("4.2 KB");
+  });
+
+  it("says why a file cannot be attached instead of quietly omitting it", () => {
+    panel.type("@../../etc/passwd");
+    panel.flushTimers();
+    panel.send({
+      type: "contextCandidates",
+      query: "../../etc/passwd",
+      items: [
+        {
+          id: "/etc/passwd",
+          path: "/etc/passwd",
+          label: "/etc/passwd",
+          bytes: 0,
+          kind: "missing",
+          ok: false,
+          reason: "outside the workspace",
+        },
+      ],
+    });
+    expect(panel.byId("suggest-list").textContent).toContain("outside the workspace");
+  });
+
+  it("attaches on click and takes the @ text back out of the composer", () => {
+    panel.type("look at @auth");
+    panel.flushTimers();
+    panel.send({ type: "contextCandidates", query: "auth", items: contextItems });
+    panel.byId("suggest-list").all("suggest-row")[0]?.dispatch("click");
+    expect(panel.posted.at(-1)).toEqual({ type: "attach", paths: ["src/auth.ts"] });
+    // The chip is the whole truth about what the prompt carries, so the
+    // mention that opened the picker does not also ride along in the text.
+    expect(panel.byId("prompt").value).toBe("look at ");
+  });
+
+  it("is usable from the keyboard alone", () => {
+    panel.type("@auth");
+    panel.flushTimers();
+    panel.send({ type: "contextCandidates", query: "auth", items: contextItems });
+    const prompt = panel.byId("prompt");
+    // The first row is already highlighted, the way a completion menu is, so
+    // one press moves to the second.
+    prompt.dispatch("keydown", { key: "ArrowDown" });
+    prompt.dispatch("keydown", { key: "Enter" });
+    expect(panel.posted.at(-1)).toEqual({ type: "attach", paths: ["docs/plan.md"] });
+    expect(panel.posted.filter((message) => message.type === "send")).toHaveLength(0);
+  });
+
+  it("closes on Escape and leaves what was typed alone", () => {
+    panel.type("@auth");
+    panel.flushTimers();
+    panel.send({ type: "contextCandidates", query: "auth", items: contextItems });
+    expect(panel.byId("suggest").classList.contains("hidden")).toBe(false);
+    panel.byId("prompt").dispatch("keydown", { key: "Escape" });
+    expect(panel.byId("suggest").classList.contains("hidden")).toBe(true);
+    expect(panel.byId("prompt").value).toBe("@auth");
+  });
+
+  it("closes once the mention is finished, so a space returns the box to prose", () => {
+    panel.type("@auth");
+    panel.flushTimers();
+    panel.send({ type: "contextCandidates", query: "auth", items: contextItems });
+    panel.type("@auth ");
+    expect(panel.byId("suggest").classList.contains("hidden")).toBe(true);
+  });
+
+  it("ignores an answer to a query the user has already typed past", () => {
+    panel.type("@auth");
+    panel.flushTimers();
+    panel.type("@authz");
+    panel.flushTimers();
+    panel.send({ type: "contextCandidates", query: "auth", items: contextItems });
+    expect(panel.byId("suggest-list").all("suggest-row")).toHaveLength(0);
+  });
+
+  it("opens from the composer's own button as well as from typing", () => {
+    panel.byId("context").dispatch("click");
+    expect(panel.byId("prompt").value).toBe("@");
+    panel.flushTimers();
+    expect(panel.posted.at(-1)).toEqual({ type: "resolveContext", query: "" });
+  });
+
+  it("renders codicon syntax in a path as the characters the engine sent", () => {
+    panel.type("@x");
+    panel.flushTimers();
+    panel.send({
+      type: "contextCandidates",
+      query: "x",
+      items: [
+        { ...contextItems[0], id: "$(check)/x.ts", path: "$(check)/x.ts", label: "$(check)/x.ts" },
+      ],
+    });
+    expect(panel.byId("suggest-list").textContent).toContain("$(check)");
+  });
+});
+
+describe("the chips above the composer", () => {
+  it("shows what is attached, with its real size, and nothing when nothing is", () => {
+    expect(panel.byId("chips").classList.contains("hidden")).toBe(true);
+    panel.send({ type: "context", items: contextItems });
+    expect(panel.byId("chips").classList.contains("hidden")).toBe(false);
+    const chips = panel.byId("chips").all("context-chip");
+    expect(chips).toHaveLength(2);
+    expect(chips[0]?.textContent).toContain("auth.ts");
+    expect(chips[0]?.textContent).toContain("4.2 KB");
+  });
+
+  it("removes one by asking the host, which owns the set the prompt will carry", () => {
+    panel.send({ type: "context", items: contextItems });
+    panel.byId("chips").all("chip-remove")[0]?.dispatch("click");
+    expect(panel.posted.at(-1)).toEqual({ type: "detach", id: "src/auth.ts" });
+    // Nothing is removed here: the row is a render of the host's set, and a
+    // chip that vanished before the host agreed would be the panel and the
+    // prompt disagreeing about what is attached.
+    expect(panel.byId("chips").all("context-chip")).toHaveLength(2);
+  });
+
+  it("marks a chip the engine refused, so it is visibly not going to be sent", () => {
+    panel.send({
+      type: "context",
+      items: [
+        {
+          id: "big.bin",
+          path: "big.bin",
+          label: "big.bin",
+          bytes: 0,
+          kind: "other",
+          ok: false,
+          reason: "not a text file",
+        },
+      ],
+    });
+    const chip = panel.byId("chips").all("context-chip")[0];
+    expect(chip?.classList.contains("chip-bad")).toBe(true);
+    expect(chip?.textContent).toContain("not a text file");
+  });
+
+  it("attaches a file dropped on the panel through the same set", () => {
+    panel.onDocument("drop", {
+      dataTransfer: {
+        getData: (type: string) =>
+          type === "text/uri-list" ? "file:///w/src/auth.ts\nfile:///w/docs/plan.md" : "",
+        files: [],
+        items: [],
+      },
+    });
+    expect(panel.posted.at(-1)).toEqual({
+      type: "attach",
+      paths: ["file:///w/src/auth.ts", "file:///w/docs/plan.md"],
+    });
+  });
+
+  it("sends a pasted image as bytes, because a paste has no path", () => {
+    panel.byId("prompt").dispatch("paste", {
+      clipboardData: {
+        items: [
+          {
+            kind: "file",
+            type: "image/png",
+            getAsFile: () => ({ dataUrl: "data:image/png;base64,iVBORw0KGgo=" }),
+          },
+        ],
+      },
+    });
+    expect(panel.posted.at(-1)).toEqual({
+      type: "attachImage",
+      data: "iVBORw0KGgo=",
+      mimeType: "image/png",
+    });
+  });
+
+  it("leaves a pasted text clipboard to the textarea", () => {
+    const before = panel.posted.length;
+    panel.byId("prompt").dispatch("paste", {
+      clipboardData: { items: [{ kind: "string", type: "text/plain" }] },
+    });
+    expect(panel.posted.length).toBe(before);
+  });
+
+  it("asks the host to open its own file dialog, which is the only one that yields a path", () => {
+    panel.byId("attach").dispatch("click");
+    expect(panel.posted.at(-1)).toEqual({ type: "browseForFiles" });
+  });
+});
+
+describe("the / command menu", () => {
+  const commands = [
+    {
+      name: "review",
+      description: "Review the diff for bugs",
+      kind: "skill",
+      source: "/w/.arcturn/skills/review.md",
+    },
+    { name: "changelog", description: "Write a changelog entry", kind: "skill" },
+    { name: "model", description: "Switch the model", kind: "builtin" },
+    { name: "rewind", description: "Restore a checkpoint", kind: "builtin" },
+  ];
+
+  function open(text = "/"): void {
+    panel.type(text);
+    panel.send({ type: "commands", status: "ready", commands });
+  }
+
+  it("asks the host for the list when the composer opens the menu", () => {
+    panel.type("/");
+    expect(panel.posted.filter((message) => message.type === "requestCommands")).toHaveLength(1);
+  });
+
+  it("puts skills first with their descriptions, then the built-ins", () => {
+    open();
+    const rows = panel.byId("suggest-list").all("suggest-row");
+    expect(
+      rows.map((row) => row.find((node) => node.classList.contains("suggest-name"))?.textContent),
+    ).toEqual(["/changelog", "/review", "/model"]);
+    expect(rows[1]?.textContent).toContain("Review the diff for bugs");
+    expect(rows[1]?.textContent).toContain("review.md");
+  });
+
+  it("lists no command the panel cannot run — RFC 0005 §3", () => {
+    open();
+    expect(panel.byId("suggest-list").textContent).not.toContain("rewind");
+  });
+
+  it("filters as you type", () => {
+    open("/rev");
+    const rows = panel.byId("suggest-list").all("suggest-row");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.textContent).toContain("/review");
+  });
+
+  it("inserts a skill rather than sending it, because execution stays prompt", () => {
+    open("/rev");
+    panel.byId("prompt").dispatch("keydown", { key: "Enter" });
+    expect(panel.byId("prompt").value).toBe("/review ");
+    expect(panel.posted.filter((message) => message.type === "send")).toHaveLength(0);
+  });
+
+  it("runs a built-in on the surface the panel already has for it", () => {
+    open("/model");
+    panel.byId("suggest-list").all("suggest-row")[0]?.dispatch("click");
+    expect(panel.byId("model-popover").classList.contains("hidden")).toBe(false);
+    expect(panel.byId("prompt").value).toBe("");
+  });
+
+  it("says nothing at all when the engine cannot list commands", () => {
+    panel.type("/");
+    panel.send({ type: "commands", status: "unavailable", commands: [] });
+    expect(panel.byId("suggest").classList.contains("hidden")).toBe(true);
+  });
+
+  it("renders codicon syntax in a skill description as the characters it was sent", () => {
+    panel.type("/");
+    panel.send({
+      type: "commands",
+      status: "ready",
+      commands: [{ name: "x", description: "\\$(verified) Trusted", kind: "skill" }],
+    });
+    expect(panel.byId("suggest-list").textContent).toContain("\\$(verified)");
+  });
+});
+
+describe("the permission mode chip", () => {
+  it("says nothing about a mode until the engine has named one", () => {
+    expect(panel.byId("mode-label").textContent).toBe("Permissions");
+  });
+
+  it("names the mode in force and what it grants", () => {
+    panel.send({ type: "permission", status: "ready", mode: "plan", tools: ["read"] });
+    expect(panel.byId("mode-label").textContent).toBe("Plan");
+    panel.byId("mode").dispatch("click");
+    const rows = panel.byId("mode-list").all("mode-row");
+    expect(rows).toHaveLength(4);
+    expect(rows.map((row) => row.textContent).join(" ")).toContain("no edits, no commands");
+  });
+
+  it("asks the engine to change mode rather than deciding for itself", () => {
+    panel.send({ type: "permission", status: "ready", mode: "default", tools: ["read"] });
+    panel.byId("mode").dispatch("click");
+    panel.byId("mode-list").all("mode-row")[2]?.dispatch("click");
+    expect(panel.posted.at(-1)).toEqual({ type: "setPermissionMode", mode: "plan" });
+    // The chip does not move on the click: the engine's answer moves it, so a
+    // refused change never leaves the panel claiming a mode that is not in
+    // force. RFC 0005 §1.2.
+    expect(panel.byId("mode-label").textContent).toBe("Default");
+  });
+
+  it("moves only when the engine says the mode is what it now is", () => {
+    panel.send({ type: "permission", status: "ready", mode: "yolo", tools: ["read"] });
+    expect(panel.byId("mode-label").textContent).toBe("Yolo");
+  });
+
+  it("says the engine is too old rather than showing a chip that lies", () => {
+    panel.send({ type: "permission", status: "unavailable", tools: [] });
+    expect(panel.byId("mode-label").textContent).toBe("Permissions");
+    panel.byId("mode").dispatch("click");
+    expect(panel.byId("mode-status").textContent).toMatch(/too old/i);
+  });
+
+  it("repeats the engine's refusal instead of failing silently", () => {
+    panel.send({ type: "permission", status: "ready", mode: "default", tools: ["read"] });
+    panel.byId("mode").dispatch("click");
+    panel.send({
+      type: "permission",
+      status: "ready",
+      mode: "default",
+      tools: ["read"],
+      note: "A run is in flight. Stop it, or wait for it to finish, and try again.",
+    });
+    expect(panel.byId("mode-status").textContent).toContain("A run is in flight");
+    expect(panel.byId("mode-label").textContent).toBe("Default");
+  });
+
+  it("asks for the state when the connection comes up", () => {
+    expect(
+      panel.posted.filter((message) => message.type === "requestPermission").length,
+    ).toBeGreaterThan(0);
+  });
+});
+
+describe("the capability line in the empty state", () => {
+  it("says nothing while the engine has not reported its tools", () => {
+    panel.send(state());
+    expect(panel.byId("capability").classList.contains("hidden")).toBe(true);
+  });
+
+  it("names what this engine can do, the web included, when it can reach it", () => {
+    panel.send(state());
+    panel.send({
+      type: "permission",
+      status: "ready",
+      mode: "default",
+      tools: ["read", "edit", "bash", "fetch"],
+    });
+    const line = panel.byId("capability");
+    expect(line.classList.contains("hidden")).toBe(false);
+    expect(line.textContent).toMatch(/web/i);
+  });
+
+  it("says nothing about the web on an engine with no fetch, and shows no button for it", () => {
+    panel.send(state());
+    panel.send({
+      type: "permission",
+      status: "ready",
+      mode: "default",
+      tools: ["read", "edit", "bash"],
+    });
+    expect(panel.byId("capability").textContent).not.toMatch(/web|brows/i);
+    // RFC 0005 §3: no capability implied by an affordance.
+    expect(panel.root.all("browse").length).toBe(0);
+  });
+});
+
+describe("the composer's menus and the keys they share with it", () => {
+  it("hands Enter back to the composer when the menu is showing nothing", () => {
+    panel.type("@zzzz");
+    panel.flushTimers();
+    panel.send({ type: "contextCandidates", query: "zzzz", items: [], status: "ready" });
+    expect(panel.byId("suggest-list").all("suggest-row")).toHaveLength(0);
+    panel.byId("prompt").dispatch("keydown", { key: "Enter" });
+    expect(panel.posted.at(-1)).toEqual({ type: "send", text: "@zzzz" });
+  });
+
+  it("closes the menu when the message it was completing is sent", () => {
+    panel.type("@auth");
+    panel.flushTimers();
+    panel.send({ type: "contextCandidates", query: "auth", items: contextItems });
+    expect(panel.byId("suggest").classList.contains("hidden")).toBe(false);
+    panel.byId("send").dispatch("click");
+    expect(panel.byId("suggest").classList.contains("hidden")).toBe(true);
+  });
+
+  it("closes the picker rather than claiming the workspace has no files", () => {
+    panel.type("@auth");
+    panel.flushTimers();
+    panel.send({ type: "contextCandidates", query: "auth", items: contextItems });
+    // Open, with rows, and then the engine turns out not to have the verb.
+    expect(panel.byId("suggest").classList.contains("hidden")).toBe(false);
+    panel.type("@authe");
+    panel.flushTimers();
+    panel.send({ type: "contextCandidates", query: "authe", items: [], status: "unavailable" });
+    expect(panel.byId("suggest").classList.contains("hidden")).toBe(true);
+  });
+
+  it("keeps focus in the composer when a row is clicked, so the click lands", () => {
+    // Without this the mousedown blurs the textarea, blur closes the popover,
+    // the row leaves the document and the click never happens.
+    let prevented = false;
+    panel.byId("suggest").dispatch("mousedown", {
+      preventDefault: () => {
+        prevented = true;
+      },
+    });
+    expect(prevented).toBe(true);
   });
 });

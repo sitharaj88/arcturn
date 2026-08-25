@@ -25,6 +25,18 @@ CLI, the SDK, or the wire protocol.
   a `notice` saying so, because over the wire a mention that quietly did nothing
   was indistinguishable from one that worked.
 
+- **A skill's arguments could name its substitution tokens.** `$ARGUMENTS` was
+  substituted before `$SKILL_DIR` and `$CWD`, and the result was then scanned
+  again — so an argument of `$SKILL_DIR/../../etc/passwd` came back with the
+  skill folder's real absolute path spliced into it. Harmless enough while the
+  only caller was a person typing into their own terminal; RFC 0005 §1.3 makes
+  arguments remote-caller text, and remote text that can name substitution
+  tokens is an injection channel that also discloses where the skill library
+  lives. Expansion is now a single pass: a template's own tokens expand, and
+  what they expand to is final. Affects `/name` in the terminal, the
+  model-invoked `skill` tool and the serve path alike, since all three share one
+  expander.
+
 ### Added
 
 - **Attachments and `resolveContext` on the wire protocol.** `prompt` takes an
@@ -112,9 +124,43 @@ CLI, the SDK, or the wire protocol.
   them on the way to the model, because `<cwd>/.arcturn/skills` is a directory a
   cloned repository controls and those strings now reach a UI as well as a
   prompt. Execution stays `prompt` — a skill is prompt text, and a second
-  execution path would give one skill two behaviours. Optional and additive:
+  execution path would give one skill two behaviours — and `prompt` now really
+  runs one; see "a leading `/name`" below. Optional and additive:
   `PROTOCOL_VERSION` stays at `1`, and an older server's `invalidRequest`
   becomes `undefined`.
+- **A leading `/name` runs the skill, on `prompt` and on `steer`.** `listCommands`
+  told a client which skills exist, but the serve path did not expand the command
+  it offered: a client that sent `/review` reached a model holding seven literal
+  characters, which it might notice and pick up through the model-invoked `skill`
+  tool, or might not. A menu whose entries mostly do nothing is the menu RFC 0005
+  §3 forbids. A prompt beginning with `/name [args]` is now replaced by that
+  skill's body before the model sees anything, substituted by the very same
+  `Skill.buildPrompt` the terminal's `/name` and the `skill` tool already use.
+
+  It follows the terminal's rules, including where they say "leave this alone":
+  only a *leading* `/name` counts, and a skill body's own `@mentions` are **not**
+  expanded — mention expansion is for the text a person typed, and a skill in
+  `<cwd>/.arcturn/skills` is a file a cloned repository controls, which would
+  otherwise be able to pull `@.env` into a prompt on the strength of someone
+  running `/review`. An unrecognised `/name` is **refused** with the nearest
+  names suggested and no turn spent, rather than forwarded as prose: a model
+  reading `/reviw the auth module` answers *something*, and a user cannot tell
+  that from a command that ran. A built-in is refused the same way, naming the
+  verb that runs it. One deliberate divergence from the terminal, which treats
+  every leading slash as a command: a name here must look like a name
+  (`[A-Za-z0-9-]+`), so `/etc/hosts has the wrong entry` is sent as the prose it
+  is. A skill is addressed by name against what the engine discovered, never by
+  path, so nothing on this route reaches the filesystem.
+
+  `steer` expands identically, and became `Promise<void>` on `SessionHost` to do
+  it (the wire has always awaited it, so nothing about the protocol changed);
+  steers are chained per session so that the newly-async expansion cannot queue
+  two of them in the order their filesystem reads finished rather than the order
+  they were sent.
+  The terminal steers the *expanded* body when a run is in flight, and a command
+  that meant one thing on an idle session and another on a busy one would be the
+  same menu lying at a harder moment to notice. That also closes the other half
+  of the mention bug below: `@auth.ts` in a steer was never expanded either.
 - **`sessionHistory` on the wire protocol.** A client can now ask a server for a
   session's stored conversation, so a panel that attaches to a session it never
   watched can render it. `openSession` subscribes to *future* events and replays
@@ -159,6 +205,52 @@ CLI, the SDK, or the wire protocol.
   itself goes through the engine's `deleteSession` verb, and the extension never
   touches a session file. Deleting the session on screen opens a fresh one, so
   the composer still goes somewhere real.
+- **The VS Code composer is a composer.** The panel exposed a model chip and
+  nothing else; it now surfaces the verbs above it, and reads as one control
+  rather than a text box with buttons bolted on — attach and context on the
+  left, model and mode as chips, send and stop on the right, judged at 300px.
+
+  **`@` opens a context picker.** Typing `@` fuzzy-matches workspace files
+  through VS Code's own index (so your `files.exclude` is respected without the
+  extension owning a second exclude list), and every row shown has been through
+  `resolveContext` — so the size on it is the engine's byte count, not a guess,
+  and a path the engine will refuse says why before you press enter. Picking one
+  turns it into a removable chip above the composer and **takes the `@…` back
+  out of the box**: the engine expands mentions *and* injects attachments, so
+  leaving the text in would send the same file twice and the chip row would stop
+  being the whole truth about what the prompt carries. Drag-and-drop from the
+  explorer or the OS, a native Attach dialog, and pasting an image all land in
+  that same set — the one the next `prompt` actually sends. A pasted image
+  travels as bytes, because a paste has no path; the panel checks its type
+  against the engine's own allowlist first, so a chip that appears is a chip
+  that will send.
+
+  **`/` opens the command menu** from `listCommands`: the workspace's skills
+  first, each with its description and the file it came from, then the
+  built-ins. Enter inserts a skill and leaves you to add an argument —
+  execution stays `prompt`, per RFC 0005 §1.3 — while a built-in opens the
+  panel surface that already runs it, so `/model` opens the model list rather
+  than sending the model a message about wanting a different model. A built-in
+  this panel has no surface for is not listed at all, which is RFC 0005 §3's
+  rule applied a second time on the client's own terms.
+
+  **A permission mode chip** shows `default` / `acceptEdits` / `plan` / `yolo`
+  with one line saying what each grants, `yolo`'s included — that a deny rule in
+  your config still wins. The chip **never moves on your click**: it moves when
+  the engine's answer says the mode changed, so a refusal cannot leave the panel
+  claiming a restriction that is not in force. An engine too old for
+  `setPermissionMode` says exactly that instead of degrading, and a mode change
+  attempted mid-run says the run is in flight rather than failing silently.
+
+  **The empty state names what this engine can do**, built from
+  `permissionState.tools` — including whether it can reach the web. If `fetch`
+  and `websearch` are both absent the panel says nothing about browsing and
+  shows no button for it; no capability is implied by an affordance.
+
+  **Permission requests stay native modals**, which is a security property and
+  not a style choice, and the "allow always" button is now **"Allow for this
+  session"** — the only scope this wire has ever accepted. It said "always" and
+  meant "until this session ends".
 
 ## [0.3.0] — 2026-08-25
 

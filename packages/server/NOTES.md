@@ -540,3 +540,49 @@ running*, without relying on timing.
   runs, denies pending asks without severing already-attached observers, so a
   run's tail — e.g. a final `runEnd`) is exercised directly in
   `session-host.test.ts`.
+
+## `/name` expansion lives in `@arcturn/cli`, and why `steer` became async
+
+RFC 0005 §1.3 keeps command execution on `prompt`: a skill is prompt text, and
+a `runCommand` verb would give one skill two behaviours. Closing the gap
+therefore meant expanding a leading `/name` somewhere on the prompt path, and
+the choice of *where* was already made by §1.1's mention expansion — the
+knowledge (what a skill is, how `$ARGUMENTS`/`$SKILL_DIR` substitute) lives in
+`@arcturn/cli`, this package cannot depend on it, so it arrives through the
+injected `ContextResolver`. `SessionHost` did not gain a line for commands: it
+already called `contextResolver.buildPrompt`, and `createContextResolver` now
+resolves a command there before it resolves a mention.
+
+What *is* in this package is `REMOTE_BUILT_IN_COMMAND_VERBS`, next to
+`REMOTE_REACHABLE_BUILT_IN_COMMANDS` and for the same reason: a client that
+sends `/model` as prompt text has to be told to call `setModel` instead, and
+"which verbs make this command real" is the question membership in that list is
+already decided by. Answering it in two places is how a menu entry and its
+error message come to name different verbs. A test in `permissions-wire.test.ts`
+holds the two exports to the same set of names.
+
+`SessionHost.steer` changed from a synchronous hand-off to `Promise<void>`, and
+now routes through the same `#buildPromptContent` as `prompt`. Two reasons, one
+of them the point of the change:
+
+1. The terminal's `skillCommand` steers the **expanded** skill body when a run
+   is in flight (`runtime.ts`). A serve path that expanded `/review` on `prompt`
+   but queued the literal text on `steer` would be the lying menu §3 forbids,
+   lying only while a run happens to be active — the hardest kind to notice.
+2. It closes §1.1's other half at the same time: mentions were never expanded on
+   `steer` either, so `@auth.ts` meant the file when the session was idle and six
+   words about a file when it was busy.
+
+`steer` is a request/response verb and the protocol client has always awaited
+it, so nothing on the wire changed; `ws-server.ts` awaits the call so a refusal
+comes back as that request's error rather than an unhandled rejection.
+
+Making it async opened a hazard worth naming, because it is the same one
+`LiveSession.starting` already guards for `prompt`: `ws-server.ts` dispatches a
+connection's frames concurrently (`void this.#handleMessage(...)`), so two
+steers sent back to back — one naming a file, one plain text — reached
+`Agent.steer` in whichever order their filesystem reads finished, which for a
+mention-plus-plain pair was reliably backwards. A queue that reorders is not a
+queue. `LiveSession.steerTail` chains them per session. `prompt` cannot share
+that mechanism: it *rejects* a second caller as `sessionBusy` rather than making
+it wait, which is right for a turn and wrong for a steer.

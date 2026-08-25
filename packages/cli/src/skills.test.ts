@@ -108,6 +108,27 @@ describe("loadSkills", () => {
     );
   });
 
+  it("never re-scans substituted text for further tokens", async () => {
+    // Substitution is one pass, deliberately. Arguments are caller text — on
+    // the serve path, remote caller text — and a second pass would let them
+    // name tokens of their own: `$SKILL_DIR` typed as an argument would expand
+    // into the skill folder's real absolute path, handing a caller a path
+    // outside the workspace to walk from. A template's own tokens expand; what
+    // they expand *to* is final.
+    const root = await skillsRoot({
+      "tool/SKILL.md": "dir=[$SKILL_DIR] args=[$ARGUMENTS] first=[$1]",
+    });
+    const warnings: string[] = [];
+    const skills = await loadSkills([root], warnings);
+    const skill = skills[0];
+    const prompt = skill?.buildPrompt("$SKILL_DIR/../../etc/passwd $CWD", "/some/dir");
+    expect(prompt).toBe(
+      `dir=[${join(root, "tool")}] args=[$SKILL_DIR/../../etc/passwd $CWD] ` +
+        "first=[$SKILL_DIR/../../etc/passwd]",
+    );
+    expect(prompt).not.toContain(`${join(root, "tool")}/../../etc/passwd`);
+  });
+
   it("substitutes an empty string for a missing positional argument", async () => {
     const root = await skillsRoot({ "cmd.md": "one=[$1] two=[$2]" });
     const warnings: string[] = [];

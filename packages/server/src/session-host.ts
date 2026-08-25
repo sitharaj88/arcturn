@@ -281,6 +281,20 @@ interface LiveSession {
    * a session that is about to start writing to its own file.
    */
   starting: boolean;
+  /**
+   * Tail of this session's steer chain, so steers queue in the order they were
+   * sent rather than the order their filesystem reads happened to finish.
+   *
+   * The same hazard {@link LiveSession.starting} guards for `prompt`, arriving
+   * from the same cause: `steer` expands mentions and `/name` now, which is I/O,
+   * and `ws-server.ts` dispatches a connection's frames concurrently. Two
+   * steers sent back to back — one naming a file, one plain — would otherwise
+   * reach `Agent.steer` backwards, and a queue that reorders is not a queue.
+   * `prompt` cannot use this: it *rejects* a second caller as `sessionBusy`
+   * rather than making it wait, which is the right answer for a turn and the
+   * wrong one for a steer.
+   */
+  steerTail: Promise<void>;
   unsubscribe: () => void;
 }
 
@@ -769,11 +783,33 @@ export class SessionHost {
   /**
    * Queue a mid-run steering message (or, if idle, the next prompt).
    *
+   * Goes through {@link SessionHostOptions.contextResolver} exactly as
+   * {@link SessionHost.prompt} does, and for the same reason: a steer is text a
+   * person typed into the same box, and the engine cannot have `@auth.ts` mean
+   * the file when the session is idle and six words about a file when it is
+   * running. RFC 0005 §1.3 makes that concrete for commands — the terminal's
+   * `skillCommand` steers the *expanded* skill body when a run is in flight, so
+   * a serve path that steered the literal `/review` would be the lying menu §3
+   * forbids, merely lying at a different moment.
+   *
+   * Asynchronous for that reason, where it used to be a synchronous hand-off.
+   * The wire has always awaited it (`steer` is a request/response verb like any
+   * other), so nothing about the protocol changes.
+   *
    * @throws {SessionHostError} with code `sessionNotFound` when the session
-   *   is not live.
+   *   is not live, or `invalidRequest` when the text names a command this host
+   *   cannot expand — refused rather than queued, because a steer that queued
+   *   `/reviw` would spend the rest of the run on text nobody meant to send.
    */
-  steer(sessionId: string, text: string): void {
-    this.#require(sessionId).agent.steer(text);
+  async steer(sessionId: string, text: string): Promise<void> {
+    const session = this.#require(sessionId);
+    const queued = session.steerTail.then(async () => {
+      session.agent.steer(await this.#buildPromptContent(session, text, []));
+    });
+    // The tail swallows failures so one refused steer does not poison every
+    // later one; the caller still gets the rejection, from `queued` itself.
+    session.steerTail = queued.catch(() => undefined);
+    return queued;
   }
 
   /**
@@ -1159,6 +1195,7 @@ export class SessionHost {
       observers,
       pendingPermissions,
       starting: false,
+      steerTail: Promise.resolve(),
       unsubscribe,
     };
     this.#sessions.set(header.sessionId, session);

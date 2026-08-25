@@ -94,3 +94,27 @@ export const REMOTE_REACHABLE_BUILT_IN_COMMANDS: readonly CommandDescriptor[] = 
     kind: "builtin" as const,
   }),
 ]);
+
+/**
+ * The verbs behind each listed built-in, named so a refusal can be acted on.
+ *
+ * `listCommands` marks these `kind: "builtin"`, which tells a client they are
+ * not prompt text — but a client that inserts `/model` into its composer and
+ * sends it anyway (a `/` menu that pastes the name, an older panel, a person
+ * typing) has to be told *what to call instead*, not merely that it was wrong.
+ * The serve path's `/name` expansion reads this to write that sentence.
+ *
+ * Kept beside {@link REMOTE_REACHABLE_BUILT_IN_COMMANDS} rather than at the
+ * refusal site for the reason the list itself lives in this package: "which
+ * verbs make this command real" is the same question membership above is
+ * decided by, and answering it twice is how the menu entry and the error
+ * message come to name different verbs. Deliberately **not** on the wire —
+ * `CommandDescriptor` stays as it is; this is server-side prose.
+ */
+export const REMOTE_BUILT_IN_COMMAND_VERBS: Readonly<Record<string, readonly string[]>> =
+  Object.freeze({
+    model: Object.freeze(["listModels", "setModel"]),
+    permissions: Object.freeze(["permissionState", "setPermissionMode"]),
+    sessions: Object.freeze(["listSessions", "openSession", "sessionHistory"]),
+    clear: Object.freeze(["createSession", "openSession"]),
+  });

@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
-import type { ModelCatalogEntry, SessionHeader } from "../serve/engine.js";
+import type { CommandDescriptor, ModelCatalogEntry, SessionHeader } from "../serve/engine.js";
 import { CONNECTION_ACTIONS } from "./connection-card.js";
 import {
   MAX_COPY_LENGTH,
+  MAX_IMAGE_DATA_LENGTH,
   MAX_MODEL_ID_LENGTH,
   MAX_PROMPT_LENGTH,
   MAX_SESSION_ID_LENGTH,
   parseWebviewMessage,
+  projectCommandOption,
   projectModelOption,
   projectSessions,
 } from "./webview-messages.js";
@@ -298,5 +300,100 @@ describe("projectModelOption", () => {
   it("carries the variable's name and never a value", () => {
     expect(projectModelOption(entry).apiKeyEnv).toBe("ANTHROPIC_API_KEY");
     expect(projectModelOption({ ...entry, apiKeyEnv: undefined }).apiKeyEnv).toBeUndefined();
+  });
+});
+
+describe("parseWebviewMessage, the RFC 0005 composer verbs", () => {
+  it("accepts the three requests the panel makes about itself", () => {
+    expect(parseWebviewMessage({ type: "requestPermission" })).toEqual({
+      type: "requestPermission",
+    });
+    expect(parseWebviewMessage({ type: "requestCommands" })).toEqual({ type: "requestCommands" });
+    expect(parseWebviewMessage({ type: "browseForFiles" })).toEqual({ type: "browseForFiles" });
+  });
+
+  it("accepts exactly the four permission modes the engine defines", () => {
+    for (const mode of ["default", "acceptEdits", "plan", "yolo"]) {
+      expect(parseWebviewMessage({ type: "setPermissionMode", mode })).toEqual({
+        type: "setPermissionMode",
+        mode,
+      });
+    }
+  });
+
+  it("refuses a mode the engine has no name for, rather than forwarding it", () => {
+    for (const mode of ["", "yolo ", "YOLO", "god", 7, null, {}]) {
+      expect(parseWebviewMessage({ type: "setPermissionMode", mode })).toBeUndefined();
+    }
+  });
+
+  it("accepts a pasted image as base64 and a mime type the engine will take", () => {
+    expect(
+      parseWebviewMessage({ type: "attachImage", data: "iVBORw0KGgo=", mimeType: "image/png" }),
+    ).toEqual({ type: "attachImage", data: "iVBORw0KGgo=", mimeType: "image/png" });
+  });
+
+  it("refuses an image whose type the engine does not accept, before a turn is spent", () => {
+    for (const mimeType of ["image/svg+xml", "text/html", "application/pdf", "", "image/PNG"]) {
+      expect(parseWebviewMessage({ type: "attachImage", data: "AAAA", mimeType })).toBeUndefined();
+    }
+  });
+
+  it("refuses anything that is not base64, so nothing but bytes reaches the wire", () => {
+    for (const data of ["not base64!", "<script>", "AA AA", "", 42]) {
+      expect(
+        parseWebviewMessage({ type: "attachImage", data, mimeType: "image/png" }),
+      ).toBeUndefined();
+    }
+  });
+
+  it("caps a pasted image rather than letting a paste be unbounded", () => {
+    expect(
+      parseWebviewMessage({
+        type: "attachImage",
+        data: "A".repeat(MAX_IMAGE_DATA_LENGTH + 4),
+        mimeType: "image/png",
+      }),
+    ).toBeUndefined();
+  });
+});
+
+describe("projectCommandOption", () => {
+  const descriptor: CommandDescriptor = {
+    name: "review",
+    description: "Review the diff for bugs",
+    kind: "skill",
+    source: "/w/.arcturn/skills/review.md",
+  };
+
+  it("rebuilds the row field by field instead of forwarding the engine's object", () => {
+    expect(Object.keys(projectCommandOption(descriptor)).sort()).toEqual([
+      "description",
+      "kind",
+      "name",
+      "source",
+    ]);
+  });
+
+  it("carries a field the engine adds nowhere", () => {
+    const extended = { ...descriptor, prompt: "the whole skill body" } as CommandDescriptor;
+    expect(JSON.stringify(projectCommandOption(extended))).not.toContain("the whole skill body");
+  });
+
+  it("escapes a description a cloned repository wrote, which reaches a rendered field", () => {
+    const hostile = { ...descriptor, description: "$(verified) Trusted by Arcturn" };
+    // Escaped, not stripped: the panel renders the characters the engine sent,
+    // and a VS Code label renderer sees a backslash rather than glyph syntax.
+    expect(projectCommandOption(hostile).description).toBe("\\$(verified) Trusted by Arcturn");
+  });
+
+  it("escapes the source path too, which is a filename on the user's disk", () => {
+    const hostile = { ...descriptor, source: "/w/$(check)/review.md" };
+    expect(projectCommandOption(hostile).source).toBe("/w/\\$(check)/review.md");
+  });
+
+  it("invents no source for a built-in, which has no file", () => {
+    const builtin: CommandDescriptor = { name: "model", description: "Switch", kind: "builtin" };
+    expect("source" in projectCommandOption(builtin)).toBe(false);
   });
 });

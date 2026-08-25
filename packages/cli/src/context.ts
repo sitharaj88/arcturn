@@ -16,9 +16,21 @@
  *   rule stops being the strictest.
  * - A file is read by {@link readContextFile}, so an attachment and a mention
  *   share one set of size caps and one truncation marker.
+ * - A leading `/name` expands through {@link expandServedCommand}, which drives
+ *   the same {@link Skill.buildPrompt} the TUI's `/name` and the model-invoked
+ *   `skill` tool drive — RFC 0005 §1.3, and the same argument one more time.
  *
  * What is new here is only what the wire adds: attachments, a total byte
  * budget, and an honest read-only answer for a file picker.
+ *
+ * ## Why a command and a mention share this one seam
+ *
+ * They are the same job — "turn what the client typed into what the model is
+ * handed, before a turn is spent" — and they have to be *ordered* against each
+ * other, which can only be decided in one place. Splitting them would leave
+ * that order implicit in whichever ran first. Here it is explicit: a prompt is
+ * either a command or it is prose, never both, and `serve-commands.ts` records
+ * why (a skill body's mentions stay unexpanded, exactly as in the terminal).
  */
 
 import { stat } from "node:fs/promises";
@@ -39,6 +51,8 @@ import {
   IMAGE_MIME_TYPES,
   readContextFile,
 } from "./mentions.js";
+import { expandServedCommand } from "./serve-commands.js";
+import type { Skill } from "./skills.js";
 
 /** Construction options for {@link createContextResolver}. */
 export interface ContextResolverOptions {
@@ -51,6 +65,21 @@ export interface ContextResolverOptions {
    * attachments to a scratch directory.
    */
   maxAttachmentBytes?: number;
+  /**
+   * The discovered markdown skills a leading `/name` resolves against.
+   *
+   * A getter rather than an array, matching `SessionHostOptions.commands` and
+   * `modelCatalog`: skills do not reload after startup today, but a future
+   * watcher must not need this wiring changed to be picked up. Omitted — a
+   * stub runtime, an embedder with no skill library — every command attempt
+   * finds nothing and is refused as unknown, which is the truth for such a
+   * host.
+   *
+   * `createServeHost` passes the very same closure it passes to `commands`, so
+   * the menu and the expander read one array. Two closures over one array is
+   * how a menu comes to list a skill the expander cannot find.
+   */
+  skills?: () => readonly Skill[];
 }
 
 /**
@@ -80,10 +109,26 @@ function budgetMessage(what: string, bytes: number, limit: number): string {
  */
 export function createContextResolver(options: ContextResolverOptions = {}): ContextResolver {
   const maxBytes = options.maxAttachmentBytes ?? PROMPT_ATTACHMENT_MAX_BYTES;
+  const skills = options.skills ?? ((): readonly Skill[] => []);
 
   return {
     async buildPrompt(request: PromptContextRequest): Promise<ResolvedPrompt> {
-      const expanded = await expandMentions(request.text, request.cwd);
+      // A command first, because a command is not prose: when the prompt is
+      // `/review src`, there is no user-typed mention in it to expand, and
+      // running `expandMentions` over the skill body afterwards would hand a
+      // repository-controlled file the mention channel. See
+      // `serve-commands.ts` for that decision in full.
+      const command = expandServedCommand(request.text, skills(), request.cwd);
+      if (command.outcome === "refused") {
+        // Fatal, like a bad attachment and unlike a bad mention: the client
+        // named a command, and answering the model with the literal text
+        // `/reviw the auth module` is the silent no-op RFC 0005 §3 forbids.
+        throw new ContextRefusedError(command.reason);
+      }
+      const expanded =
+        command.outcome === "expanded"
+          ? { text: command.text, images: [], imagePaths: [] as string[], refusals: [] }
+          : await expandMentions(request.text, request.cwd);
       const images: ResolvedImage[] = expanded.images.map((content, index) => ({
         content,
         source: "mention",

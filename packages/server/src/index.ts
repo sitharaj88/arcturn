@@ -8,7 +8,10 @@
 
 export type { AuthenticateFrame } from "./auth.js";
 export { isAuthenticateFrame, tokensMatch } from "./auth.js";
-export { REMOTE_REACHABLE_BUILT_IN_COMMANDS } from "./built-in-commands.js";
+export {
+  REMOTE_BUILT_IN_COMMAND_VERBS,
+  REMOTE_REACHABLE_BUILT_IN_COMMANDS,
+} from "./built-in-commands.js";
 export type {
   ContextQueryRequest,
   ContextRefusal,

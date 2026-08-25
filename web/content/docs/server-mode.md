@@ -152,7 +152,8 @@ A typical session, client-initiated:
    `permissionRequest`; the client resolves it with
    `{ method: "permissionDecision", params: { sessionId, decision } }`.
 4. `{ method: "steer", params: { sessionId, text } }` injects a message mid-run, exactly
-   like `agent.steer()` locally.
+   like `agent.steer()` locally — including the mention and `/name` expansion `prompt`
+   gets, so the same text means the same thing whether the session was busy or idle.
 5. `{ method: "abort", params: { sessionId } }` cancels the in-flight run.
 
 ## The model catalog
@@ -316,11 +317,15 @@ how a client tells "this engine is too old" from "this session is busy".
 
 ## Context: mentions and attachments
 
-A `prompt`'s `text` is **not** passed to the model verbatim. The server expands `@path`
-mentions against the session's `cwd` first, using the same `expandMentions` the TUI and
-`--print` call — so `@src/auth.ts` reaches the model as the file, not as six words about a
+A `prompt`'s (and a `steer`'s) `text` is **not** passed to the model verbatim. The server
+expands `@path` mentions against the session's `cwd` first, using the same `expandMentions`
+the TUI and `--print` call — so `@src/auth.ts` reaches the model as the file, not as six words about a
 file. Before this existed, that expansion ran only in the local CLI, and every remote
 client was silently degraded; see RFC 0005 §0.
+
+One exception, covered under [Commands](#commands): a prompt that *is* a command — one
+beginning with `/name` — expands into that skill's body instead, and the body's own
+mentions are left alone. A prompt is either a command or it is prose, never both.
 
 A mention that resolves outside the workspace is **refused, not read** — lexically, and
 again after symlinks are resolved, so a link inside the workspace cannot lead out of it.
@@ -560,7 +565,9 @@ drawn.
 
 Skills first, alphabetically, then built-ins — the order a `/` menu wants, sorted
 server-side so every client's menu agrees. A server property, not a session one: skills are
-discovered from the served workspace and the user's home.
+discovered from the served workspace and the user's home. A skill whose name collides with
+a listed built-in is neither listed nor runnable under that name, matching the terminal,
+where the built-in is registered first and the skill is skipped with a warning.
 
 **Only built-ins a client can actually run are listed.** A menu offering `/rewind` to a
 client with no rewind verb is a menu that lies. `model` is here because `listModels` and
@@ -578,11 +585,41 @@ and that half is refused on this wire by design.
 
 **Execution stays `prompt`.** A skill is prompt text; there is no `runCommand` verb and
 there will not be one, because a second execution path would give one skill two behaviours
-that could drift apart. Note the current gap: the serve path does not yet expand a leading
-`/name` into the skill's body the way the TUI's command registry does, so a client that
-sends `/review` verbatim reaches a model that must pick the skill up through the
-model-invoked `skill` tool. Closing that belongs in the prompt path, beside mention
-expansion.
+that could drift apart. Sending `{ method: "prompt", params: { text: "/review the auth
+module" } }` is how a client runs a listed skill, and the server expands it before the
+model sees anything: the leading `/name` is replaced by that skill's body, with
+`$ARGUMENTS`, `$1`..`$9`, `$CWD` and `$SKILL_DIR` substituted by the very same
+`Skill.buildPrompt` the terminal's `/name` and the model-invoked `skill` tool use. The
+`skill` tool is not a substitute for this: that is the model *noticing* text and choosing
+to act on it, which is not a command running. `steer` expands identically, so a command
+sent mid-run means what it means when the session is idle.
+
+Four rules govern the expansion:
+
+- **Only a leading `/name`.** `explain what /review does` is prose and is sent as prose.
+- **A name is `[A-Za-z0-9-]+`**, ended by whitespace or the end of the line — the charset a
+  skill name is normalized into. `/etc/hosts has the wrong entry` is therefore prose too:
+  the terminal treats every leading slash as a command because a completion menu is open
+  as you type, and a chat composer is where paths get sent instead. This is the one place
+  the serve path knowingly diverges from the terminal, and it diverges by refusing less.
+- **An unrecognised `/name` is refused**, with `invalidRequest`, the nearest names as a
+  suggestion, and no turn spent. It is never forwarded as literal text: a model reading
+  `/reviw the auth module` answers *something*, and the user cannot tell that from a
+  command that ran. A built-in is refused the same way, naming the verb that actually runs
+  it — `/model` says to call `setModel`, which is what `kind: "builtin"` means in the list
+  above.
+- **A skill body's own `@mentions` are not expanded.** The body reaches the model as
+  written, exactly as in the terminal. This is deliberate twice over: a skill in
+  `<cwd>/.arcturn/skills` is a file a cloned repository controls, and expanding its
+  mentions would let that repository pull `@.env` into a prompt on the strength of someone
+  running `/review`. Mention expansion is for the text a *person* typed.
+
+A skill is addressed by **name**, never by path — the name is matched against what the
+engine discovered under its own skill roots, so no `..`, absolute path or symlink in a
+`prompt` reaches the filesystem through this route, and a markdown file outside those roots
+is not reachable at all. Arguments are not re-scanned for substitution tokens either: an
+argument of `$SKILL_DIR/../../etc/passwd` stays exactly that text rather than expanding
+into the skill folder's real absolute path.
 
 Skill descriptions are **sanitized** before they reach a client — first line only, control
 characters collapsed, length-capped — using the same function that sanitizes them on the

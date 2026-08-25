@@ -308,7 +308,20 @@ export interface ProtocolClient {
    *   over the byte budget, an image for a model with no vision).
    */
   prompt(sessionId: string, text: string, attachments?: readonly PromptAttachment[]): Promise<void>;
-  /** Queue a mid-run steering message. */
+  /**
+   * Queue a mid-run steering message.
+   *
+   * The engine expands `@`-mentions and a leading `/name` in `text` exactly as
+   * {@link ProtocolClient.prompt} does, so a command inserted while a run is in
+   * flight means what it means when the session is idle. An engine that
+   * predates that expands neither and queues the text as written; there is no
+   * probe for it, because a steer that is only prose is unaffected either way.
+   *
+   * @param sessionId - Session to steer.
+   * @param text - The message as typed, mentions and `/name` left in place.
+   * @throws {ProtocolRequestError} `invalidRequest` when `text` names a command
+   *   the engine cannot expand — nothing is queued.
+   */
   steer(sessionId: string, text: string): Promise<void>;
   /** Abort the session's current run. */
   abort(sessionId: string): Promise<void>;

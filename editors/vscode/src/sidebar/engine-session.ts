@@ -20,6 +20,7 @@
 import { buildServeArgs, cliInvocation, type ResolvedCliLike } from "../serve/args.js";
 import { connectToServe, type SocketFactory } from "../serve/connect.js";
 import type {
+  CommandDescriptor,
   ModelCatalogEntry,
   ProtocolClient,
   SessionHeader,
@@ -119,6 +120,22 @@ export interface EngineSession {
    * the fallback picker on `undefined` rather than showing an error.
    */
   listModels(): Promise<ModelCatalogEntry[] | undefined>;
+  /**
+   * What a `/` could invoke on this engine — the workspace's markdown skills
+   * plus the built-ins this wire can carry out — or `undefined` when this
+   * engine is older than the `listCommands` verb.
+   *
+   * Server-scoped rather than session-scoped, which is why it sits here beside
+   * `listModels` rather than on the controller: skills are files on disk and
+   * the built-in list is a property of the protocol, neither of which changes
+   * because a different session is attached.
+   *
+   * Callers show no `/` menu on `undefined` rather than an empty one — "this
+   * workspace has no skills" and "this engine cannot tell me" are not the same
+   * news, and the panel has been careful about that distinction since the
+   * session list.
+   */
+  listCommands(): Promise<CommandDescriptor[] | undefined>;
   /** Attach to an existing session, replaying its stored conversation. */
   openSession(sessionId: string): Promise<void>;
   /** Create and attach to a fresh session. */
@@ -427,6 +444,9 @@ export function createEngineSession(options: EngineSessionOptions): EngineSessio
     listSessions: () => requireClient().listSessions(),
     async listModels(): Promise<ModelCatalogEntry[] | undefined> {
       return (await requireClient().listModels())?.models;
+    },
+    async listCommands(): Promise<CommandDescriptor[] | undefined> {
+      return (await requireClient().listCommands())?.commands;
     },
     async openSession(sessionId: string): Promise<void> {
       await attach(await requireClient().openSession(sessionId));

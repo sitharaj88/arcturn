@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createCoalescer } from "./coalesce.js";
 import {
   ALLOW,
-  ALLOW_ALWAYS,
+  ALLOW_SESSION,
   answerFromChoice,
   confirmsSessionDeletion,
   DELETE_SESSION,
@@ -30,7 +30,7 @@ describe("permissionChoices", () => {
       ...request,
       suggestedRule: { tool: "bash", specifier: "rm *", action: "allow" },
     });
-    expect(permissionChoices(described)).toEqual([ALLOW, ALLOW_ALWAYS, DENY]);
+    expect(permissionChoices(described)).toEqual([ALLOW, ALLOW_SESSION, DENY]);
   });
 });
 
@@ -45,7 +45,7 @@ describe("answerFromChoice", () => {
   });
 
   it("allows and persists the engine's own rule", () => {
-    expect(answerFromChoice(ALLOW_ALWAYS, described)).toEqual({
+    expect(answerFromChoice(ALLOW_SESSION, described)).toEqual({
       behavior: "allow",
       persistRule: { tool: "bash", specifier: "rm *", action: "allow", scope: "session" },
     });
@@ -67,7 +67,7 @@ describe("answerFromChoice", () => {
 
   it("never persists a rule the engine did not suggest", () => {
     const bare = describePermissionRequest(request);
-    expect(answerFromChoice(ALLOW_ALWAYS, bare)).toEqual({ behavior: "allow" });
+    expect(answerFromChoice(ALLOW_SESSION, bare)).toEqual({ behavior: "allow" });
   });
 });
 
@@ -133,5 +133,31 @@ describe("confirmsSessionDeletion", () => {
     expect(confirmsSessionDeletion("", prompt)).toBe(false);
     expect(confirmsSessionDeletion("delete", prompt)).toBe(false);
     expect(confirmsSessionDeletion("Allow", prompt)).toBe(false);
+  });
+});
+
+describe("what the second button promises", () => {
+  const described = {
+    message: "Run a shell command",
+    detail: "Tool: bash",
+    suggestedRule: {
+      tool: "bash",
+      specifier: "git *",
+      action: "allow" as const,
+      scope: "session" as const,
+    },
+  };
+
+  it("says 'for this session', because that is the only scope this wire has", () => {
+    // RFC 0005 §1.2: "a session-scoped allow dies with the session. A rule that
+    // outlives a session is written by a person, in their own config." The
+    // button used to say "Allow always", which is a promise the wire refuses to
+    // keep — `permissionDecision` rejects any scope but `session`.
+    expect(ALLOW_SESSION).toBe("Allow for this session");
+    expect(permissionChoices(described)).toEqual([ALLOW, ALLOW_SESSION, DENY]);
+  });
+
+  it("still scopes what it persists to the session", () => {
+    expect(answerFromChoice(ALLOW_SESSION, described).persistRule?.scope).toBe("session");
   });
 });

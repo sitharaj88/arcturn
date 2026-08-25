@@ -536,3 +536,56 @@ describe("the panel's own messages", () => {
     expect(panel.posted().map((message) => message.type)).toContain("models");
   });
 });
+
+describe("a pasted image, which is the one attachment with no path", () => {
+  function open(): ReturnType<typeof fakeView> {
+    activate();
+    const panel = fakeView();
+    ledger.views[0]?.provider.resolveWebviewView(panel.view);
+    panel.send({ type: "ready" });
+    ledger.posted.length = 0;
+    return panel;
+  }
+
+  function chips(panel: ReturnType<typeof fakeView>): { items: unknown[] }[] {
+    return panel.posted().filter((message) => message.type === "context") as unknown as {
+      items: unknown[];
+    }[];
+  }
+
+  it("becomes a chip with its real size, without an engine round trip to resolve", () => {
+    const panel = open();
+    // "AAAA" is four base64 characters, which is three bytes. No engine is
+    // running in this test and none is needed: there is nothing on disk to
+    // resolve, and the boundary already checked the bytes and the type.
+    panel.send({ type: "attachImage", data: "AAAA", mimeType: "image/png" });
+    const last = chips(panel).at(-1);
+    expect(last?.items).toEqual([
+      expect.objectContaining({ kind: "image", ok: true, bytes: 3, label: "Pasted PNG", path: "" }),
+    ]);
+  });
+
+  it("never sends the bytes back to the page, which only needs to know it exists", () => {
+    const panel = open();
+    panel.send({ type: "attachImage", data: "iVBORw0KGgo=", mimeType: "image/png" });
+    expect(JSON.stringify(chips(panel))).not.toContain("iVBORw0KGgo=");
+  });
+
+  it("comes off the row when it is detached, like any other chip", () => {
+    const panel = open();
+    panel.send({ type: "attachImage", data: "AAAA", mimeType: "image/png" });
+    const items = chips(panel).at(-1)?.items ?? [];
+    const id = (items[0] as { id: string }).id;
+    panel.send({ type: "detach", id });
+    expect(chips(panel).at(-1)?.items).toEqual([]);
+    // That the *bytes* go with it is not observable from here — nothing the
+    // page is sent ever carried them. It is provable only through
+    // `pendingAttachments`, which needs a live engine; TESTING.md lists it.
+  });
+
+  it("refuses a type the engine would not take, before a chip ever appears", () => {
+    const panel = open();
+    panel.send({ type: "attachImage", data: "AAAA", mimeType: "image/svg+xml" });
+    expect(chips(panel)).toHaveLength(0);
+  });
+});
