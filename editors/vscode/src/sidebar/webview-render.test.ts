@@ -1791,6 +1791,174 @@ describe("the permission mode chip", () => {
   });
 });
 
+describe("the dry-run review card", () => {
+  function pending(count: number, extra: Record<string, unknown> = {}): unknown {
+    return {
+      type: "dryRun",
+      view: {
+        status: "ready",
+        truncated: false,
+        changes: Array.from({ length: count }, (_, index) => ({
+          path: `src/file-${String(index)}.ts`,
+          label: `src/file-${String(index)}.ts`,
+          kind: index === 0 ? "modified" : "added",
+          detail: "1.0 kB → 2.0 kB",
+        })),
+        ...extra,
+      },
+    };
+  }
+
+  it("asks what is pending as soon as the page loads, without being opened", () => {
+    // The whole point of the card: a user must not have to remember to look.
+    expect(panel.posted.filter((message) => message.type === "requestDryRun").length).toBe(1);
+  });
+
+  it("shows nothing until the engine says something is waiting", () => {
+    expect(panel.byId("dryrun").classList.contains("hidden")).toBe(true);
+    panel.send(pending(0));
+    expect(panel.byId("dryrun").classList.contains("hidden")).toBe(true);
+  });
+
+  it("appears with a count and one row per file the moment changes are pending", () => {
+    panel.send(pending(2));
+    expect(panel.byId("dryrun").classList.contains("hidden")).toBe(false);
+    expect(panel.byId("dryrun-text").textContent).toBe("2 files pending review");
+    expect(panel.byId("dryrun-files").all("dryrun-file")).toHaveLength(2);
+  });
+
+  it("stays hidden for an engine that is not holding anything back", () => {
+    // A review affordance over an engine with no shadow tree would imply a
+    // safety net that is not there. RFC 0005 §3.
+    panel.send({ type: "dryRun", view: { status: "off", changes: [], truncated: false } });
+    expect(panel.byId("dryrun").classList.contains("hidden")).toBe(true);
+    panel.send({ type: "dryRun", view: { status: "unavailable", changes: [], truncated: false } });
+    expect(panel.byId("dryrun").classList.contains("hidden")).toBe(true);
+  });
+
+  it("says out loud when the engine would not list the whole set", () => {
+    panel.send(pending(2, { truncated: true }));
+    expect(panel.byId("dryrun-text").textContent).toMatch(/more than the engine will list/);
+  });
+
+  it("asks the host to open the diff for the file that was clicked", () => {
+    panel.send(pending(2));
+    panel.byId("dryrun-files").all("dryrun-file")[1]?.dispatch("click");
+    expect(panel.posted.at(-1)).toEqual({ type: "showDiff", path: "src/file-1.ts" });
+  });
+
+  it("opens the review from the card's own button", () => {
+    panel.send(pending(1));
+    panel.byId("dryrun-review").dispatch("click");
+    expect(panel.posted.at(-1)).toEqual({ type: "showDiff" });
+  });
+
+  it("asks the host to apply, and never writes anything itself", () => {
+    panel.send(pending(1));
+    panel.byId("dryrun-apply").dispatch("click");
+    expect(panel.posted.at(-1)).toEqual({ type: "applyChanges" });
+  });
+
+  it("sends discard bare, and raises no confirmation of its own", () => {
+    panel.send(pending(1));
+    panel.byId("dryrun-discard").dispatch("click");
+    // The modal is the host's — a webview button that says "are you sure" is a
+    // button, not a confirmation.
+    expect(panel.posted.at(-1)).toEqual({ type: "discardChanges" });
+  });
+
+  it("cannot send a second apply before the host has answered the first", () => {
+    panel.send(pending(1));
+    panel.byId("dryrun-apply").dispatch("click");
+    panel.byId("dryrun-apply").dispatch("click");
+    panel.byId("dryrun-discard").dispatch("click");
+    expect(panel.posted.filter((message) => message.type === "applyChanges")).toHaveLength(1);
+    expect(panel.posted.filter((message) => message.type === "discardChanges")).toHaveLength(0);
+  });
+
+  it("takes the buttons back the moment the host answers", () => {
+    panel.send(pending(1));
+    panel.byId("dryrun-apply").dispatch("click");
+    panel.send(pending(1));
+    panel.byId("dryrun-apply").dispatch("click");
+    expect(panel.posted.filter((message) => message.type === "applyChanges")).toHaveLength(2);
+  });
+
+  it("repeats the engine's refusal rather than failing silently", () => {
+    panel.send(
+      pending(1, {
+        note: "A run is in flight. Stop it, or wait for it to finish, and apply then.",
+      }),
+    );
+    expect(panel.byId("dryrun-note").classList.contains("hidden")).toBe(false);
+    expect(panel.byId("dryrun-note").textContent).toContain("A run is in flight");
+    // The card still says what is pending: a refusal changes nothing about it.
+    expect(panel.byId("dryrun-text").textContent).toBe("1 file pending review");
+  });
+
+  it("drops a row the host did not identify rather than rendering a blank one", () => {
+    panel.send({
+      type: "dryRun",
+      view: {
+        status: "ready",
+        truncated: false,
+        changes: [{ label: "no path here", kind: "modified", detail: "" }],
+      },
+    });
+    expect(panel.byId("dryrun").classList.contains("hidden")).toBe(true);
+  });
+});
+
+describe("the / menu runs the review loop's built-ins", () => {
+  function offer(): void {
+    panel.send({
+      type: "commands",
+      status: "ready",
+      commands: [
+        { name: "diff", description: "Show pending dry-run changes", kind: "builtin" },
+        { name: "apply", description: "Apply pending dry-run changes", kind: "builtin" },
+        { name: "discard", description: "Throw away pending dry-run changes", kind: "builtin" },
+      ],
+    });
+  }
+
+  function choose(name: string): void {
+    offer();
+    panel.type("/");
+    panel.flushTimers();
+    const rows = panel.byId("suggest-list").all("suggest-row");
+    const row = rows.find((candidate) => candidate.textContent.includes(`/${name}`));
+    row?.dispatch("click");
+  }
+
+  it("lists all three, because the panel has a surface for each", () => {
+    offer();
+    panel.type("/");
+    panel.flushTimers();
+    const text = panel
+      .byId("suggest-list")
+      .all("suggest-row")
+      .map((row) => row.textContent);
+    expect(text.join(" ")).toContain("/diff");
+    expect(text.join(" ")).toContain("/apply");
+    expect(text.join(" ")).toContain("/discard");
+  });
+
+  it("runs the card's own controls rather than sending the name as a prompt", () => {
+    choose("diff");
+    expect(panel.posted.at(-1)).toEqual({ type: "showDiff" });
+    expect(panel.byId("prompt").value).toBe("");
+
+    choose("apply");
+    expect(panel.posted.at(-1)).toEqual({ type: "applyChanges" });
+
+    // A fresh answer clears the page's in-flight guard between the two.
+    panel.send({ type: "dryRun", view: { status: "ready", changes: [], truncated: false } });
+    choose("discard");
+    expect(panel.posted.at(-1)).toEqual({ type: "discardChanges" });
+  });
+});
+
 describe("the capability line in the empty state", () => {
   it("says nothing while the engine has not reported its tools", () => {
     panel.send(state());

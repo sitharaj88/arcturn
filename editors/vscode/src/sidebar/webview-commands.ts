@@ -69,16 +69,25 @@ export const COMMAND_MENU_SOURCE = String.raw`
  * Which panel surface a built-in opens. '' when this panel has none, which is
  * what keeps the command out of the menu entirely.
  *
- * The four here are the four the engine lists, and each maps to a control that
- * is already on screen — so a user who finds a command through '/' and a user
- * who clicks the chip end up in the same place, which is the only way the two
- * cannot drift.
+ * Each maps to a control that is already on screen — so a user who finds a
+ * command through '/' and a user who clicks the chip or the review card end up
+ * in the same place, which is the only way the two cannot drift.
+ *
+ * The dry-run three are here on the same terms as the rest: the engine lists
+ * them because the wire carries 'pendingChanges', 'applyChanges' and
+ * 'discardChanges', and the panel keeps them because it has a review card that
+ * runs exactly those. An engine too old to list them simply does not, and
+ * 'runnableCommands' never sees the names.
  */
 var BUILTIN_ACTIONS = {
   model: "model",
   permissions: "permissions",
   sessions: "sessions",
-  clear: "clear"
+  clear: "clear",
+  diff: "diff",
+  apply: "apply",
+  discard: "discard",
+  cost: "cost"
 };
 
 function builtinAction(command) {

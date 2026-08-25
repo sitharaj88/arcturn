@@ -327,6 +327,51 @@ the grouping and the wording directly. What no suite covers is the round trip:
   the panel has no surface for; that the engine's own list matches what
   `loadSkills` found on disk is untested here.
 
+**Needs a real dry-run engine, for the review loop.** The panel's half is
+covered end to end against fixtures: `webview-render.test.ts` runs the shipped
+script for the card's appearance (and its deliberate *non*-appearance for an
+engine with no shadow tree, or one too old for the verb), the file rows, the
+per-file `showDiff`, the three buttons, the in-flight guard that stops a double
+click sending two applies, and the `/diff`, `/apply`, `/discard` entries in the
+`/` menu; `dry-run.test.ts` drives the projection, the summary sentence and the
+discard modal's wording; `index.test.ts` proves the messages are recognised, that
+a content provider is registered for the diff's right-hand side, and that no
+destructive modal is raised against an engine that could not act on it anyway.
+The engine's own half is proved in `packages/cli/src/dry-run-wire.test.ts`,
+against a real server and a real overlay, on the *filesystem* rather than on a
+returned status.
+
+What no suite covers, and what wants human eyes:
+
+- **That `vscode.diff` actually opens with the right two documents**, that the
+  right-hand side is read-only, and that the tab title reads as intended. The
+  unit suite proves the panel asks; whether VS Code shows a usable diff — and
+  whether the syntax highlighting comes out right, which is why the virtual
+  document ends in the real file's basename — is unobserved. Start
+  `arcturn --dry-run`, have the agent edit two files, and click a row.
+- **That re-opening the same file after another turn shows the *new* pending
+  content.** `provideTextDocumentContent` is cached per URI and the extension
+  fires `onDidChange` before each open; that the editor honours it has not been
+  watched.
+- **That an added file's diff renders against an empty left-hand side** rather
+  than an error, since there is no `file:` URI to open for a file that does not
+  exist yet.
+- **That the discard modal is genuinely modal** and that Escape is treated as
+  "keep them". The refusal logic is unit-tested; the dialog is not.
+- **That applying really writes the files you were shown** and only those. This
+  is asserted on the filesystem in the engine's own suite, but nobody has watched
+  it happen from the panel, which is the one place a reviewer will actually do it.
+- **That the card appears on its own when a turn ends.** The host refreshes the
+  pending set on the running→idle edge of the chat state, which is the whole
+  "you do not have to remember to look" claim. Nothing in the unit suite reaches
+  that wire — `index.test.ts` never starts an engine — so it wants a real run:
+  ask for an edit under `--dry-run` and watch the card arrive by itself.
+- **That the mid-run refusal reads well in the card.** `sessionBusy` becomes "A
+  run is in flight. Stop it, or wait for it to finish, and apply then." — the
+  wording has not been read by anyone in situ, and the wider cross-session case
+  ("session X is running on this engine") needs two panels against one
+  `arcturn serve` to see at all.
+
 **Drag and drop, specifically.** A drop into the webview is read as
 `text/uri-list` and the URIs are forwarded to the host verbatim, which turns
 them into paths with `vscode.Uri`. The unit suite drives the page's half

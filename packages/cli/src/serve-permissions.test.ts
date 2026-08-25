@@ -262,9 +262,16 @@ describe("RFC 0005 §1.3 — listCommands on the real serve path", () => {
     expect(byName.get("permissions")).toMatchObject({ kind: "builtin" });
     expect(byName.get("sessions")).toMatchObject({ kind: "builtin" });
     expect(byName.get("clear")).toMatchObject({ kind: "builtin" });
+    expect(byName.get("compact")).toMatchObject({ kind: "builtin" });
+    expect(byName.get("export")).toMatchObject({ kind: "builtin" });
+    expect(byName.get("mcp")).toMatchObject({ kind: "builtin" });
+    expect(byName.get("cost")).toMatchObject({ kind: "builtin" });
+    // `/rewind` is still the one RFC 0005 §1.3 names: no verb restores a
+    // checkpoint, so listing it would be the menu that lies. `/todos` is
+    // absent for the other half of the rule — its data rides the event stream
+    // like `/cost`'s does, but no client has a surface for it to open.
     expect(byName.has("rewind")).toBe(false);
-    expect(byName.has("export")).toBe(false);
-    expect(byName.has("compact")).toBe(false);
+    expect(byName.has("todos")).toBe(false);
 
     // Skills first, built-ins after — the order RFC 0005 §2 renders.
     const kinds = (list?.commands ?? []).map((command) => command.kind);

@@ -23,7 +23,10 @@
 
 import type {
   AgentEvent,
+  ApplyChangesResult,
   ContextResolution,
+  DiscardChangesResult,
+  PendingChanges,
   PermissionMode,
   PermissionRequest,
   PermissionState,
@@ -144,6 +147,38 @@ export interface SessionController {
    *   assuming the mode you asked for is the mode you got.
    */
   setPermissionMode(mode: PermissionMode): Promise<PermissionState>;
+  /**
+   * Ask what this `--dry-run` session is holding back.
+   *
+   * Read-only. `undefined` means this engine predates the verb — the caller
+   * shows no review surface at all, which is honest: that engine could not
+   * have applied anything either. An engine that *has* the verb but is not in
+   * dry-run mode answers `dryRun: false`, which is a different story again and
+   * must not be rendered as "nothing pending".
+   *
+   * @param path - One row's path, to fetch the content an apply would write.
+   *   Omitted, the answer is metadata only.
+   */
+  pendingChanges(path?: string): Promise<PendingChanges | undefined>;
+  /**
+   * Write pending changes to the real workspace files.
+   *
+   * Deliberately **not** given the `undefined` treatment `pendingChanges`
+   * gets, on the `setPermissionMode` precedent and for a sharper reason: an
+   * apply reported as done that did not happen tells a reviewer their change
+   * landed, and their next move is to discard the only copy of it.
+   *
+   * @param paths - A subset, spelled as the engine reported it. Omit for all.
+   */
+  applyChanges(paths?: readonly string[]): Promise<ApplyChangesResult>;
+  /**
+   * Throw pending changes away. **Irreversible** — confirm first.
+   *
+   * Not degradable either, pointed the other way: a discard reported as done
+   * that did not happen leaves a user certain their pending edits are gone
+   * while they wait for the next apply.
+   */
+  discardChanges(paths?: readonly string[]): Promise<DiscardChangesResult>;
   /** Expand or collapse one transcript block. */
   toggle(blockId: string): void;
   /** Unsubscribe, and deny any permission request still outstanding. */
@@ -279,6 +314,9 @@ export function createSessionController(options: SessionControllerOptions): Sess
     setModel: (modelId: string) => client.setModel(sessionId, modelId),
     permissionState: () => client.permissionState(sessionId),
     setPermissionMode: (mode: PermissionMode) => client.setPermissionMode(sessionId, mode),
+    pendingChanges: (path?: string) => client.pendingChanges(sessionId, path),
+    applyChanges: (paths?: readonly string[]) => client.applyChanges(sessionId, paths),
+    discardChanges: (paths?: readonly string[]) => client.discardChanges(sessionId, paths),
     toggle(blockId: string): void {
       notify(toggleBlock(state, blockId));
     },

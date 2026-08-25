@@ -129,6 +129,27 @@ Sub-agents get a read-only tool set by filtering the parent's tools against
 - **The transcript formatter is the single renderer of events**, shared by the TUI and available to
   programmatic users, so a new event type only needs handling in one place.
 
+- **`Overlay.apply`/`discard` take an optional path subset, and there is still only one applier.**
+  The wire's `applyChanges` lets a reviewer land three files out of forty, which is what an editor
+  makes natural. That selectivity is a *filter* on the existing `changes()` list, not a second
+  write path: the symlink resolution that refuses a destination outside the workspace and the
+  temp-file-plus-rename that survives an interrupt are the same lines whether the call came from
+  `/apply` in a terminal or from a socket. A second applier would have been a second place to
+  forget the symlink check, and the difference would only ever show up on somebody's disk. A full
+  apply with no errors still empties the shadow tree, exactly as `/apply` does; a partial one does
+  not, because the copies that did not land *are* the pending changes.
+
+- **The overlay restates a redirected tool's permission ask in workspace terms.** Rule enforcement
+  does not depend on this — `loop.ts` checks permissions against the tool call's raw `path` before
+  the overlay redirects anything, so a denied write never reaches `execute` and never becomes a
+  pending change. What this fixes is the *second* ask a tool makes for itself: `write` calls
+  `ctx.requestPermission` with the path it was handed, which under dry run is the shadow copy, so
+  the prompt named a file under `~/.arcturn/overlays/<session>/` that the user has never heard of
+  and the "always allow" it offered would have persisted a rule scoped to a directory `/discard`
+  deletes. `wrapToolsWithOverlay` now maps the subject, the description and the suggested
+  specifier back to the real workspace path on the way to the engine. The write still goes to the
+  shadow copy.
+
 ## Gaps / follow-ups
 
 - `/compact` and `/clear` refuse while a run is in flight instead of interrupting it first.

@@ -3,12 +3,15 @@ import {
   MAX_CONTEXT_QUERY_LENGTH,
   MAX_PROMPT_ATTACHMENTS,
   validateClientRequest,
+  validateCompactionSummary,
   validateContextResolution,
+  validateMcpStatus,
   validateModelCatalog,
   validatePermissionDecision,
   validatePermissionRule,
   validatePromptAttachment,
   validateServerMessage,
+  validateSessionExport,
   validateSessionHeader,
   validateSessionHistory,
 } from "./validate.js";
@@ -76,6 +79,17 @@ describe("validateClientRequest: accepts every method", () => {
       { id: "1", method: "setPermissionMode", params: { sessionId: "s1", mode: "plan" } },
     ],
     ["listCommands", { id: "1", method: "listCommands" }],
+    ["compact", { id: "1", method: "compact", params: { sessionId: "s1" } }],
+    ["exportSession (minimal)", { id: "1", method: "exportSession", params: { sessionId: "s1" } }],
+    [
+      "exportSession (html, with thinking)",
+      {
+        id: "1",
+        method: "exportSession",
+        params: { sessionId: "s1", format: "html", includeThinking: true },
+      },
+    ],
+    ["mcpStatus", { id: "1", method: "mcpStatus" }],
   ];
 
   it.each(cases)("%s", (_name, value) => {
@@ -668,6 +682,116 @@ describe("RFC 0005 §1.1 — prompt attachments and resolveContext", () => {
 
     it("refuses an unknown kind", () => {
       expect(validateContextResolution({ ...good, kind: "socket" })).toMatchObject({ ok: false });
+    });
+  });
+});
+
+describe("compact / exportSession / mcpStatus payloads", () => {
+  describe("validateCompactionSummary", () => {
+    const ok = { sessionId: "s1", compacted: true, tokensBefore: 100, tokensAfter: 40 };
+
+    it("accepts a summary and drops nothing it defines", () => {
+      const result = validateCompactionSummary(ok);
+      expect(result.ok && result.value).toEqual(ok);
+    });
+
+    it("carries a reason only for a compaction that did not happen", () => {
+      const nothing = {
+        sessionId: "s1",
+        compacted: false,
+        tokensBefore: 40,
+        tokensAfter: 40,
+        reason: "Nothing to compact: no turn boundary old enough to summarize.",
+      };
+      expect(validateCompactionSummary(nothing).ok).toBe(true);
+      // "Compacted, but…" is a payload a client would render two ways.
+      const contradiction = { ...ok, reason: "but also nothing happened" };
+      const result = validateCompactionSummary(contradiction);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toMatch(/absent when compacted is true/);
+    });
+
+    it("refuses a negative token count", () => {
+      expect(validateCompactionSummary({ ...ok, tokensAfter: -1 }).ok).toBe(false);
+    });
+  });
+
+  describe("validateSessionExport", () => {
+    const ok = {
+      sessionId: "s1",
+      format: "markdown",
+      filename: "arcturn-session-2026-08-25-1200.md",
+      content: "# Arcturn Session",
+      messageCount: 2,
+      truncated: false,
+      droppedMessages: 0,
+    };
+
+    it("accepts a well-formed export", () => {
+      const result = validateSessionExport(ok);
+      expect(result.ok && result.value).toEqual(ok);
+    });
+
+    it("refuses a filename that is a path", () => {
+      // Nothing the engine sends may steer a client's save dialog somewhere
+      // the person did not choose.
+      for (const filename of ["../../etc/passwd", "/tmp/x.md", "a\\b.md", "..md.."]) {
+        const result = validateSessionExport({ ...ok, filename });
+        expect(result.ok).toBe(false);
+      }
+    });
+
+    it("refuses a dropped count on a payload claiming nothing was dropped", () => {
+      const result = validateSessionExport({ ...ok, droppedMessages: 3 });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toMatch(/must be 0 when truncated is false/);
+    });
+  });
+
+  describe("validateMcpStatus", () => {
+    const server = { name: "files", transport: "stdio", state: "connected", toolCount: 3 };
+
+    it("copies four fields and leaves everything else behind", () => {
+      const result = validateMcpStatus({
+        servers: [
+          {
+            ...server,
+            url: "https://mcp.example.com/?token=sk-live-planted",
+            command: "/usr/local/bin/mcp-files",
+            env: { MCP_API_KEY: "sk-live-planted" },
+            headers: { Authorization: "Bearer sk-oauth-planted" },
+            error: "connect ECONNREFUSED at /home/someone/.secrets",
+          },
+        ],
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.servers[0]).toEqual(server);
+      expect(JSON.stringify(result.value)).not.toContain("planted");
+      expect(JSON.stringify(result.value)).not.toContain("mcp.example.com");
+    });
+
+    it("accepts a bare array, like listModels and listCommands do", () => {
+      const result = validateMcpStatus([server]);
+      expect(result.ok && result.value.servers).toHaveLength(1);
+    });
+
+    it("refuses a transport or state outside the closed set", () => {
+      expect(validateMcpStatus({ servers: [{ ...server, transport: "ssh" }] }).ok).toBe(false);
+      expect(validateMcpStatus({ servers: [{ ...server, state: "maybe" }] }).ok).toBe(false);
+    });
+
+    it("refuses a tool count for a server that is not connected", () => {
+      const result = validateMcpStatus({
+        servers: [{ name: "files", transport: "stdio", state: "failed", toolCount: 3 }],
+      });
+      expect(result.ok).toBe(false);
+    });
+
+    it("refuses a name carrying a control character", () => {
+      // It lands in a menu row and a log line; a newline forges a second one.
+      const result = validateMcpStatus({ servers: [{ ...server, name: "files\nfake" }] });
+      expect(result.ok).toBe(false);
     });
   });
 });

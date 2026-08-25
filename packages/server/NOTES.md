@@ -586,3 +586,226 @@ mention-plus-plain pair was reliably backwards. A queue that reorders is not a
 queue. `LiveSession.steerTail` chains them per session. `prompt` cannot share
 that mechanism: it *rejects* a second caller as `sessionBusy` rather than making
 it wait, which is right for a turn and wrong for a steer.
+
+## `compact` refuses mid-run and quotes the event it just caused
+
+Two decisions worth writing down, because both had a plausible alternative.
+
+**Refuse, not queue.** `Agent.compact()` throws while a run is in flight,
+because compaction splices the message array the run loop is iterating. So
+queueing would not avoid the hazard, only defer it — and it would race the
+loop's *own* automatic compaction, which can fire in the same window with
+different bounds and a different cut point. It would also settle at a moment the
+client cannot observe, which makes the before/after numbers describe a
+conversation that has since moved on. `sessionBusy` is the same answer
+`setPermissionMode` and `deleteSession` give, from the same underlying fact:
+some operations have no correct meaning halfway through a turn.
+
+The busy check is `isBusy()` (agent running **or** `LiveSession.starting`),
+which is `deleteSession`'s check rather than `setPermissionMode`'s narrower
+`agent.isRunning`. A mode only takes effect at the next turn, so a prompt that
+has been accepted but is still resolving its context is harmless to it. A
+compaction landing in that window would rewrite the array the run is about to
+iterate, which is exactly what `starting` exists to prevent.
+
+**Quote the event, do not measure again.** A compaction emits
+`compactionEnd { tokensBefore, tokensAfter }` on the stream every attached
+client is already reading. The verb answers with *those two numbers*, captured
+by a listener attached for the duration of the call, rather than measuring its
+own pair — because two sources for one number is how a notification and the
+response that caused it come to disagree, which is the same argument
+`built-in-commands.ts` makes for not adding a `cost` verb.
+
+It is also the only honest option available. `Agent.estimatedTokens` anchors on
+the last assistant message's *reported* usage — what the provider charged for
+the pre-compaction prompt — and that anchor survives the rewrite, so reading it
+before and after mostly returns the same number for a compaction that genuinely
+halved the conversation. The engine already knows this: `compactMessages` pairs
+the metered "before" with a character-estimated "after", because nobody has
+metered the new prompt yet. (The terminal's `/compact` prints the anchored
+number on both sides and therefore usually prints it unchanged. That is a TUI
+display issue, not this verb's, and it is not fixed here.)
+
+The same listener captures the `notice` the agent emits when nothing was folded,
+which is what `CompactionSummary.reason` carries. `Agent.compact()` answers
+`false` for two quite different outcomes — no turn boundary old enough, and a
+summarizer that failed — and distinguishes them only in that notice; re-deriving
+the distinction here would mean a second copy of the cut-point rule.
+
+## `exportSession` returns a document because the server's disk is the wrong disk
+
+The terminal's `/export` writes a file. This verb deliberately does not, and the
+reason is not tidiness: an engine that writes a file wherever a remote client
+asks is an arbitrary-write primitive for anyone holding the serve token, and
+even used honestly it puts the document on a machine the person asking will
+never look at. RFC 0005 §1.2 already says nothing persists to disk from a remote
+client; this is that rule applied to transcripts. The content comes back, the
+client saves it, and `filename` is a bare name that `validateSessionExport`
+refuses if it carries a separator or `..` — nothing the engine sends may steer a
+client's save dialog somewhere the person did not choose.
+
+The renderers are injected (`SessionHostOptions.transcriptExporter`) for the
+reason `contextResolver` and `modelCatalog` are: `exportMarkdown`/`exportHtml`
+live in `@arcturn/cli` and are what `/export` already calls. Both halves —
+render and `suggestFilename` — travel in one object, following the rule
+`createServeHost` learned when `resolveModel` and `modelCatalog` were split and
+drifted: a document and the name it is offered under are one feature, and wiring
+half of it produces a `.md` file full of HTML.
+
+`session-export.ts` owns only the part the wire is responsible for: the 1 MiB
+budget (the same `DEFAULT_BACKPRESSURE_THRESHOLD_BYTES` `session-history.ts`
+uses, for the reason stated there) and the trimming. Over the cap, the **oldest
+messages are dropped and the document is re-rendered** rather than the string
+being cut — a byte-count cut would hand a client HTML sliced through a tag. It
+is a loop rather than arithmetic because only the renderer knows what a message
+costs: a tool result is line-truncated, a thinking block may be omitted
+entirely. Unlike `SessionHistoryLimits` there is no element-count bound, because
+a client folds history through a reducer and pays per event but writes an export
+to a file and pays only in bytes.
+
+## `mcpStatus` carries four fields, and the omissions are the feature
+
+An `McpConfig` holds a stdio server's `env` and `args`, an HTTP server's `url`
+and its `Authorization` header, and the `auth: "oauth"` flag behind which a
+bearer token is minted. The wire carries `{ name, transport, state, toolCount? }`
+and nothing else.
+
+The projection lives in `@arcturn/cli` (`serve-mcp.ts`), not here, and that is
+deliberate: the decision about what leaves a process is best made next to the
+secret, where it can be reviewed. `@arcturn/mcp` gained one narrow accessor for
+it — `McpManager.transports()`, which returns the config's `type` discriminant
+per server and nothing adjacent to it — rather than a `config()` getter that
+would hand callers the credentials to be trusted with.
+
+Then `validateMcpStatus` copies the same four fields out by name again on the
+way out of this package. Two independent narrow gates on the payload with the
+most to leak; a field added to `McpServerConfig` or `McpServerStatus` tomorrow
+is absent by default rather than present until somebody notices. It is the same
+mechanism `validatePermissionState` uses to keep `tools` carrying names and only
+names.
+
+Two things the terminal's `/mcp` shows that this does not:
+
+- **The failure reason.** `McpServerStatus.error` is prose an MCP server or its
+  transport wrote, and this payload feeds a `/` menu a person reads and clicks.
+  Same class of string as a tool description, same rule.
+- **A liveness ping.** `/mcp` pings each connected server with a 1.5s timeout
+  because a person at a prompt can afford to wait. A request/response verb
+  cannot add one dead server's timeout to every round trip, and a second
+  liveness field beside `state` would give a client two answers to one question.
+  `McpServerSummary.state` says in its own doc that it is an observation rather
+  than a guarantee.
+
+## `cost` is listed as a built-in with no verb behind it, on purpose
+
+`built-in-commands.ts` excluded `todos` and `cost` on the grounds that both read
+state a client already receives on the event stream, and that a verb duplicating
+an event feed would be a second, drifting source. That argument is still right,
+and no `cost` verb was added.
+
+What changed is which question the list answers. "Can a client carry this
+command out" is not "is there a verb named after it": `openSession` subscribes a
+connection to the session's events, `turnEnd` carries the usage and the price,
+and a client folding those has everything `/cost` shows. So the command is
+listed and `REMOTE_BUILT_IN_COMMAND_VERBS` names `openSession` for it — the verb
+that makes the data reachable. That widened the map's meaning slightly from
+"invoked by" to "answered by", which is why `serve-commands.ts`'s refusal
+sentence now reads "on this wire it is answered by …" rather than "run it with
+…": "run it with openSession" would be advice nobody could follow.
+
+`todos` stayed out, and for the *other* half of the rule rather than the same
+one. Its data is equally reachable (`todoUpdate`), but a built-in earns a menu
+entry by naming something a client can then **do**, and the only client with a
+`/` menu — the VS Code panel — renders todos continuously in its plan card.
+There is no surface for `/todos` to open, so the row would do nothing when
+chosen. It goes in the day a client grows somewhere for it to lead; that is a
+one-line change in two files.
+
+## The dry-run review verbs are session-scoped over a server-scoped shadow tree
+
+`pendingChanges`, `applyChanges` and `discardChanges` all take a `sessionId`, and the thing
+they act on is not per-session at all. `--dry-run` is a flag on the served **process**:
+`buildRuntime` creates one `Overlay` rooted at the served workspace, and every agent
+`buildSessionAgent` mints gets the same overlay-wrapped tool set. Two sessions on one
+`arcturn serve` write into one shadow tree, and an apply asked for by either of them lands
+whatever both of them wrote.
+
+The `sessionId` is kept anyway, for two reasons that are not decoration. It is what makes
+`sessionNotFound` answerable, matching every other session-scoped verb; and it is what the
+refusals are phrased against, which is the difference between "a run is in flight" and "a
+run is in flight *in session X*, which is not the one you are looking at".
+
+The consequence is `#requireIdleWorkspace`, which is **wider** than
+`setPermissionMode`'s busy check on purpose. A permission mode belongs to one agent, so
+that check reads one agent's `isRunning`. A shadow tree belongs to the process, so "is it
+safe to write this tree back to disk" is not a question one session's `isRunning` can
+answer, and the check walks every live session. The message names which one is busy so the
+answer is actionable rather than mysterious.
+
+If the runtime ever grows a per-session overlay — which it would need to for two clients to
+review independently — this is the paragraph that has to change, and the check narrows.
+
+## `DryRunOverlay` is a structural interface, not an import
+
+`@arcturn/server` does not depend on `@arcturn/cli`, and the applier this feature must use
+lives there: `Overlay.apply` is the function the TUI's `/apply` drives, with the
+temp-file-plus-rename and the per-file symlink resolution that keeps a write from landing
+outside the workspace. Reimplementing any of that here would have been a second applier,
+which is a second place for the symlink check to be forgotten — and the difference would
+only ever show up on somebody's disk.
+
+So `dry-run.ts` declares the smallest structural interface a real `Overlay` satisfies with
+no adapter (`cwd`, `changes`, `apply`, `discard`) and `createServeHost` passes
+`runtime.overlay` straight in. `redirect` and `materialize` are deliberately not on it —
+they are the tool-wrapping half and have no business on a review surface — and neither is
+`diff`, because the wire carries content rather than a rendering.
+
+The same injection shape `contextResolver` and `modelCatalog` use, for the same reason, and
+with the same one-injection rule: all three verbs read this single reference, because a
+list built from one overlay and an apply run against another would land changes nobody
+reviewed.
+
+## `pendingChanges` answers where the others refuse
+
+An engine with no overlay is not an error condition for `pendingChanges` — it answers
+`{ dryRun: false, changes: [] }`. `applyChanges` and `discardChanges` on the same engine
+refuse with `invalidRequest`.
+
+The asymmetry is the shape of the question. `pendingChanges` asks *what is waiting*, and
+"nothing is ever held back here, your edits already landed" is a true, useful and quite
+different answer from "nothing is waiting yet" — a client that cannot tell those apart will
+tell one group of users the reassuring one. Apply and discard are commands, and a command
+with nothing to command is refused.
+
+It also keeps the read cheap enough for a panel to poll on load without an error path.
+
+## Why the list carries no content, and why an oversized file is withheld rather than cut
+
+`SESSION_HISTORY_MAX_BYTES` set the precedent: 1 MiB, which is `ws-server.ts`'s own
+`DEFAULT_BACKPRESSURE_THRESHOLD_BYTES` and a quarter of the 4 MiB frame cap. A response
+answering the client's own request is essential traffic and is never dropped by the
+backpressure policy, which is exactly why it must not be the frame that wedges the socket.
+
+A hundred-file refactor's patches are megabytes. A hundred-file *listing* is about twenty
+kilobytes. So the list is bounded metadata and the bytes are fetched one file at a time,
+which is also the only granularity a diff editor ever renders.
+
+Where this deliberately diverges from `sessionHistory` is the oversized single file.
+Dropping the oldest events from a transcript leaves every surviving event true; half a file
+rendered in a diff editor is a false account of the change, and a reviewer would approve
+it. So the content is withheld, `contentOmitted: true` says it was, and the client tells
+the user to review that one in a terminal.
+
+## There is no `before` on the wire, and that is a correctness choice
+
+The obvious payload for a review is `{ before, after }`. It is wrong here, because
+`Overlay.apply` writes `after` over the real file **whole** — it does not apply a patch
+against a snapshot — and `bash` is not wrapped by the overlay, so the real tree can change
+under a dry run.
+
+That makes the honest left-hand side of "what will this file become" *the file as it stands
+at apply time*, not a snapshot the engine took when the client happened to ask. A `before`
+on the wire would let a client render a diff against one thing while the engine applied
+against another, and the gap between them is exactly where an unreviewed change hides. The
+VS Code panel therefore diffs a `file:` URI (live) against the engine's `after` (fixed),
+and the wire is half the size for it.

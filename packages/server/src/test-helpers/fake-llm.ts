@@ -28,9 +28,18 @@ function usage(): Usage {
   return { inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 };
 }
 
-/** Script a turn that streams plain text, then ends with `endTurn`. */
-export function textTurn(value: string): StreamEvent[] {
-  const turnUsage = usage();
+/**
+ * Script a turn that streams plain text, then ends with `endTurn`.
+ *
+ * `reportedUsage` overrides the fixed 10/5 default. It matters for anything
+ * that reads `Agent.estimatedTokens` or watches a compaction: that estimate
+ * *anchors* on the last assistant message's reported usage, so a turn that
+ * claims fifteen tokens for six hundred characters of text makes a real
+ * conversation look like a trivial one. A test about context size passes a
+ * number in the same neighbourhood as the text it scripted.
+ */
+export function textTurn(value: string, reportedUsage?: Partial<Usage>): StreamEvent[] {
+  const turnUsage: Usage = { ...usage(), ...reportedUsage };
   const message: AssistantMessage = {
     role: "assistant",
     content: [{ type: "text", text: value }],

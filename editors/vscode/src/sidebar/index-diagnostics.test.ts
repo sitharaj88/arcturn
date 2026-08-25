@@ -50,8 +50,34 @@ vi.mock("vscode", () => {
       this.onDispose();
     }
   }
+  class EventEmitter<T> {
+    readonly listeners = new Set<(value: T) => void>();
+    readonly event = (listener: (value: T) => void): { dispose(): void } => {
+      this.listeners.add(listener);
+      return { dispose: () => this.listeners.delete(listener) };
+    };
+    fire(value: T): void {
+      for (const listener of [...this.listeners]) listener(value);
+    }
+    dispose(): void {
+      this.listeners.clear();
+    }
+  }
+  const uri = (parts: { scheme?: string; path?: string; query?: string }) => ({
+    scheme: parts.scheme ?? "file",
+    path: parts.path ?? "",
+    query: parts.query ?? "",
+    fsPath: parts.path ?? "",
+    toString: () => `${parts.scheme ?? "file"}://${parts.path ?? ""}`,
+  });
   return {
     Disposable,
+    EventEmitter,
+    Uri: {
+      from: uri,
+      file: (fsPath: string) => uri({ scheme: "file", path: fsPath }),
+      parse: (value: string) => uri({ scheme: "file", path: value }),
+    },
     StatusBarAlignment: { Left: 1, Right: 2 },
     window: {
       createOutputChannel: () => ({
@@ -82,6 +108,7 @@ vi.mock("vscode", () => {
     workspace: {
       workspaceFolders: [{ uri: { fsPath: "/workspace" } }],
       getConfiguration: () => ({ get: (_k: string, fallback?: unknown) => fallback }),
+      registerTextDocumentContentProvider: () => ({ dispose: () => {} }),
     },
   };
 });

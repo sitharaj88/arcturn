@@ -253,6 +253,27 @@ export class McpManager {
     return Object.fromEntries(this.statuses.entries());
   }
 
+  /**
+   * Which transport each configured server is reached over, keyed by name.
+   *
+   * The **discriminant only** — never the `url`, `command`, `args`, `cwd`,
+   * `env` or `headers` that sit beside it in the same config object. That
+   * narrowness is the whole reason this accessor exists rather than a
+   * `config()` getter: `/mcp` and the `mcpStatus` wire verb both want to say
+   * "stdio" or "http" next to a server's name, and neither has any business
+   * holding the object that carries the credentials.
+   *
+   * Pairs with {@link McpManager.status}, which answers the other half of the
+   * same row.
+   */
+  transports(): Record<string, McpServerConfig["type"]> {
+    const result: Record<string, McpServerConfig["type"]> = {};
+    for (const [name, server] of Object.entries(this.config.servers)) {
+      result[name] = server.type;
+    }
+    return result;
+  }
+
   /** All bridged tools across every connected server. */
   tools(): Tool[] {
     const result: Tool[] = [];

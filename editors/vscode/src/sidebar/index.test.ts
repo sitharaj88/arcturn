@@ -31,6 +31,7 @@ const ledger = vi.hoisted(() => ({
   posted: [] as { type: string; [key: string]: unknown }[],
   clipboard: [] as string[],
   quickPicks: [] as { items: { label: string; description?: string }[]; options: unknown }[],
+  contentProviders: [] as { scheme: string; provider: unknown }[],
   messages: [] as { level: string; message: string; items: string[] }[],
   executed: [] as { command: string; args: unknown[] }[],
   shownOutputs: 0,
@@ -47,6 +48,7 @@ const ledger = vi.hoisted(() => ({
     ledger.posted = [];
     ledger.clipboard = [];
     ledger.quickPicks = [];
+    ledger.contentProviders = [];
     ledger.messages = [];
     ledger.executed = [];
     ledger.shownOutputs = 0;
@@ -90,8 +92,34 @@ vi.mock("vscode", () => {
       this.onDispose();
     }
   }
+  class EventEmitter<T> {
+    readonly listeners = new Set<(value: T) => void>();
+    readonly event = (listener: (value: T) => void): { dispose(): void } => {
+      this.listeners.add(listener);
+      return { dispose: () => this.listeners.delete(listener) };
+    };
+    fire(value: T): void {
+      for (const listener of [...this.listeners]) listener(value);
+    }
+    dispose(): void {
+      this.listeners.clear();
+    }
+  }
+  const uri = (parts: { scheme?: string; path?: string; query?: string }) => ({
+    scheme: parts.scheme ?? "file",
+    path: parts.path ?? "",
+    query: parts.query ?? "",
+    fsPath: parts.path ?? "",
+    toString: () => `${parts.scheme ?? "file"}://${parts.path ?? ""}`,
+  });
   return {
     Disposable,
+    EventEmitter,
+    Uri: {
+      from: uri,
+      file: (fsPath: string) => uri({ scheme: "file", path: fsPath }),
+      parse: (value: string) => uri({ scheme: "file", path: value }),
+    },
     StatusBarAlignment: { Left: 1, Right: 2 },
     window: {
       createOutputChannel(name: string) {
@@ -176,11 +204,16 @@ vi.mock("vscode", () => {
       getConfiguration: () => ({
         get: (key: string, fallback?: unknown) => ledger.config[key] ?? fallback,
       }),
+      registerTextDocumentContentProvider(scheme: string, provider: unknown) {
+        ledger.contentProviders.push({ scheme, provider });
+        return { dispose: () => {} };
+      },
     },
   };
 });
 
 import { activateSidebar, SIDEBAR_COMMANDS, SIDEBAR_VIEW_ID } from "./index.js";
+import { WEBVIEW_COMMANDS } from "./webview-messages.js";
 
 /** The slice of `WebviewViewProvider` this file drives. */
 interface WebviewViewProviderLike {
@@ -355,6 +388,40 @@ describe("retrying after the engine failed to start", () => {
   });
 });
 
+describe("the panel's built-in commands reach the surfaces they name", () => {
+  function open(): ReturnType<typeof fakeView> {
+    activate();
+    const panel = fakeView();
+    ledger.views[0]?.provider.resolveWebviewView(panel.view);
+    return panel;
+  }
+
+  it("routes every WEBVIEW_COMMANDS id to a command this module registers", () => {
+    // The `/` menu's built-in rows land here, and a row that reached nothing
+    // would be the menu that lies — one file away from where RFC 0005 §1.3
+    // says so. Asserted over the whole list rather than one id, so an id added
+    // to the union has to be routed before this passes.
+    activate();
+    const panel = open();
+    panel.send({ type: "ready" });
+    for (const command of WEBVIEW_COMMANDS) {
+      ledger.executed.length = 0;
+      panel.send({ type: "command", command });
+      const executed = ledger.executed.map((entry) => entry.command);
+      expect(executed.length).toBeGreaterThan(0);
+      for (const id of executed) expect(ledger.commands.has(id)).toBe(true);
+    }
+  });
+
+  it("sends /cost to the cost breakdown, not to the engine", async () => {
+    const panel = open();
+    panel.send({ type: "ready" });
+    ledger.executed.length = 0;
+    panel.send({ type: "command", command: "cost" });
+    expect(ledger.executed.map((entry) => entry.command)).toEqual([SIDEBAR_COMMANDS.showCost]);
+  });
+});
+
 describe("arcturn.showSessions", () => {
   function open(): ReturnType<typeof fakeView> {
     activate();
@@ -523,6 +590,38 @@ describe("the panel's own messages", () => {
     // A confirmation the engine could not honour is a prompt that teaches the
     // user their click did nothing; the reconnect card is the honest answer.
     expect(ledger.messages.filter((m) => m.message.startsWith("Delete the Arcturn"))).toEqual([]);
+  });
+
+  it("registers a read-only provider for the diff's right-hand side", () => {
+    open();
+    // The pending content is served from what `pendingChanges` put on the
+    // wire, never read off the engine's shadow tree. A provider that read the
+    // disk would be a second source for the same bytes, and the first time
+    // they disagreed a reviewer would approve something they had not seen.
+    expect(ledger.contentProviders.map((entry) => entry.scheme)).toContain("arcturn-dry-run");
+  });
+
+  it("routes apply and discard at the engine, and never at the filesystem", async () => {
+    const panel = open();
+    panel.send({ type: "applyChanges" });
+    panel.send({ type: "discardChanges" });
+    panel.send({ type: "showDiff", path: "src/app.ts" });
+    await Promise.resolve();
+    const dropped = (ledger.outputs[0]?.lines ?? []).filter((line) =>
+      line.includes("dropped an unrecognised webview message"),
+    );
+    expect(dropped).toHaveLength(0);
+  });
+
+  it("does not raise a destructive modal when the engine cannot act on it anyway", async () => {
+    const panel = open();
+    panel.send({ type: "discardChanges" });
+    await Promise.resolve();
+    await Promise.resolve();
+    // A confirmation the engine could not honour teaches the user their click
+    // did nothing; the reconnect card is the honest answer. Same rule the
+    // session delete keeps.
+    expect(ledger.messages.filter((m) => m.message.startsWith("Discard "))).toEqual([]);
   });
 
   it("replays the model list when the page reloads", async () => {

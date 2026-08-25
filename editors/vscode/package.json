@@ -104,6 +104,22 @@
         "category": "Arcturn"
       },
       {
+        "command": "arcturn.showDiff",
+        "title": "Review Pending Changes",
+        "category": "Arcturn",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "arcturn.applyChanges",
+        "title": "Apply Pending Changes",
+        "category": "Arcturn"
+      },
+      {
+        "command": "arcturn.discardChanges",
+        "title": "Discard Pending Changes",
+        "category": "Arcturn"
+      },
+      {
         "command": "arcturn.reconnect",
         "title": "Reconnect",
         "category": "Arcturn"
@@ -151,6 +167,18 @@
         },
         {
           "command": "arcturn.showCost",
+          "when": "config.arcturn.serve.enabled"
+        },
+        {
+          "command": "arcturn.showDiff",
+          "when": "config.arcturn.serve.enabled"
+        },
+        {
+          "command": "arcturn.applyChanges",
+          "when": "config.arcturn.serve.enabled"
+        },
+        {
+          "command": "arcturn.discardChanges",
           "when": "config.arcturn.serve.enabled"
         },
         {

@@ -97,3 +97,28 @@ is just `string` — so this is a free implementation choice, documented here
 for anyone building a second client-side id generator that needs to avoid
 colliding with this one (in practice: just use this one, or your own
 `RequestIdGenerator` instance).
+
+## `applyChanges` and `discardChanges` share one validation branch
+
+`validateClientRequest` handles both in a single `case` because they take the same params,
+and that is not laziness. A selection that validated differently on the way in depending on
+which of the two verbs it was is precisely how "apply these four" and "discard these four"
+come to mean different sets of four — and one of those two operations is irreversible.
+
+The branch also refuses an **empty** `paths` array rather than passing it through. On the
+wire an omitted field means "every pending change"; an empty array would silently mean the
+same thing, and the two spellings are one character apart at a call site. Omitting is the
+way to say "all of it"; an empty selection is a bug, and it is named as one.
+
+## The dry-run verbs split "optional" from "degradable" the same way, harder
+
+`pendingChanges` translates an older server's `invalidRequest` into `undefined`, on the
+`listModels` precedent: it reads, so a client that gets nothing shows no review surface,
+which is exactly true — that engine could not have applied anything either.
+
+`applyChanges` and `discardChanges` do not, on the `deleteSession` counter-precedent, and
+they are the strongest case in this package for it because they fail in opposite directions
+and both directions are bad. An apply that resolved against an engine which ignored it tells
+a reviewer their change landed while the file on disk says otherwise — and their next move
+is to discard the shadow tree holding the only copy. A discard that resolved the same way
+leaves them certain their pending work is gone right until the next apply lands it.

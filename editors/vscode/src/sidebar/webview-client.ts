@@ -720,6 +720,85 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
 }
 
 /*
+ * The dry-run review card.
+ *
+ * Above the composer and below the permission strip, in the dock — which is to
+ * say it is *always on screen* while changes are waiting, rather than behind a
+ * command the user has to remember. That placement is the feature: a pending
+ * change nobody notices is a pending change that gets applied unread, and the
+ * whole point of dry run is that somebody reads it first.
+ *
+ * Bordered in the same accent the permission strip uses, because it is the
+ * same kind of thing: the panel is holding something and waiting for a person.
+ */
+.dryrun {
+  margin-bottom: 8px;
+  padding: 7px 9px;
+  border: 1px solid var(--vscode-textLink-foreground);
+  border-radius: var(--arc-radius);
+  background: var(--arc-surface);
+  font-size: 0.9em;
+}
+.dryrun-head { display: flex; align-items: center; gap: 6px; }
+.dryrun-text { flex: 1 1 auto; min-width: 0; font-weight: 600; }
+.dryrun-files { margin-top: 5px; display: flex; flex-direction: column; gap: 1px; }
+/*
+ * One row per waiting file, and each one opens the diff. Truncating the path
+ * from the LEFT: at 300px the tail of 'src/features/auth/session.ts' is what
+ * identifies it, and a row ellipsised the usual way shows four directories and
+ * no filename.
+ */
+.dryrun-file {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  width: 100%;
+  padding: 2px 4px;
+  border: none;
+  border-radius: 3px;
+  font: inherit;
+  font-size: 0.95em;
+  text-align: left;
+  color: var(--vscode-foreground);
+  background: transparent;
+  cursor: pointer;
+}
+.dryrun-file:hover { background: var(--vscode-list-hoverBackground); }
+.dryrun-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  direction: rtl;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dryrun-kind { flex: none; font-size: 0.85em; color: var(--arc-muted); }
+.dryrun-kind.dryrun-added { color: var(--arc-ok); }
+.dryrun-note { margin: 5px 0 0; color: var(--arc-warn); }
+.dryrun-actions { display: flex; gap: 5px; margin-top: 7px; }
+.dryrun-button {
+  flex: 1 1 auto;
+  padding: 3px 8px;
+  border: 1px solid var(--arc-border);
+  border-radius: 4px;
+  font: inherit;
+  font-size: 0.95em;
+  color: var(--vscode-foreground);
+  background: transparent;
+  cursor: pointer;
+}
+.dryrun-button:hover { background: var(--vscode-list-hoverBackground); }
+.dryrun-button:disabled { opacity: 0.5; cursor: default; }
+.dryrun-primary {
+  color: var(--vscode-button-foreground);
+  background: var(--vscode-button-background);
+  border-color: var(--vscode-button-background);
+}
+.dryrun-primary:hover { background: var(--vscode-button-hoverBackground); }
+.dryrun-danger:hover { color: var(--arc-err); border-color: var(--arc-err); }
+
+/*
  * One control, not a text box with buttons bolted on (RFC 0005 §2).
  *
  * Everything the composer holds lives inside this one border: the chip row on
@@ -1250,7 +1329,7 @@ const CLIENT_SOURCE = String.raw`
    */
   var KNOWN_HOST_MESSAGES = {
     state: 1, connection: 1, cost: 1, models: 1, session: 1, sessions: 1, showSessions: 1,
-    context: 1, contextCandidates: 1, permission: 1, commands: 1
+    context: 1, contextCandidates: 1, permission: 1, commands: 1, dryRun: 1
   };
 
   var SVG_NS = "http://www.w3.org/2000/svg";
@@ -1421,6 +1500,14 @@ const CLIENT_SOURCE = String.raw`
   var suggestBox = $("suggest");
   var suggestStatus = $("suggest-status");
   var suggestList = $("suggest-list");
+  var dryRunCard = $("dryrun");
+  var dryRunIcon = $("dryrun-icon");
+  var dryRunText = $("dryrun-text");
+  var dryRunFiles = $("dryrun-files");
+  var dryRunNote = $("dryrun-note");
+  var dryRunReview = $("dryrun-review");
+  var dryRunApply = $("dryrun-apply");
+  var dryRunDiscard = $("dryrun-discard");
   var modeChip = $("mode");
   var modeLabel = $("mode-label");
   var modePopover = $("mode-popover");
@@ -1485,6 +1572,18 @@ const CLIENT_SOURCE = String.raw`
   var suggest = { kind: "", trigger: undefined, rows: [], active: -1, query: undefined };
   var suggestTimer = 0;
   var commands = { status: "loading", list: [] };
+  /*
+   * What the dry run is holding back, as the host last reported it.
+   *
+   * A render of the host's answer and nothing else — the page never counts
+   * files itself and never remembers a set across a reload, because the only
+   * thing that must be true of this card is that Apply lands what the card
+   * says it will. 'busy' is local: it disables the buttons between a click and
+   * the host's next 'dryRun' message, so a double click cannot send two
+   * applies.
+   */
+  var dryRun = { status: "loading", changes: [], truncated: false, note: "" };
+  var dryRunBusy = false;
   var permissionView = { status: "loading", mode: undefined, tools: [], note: "" };
   var activeModeRow = -1;
   /*
@@ -2208,6 +2307,17 @@ const CLIENT_SOURCE = String.raw`
     if (action === "permissions") { openModes(); return; }
     if (action === "sessions") { post({ type: "command", command: "sessions" }); return; }
     if (action === "clear") { post({ type: "command", command: "newSession" }); return; }
+    // The dry-run three run the review card's own controls, so '/diff' and the
+    // Review button are one implementation — which is the only way the two
+    // cannot come to mean different things. '/apply' and '/discard' go through
+    // the same host handlers the buttons do, confirmation included.
+    if (action === "diff") { post({ type: "showDiff" }); return; }
+    if (action === "apply") { requestApply(); return; }
+    if (action === "discard") { requestDiscard(); return; }
+    // Cost has no verb of its own: the numbers ride turnEnd on the session the
+    // panel is already subscribed to, so the row opens the breakdown the host
+    // already holds rather than asking the engine a second time.
+    if (action === "cost") { post({ type: "command", command: "cost" }); return; }
     promptBox.focus();
   }
 
@@ -2791,6 +2901,92 @@ const CLIENT_SOURCE = String.raw`
     if (suggest.kind === "command") renderCommandMenu();
   }
 
+  /* ---- the dry-run review card ---------------------------------------- */
+
+  /*
+   * A file's name, shown tail-first.
+   *
+   * The row is right-to-left in CSS so the ellipsis falls at the START of the
+   * path, which at 300px is the difference between reading
+   * 'features/auth/session.ts' and reading 'src/features/aut…'. The Unicode
+   * left-to-right mark keeps a leading '/' or a path with digits from being
+   * reordered by the bidi algorithm — RTL direction is a layout trick here,
+   * not a claim about the text.
+   */
+  function dryRunName(path) {
+    return "\u200e" + String(path);
+  }
+
+  function dryRunFileRow(change) {
+    var row = button("dryrun-file");
+    row.appendChild(el("span", "dryrun-name", dryRunName(change.label)));
+    var kind = el("span", "dryrun-kind" + (change.kind === "added" ? " dryrun-added" : ""),
+      change.kind === "added" ? "new" : change.detail);
+    row.appendChild(kind);
+    row.title = change.label + "\n" + change.detail;
+    row.addEventListener("click", function () { post({ type: "showDiff", path: change.path }); });
+    return row;
+  }
+
+  /*
+   * Paint the card.
+   *
+   * Four states, and only ONE of them shows a card at all:
+   *
+   * - 'ready' with changes — the indicator, the file list, the three actions.
+   * - 'ready' with none — hidden. A dry-run session that has not written
+   *   anything yet has nothing for a reviewer to do, and a permanent "0
+   *   pending" strip is noise that teaches people to stop looking at it.
+   * - 'off' — hidden. This engine is not holding anything back, so a review
+   *   affordance would imply a safety net that is not there (RFC 0005 §3).
+   * - 'unavailable' / 'loading' — hidden, for the same reason.
+   */
+  function renderDryRun() {
+    var showing = dryRun.status === "ready" && dryRun.changes.length > 0;
+    dryRunCard.classList.toggle("hidden", !showing);
+    if (!showing) return;
+    var count = dryRun.changes.length;
+    var files = String(count) + " file" + (count === 1 ? "" : "s");
+    dryRunText.textContent = dryRun.truncated
+      ? files + " pending — more than the engine will list at once"
+      : files + " pending review";
+    clear(dryRunIcon);
+    dryRunIcon.appendChild(icon("edit"));
+    clear(dryRunFiles);
+    for (var i = 0; i < dryRun.changes.length; i += 1) {
+      dryRunFiles.appendChild(dryRunFileRow(dryRun.changes[i]));
+    }
+    dryRunNote.textContent = dryRun.note || "";
+    dryRunNote.classList.toggle("hidden", !dryRun.note);
+    // Disabled between a click and the host's answer: one apply per press.
+    dryRunReview.disabled = dryRunBusy;
+    dryRunApply.disabled = dryRunBusy;
+    dryRunDiscard.disabled = dryRunBusy;
+  }
+
+  /*
+   * Apply and discard both go to the HOST, which asks the engine.
+   *
+   * Discard raises a native modal there naming the files; this page shows no
+   * confirmation of its own, because a webview button that says "are you sure"
+   * is a button, not a confirmation (see 'dialog.ts'). Nothing is sent with a
+   * selection: the card's actions are about the whole pending set, which is
+   * what the card is showing.
+   */
+  function requestApply() {
+    if (dryRunBusy) return;
+    dryRunBusy = true;
+    renderDryRun();
+    post({ type: "applyChanges" });
+  }
+
+  function requestDiscard() {
+    if (dryRunBusy) return;
+    dryRunBusy = true;
+    renderDryRun();
+    post({ type: "discardChanges" });
+  }
+
   /* ---- wiring --------------------------------------------------------- */
 
   var STARTERS = [
@@ -2825,6 +3021,13 @@ const CLIENT_SOURCE = String.raw`
 
   sendButton.addEventListener("click", send);
   stopButton.addEventListener("click", function () { post({ type: "abort" }); });
+
+  // Review opens the diff for the whole set; the host picks when there is more
+  // than one. Apply and Discard go to the host, which asks the engine — this
+  // page writes nothing and confirms nothing.
+  dryRunReview.addEventListener("click", function () { post({ type: "showDiff" }); });
+  dryRunApply.addEventListener("click", requestApply);
+  dryRunDiscard.addEventListener("click", requestDiscard);
   // The same verb the history view's own button sends, so pressing either
   // leaves the panel showing the new session rather than the list it came from.
   $("new-session").addEventListener("click", startNewSession);
@@ -3187,6 +3390,35 @@ const CLIENT_SOURCE = String.raw`
       );
       return;
     }
+    if (message.type === "dryRun") {
+      var view = message.view && typeof message.view === "object" ? message.view : {};
+      var dryStatus = view.status === "ready" || view.status === "off" ||
+        view.status === "unavailable" ? view.status : "loading";
+      var changed = [];
+      var reportedChanges = Array.isArray(view.changes) ? view.changes : [];
+      for (var d = 0; d < reportedChanges.length; d += 1) {
+        var entry = reportedChanges[d];
+        if (!entry || typeof entry.path !== "string" || entry.path === "") continue;
+        // Rebuilt field by field, like every other list on this boundary: the
+        // host projects the engine's rows and this takes only what it renders.
+        changed.push({
+          path: entry.path,
+          label: typeof entry.label === "string" ? entry.label : entry.path,
+          kind: entry.kind === "added" ? "added" : "modified",
+          detail: typeof entry.detail === "string" ? entry.detail : ""
+        });
+      }
+      dryRun = {
+        status: dryStatus,
+        changes: changed,
+        truncated: view.truncated === true,
+        note: typeof view.note === "string" ? view.note : ""
+      };
+      // The host has answered, so whatever was in flight is over.
+      dryRunBusy = false;
+      renderDryRun();
+      return;
+    }
     if (message.type === "commands") {
       var commandStatus = message.status === "ready" || message.status === "unavailable"
         ? message.status : "loading";
@@ -3232,9 +3464,13 @@ const CLIENT_SOURCE = String.raw`
   renderModeChip();
   renderCapability();
   renderChips();
+  renderDryRun();
   renderSessionsCwd("");
   syncComposer();
   post({ type: "ready" });
+  // Asked for once on load rather than only when something opens it: the whole
+  // job of the review card is to be there without being looked for.
+  post({ type: "requestDryRun" });
 })();
 `;
 

@@ -40,7 +40,8 @@
 import { randomBytes } from "node:crypto";
 import { calculateCostUsd } from "@arcturn/ai";
 import { Agent } from "@arcturn/core";
-import type { AgentFactoryOptions } from "@arcturn/server";
+import type { McpManager } from "@arcturn/mcp";
+import type { AgentFactoryOptions, DryRunOverlay } from "@arcturn/server";
 import { ArcturnServer, SessionHost } from "@arcturn/server";
 import type {
   LLMClient,
@@ -52,6 +53,7 @@ import type {
 } from "@arcturn/types";
 import { createContextResolver } from "./context.js";
 import { createCostGuard } from "./cost-guard.js";
+import { exportHtml, exportMarkdown, suggestExportFilename } from "./export.js";
 import type { EnvMap } from "./paths.js";
 import {
   type ArcturnRuntime,
@@ -62,6 +64,7 @@ import {
   resolveModelSpec,
 } from "./runtime.js";
 import { serveCommandDescriptors } from "./serve-commands.js";
+import { mcpServerSummaries } from "./serve-mcp.js";
 import type { Skill } from "./skills.js";
 import { startWebClientServer, type WebClientServer, webClientOrigins } from "./web/server.js";
 
@@ -183,6 +186,27 @@ export interface ServableRuntime {
    * with the built-ins alone, which is the truth for such a host.
    */
   readonly skills?: readonly Skill[];
+  /**
+   * The runtime's MCP manager, for the `mcpStatus` verb.
+   *
+   * Optional so a stub runtime (this module's tests, an embedder with no MCP
+   * config, `--no-mcp`) still satisfies the shape; absent, `mcpStatus` answers
+   * with an empty list, which is the truth for such a host.
+   *
+   * Typed as the manager rather than as a projection so the *projection* stays
+   * in one place — `serve-mcp.ts`, next to the config the credentials live in.
+   * See that module for what leaves and what does not.
+   */
+  readonly mcp?: McpManager;
+  /**
+   * The `--dry-run` shadow workspace, when this runtime has one.
+   *
+   * Optional so a stub runtime (this module's tests, an embedder that never
+   * runs dry) still satisfies the shape; absent, the review verbs answer
+   * `dryRun: false` and refuse to apply or discard, which is the truth for such
+   * a host. A real `ArcturnRuntime` exposes exactly this field.
+   */
+  readonly overlay?: DryRunOverlay | undefined;
   /**
    * Optional: build a fully isolated agent for one served session. A real
    * `ArcturnRuntime` provides it; stubs may omit it and get the generic assembly.
@@ -387,6 +411,59 @@ export function createServeHost(
     // package that knows which verbs exist, and therefore which commands this
     // wire can actually carry out. See `serve-commands.ts`.
     commands: () => serveCommandDescriptors(skills()),
+    // ---- Export injection: one renderer, two front-ends. ----
+    // `exportMarkdown`/`exportHtml` are what the terminal's `/export` already
+    // calls; this hands the server the same two functions rather than a second
+    // pair, so a transcript cannot look one way in a terminal and another over
+    // a socket. The filename suggester travels with them for the reason the
+    // model pair below travels together: a document and the name it is offered
+    // under are one feature, and wiring half of it produces a `.md` file full
+    // of HTML.
+    //
+    // Nothing here writes. The document goes back down the socket and the
+    // *client* saves it — see `@arcturn/server`'s `session-export.ts`.
+    transcriptExporter: {
+      render: ({ messages, format, includeThinking, model, exportedAt }) =>
+        format === "html"
+          ? exportHtml(messages, { model, exportedAt }, { showThinking: includeThinking })
+          : exportMarkdown(messages, { model, exportedAt }, { showThinking: includeThinking }),
+      suggestFilename: ({ format, exportedAt }) =>
+        suggestExportFilename({ exportedAt }, format === "html" ? "html" : "md"),
+    },
+    // ---- MCP injection: names and status, decided where the secrets are. ----
+    // The manager holds a config with `env`, `args`, `headers` and a `url` in
+    // it. `@arcturn/server` cannot see any of that, so the choice of what
+    // leaves is made in `serve-mcp.ts` — next to the credential rather than
+    // three packages away from it — and re-validated on the way out by
+    // `validateMcpStatus`, which copies four fields by name.
+    //
+    // Re-read on every call rather than snapshotted, matching `modelCatalog`
+    // and `commands` above: a server's state is the whole point of the verb,
+    // and a snapshot taken at startup would report every server disconnected
+    // forever.
+    mcpStatus: () => mcpServerSummaries(runtime.mcp),
+    // ---- Dry-run injection: one overlay, three verbs, one line. ----------
+    // `--dry-run` reroutes every write/edit into a shadow copy of the
+    // workspace so a person reviews the change before it lands. That loop was
+    // reachable only from a terminal (`/diff`, `/apply`, `/discard`), which
+    // meant a remote client attached to a dry-run engine watched an agent
+    // appear to do nothing at all.
+    //
+    // `pendingChanges`, `applyChanges` and `discardChanges` are all answered
+    // from this one reference, and it stays one reference for the reason the
+    // block above records: the `resolveModel`/`modelCatalog` pair was split
+    // once and the halves drifted into a real routing bug. Here the stakes are
+    // higher — a list built from one overlay and an apply run against another
+    // would land changes nobody reviewed.
+    //
+    // It is the runtime's OWN overlay, the same object the TUI's `/apply`
+    // drives, so a remote apply gets the identical symlink resolution and
+    // atomic write a local one does. `@arcturn/server` never writes a file
+    // itself; there is no second applier anywhere on this path.
+    //
+    // `undefined` when the engine is not in dry-run mode, which the verbs
+    // report as `dryRun: false` rather than as an empty list.
+    ...(runtime.overlay === undefined ? {} : { dryRunOverlay: runtime.overlay }),
   });
 }
 

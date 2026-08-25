@@ -1,6 +1,6 @@
 ---
 title: Dry run & sandbox
-description: The --dry-run shadow-tree overlay, /diff /apply /discard, and the opt-in OS filesystem sandbox.
+description: The --dry-run shadow-tree overlay, /diff /apply /discard in the terminal or the editor, and the opt-in OS filesystem sandbox.
 section: Core concepts
 order: 5.2
 ---
@@ -37,6 +37,10 @@ once it's allowed. For the broader story of what each layer defends against, see
    for <path>`).
 4. **Commit with `/apply`, or throw it away with `/discard`.**
 
+The review step is not terminal-only. The same three commands reach a remote client — and
+the VS Code panel — over the wire; see [Reviewing in an editor](#reviewing-in-an-editor)
+below.
+
 ```text
 > /diff
 --- a/src/app.ts
@@ -63,6 +67,38 @@ If every file applies cleanly, the shadow tree is discarded automatically and yo
 `Applied N file(s).`. `/discard` asks "Discard N pending file change(s)?" and, on
 confirmation, deletes the whole shadow tree — safe to call even if nothing is pending.
 
+## Reviewing in an editor
+
+A terminal prints a patch; an editor already owns a diff viewer, and a reviewer who can
+*see* a change before it lands is the whole pitch of dry run. So the loop is on the wire as
+three verbs — `pendingChanges`, `applyChanges`, `discardChanges` (see
+[Server mode](/docs/server-mode#reviewing-a-dry-run)) — and the VS Code panel drives them:
+
+- **A card above the composer appears the moment anything is pending**, with the count and
+  one row per file. It is on screen rather than behind a command, because a pending change
+  you have to remember to look for is one that gets applied unread.
+- **Clicking a row opens VS Code's own diff editor** — your workspace file on the left, the
+  pending content on the right, read-only. Not a patch rendered in the panel: the editor's
+  diff view is the reason this loop belongs in an editor at all. `/diff` from the panel's
+  `/` menu, and `Arcturn: Review Pending Changes` in the command palette, open the same
+  thing.
+- **Apply and Discard are explicit buttons**, and discard raises a native modal naming the
+  files it is about to throw away. There is no "are you sure" inside the panel — a webview
+  button is a button, not a confirmation.
+- **The extension never writes your files.** Apply is the engine's `applyChanges` verb, so a
+  remote apply gets the identical symlink refusal and the identical atomic write a local
+  `/apply` gets. An apply the extension performed itself would be an apply no permission
+  engine and no workspace confinement ever saw.
+
+Applying and discarding are both **refused while a run is in flight**, and because
+`--dry-run` is a flag on the served process — one shadow tree shared by every session that
+engine hosts — a run in *any* session blocks them. Reading the pending list is not refused;
+it is a read, and a change set you can watch grow is useful.
+
+If the engine is not running under `--dry-run`, the panel shows no review card at all
+rather than an empty one that would imply a safety net that is not there, and the palette
+commands say so plainly.
+
 ## Symlink-safe apply
 
 `bash` is not wrapped by the overlay (see [the boundary](#the-boundary-bash-grep-and-glob-see-the-real-tree)
@@ -73,10 +109,11 @@ the pending change under `<shadowDir>/src/escape/passwd`, but the *real* destina
 `/apply` would write to is wherever the link actually resolves — potentially far outside
 the workspace the reviewed diff described.
 
-`apply()` guards against this per file: before writing, it resolves symlinks on the
-target's existing ancestors (walking up to the nearest ancestor that exists, since an
-added file may not exist yet) and checks that the resolved path is still the workspace
-root or a strict descendant of it. A path that resolves outside is refused with:
+`apply()` guards against this per file — and it is one `apply()`, whether it was reached
+from `/apply` in a terminal or from `applyChanges` on the wire. Before writing, it resolves
+symlinks on the target's existing ancestors (walking up to the nearest ancestor that
+exists, since an added file may not exist yet) and checks that the resolved path is still
+the workspace root or a strict descendant of it. A path that resolves outside is refused with:
 
 ```text
 resolves outside the workspace (symlink); refused

@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
-import type { Tool, ToolExecutionContext, ToolResult } from "@arcturn/types";
+import type { PermissionRequest, Tool, ToolExecutionContext, ToolResult } from "@arcturn/types";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createOverlay, MAX_DIFF_LINES_PER_FILE, wrapToolsWithOverlay } from "./overlay.js";
 
@@ -55,6 +55,31 @@ function fakeTool(name: string): Tool {
       } catch {
         return { content: [{ type: "text", text: `missing ${path}` }], isError: true };
       }
+    },
+  };
+}
+
+/**
+ * A tool that asks for permission the way the real `write` does — from the
+ * `path` it was handed, which under the overlay is the shadow copy.
+ */
+function askingTool(name: string): Tool {
+  const inner = fakeTool(name);
+  return {
+    ...inner,
+    async execute(input, ctx): Promise<ToolResult> {
+      const path = input.path as string;
+      const decision = await ctx.requestPermission({
+        toolName: name,
+        toolCallId: ctx.toolCallId,
+        subject: path,
+        description: `Overwrite file ${path}`,
+        suggestedRule: { tool: name, specifier: `${join(path, "..")}/**`, action: "allow" },
+      });
+      if (decision.behavior !== "allow") {
+        return { content: [{ type: "text", text: "denied" }], isError: true };
+      }
+      return inner.execute(input, ctx);
     },
   };
 }
@@ -344,6 +369,90 @@ describe("overlay", () => {
     it("is safe when the shadow tree was never created", async () => {
       const overlay = createOverlay({ cwd: workDir, dir: shadowDir });
       await expect(overlay.discard()).resolves.toBeUndefined();
+    });
+
+    it("removes only the named files' shadow copies and keeps the rest pending", async () => {
+      const overlay = createOverlay({ cwd: workDir, dir: shadowDir });
+      const [write] = wrapToolsWithOverlay([fakeTool("write")], overlay);
+      const kept = join(workDir, "keep.txt");
+      const dropped = join(workDir, "drop.txt");
+      await writeFile(kept, "original keep", "utf8");
+      await writeFile(dropped, "original drop", "utf8");
+      await write!.execute({ path: kept, content: "pending keep" }, fakeContext(workDir));
+      await write!.execute({ path: dropped, content: "pending drop" }, fakeContext(workDir));
+      expect(await overlay.changes()).toHaveLength(2);
+
+      await overlay.discard([dropped]);
+
+      expect((await overlay.changes()).map((change) => change.path)).toEqual([kept]);
+      // Neither real file moved: a selective discard throws away a pending
+      // edit, it does not write anything.
+      expect(await readFile(kept, "utf8")).toBe("original keep");
+      expect(await readFile(dropped, "utf8")).toBe("original drop");
+      expect(await exists(shadowDir)).toBe(true);
+    });
+  });
+
+  describe("selective apply", () => {
+    it("writes only the named files and leaves the others pending", async () => {
+      const overlay = createOverlay({ cwd: workDir, dir: shadowDir });
+      const [write] = wrapToolsWithOverlay([fakeTool("write")], overlay);
+      const kept = join(workDir, "keep.txt");
+      const landed = join(workDir, "land.txt");
+      await writeFile(kept, "original keep", "utf8");
+      await writeFile(landed, "original land", "utf8");
+      await write!.execute({ path: kept, content: "pending keep" }, fakeContext(workDir));
+      await write!.execute({ path: landed, content: "pending land" }, fakeContext(workDir));
+
+      expect(await overlay.apply([landed])).toEqual({ applied: [landed], errors: [] });
+
+      expect(await readFile(landed, "utf8")).toBe("pending land");
+      expect(await readFile(kept, "utf8")).toBe("original keep");
+      // The applied file drops out of `changes()` on its own, because its
+      // shadow copy now matches the real file — nothing had to be bookkept.
+      expect((await overlay.changes()).map((change) => change.path)).toEqual([kept]);
+    });
+
+    it("applies nothing for a path that is not pending", async () => {
+      const overlay = createOverlay({ cwd: workDir, dir: shadowDir });
+      const [write] = wrapToolsWithOverlay([fakeTool("write")], overlay);
+      const real = join(workDir, "a.txt");
+      await writeFile(real, "original", "utf8");
+      await write!.execute({ path: real, content: "pending" }, fakeContext(workDir));
+
+      expect(await overlay.apply([join(workDir, "not-pending.txt")])).toEqual({
+        applied: [],
+        errors: [],
+      });
+      expect(await readFile(real, "utf8")).toBe("original");
+    });
+  });
+
+  describe("permission asks are stated about the real file", () => {
+    it("maps the shadow path back to the workspace in subject, description and rule", async () => {
+      const overlay = createOverlay({ cwd: workDir, dir: shadowDir });
+      const [write] = wrapToolsWithOverlay([askingTool("write")], overlay);
+      const real = join(workDir, "src", "app.ts");
+      await mkdir(join(workDir, "src"), { recursive: true });
+      await writeFile(real, "original", "utf8");
+
+      const asks: Omit<PermissionRequest, "id">[] = [];
+      const ctx: ToolExecutionContext = {
+        ...fakeContext(workDir),
+        requestPermission: async (request) => {
+          asks.push(request);
+          return { requestId: "r", behavior: "allow" };
+        },
+      };
+      await write!.execute({ path: real, content: "pending" }, ctx);
+
+      // Without the mapping every one of these names the shadow tree: a
+      // prompt about a file the user has never heard of, and an "always
+      // allow" scoped to a directory `/discard` deletes.
+      expect(asks[0]?.subject).toBe(real);
+      expect(asks[0]?.description).toContain(real);
+      expect(asks[0]?.description).not.toContain(shadowDir);
+      expect(asks[0]?.suggestedRule?.specifier).toBe(`${join(workDir, "src")}/**`);
     });
   });
 });

@@ -13,6 +13,20 @@ export {
   REMOTE_REACHABLE_BUILT_IN_COMMANDS,
 } from "./built-in-commands.js";
 export type {
+  DryRunApplyError,
+  DryRunApplyOutcome,
+  DryRunChange,
+  DryRunOverlay,
+  DryRunResult,
+  DryRunReview,
+  PendingChangesLimits,
+} from "./dry-run.js";
+export {
+  createDryRunReview,
+  PENDING_CHANGES_MAX_BYTES,
+  PENDING_CHANGES_MAX_FILES,
+} from "./dry-run.js";
+export type {
   ContextQueryRequest,
   ContextRefusal,
   ContextResolver,
@@ -25,6 +39,12 @@ export {
   PROMPT_ATTACHMENT_MAX_BYTES,
   visionRefusalMessage,
 } from "./prompt-context.js";
+export type {
+  SessionExportLimits,
+  TranscriptExporter,
+  TranscriptRenderRequest,
+} from "./session-export.js";
+export { buildSessionExport, SESSION_EXPORT_MAX_BYTES } from "./session-export.js";
 export type { SessionHistoryLimits } from "./session-history.js";
 export {
   buildSessionHistory,

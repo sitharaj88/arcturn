@@ -8,18 +8,26 @@ import { resolve, sep } from "node:path";
 import { type Agent, createSessionId } from "@arcturn/core";
 import {
   validateCommandList,
+  validateCompactionSummary,
   validateContextResolution,
+  validateMcpStatus,
   validateModelCatalog,
   validatePermissionState,
+  validateSessionExport,
   validateSessionHistory,
 } from "@arcturn/protocol";
 import type {
   AgentEvent,
   AgentEventListener,
+  ApplyChangesResult,
   CommandDescriptor,
+  CompactionSummary,
   ContextResolution,
+  DiscardChangesResult,
+  McpServerSummary,
   ModelCatalogEntry,
   ModelSpec,
+  PendingChanges,
   PermissionDecision,
   PermissionMode,
   PermissionPrompt,
@@ -27,17 +35,31 @@ import type {
   PermissionScope,
   PermissionState,
   PromptAttachment,
+  SessionExport,
   SessionHeader,
   SessionHistory,
   SessionStore,
+  TranscriptFormat,
   UserContent,
 } from "@arcturn/types";
+import {
+  createDryRunReview,
+  type DryRunOverlay,
+  type DryRunResult,
+  type DryRunReview,
+  type PendingChangesLimits,
+} from "./dry-run.js";
 import {
   ContextRefusedError,
   type ContextResolver,
   type ResolvedPrompt,
   visionRefusalMessage,
 } from "./prompt-context.js";
+import {
+  buildSessionExport,
+  type SessionExportLimits,
+  type TranscriptExporter,
+} from "./session-export.js";
 import { buildSessionHistory, type SessionHistoryLimits } from "./session-history.js";
 
 /** Machine-readable failure kinds surfaced by {@link SessionHost}. */
@@ -180,6 +202,90 @@ export interface SessionHostOptions {
    */
   commands?: () => CommandDescriptor[] | Promise<CommandDescriptor[]>;
   /**
+   * The renderer pair {@link SessionHost.exportSession} produces documents
+   * with, and the name it offers them under.
+   *
+   * Injected for the reason {@link SessionHostOptions.commands} is: the
+   * renderers are `@arcturn/cli`'s `exportMarkdown`/`exportHtml`, which is
+   * what the terminal's `/export` already calls, and this package does not
+   * depend on that one. One renderer, two front-ends — a transcript cannot
+   * look one way in a terminal and another over a socket.
+   *
+   * Both halves in one object on purpose; see {@link TranscriptExporter}.
+   *
+   * Omitted, {@link SessionHost.exportSession} **refuses** rather than
+   * inventing a document. There is no safe guess: an export assembled here
+   * would be a second, worse renderer that a user would read as their
+   * conversation.
+   *
+   * That refusal is an `invalidRequest`, which `ProtocolClient.exportSession`
+   * collapses into `undefined` alongside an older server's unknown-method
+   * rejection — the same collapse {@link SessionHostOptions.contextResolver}'s
+   * absence already gets, and coherent for the same reason: to a client, "this
+   * engine has no exporter" and "this engine predates the verb" are one piece
+   * of news, and the answer to both is to offer no export. The sentence still
+   * reaches whoever assembled the host, which is who can act on it.
+   */
+  transcriptExporter?: TranscriptExporter;
+  /**
+   * Bound on the payload {@link SessionHost.exportSession} returns. Defaults;
+   * see `session-export.ts`. Injectable so a test can prove the cap actually
+   * cuts without writing a megabyte of conversation first — the same reason
+   * {@link SessionHostOptions.sessionHistoryLimits} is.
+   */
+  sessionExportLimits?: SessionExportLimits;
+  /**
+   * Source of the MCP listing {@link SessionHost.mcpStatus} answers with.
+   *
+   * Injected for the reason {@link SessionHostOptions.modelCatalog} is: the
+   * MCP manager lives in `@arcturn/mcp` and is owned by `@arcturn/cli`'s
+   * runtime, and this package depends on neither. The projection that turns a
+   * manager into these four fields lives there too (`serve-mcp.ts`), because
+   * that is where the config with the credentials in it is, and the safest
+   * place to decide what leaves a secret behind is next to the secret.
+   *
+   * Whatever this returns is re-validated against the wire contract before it
+   * leaves the host — the same discipline `listModels` applies, and the reason
+   * it matters most here: the validator copies four fields out by name, so a
+   * projection that grew careless still cannot put a `url`, an `env` or an
+   * `Authorization` header on the wire.
+   *
+   * Omitted, the host reports an empty list rather than inventing servers it
+   * has no way to know about.
+   */
+  mcpStatus?: () => McpServerSummary[] | Promise<McpServerSummary[]>;
+  /**
+   * The served runtime's `--dry-run` shadow workspace, for the review verbs.
+   *
+   * One injection, three verbs, and deliberately one injection — the rule
+   * `createServeHost` keeps after the `resolveModel`/`modelCatalog` pair
+   * drifted apart once and became a real routing bug. `pendingChanges` lists
+   * what this overlay is holding, `applyChanges` calls its `apply`, and
+   * `discardChanges` calls its `discard`. Splitting them would mean a client
+   * could be shown a change set by one object and land a different one through
+   * another.
+   *
+   * Injected for the reason {@link SessionHostOptions.contextResolver} is: the
+   * overlay lives in `@arcturn/cli` (`createOverlay`, wired by `buildRuntime`),
+   * this package cannot depend on it, and the applier a remote client reaches
+   * has to be *the same object* the TUI's `/apply` drives — symlink guard,
+   * temp-file-plus-rename and all. See `dry-run.ts`.
+   *
+   * Omitted, this host is an engine that is not running under `--dry-run`:
+   * `pendingChanges` answers `dryRun: false` (which is a fact a client needs,
+   * not an error), and `applyChanges`/`discardChanges` refuse with a sentence
+   * saying so. That is different again from an engine that has no such verb at
+   * all, which a client learns from the `invalidRequest` an older server sends.
+   */
+  dryRunOverlay?: DryRunOverlay;
+  /**
+   * Bounds on the payload {@link SessionHost.pendingChanges} returns. Both
+   * halves default; see `dry-run.ts`. Injectable so a test can prove the cap
+   * actually cuts without writing a megabyte of scratch files first — the same
+   * reason {@link SessionHostOptions.sessionHistoryLimits} is injectable.
+   */
+  pendingChangesLimits?: PendingChangesLimits;
+  /**
    * Maximum number of concurrently *live* sessions this host will hold (each
    * one is a full agent: LLM connection, tool set, in-memory history).
    * Without a cap, a client could `createSession` in a loop and exhaust
@@ -242,6 +348,18 @@ function widerScopeRefusal(field: string, scope: PermissionScope): string {
  */
 function isBusy(session: LiveSession): boolean {
   return session.agent.isRunning || session.starting;
+}
+
+/**
+ * Turn a `dry-run.ts` refusal into the wire's `invalidRequest`.
+ *
+ * That module returns a union rather than throwing so it can be tested by
+ * reading a value; this is the one place the union becomes an error, which is
+ * also the only place the error code for these three verbs is decided.
+ */
+function unwrapDryRun<T>(result: DryRunResult<T>): T {
+  if (!result.ok) throw new SessionHostError("invalidRequest", result.error);
+  return result.value;
 }
 
 const DEFAULT_PERMISSION_TIMEOUT_MS = 5 * 60 * 1000;
@@ -310,7 +428,11 @@ export class SessionHost {
   readonly #sessionHistoryLimits: SessionHistoryLimits;
   readonly #contextResolver: ContextResolver | undefined;
   readonly #commands: (() => CommandDescriptor[] | Promise<CommandDescriptor[]>) | undefined;
+  readonly #transcriptExporter: TranscriptExporter | undefined;
+  readonly #sessionExportLimits: SessionExportLimits;
+  readonly #mcpStatus: (() => McpServerSummary[] | Promise<McpServerSummary[]>) | undefined;
   readonly #maxSessions: number;
+  readonly #dryRun: DryRunReview;
   readonly #sessions = new Map<string, LiveSession>();
 
   constructor(options: SessionHostOptions) {
@@ -331,7 +453,11 @@ export class SessionHost {
     this.#sessionHistoryLimits = options.sessionHistoryLimits ?? {};
     this.#contextResolver = options.contextResolver;
     this.#commands = options.commands;
+    this.#transcriptExporter = options.transcriptExporter;
+    this.#sessionExportLimits = options.sessionExportLimits ?? {};
+    this.#mcpStatus = options.mcpStatus;
     this.#maxSessions = options.maxSessions ?? DEFAULT_MAX_SESSIONS;
+    this.#dryRun = createDryRunReview(options.dryRunOverlay, options.pendingChangesLimits ?? {});
   }
 
   /**
@@ -952,6 +1078,333 @@ export class SessionHost {
       throw new Error(`Command list is not a valid wire payload: ${validation.error}`);
     }
     return validation.value.commands;
+  }
+
+  /**
+   * Summarise the head of one session's conversation — the terminal's
+   * `/compact`, over the wire.
+   *
+   * **There is one compactor and this is not it.** All this does is call
+   * `Agent.compact()`, the same method `@arcturn/cli`'s `/compact` command
+   * calls and the same one the run loop calls when it crosses the automatic
+   * threshold. A second implementation here would summarise with different
+   * options, cut at a different turn boundary and write a different
+   * `compaction` entry into the same session file.
+   *
+   * **Refused mid-run**, with `sessionBusy`, and via {@link isBusy} rather
+   * than `agent.isRunning` alone: a prompt that has been accepted but is still
+   * resolving its context has not started the agent yet, and a compaction
+   * landing in that window would rewrite the message array the run is about to
+   * iterate. `setPermissionMode` checks the narrower condition because a mode
+   * only takes effect at the next turn; this rewrites history, so it takes the
+   * same wider check `deleteSession` takes.
+   *
+   * The alternative — queueing — was rejected. `Agent.compact()` itself throws
+   * while running, so queueing would only move that hazard behind a promise;
+   * it would race the loop's own automatic compaction, which can fire in the
+   * same window with different bounds; and it would settle at a moment the
+   * client cannot observe, so the numbers returned would describe a
+   * conversation that had since moved on. `sessionBusy` hands the client
+   * something to do instead: abort, or wait for `runEnd`.
+   *
+   * ### The numbers are the engine's own, quoted rather than re-derived
+   *
+   * A compaction already publishes `compactionEnd { tokensBefore, tokensAfter }`
+   * on the event stream, and every attached client already sees it. This verb
+   * therefore **quotes that event** rather than measuring anything itself: two
+   * sources for one pair of numbers is exactly the drift
+   * `built-in-commands.ts` refuses for `/cost`, and it would be worse here,
+   * because the two would be read side by side — the notification and the
+   * response to the request that caused it.
+   *
+   * Nor could this measure it honestly on its own. `Agent.estimatedTokens`
+   * anchors on the last assistant message's *reported* usage, which is what
+   * the provider charged for the pre-compaction prompt; that anchor survives
+   * the rewrite, so reading it before and after mostly returns the same number
+   * for a compaction that genuinely halved the conversation. The engine knows
+   * this, which is why `compactMessages` pairs the metered "before" with an
+   * estimated "after" — nobody has metered the new prompt yet. Those are the
+   * two numbers on the event, and they are the two numbers here.
+   *
+   * When no compaction was attempted at all (no turn boundary old enough),
+   * there is no event to quote and nothing changed, so both sides report
+   * `Agent.estimatedTokens` — equal, which is the truth.
+   *
+   * ### Why the reason is captured from the event stream too
+   *
+   * `Agent.compact()` answers `false` for two quite different outcomes — no
+   * turn boundary old enough to fold, and a summarizer that failed — and says
+   * which one only by emitting a `notice`. Rather than re-deriving the
+   * distinction here (which would mean a second copy of the cut-point rule),
+   * this listens for that notice for the duration of the call and quotes it.
+   * The window is narrow by construction — the session is idle, because this
+   * method refused to proceed if it were not — and the capture is scoped to
+   * the `compacted === false` branch, so the worst a notice from a *concurrent*
+   * connection could do is supply the wrong sentence for an outcome that is
+   * already reported as "nothing was folded".
+   *
+   * @param sessionId - Session to compact.
+   * @returns The token estimate on both sides, and whether anything moved.
+   * @throws {SessionHostError} `sessionNotFound` when the session is not live,
+   *   or `sessionBusy` while a run is in flight.
+   */
+  async compact(sessionId: string): Promise<CompactionSummary> {
+    const session = this.#require(sessionId);
+    if (isBusy(session)) {
+      throw new SessionHostError(
+        "sessionBusy",
+        `Session ${sessionId} is running a turn; a conversation may not be rewritten halfway ` +
+          "through one. Abort the run or wait for it to end, then compact.",
+      );
+    }
+
+    let notice: string | undefined;
+    let measured: { tokensBefore: number; tokensAfter: number } | undefined;
+    const listener: AgentEventListener = (event) => {
+      if (event.type === "notice") notice = event.text;
+      if (event.type === "compactionEnd") {
+        measured = { tokensBefore: event.tokensBefore, tokensAfter: event.tokensAfter };
+      }
+    };
+    session.observers.add(listener);
+    let compacted: boolean;
+    try {
+      compacted = await session.agent.compact();
+    } finally {
+      session.observers.delete(listener);
+    }
+
+    const unchanged = session.agent.estimatedTokens;
+    const tokens = measured ?? { tokensBefore: unchanged, tokensAfter: unchanged };
+    const summary: CompactionSummary = {
+      sessionId,
+      compacted,
+      tokensBefore: tokens.tokensBefore,
+      tokensAfter: tokens.tokensAfter,
+      ...(compacted || notice === undefined ? {} : { reason: notice }),
+    };
+    // Normalized against the wire contract on the way out, like every other
+    // result this host builds.
+    const validation = validateCompactionSummary(summary);
+    if (!validation.ok) {
+      throw new Error(`Compaction summary is not a valid wire payload: ${validation.error}`);
+    }
+    return validation.value;
+  }
+
+  /**
+   * Render one session's conversation as a document for the **client** to
+   * save.
+   *
+   * The engine writes nothing. See `session-export.ts` for why that is the
+   * whole design rather than an implementation detail, and for where the byte
+   * budget comes from.
+   *
+   * Requires a **live** session, like {@link SessionHost.resolveContext} and
+   * unlike {@link SessionHost.sessionHistory}: this renders the conversation
+   * the agent is holding in memory, and a session nobody has opened is holding
+   * none. A client that wants a transcript of a session it has not attached to
+   * opens it first, or asks `sessionHistory` and renders its own.
+   *
+   * Deliberately **not** refused mid-run. It only reads, and it reads exactly
+   * what the terminal's `/export` reads — which does not check either. An
+   * export taken mid-turn is a snapshot of a conversation still in progress,
+   * which is a true thing to have; refusing it would be a restriction the
+   * local user does not have.
+   *
+   * @param sessionId - Session to render.
+   * @param options - Format (default markdown) and thinking (default off) —
+   *   the terminal's `/export` defaults.
+   * @throws {SessionHostError} `sessionNotFound` when the session is not live,
+   *   or `invalidRequest` when no {@link SessionHostOptions.transcriptExporter}
+   *   was wired — this host has no renderer, and a document assembled here
+   *   would be a second, worse one a user would read as their conversation.
+   */
+  exportSession(
+    sessionId: string,
+    options: { format?: TranscriptFormat; includeThinking?: boolean } = {},
+  ): SessionExport {
+    const session = this.#require(sessionId);
+    const exporter = this.#transcriptExporter;
+    if (!exporter) {
+      throw new SessionHostError(
+        "invalidRequest",
+        "This server was built without a transcript exporter, so it cannot render this " +
+          "conversation. Refusing rather than assembling a second, worse one. Ask " +
+          "sessionHistory for the events and render your own.",
+      );
+    }
+    const result = buildSessionExport(
+      sessionId,
+      session.agent.messages,
+      exporter,
+      {
+        format: options.format ?? "markdown",
+        includeThinking: options.includeThinking ?? false,
+        model: session.agent.model.displayName,
+        // Read once, here, and threaded through every re-render the byte
+        // budget forces — see `TranscriptRenderRequest.exportedAt`.
+        exportedAt: new Date().toISOString(),
+      },
+      this.#sessionExportLimits,
+    );
+    const validation = validateSessionExport(result);
+    if (!validation.ok) {
+      throw new Error(`Session export is not a valid wire payload: ${validation.error}`);
+    }
+    return validation.value;
+  }
+
+  /**
+   * The MCP servers this engine is configured with: name, transport, state,
+   * tool count.
+   *
+   * Not session-scoped — MCP servers belong to the server process, so this is
+   * shaped like {@link SessionHost.listModels}.
+   *
+   * Sourced from {@link SessionHostOptions.mcpStatus} and normalized against
+   * the wire contract on the way out. That last step is load-bearing here in a
+   * way it is not for the catalog: `validateMcpStatus` copies four fields out
+   * by name, so a `url`, a `command`, an `env` map or an `Authorization`
+   * header cannot reach a client even if the injected projection grew
+   * careless. It is the same mechanism `PermissionState.tools` relies on to
+   * carry names and only names.
+   *
+   * @returns The listing, sorted by name, or `[]` when no source was wired.
+   * @throws When the wired source returns entries that are not a valid wire
+   *   payload — a wiring bug in the host process, and one worth reporting
+   *   rather than quietly serving a listing a user would read as complete.
+   */
+  async mcpStatus(): Promise<McpServerSummary[]> {
+    if (!this.#mcpStatus) return [];
+    const servers = await this.#mcpStatus();
+    const validation = validateMcpStatus({ servers });
+    if (!validation.ok) {
+      throw new Error(`MCP status is not a valid wire payload: ${validation.error}`);
+    }
+    return validation.value.servers;
+  }
+
+  /**
+   * What a `--dry-run` session is holding back for review.
+   *
+   * A **read**, and answered even for an engine that is not in dry-run mode at
+   * all — with `dryRun: false` and an empty list. That distinction is the
+   * reason this verb does not simply refuse: "nothing is pending" and "nothing
+   * is ever held back here, your edits already landed" are opposite pieces of
+   * news, and a client shown an empty list with no flag would render the
+   * reassuring one.
+   *
+   * Not refused mid-run either. `/diff` in the terminal has no busy check, a
+   * change set that grows while you watch it is useful rather than dangerous,
+   * and nothing here writes.
+   *
+   * @param sessionId - Session to ask about.
+   * @param path - One row's path, to fetch the content an apply would write.
+   *   Omit for the metadata-only list; see `dry-run.ts` for the payload budget
+   *   this split exists to respect.
+   * @throws {SessionHostError} `sessionNotFound` when the session is not live,
+   *   or `invalidRequest` when `path` names nothing pending.
+   */
+  async pendingChanges(sessionId: string, path?: string): Promise<PendingChanges> {
+    this.#require(sessionId);
+    return unwrapDryRun(await this.#dryRun.pendingChanges(sessionId, path));
+  }
+
+  /**
+   * Write pending dry-run changes back over the real workspace files.
+   *
+   * This is the verb that touches somebody's working directory, and it holds
+   * three lines that the rest of this class draws elsewhere:
+   *
+   * **The applier is the engine's, not a client's.** All this does is call the
+   * overlay the served runtime built — the same object the TUI's `/apply`
+   * drives — so the per-file symlink resolution that refuses a destination
+   * outside the workspace, and the temp-file-plus-rename that keeps an
+   * interrupted apply from leaving half a file, are the same code a local user
+   * gets. There is no second applier on this path and there must not be one.
+   *
+   * **A selection can only narrow the engine's own list.** `paths` is matched
+   * against what `pendingChanges` just reported, and the overlay is then handed
+   * the absolute paths *this host* produced. A client string never becomes a
+   * destination, so a `..`, an absolute path or a drive letter arriving on the
+   * wire selects nothing rather than escaping something.
+   *
+   * **Refused while any session on this engine is running.** Not just the one
+   * named: `--dry-run` is a flag on the served process, so one overlay and one
+   * shadow tree are shared by every session this host holds, and applying while
+   * *any* of them is still writing into that tree is the same race with the
+   * user's files on one side. It is the refusal {@link SessionHost.deleteSession}
+   * and {@link SessionHost.setPermissionMode} make, widened to match what is
+   * actually shared.
+   *
+   * @param sessionId - Session asking. Used for the refusals and echoed back.
+   * @param paths - A subset, spelled as `PendingChange.path` reported it. Omit
+   *   to land everything.
+   * @returns What landed, what did not and why, and what is still pending.
+   * @throws {SessionHostError} `sessionNotFound`, `sessionBusy` while any live
+   *   session is running a turn, or `invalidRequest` when this engine is not in
+   *   dry-run mode or a named path is not pending.
+   */
+  async applyChanges(sessionId: string, paths?: readonly string[]): Promise<ApplyChangesResult> {
+    this.#require(sessionId);
+    this.#requireIdleWorkspace(sessionId, "applied");
+    return unwrapDryRun(await this.#dryRun.applyChanges(sessionId, paths));
+  }
+
+  /**
+   * Throw pending dry-run changes away. **Irreversible** — the shadow tree is
+   * the only record of that work.
+   *
+   * No wire-level confirmation, and that is {@link SessionHost.deleteSession}'s
+   * discipline rather than an omission: the confirmation belongs where a person
+   * can read what they are about to lose, which is a native modal in the
+   * client. What the engine owns is the refusal a client cannot make for
+   * itself — the same busy check `applyChanges` makes, across every live
+   * session, for the same reason.
+   *
+   * @param sessionId - Session asking.
+   * @param paths - A subset, on `applyChanges`' terms. Omit to discard all.
+   * @throws {SessionHostError} On exactly `applyChanges`' terms.
+   */
+  async discardChanges(
+    sessionId: string,
+    paths?: readonly string[],
+  ): Promise<DiscardChangesResult> {
+    this.#require(sessionId);
+    this.#requireIdleWorkspace(sessionId, "discarded");
+    return unwrapDryRun(await this.#dryRun.discardChanges(sessionId, paths));
+  }
+
+  /**
+   * Refuse when **any** live session is mid-run.
+   *
+   * Wider than {@link SessionHost.setPermissionMode}'s check on purpose, and
+   * the width is the honest part: a permission mode belongs to one agent, but
+   * the dry-run shadow tree belongs to the process. Two served sessions write
+   * into the same tree, so "is it safe to write this tree back to disk" is not
+   * a question one session's `isRunning` can answer.
+   *
+   * @param sessionId - The session that asked, named first in the message when
+   *   it is the busy one so the common case reads naturally.
+   * @param verb - `"applied"` / `"discarded"`, for the sentence.
+   */
+  #requireIdleWorkspace(sessionId: string, verb: string): void {
+    const asking = this.#sessions.get(sessionId);
+    const busy =
+      asking !== undefined && isBusy(asking)
+        ? sessionId
+        : [...this.#sessions].find(([, session]) => isBusy(session))?.[0];
+    if (busy === undefined) return;
+    throw new SessionHostError(
+      "sessionBusy",
+      busy === sessionId
+        ? `Session ${sessionId} is running a turn; pending changes may not be ${verb} while the ` +
+            "agent is still writing into the shadow tree. Abort the run or wait for it to end."
+        : `Session ${busy} is running a turn on this engine, and every session here shares one ` +
+            `--dry-run shadow tree, so pending changes may not be ${verb} yet. Abort that run ` +
+            "or wait for it to end.",
+    );
   }
 
   /**

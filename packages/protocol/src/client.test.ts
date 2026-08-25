@@ -1141,6 +1141,142 @@ describe("ProtocolClient.listCommands (RFC 0005 §1.3)", () => {
   });
 });
 
+describe("ProtocolClient.compact, exportSession, mcpStatus (terminal parity)", () => {
+  const SUMMARY = {
+    sessionId: "s1",
+    compacted: true,
+    tokensBefore: 42_000,
+    tokensAfter: 9_000,
+  };
+  const EXPORT = {
+    sessionId: "s1",
+    format: "markdown" as const,
+    filename: "arcturn-session-2026-08-25-1200.md",
+    content: "# Arcturn Session\n",
+    messageCount: 4,
+    truncated: false,
+    droppedMessages: 0,
+  };
+  const MCP = {
+    servers: [
+      { name: "files", transport: "stdio" as const, state: "connected" as const, toolCount: 3 },
+    ],
+  };
+
+  it("compact sends the session and returns the validated summary", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.compact("s1");
+    await flush();
+    expect(socket.frames()[0]).toMatchObject({ method: "compact", params: { sessionId: "s1" } });
+    socket.respondOk(0, SUMMARY);
+
+    expect(await promise).toEqual(SUMMARY);
+  });
+
+  it("compact REJECTS against an old server rather than resolving", async () => {
+    // The `deleteSession` counter-precedent. A caller told "fine" by an engine
+    // that ignored this would report freed context that was never freed.
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.compact("s1");
+    await flush();
+    socket.respondError(0, ErrorCode.invalidRequest, 'Unknown method: "compact"');
+
+    const error = await promise.catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ProtocolRequestError);
+    expect(isUnsupportedMethodError(error)).toBe(true);
+  });
+
+  it("exportSession omits the optional params it was not given", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.exportSession("s1");
+    await flush();
+    expect(socket.frames()[0]?.params).toEqual({ sessionId: "s1" });
+    socket.respondOk(0, EXPORT);
+
+    expect(await promise).toEqual(EXPORT);
+  });
+
+  it("exportSession forwards format and includeThinking when asked", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.exportSession("s1", { format: "html", includeThinking: true });
+    await flush();
+    expect(socket.frames()[0]?.params).toEqual({
+      sessionId: "s1",
+      format: "html",
+      includeThinking: true,
+    });
+    socket.respondOk(0, { ...EXPORT, format: "html", filename: "a.html" });
+
+    expect((await promise)?.format).toBe("html");
+  });
+
+  it("exportSession degrades to undefined against an old server", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.exportSession("s1");
+    await flush();
+    socket.respondError(0, ErrorCode.invalidRequest, 'Unknown method: "exportSession"');
+
+    await expect(promise).resolves.toBeUndefined();
+  });
+
+  it("mcpStatus takes no params and degrades to undefined against an old server", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const ready = client.mcpStatus();
+    await flush();
+    expect(socket.frames()[0]).not.toHaveProperty("params");
+    socket.respondOk(0, MCP);
+    expect(await ready).toEqual(MCP);
+
+    const old = client.mcpStatus();
+    await flush();
+    socket.respondError(1, ErrorCode.invalidRequest, 'Unknown method: "mcpStatus"');
+    await expect(old).resolves.toBeUndefined();
+  });
+
+  it("rejects an mcpStatus payload carrying anything but the four fields", async () => {
+    // The validator copies by name, so an extra field is dropped rather than
+    // forwarded; a field with the *wrong* shape is a rejection.
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.mcpStatus();
+    await flush();
+    socket.respondOk(0, {
+      servers: [
+        {
+          name: "files",
+          transport: "stdio",
+          state: "connected",
+          toolCount: 3,
+          url: "https://mcp.example.com/?token=sk-live-planted",
+          env: { MCP_API_KEY: "sk-live-planted" },
+        },
+      ],
+    });
+
+    const status = await promise;
+    expect(status?.servers[0]).toEqual({
+      name: "files",
+      transport: "stdio",
+      state: "connected",
+      toolCount: 3,
+    });
+    expect(JSON.stringify(status)).not.toContain("sk-live-planted");
+  });
+});
+
 describe("isUnsupportedMethodError", () => {
   it("is true only for a server-reported unknown-method rejection", () => {
     expect(

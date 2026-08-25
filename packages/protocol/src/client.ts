@@ -31,27 +31,40 @@
 
 import type {
   AgentEvent,
+  ApplyChangesResult,
   CommandList,
+  CompactionSummary,
   ContextResolution,
+  DiscardChangesResult,
+  McpStatus,
   ModelCatalog,
+  PendingChanges,
   PermissionDecision,
   PermissionMode,
   PermissionScope,
   PermissionState,
   PromptAttachment,
+  SessionExport,
   SessionHeader,
   SessionHistory,
+  TranscriptFormat,
 } from "@arcturn/types";
 import { PROTOCOL_VERSION } from "@arcturn/types";
 import { ErrorCode } from "./messages.js";
 import { RequestIdGenerator } from "./request-id.js";
 import {
+  validateApplyChangesResult,
   validateClientRequest,
   validateCommandList,
+  validateCompactionSummary,
   validateContextResolution,
+  validateDiscardChangesResult,
+  validateMcpStatus,
   validateModelCatalog,
+  validatePendingChanges,
   validatePermissionState,
   validateServerMessage,
+  validateSessionExport,
   validateSessionHeader,
   validateSessionHistory,
 } from "./validate.js";
@@ -505,6 +518,140 @@ export interface ProtocolClient {
    */
   listCommands(): Promise<CommandList | undefined>;
   /**
+   * Summarise the head of this session's conversation to free up context —
+   * the terminal's `/compact`, over the wire.
+   *
+   * There is one compactor and this is a door onto it: the engine runs
+   * `Agent.compact()`, the same call the terminal makes and the same one the
+   * run loop makes automatically. What comes back is a report rather than an
+   * acknowledgement — the token estimate before and after — because a client
+   * that cannot say how much context it freed cannot tell a compaction that
+   * worked from one that found nothing old enough to fold. Read
+   * {@link CompactionSummary.compacted} first: `false` is a *successful*
+   * answer with `reason` explaining it, not a failure.
+   *
+   * Deliberately **not** given `listModels`' "old engine → `undefined`"
+   * treatment, on the {@link ProtocolClient.deleteSession} counter-precedent.
+   * A caller told "fine" by an engine that ignored this would report freed
+   * context that was never freed, keep filling the window, and hit the wall it
+   * had just asked to have moved. A caller that wants to say "this engine is
+   * too old to compact" tests the rejection with
+   * {@link isUnsupportedMethodError}.
+   *
+   * @param sessionId - Session to compact.
+   * @returns What the conversation cost before and after.
+   * @throws {ProtocolRequestError} `sessionBusy` while a run is in flight
+   *   (compaction rewrites the message array the loop is iterating — abort, or
+   *   wait for `runEnd`), `sessionNotFound` when the session is not live,
+   *   `invalidRequest` from an engine that does not implement the verb.
+   */
+  compact(sessionId: string): Promise<CompactionSummary>;
+  /**
+   * Render this session's conversation as a document — and save it yourself.
+   *
+   * The engine writes **nothing**. `/export` in a terminal drops a file next
+   * to the person who ran it; over a socket that same behaviour would put a
+   * file on the engine's disk, which is the wrong machine and an
+   * arbitrary-write primitive besides. So the content comes back with a
+   * suggested `filename`, and where it lands is the caller's decision.
+   *
+   * The payload is **bounded** at 1 MiB and reports its own truncation: a
+   * caller that sees {@link SessionExport.truncated} must say that earlier
+   * messages are missing rather than presenting a partial transcript as the
+   * conversation — the same obligation {@link ProtocolClient.sessionHistory}
+   * carries.
+   *
+   * Requires an **open** session: this renders what the agent is holding, and
+   * an engine that has not materialised the session is holding nothing.
+   *
+   * Optional, on the same terms as {@link ProtocolClient.listModels}: it only
+   * reads, so an older engine's `invalidRequest` becomes `undefined` and a
+   * caller offers no export.
+   *
+   * @param sessionId - Session to render.
+   * @param options - `format` (default `"markdown"`) and `includeThinking`
+   *   (default `false`) — the terminal's `/export` defaults.
+   * @returns The document, or `undefined` when the engine has no such verb.
+   */
+  exportSession(
+    sessionId: string,
+    options?: { format?: TranscriptFormat; includeThinking?: boolean },
+  ): Promise<SessionExport | undefined>;
+  /**
+   * List this engine's MCP servers: name, transport, connection state, tool
+   * count.
+   *
+   * **Names and status only.** No `url`, no `command`, no `args`, no `env`, no
+   * headers, no OAuth token, and no server-supplied error prose — see
+   * {@link McpServerSummary}, whose omissions are the point. A caller that
+   * wants to know why a server failed reads the engine's log.
+   *
+   * Not session-scoped: MCP servers belong to the engine, so this is shaped
+   * like {@link ProtocolClient.listModels}.
+   *
+   * Optional, on the same terms: read-only, so an older engine's
+   * `invalidRequest` becomes `undefined` and a caller shows no listing rather
+   * than an empty one — "this engine has no MCP servers" and "this engine
+   * cannot tell me" are not the same news.
+   *
+   * @returns The listing, or `undefined` when the engine has no such verb.
+   */
+  mcpStatus(): Promise<McpStatus | undefined>;
+  /**
+   * Ask what a `--dry-run` session is holding back for review.
+   *
+   * Read {@link PendingChanges.dryRun} before the list: an engine that is not
+   * running under `--dry-run` answers `dryRun: false` with no changes, and
+   * that is not the same news as a dry-run session with nothing pending yet.
+   *
+   * Optional, on the same terms as {@link ProtocolClient.listModels}: it only
+   * reads, so an older engine's `invalidRequest` becomes `undefined` and a
+   * caller shows no review surface at all — which is honest, since that engine
+   * could not have applied anything either.
+   *
+   * @param sessionId - Session to ask about.
+   * @param path - One pending change's `path`, to fetch its content. Omit for
+   *   the metadata-only list; see the verb's own doc for the payload argument.
+   * @returns The pending set, or `undefined` when the engine has no such verb.
+   */
+  pendingChanges(sessionId: string, path?: string): Promise<PendingChanges | undefined>;
+  /**
+   * Write pending dry-run changes back over the real workspace files.
+   *
+   * Deliberately **not** given the `undefined` treatment
+   * {@link ProtocolClient.pendingChanges} gets, and this is the sharpest case
+   * in this interface for the asymmetry: an older engine rejects, and a client
+   * that translated the rejection into a resolve would tell a reviewer their
+   * change had landed. It has not, and the reviewer's next move is to discard
+   * the shadow tree that held the only copy of it.
+   *
+   * @param sessionId - Session whose changes to land.
+   * @param paths - A subset, spelled exactly as `PendingChange.path` reported
+   *   it. Omit to apply everything. A path that is not pending refuses the
+   *   whole call rather than applying the rest.
+   * @returns What landed, what did not and why, and how much is still pending.
+   * @throws {ProtocolRequestError} `sessionBusy` while any session on this
+   *   engine is running a turn (one engine, one shadow tree), `invalidRequest`
+   *   when the session is not in dry-run mode, when a named path is not
+   *   pending, or from an engine that does not implement the verb.
+   */
+  applyChanges(sessionId: string, paths?: readonly string[]): Promise<ApplyChangesResult>;
+  /**
+   * Throw pending dry-run changes away. **Irreversible** — confirm with the
+   * user before calling this, the way a session delete is confirmed.
+   *
+   * Not degradable, for the reason {@link ProtocolClient.applyChanges} is not,
+   * pointed the other way: a discard that resolved against an engine which did
+   * nothing would leave a user certain their pending edits were gone while
+   * they sat waiting for the next apply.
+   *
+   * @param sessionId - Session whose changes to throw away.
+   * @param paths - A subset, on the same terms as `applyChanges`. Omit for all.
+   * @returns What was thrown away, and how much is still pending.
+   * @throws {ProtocolRequestError} On the same terms as `applyChanges`.
+   */
+  discardChanges(sessionId: string, paths?: readonly string[]): Promise<DiscardChangesResult>;
+  /**
    * Subscribe to server-pushed session events.
    *
    * @returns An unsubscribe function; calling it more than once is harmless.
@@ -779,6 +926,97 @@ class ProtocolClientImpl implements ProtocolClient {
       throw error;
     }
     return parseCommandList(result);
+  }
+
+  async compact(sessionId: string): Promise<CompactionSummary> {
+    // No unsupported-method translation, deliberately: see the interface doc.
+    // A compaction that did not happen must not resolve as though it had.
+    return parseCompactionSummary(await this.#call("compact", { sessionId }));
+  }
+
+  async exportSession(
+    sessionId: string,
+    options: { format?: TranscriptFormat; includeThinking?: boolean } = {},
+  ): Promise<SessionExport | undefined> {
+    let result: unknown;
+    try {
+      result = await this.#call("exportSession", {
+        sessionId,
+        ...(options.format === undefined ? {} : { format: options.format }),
+        ...(options.includeThinking === undefined
+          ? {}
+          : { includeThinking: options.includeThinking }),
+      });
+    } catch (error) {
+      // Same reasoning as `listModels`: only a *server-reported* rejection can
+      // mean "I do not know this verb", and `sessionNotFound` is the caller's
+      // problem rather than the engine's age.
+      if (error instanceof ProtocolRequestError && isUnsupportedMethodError(error)) {
+        return undefined;
+      }
+      throw error;
+    }
+    return parseSessionExport(result);
+  }
+
+  async mcpStatus(): Promise<McpStatus | undefined> {
+    let result: unknown;
+    try {
+      result = await this.#call("mcpStatus");
+    } catch (error) {
+      if (error instanceof ProtocolRequestError && isUnsupportedMethodError(error)) {
+        return undefined;
+      }
+      throw error;
+    }
+    return parseMcpStatus(result);
+  }
+
+  async pendingChanges(sessionId: string, path?: string): Promise<PendingChanges | undefined> {
+    let result: unknown;
+    try {
+      result = await this.#call("pendingChanges", {
+        sessionId,
+        ...(path === undefined ? {} : { path }),
+      });
+    } catch (error) {
+      // Same reasoning as `listModels`: only a *server-reported* rejection can
+      // mean "I do not know this verb", and `sessionNotFound` is the caller's
+      // problem rather than the engine's age. A refusal that names dry-run
+      // mode is not translated either — but it cannot reach here, because the
+      // engine answers `dryRun: false` rather than erroring on a read.
+      if (error instanceof ProtocolRequestError && isUnsupportedMethodError(error)) {
+        return undefined;
+      }
+      throw error;
+    }
+    return parsePendingChanges(result);
+  }
+
+  async applyChanges(sessionId: string, paths?: readonly string[]): Promise<ApplyChangesResult> {
+    // No unsupported-method translation: see the interface doc. An apply that
+    // did not happen must not resolve.
+    return parseApplyChangesResult(
+      await this.#call("applyChanges", {
+        sessionId,
+        ...(paths === undefined ? {} : { paths: [...paths] }),
+      }),
+    );
+  }
+
+  async discardChanges(
+    sessionId: string,
+    paths?: readonly string[],
+  ): Promise<DiscardChangesResult> {
+    // No unsupported-method translation either, for the sharper reason: a
+    // discard reported as done that was not done loses the user's certainty
+    // about what is on their disk.
+    return parseDiscardChangesResult(
+      await this.#call("discardChanges", {
+        sessionId,
+        ...(paths === undefined ? {} : { paths: [...paths] }),
+      }),
+    );
   }
 
   onEvent(listener: ProtocolEventListener): () => void {
@@ -1146,6 +1384,75 @@ function parseCommandList(result: unknown): CommandList {
     throw new ProtocolClientError(
       ClientErrorCode.invalidResponse,
       `Invalid listCommands result: ${validation.error}`,
+    );
+  }
+  return validation.value;
+}
+
+function parseCompactionSummary(result: unknown): CompactionSummary {
+  const validation = validateCompactionSummary(result);
+  if (!validation.ok) {
+    throw new ProtocolClientError(
+      ClientErrorCode.invalidResponse,
+      `Invalid compact result: ${validation.error}`,
+    );
+  }
+  return validation.value;
+}
+
+function parseSessionExport(result: unknown): SessionExport {
+  const validation = validateSessionExport(result);
+  if (!validation.ok) {
+    throw new ProtocolClientError(
+      ClientErrorCode.invalidResponse,
+      `Invalid exportSession result: ${validation.error}`,
+    );
+  }
+  return validation.value;
+}
+
+function parseMcpStatus(result: unknown): McpStatus {
+  const validation = validateMcpStatus(result);
+  if (!validation.ok) {
+    throw new ProtocolClientError(
+      ClientErrorCode.invalidResponse,
+      `Invalid mcpStatus result: ${validation.error}`,
+    );
+  }
+  return validation.value;
+}
+
+/** Parse a `pendingChanges` result, rejecting anything off-contract. */
+function parsePendingChanges(result: unknown): PendingChanges {
+  const validation = validatePendingChanges(result);
+  if (!validation.ok) {
+    throw new ProtocolClientError(
+      ClientErrorCode.invalidResponse,
+      `Invalid pendingChanges result: ${validation.error}`,
+    );
+  }
+  return validation.value;
+}
+
+/** Parse an `applyChanges` result, rejecting anything off-contract. */
+function parseApplyChangesResult(result: unknown): ApplyChangesResult {
+  const validation = validateApplyChangesResult(result);
+  if (!validation.ok) {
+    throw new ProtocolClientError(
+      ClientErrorCode.invalidResponse,
+      `Invalid applyChanges result: ${validation.error}`,
+    );
+  }
+  return validation.value;
+}
+
+/** Parse a `discardChanges` result, rejecting anything off-contract. */
+function parseDiscardChangesResult(result: unknown): DiscardChangesResult {
+  const validation = validateDiscardChangesResult(result);
+  if (!validation.ok) {
+    throw new ProtocolClientError(
+      ClientErrorCode.invalidResponse,
+      `Invalid discardChanges result: ${validation.error}`,
     );
   }
   return validation.value;

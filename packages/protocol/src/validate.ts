@@ -9,15 +9,25 @@
 
 import type {
   AgentEvent,
+  ApplyChangeFailure,
+  ApplyChangesResult,
   ClientRequest,
   CommandDescriptor,
   CommandList,
+  CompactionSummary,
   ContextKind,
   ContextResolution,
+  DiscardChangesResult,
+  McpConnectionState,
+  McpServerSummary,
+  McpStatus,
+  McpTransport,
   ModelCatalog,
   ModelCatalogEntry,
   ModelCost,
   ModelCredentialStatus,
+  PendingChange,
+  PendingChanges,
   PermissionDecision,
   PermissionMode,
   PermissionRule,
@@ -25,8 +35,10 @@ import type {
   PermissionState,
   PromptAttachment,
   ServerMessage,
+  SessionExport,
   SessionHeader,
   SessionHistory,
+  TranscriptFormat,
 } from "@arcturn/types";
 
 /** Result of validating a value against a wire-protocol type. */
@@ -58,6 +70,12 @@ const CLIENT_METHODS = [
   "permissionState",
   "setPermissionMode",
   "listCommands",
+  "compact",
+  "exportSession",
+  "mcpStatus",
+  "pendingChanges",
+  "applyChanges",
+  "discardChanges",
 ] as const;
 
 const SERVER_KINDS = ["response", "event", "sessions"] as const;
@@ -302,6 +320,94 @@ export function validateClientRequest(value: unknown): ClientRequestValidation {
       // user's home, both properties of the server, not of a conversation.
       return ok<ClientRequest>({ id, method: "listCommands" });
     }
+    case "compact": {
+      if (!isRecord(params)) return fail('compact requires an object "params"');
+      if (!isString(params.sessionId)) return fail("compact params.sessionId must be a string");
+      return ok<ClientRequest>({ id, method: "compact", params: { sessionId: params.sessionId } });
+    }
+    case "exportSession": {
+      if (!isRecord(params)) return fail('exportSession requires an object "params"');
+      if (!isString(params.sessionId)) {
+        return fail("exportSession params.sessionId must be a string");
+      }
+      if (
+        params.format !== undefined &&
+        (!isString(params.format) ||
+          !(TRANSCRIPT_FORMATS as readonly string[]).includes(params.format))
+      ) {
+        return fail('exportSession params.format must be one of "markdown" | "html"');
+      }
+      if (params.includeThinking !== undefined && typeof params.includeThinking !== "boolean") {
+        return fail("exportSession params.includeThinking must be a boolean when present");
+      }
+      // Both optional fields are copied only when present rather than
+      // defaulted here: the engine owns the defaults (they are the terminal's
+      // `/export` defaults), and a validator that filled them in would be a
+      // second place those two answers live.
+      const format = params.format as TranscriptFormat | undefined;
+      const includeThinking = params.includeThinking;
+      return ok<ClientRequest>({
+        id,
+        method: "exportSession",
+        params: {
+          sessionId: params.sessionId,
+          ...(format === undefined ? {} : { format }),
+          ...(includeThinking === undefined ? {} : { includeThinking }),
+        },
+      });
+    }
+    case "mcpStatus": {
+      // No params: MCP servers are a property of the server process, not of a
+      // conversation — the same shape `listModels` has.
+      return ok<ClientRequest>({ id, method: "mcpStatus" });
+    }
+    case "pendingChanges": {
+      if (!isRecord(params)) return fail('pendingChanges requires an object "params"');
+      if (!isString(params.sessionId)) {
+        return fail("pendingChanges params.sessionId must be a string");
+      }
+      if (params.path !== undefined) {
+        if (!isString(params.path)) {
+          return fail("pendingChanges params.path must be a string when present");
+        }
+        if (params.path.length > MAX_PENDING_CHANGE_PATH_LENGTH) {
+          return fail(
+            `pendingChanges params.path must be at most ${String(MAX_PENDING_CHANGE_PATH_LENGTH)} characters`,
+          );
+        }
+      }
+      const path = params.path;
+      return ok<ClientRequest>({
+        id,
+        method: "pendingChanges",
+        params:
+          path === undefined
+            ? { sessionId: params.sessionId }
+            : { sessionId: params.sessionId, path },
+      });
+    }
+    case "applyChanges":
+    case "discardChanges": {
+      // One branch for two verbs because they take the same params, and
+      // because a subset selection that validated differently on the way in
+      // depending on which of the two it was is exactly how "apply these four"
+      // and "discard these four" come to mean different sets of four.
+      const verb = method as "applyChanges" | "discardChanges";
+      if (!isRecord(params)) return fail(`${verb} requires an object "params"`);
+      if (!isString(params.sessionId)) {
+        return fail(`${verb} params.sessionId must be a string`);
+      }
+      const paths = validateChangePaths(verb, params.paths);
+      if (!paths.ok) return fail(paths.error);
+      return ok<ClientRequest>({
+        id,
+        method: verb,
+        params:
+          paths.value === undefined
+            ? { sessionId: params.sessionId }
+            : { sessionId: params.sessionId, paths: paths.value },
+      });
+    }
     default:
       return exhaustiveCheck(method as never, `Unknown method: "${method}"`);
   }
@@ -411,6 +517,79 @@ export const MAX_PROMPT_ATTACHMENTS = 64;
  * had any reason to.
  */
 export const MAX_CONTEXT_QUERY_LENGTH = 4096;
+
+/**
+ * Ceiling on an MCP server's name on the wire.
+ *
+ * The name is a key in a JSON file a person wrote, so 200 is generous rather
+ * than restrictive — the same ceiling the VS Code panel puts on a model id,
+ * and for the same reason: the value lands in a menu row and in a log line,
+ * and neither wants an unbounded string.
+ */
+export const MAX_MCP_SERVER_NAME_LENGTH = 200;
+
+/**
+ * Ceiling on one pending-change path on the wire.
+ *
+ * The same 4096 {@link MAX_CONTEXT_QUERY_LENGTH} uses, and for the same
+ * reason: it is a path, and it arrives from a client this server has no reason
+ * to trust with an unbounded string it would then normalize and compare.
+ */
+export const MAX_PENDING_CHANGE_PATH_LENGTH = 4096;
+
+/**
+ * Ceiling on how many paths one `applyChanges`/`discardChanges` may name.
+ *
+ * Matches {@link PENDING_CHANGES_MAX_FILES} in `@arcturn/server`, which is the
+ * most rows `pendingChanges` will ever list — a client can select every file
+ * it was shown and no more. Bounded at all because the selection is walked
+ * against the pending set before anything is written, and an unbounded array
+ * is work a token holder could ask for by sending one frame.
+ */
+export const MAX_CHANGE_SELECTION = 1000;
+
+/**
+ * Validate the optional `paths` selection shared by `applyChanges` and
+ * `discardChanges`.
+ *
+ * `undefined` (the field omitted) means "everything" and is a legal answer;
+ * an **empty array** is not, and is refused rather than read as "everything".
+ * A client that computed an empty selection and got the whole shadow tree
+ * applied — or discarded — would have the worst possible version of this bug,
+ * and the two spellings are only one character apart at the call site.
+ */
+function validateChangePaths(
+  method: string,
+  value: unknown,
+): ValidationResult<string[] | undefined> {
+  if (value === undefined) return { ok: true, value: undefined };
+  if (!Array.isArray(value)) {
+    return fail(`${method} params.paths must be an array of strings when present`);
+  }
+  if (value.length === 0) {
+    return fail(
+      `${method} params.paths must not be empty: omit the field to mean every pending change, ` +
+        "rather than sending an empty selection that would silently mean the same thing",
+    );
+  }
+  if (value.length > MAX_CHANGE_SELECTION) {
+    return fail(`${method} params.paths must hold at most ${String(MAX_CHANGE_SELECTION)} items`);
+  }
+  const paths: string[] = [];
+  for (let i = 0; i < value.length; i++) {
+    const entry: unknown = value[i];
+    if (!isString(entry) || entry === "") {
+      return fail(`${method} params.paths[${String(i)}] must be a non-empty string`);
+    }
+    if (entry.length > MAX_PENDING_CHANGE_PATH_LENGTH) {
+      return fail(
+        `${method} params.paths[${String(i)}] must be at most ${String(MAX_PENDING_CHANGE_PATH_LENGTH)} characters`,
+      );
+    }
+    paths.push(entry);
+  }
+  return { ok: true, value: paths };
+}
 
 /**
  * Image media types an `image` attachment may declare inline.
@@ -860,6 +1039,339 @@ export function validateCommandList(value: unknown): ValidationResult<CommandLis
   return { ok: true, value: { commands } };
 }
 
+/** The two documents `exportSession` renders. Mirrors {@link TranscriptFormat}. */
+const TRANSCRIPT_FORMATS = ["markdown", "html"] as const;
+
+/**
+ * Validate a `compact` result.
+ *
+ * Run at both ends, like {@link validateModelCatalog}. Two cross-field lies
+ * are refused here rather than in a client that would render them as fact:
+ * a negative token count (there is no such conversation), and a `reason` on a
+ * compaction that says it succeeded — the field exists to explain why nothing
+ * happened, and one attached to `compacted: true` is a payload a client would
+ * render as "compacted, but…" over a compaction that worked.
+ */
+export function validateCompactionSummary(value: unknown): ValidationResult<CompactionSummary> {
+  if (!isRecord(value)) return fail("CompactionSummary must be an object");
+  if (!isString(value.sessionId)) return fail("CompactionSummary.sessionId must be a string");
+  if (typeof value.compacted !== "boolean") {
+    return fail("CompactionSummary.compacted must be a boolean");
+  }
+  if (!isNumber(value.tokensBefore) || value.tokensBefore < 0) {
+    return fail("CompactionSummary.tokensBefore must be a non-negative number");
+  }
+  if (!isNumber(value.tokensAfter) || value.tokensAfter < 0) {
+    return fail("CompactionSummary.tokensAfter must be a non-negative number");
+  }
+  if (value.reason !== undefined && !isString(value.reason)) {
+    return fail("CompactionSummary.reason must be a string when present");
+  }
+  if (value.compacted && value.reason !== undefined) {
+    return fail("CompactionSummary.reason must be absent when compacted is true");
+  }
+  return {
+    ok: true,
+    value: {
+      sessionId: value.sessionId,
+      compacted: value.compacted,
+      tokensBefore: value.tokensBefore,
+      tokensAfter: value.tokensAfter,
+      ...(value.reason === undefined ? {} : { reason: value.reason }),
+    },
+  };
+}
+
+/**
+ * Validate an `exportSession` result.
+ *
+ * The cross-field check is {@link validateSessionHistory}'s, for the same
+ * reason: a payload claiming nothing was dropped while reporting a count is
+ * one a client would render one of two contradictory ways, and neither is safe
+ * to guess. `filename` is checked to be a **name** rather than a path —
+ * nothing this engine sends may steer a client's save dialog into a directory
+ * the person did not choose, and a `..` in a suggested filename is the classic
+ * way that is attempted.
+ */
+export function validateSessionExport(value: unknown): ValidationResult<SessionExport> {
+  if (!isRecord(value)) return fail("SessionExport must be an object");
+  if (!isString(value.sessionId)) return fail("SessionExport.sessionId must be a string");
+  if (
+    !isString(value.format) ||
+    !(TRANSCRIPT_FORMATS as readonly string[]).includes(value.format)
+  ) {
+    return fail('SessionExport.format must be one of "markdown" | "html"');
+  }
+  if (!isString(value.filename) || value.filename === "") {
+    return fail("SessionExport.filename must be a non-empty string");
+  }
+  if (/[\\/]/.test(value.filename) || value.filename.includes("..")) {
+    return fail("SessionExport.filename must be a bare filename, not a path");
+  }
+  if (!isString(value.content)) return fail("SessionExport.content must be a string");
+  if (!isNumber(value.messageCount) || value.messageCount < 0) {
+    return fail("SessionExport.messageCount must be a non-negative number");
+  }
+  if (typeof value.truncated !== "boolean") {
+    return fail("SessionExport.truncated must be a boolean");
+  }
+  if (!isNumber(value.droppedMessages) || value.droppedMessages < 0) {
+    return fail("SessionExport.droppedMessages must be a non-negative number");
+  }
+  if (!value.truncated && value.droppedMessages !== 0) {
+    return fail("SessionExport.droppedMessages must be 0 when truncated is false");
+  }
+  return {
+    ok: true,
+    value: {
+      sessionId: value.sessionId,
+      format: value.format as TranscriptFormat,
+      filename: value.filename,
+      content: value.content,
+      messageCount: value.messageCount,
+      truncated: value.truncated,
+      droppedMessages: value.droppedMessages,
+    },
+  };
+}
+
+const MCP_TRANSPORTS = ["stdio", "http"] as const;
+const MCP_STATES = ["disconnected", "connecting", "connected", "failed"] as const;
+
+/**
+ * Validate one {@link McpServerSummary}.
+ *
+ * This is the validator whose *omissions* are the feature. Four fields are
+ * copied out by name and nothing else is; two of them are closed enumerations
+ * checked against a literal list. So a `url`, a `command`, an `env`, a set of
+ * headers or an OAuth token cannot reach a client even if a host's projection
+ * grew careless, because there is no branch here that copies an unknown key.
+ * That is `validatePermissionState`'s argument about `tools` carrying names
+ * and only names, applied to the payload with the most to leak.
+ *
+ * `name` is bounded and refused if it carries a control character: it is the
+ * one free string here, it lands in a menu and in a log line, and a newline in
+ * it would forge a second line in both.
+ */
+export function validateMcpServerSummary(value: unknown): ValidationResult<McpServerSummary> {
+  if (!isRecord(value)) return fail("McpServerSummary must be an object");
+  if (!isString(value.name) || value.name === "") {
+    return fail("McpServerSummary.name must be a non-empty string");
+  }
+  if (value.name.length > MAX_MCP_SERVER_NAME_LENGTH) {
+    return fail(
+      `McpServerSummary.name must be at most ${String(MAX_MCP_SERVER_NAME_LENGTH)} characters`,
+    );
+  }
+  if (hasControlCharacter(value.name)) {
+    return fail("McpServerSummary.name must not contain control characters");
+  }
+  if (
+    !isString(value.transport) ||
+    !(MCP_TRANSPORTS as readonly string[]).includes(value.transport)
+  ) {
+    return fail('McpServerSummary.transport must be one of "stdio" | "http"');
+  }
+  if (!isString(value.state) || !(MCP_STATES as readonly string[]).includes(value.state)) {
+    return fail(
+      'McpServerSummary.state must be one of "disconnected" | "connecting" | "connected" | "failed"',
+    );
+  }
+  if (value.toolCount !== undefined) {
+    if (!isNumber(value.toolCount) || value.toolCount < 0 || !Number.isInteger(value.toolCount)) {
+      return fail("McpServerSummary.toolCount must be a non-negative integer when present");
+    }
+    if (value.state !== "connected") {
+      // A count for a server that is not connected is a number nobody can
+      // source: the manager only records one once a bridge has listed tools.
+      return fail('McpServerSummary.toolCount must be absent unless state is "connected"');
+    }
+  }
+  return {
+    ok: true,
+    value: {
+      name: value.name,
+      transport: value.transport as McpTransport,
+      state: value.state as McpConnectionState,
+      ...(value.toolCount === undefined ? {} : { toolCount: value.toolCount }),
+    },
+  };
+}
+
+/**
+ * Validate an `mcpStatus` result.
+ *
+ * The server answers `{ servers: [...] }`; a bare array is also accepted, the
+ * same latitude {@link validateModelCatalog} and {@link validateCommandList}
+ * give a leaner server variant.
+ */
+export function validateMcpStatus(value: unknown): ValidationResult<McpStatus> {
+  const raw = Array.isArray(value) ? value : isRecord(value) ? value.servers : undefined;
+  if (!Array.isArray(raw)) {
+    return fail('McpStatus must be an array of servers or an object with a "servers" array');
+  }
+  const servers: McpServerSummary[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const result = validateMcpServerSummary(raw[i]);
+    if (!result.ok) return fail(`servers[${i}] invalid: ${result.error}`);
+    servers.push(result.value);
+  }
+  return { ok: true, value: { servers } };
+}
+
+const PENDING_CHANGE_KINDS = ["added", "modified"] as const;
+
+/**
+ * Validate one {@link PendingChange}.
+ *
+ * Copied field by field, like every other result validator here, and with one
+ * field this file cares about more than the rest: `after` is the content a
+ * client will render as *the change* and, on the other side of the wire, the
+ * content the engine will write over somebody's file. Rebuilding rather than
+ * spreading is what keeps anything the host happened to hang off its own
+ * change object — a shadow path, an absolute temp file — from riding along.
+ */
+export function validatePendingChange(value: unknown): ValidationResult<PendingChange> {
+  if (!isRecord(value)) return fail("PendingChange must be an object");
+  if (!isString(value.path) || value.path === "") {
+    return fail("PendingChange.path must be a non-empty string");
+  }
+  if (!isString(value.absolutePath) || value.absolutePath === "") {
+    return fail("PendingChange.absolutePath must be a non-empty string");
+  }
+  if (!isString(value.kind) || !(PENDING_CHANGE_KINDS as readonly string[]).includes(value.kind)) {
+    return fail('PendingChange.kind must be one of "added" | "modified"');
+  }
+  if (!isNumber(value.bytes) || value.bytes < 0) {
+    return fail("PendingChange.bytes must be a non-negative number");
+  }
+  if (!isNumber(value.previousBytes) || value.previousBytes < 0) {
+    return fail("PendingChange.previousBytes must be a non-negative number");
+  }
+  if (value.after !== undefined && !isString(value.after)) {
+    return fail("PendingChange.after must be a string when present");
+  }
+  if (value.contentOmitted !== undefined && typeof value.contentOmitted !== "boolean") {
+    return fail("PendingChange.contentOmitted must be a boolean when present");
+  }
+  const change: PendingChange = {
+    path: value.path,
+    absolutePath: value.absolutePath,
+    kind: value.kind as PendingChange["kind"],
+    bytes: value.bytes,
+    previousBytes: value.previousBytes,
+    ...(value.after === undefined ? {} : { after: value.after }),
+    ...(value.contentOmitted === true ? { contentOmitted: true } : {}),
+  };
+  return { ok: true, value: change };
+}
+
+/**
+ * Validate a `pendingChanges` result.
+ *
+ * `dryRun` is required rather than defaulted, deliberately. A missing flag
+ * defaulted to `false` would make a real dry-run session look like an ordinary
+ * one; defaulted to `true` it would make an ordinary session look like it was
+ * holding changes back. Neither guess is safe, so a payload without it is not
+ * a payload.
+ */
+export function validatePendingChanges(value: unknown): ValidationResult<PendingChanges> {
+  if (!isRecord(value)) return fail("PendingChanges must be an object");
+  if (!isString(value.sessionId)) return fail("PendingChanges.sessionId must be a string");
+  if (typeof value.dryRun !== "boolean") return fail("PendingChanges.dryRun must be a boolean");
+  if (typeof value.truncated !== "boolean") {
+    return fail("PendingChanges.truncated must be a boolean");
+  }
+  if (!isNumber(value.droppedChanges) || value.droppedChanges < 0) {
+    return fail("PendingChanges.droppedChanges must be a non-negative number");
+  }
+  if (!Array.isArray(value.changes)) return fail("PendingChanges.changes must be an array");
+  const changes: PendingChange[] = [];
+  for (let i = 0; i < value.changes.length; i++) {
+    const result = validatePendingChange(value.changes[i]);
+    if (!result.ok) return fail(`PendingChanges.changes[${String(i)}] invalid: ${result.error}`);
+    changes.push(result.value);
+  }
+  return {
+    ok: true,
+    value: {
+      sessionId: value.sessionId,
+      dryRun: value.dryRun,
+      changes,
+      truncated: value.truncated,
+      droppedChanges: value.droppedChanges,
+    },
+  };
+}
+
+/** Validate an `applyChanges` result. */
+export function validateApplyChangesResult(value: unknown): ValidationResult<ApplyChangesResult> {
+  if (!isRecord(value)) return fail("ApplyChangesResult must be an object");
+  if (!isString(value.sessionId)) return fail("ApplyChangesResult.sessionId must be a string");
+  const applied = stringList("ApplyChangesResult.applied", value.applied);
+  if (!applied.ok) return fail(applied.error);
+  if (!Array.isArray(value.failed)) return fail("ApplyChangesResult.failed must be an array");
+  const failed: ApplyChangeFailure[] = [];
+  for (let i = 0; i < value.failed.length; i++) {
+    const entry: unknown = value.failed[i];
+    if (!isRecord(entry)) return fail(`ApplyChangesResult.failed[${String(i)}] must be an object`);
+    if (!isString(entry.path) || entry.path === "") {
+      return fail(`ApplyChangesResult.failed[${String(i)}].path must be a non-empty string`);
+    }
+    if (!isString(entry.message)) {
+      return fail(`ApplyChangesResult.failed[${String(i)}].message must be a string`);
+    }
+    failed.push({ path: entry.path, message: entry.message });
+  }
+  if (!isNumber(value.remaining) || value.remaining < 0) {
+    return fail("ApplyChangesResult.remaining must be a non-negative number");
+  }
+  return {
+    ok: true,
+    value: {
+      sessionId: value.sessionId,
+      applied: applied.value,
+      failed,
+      remaining: value.remaining,
+    },
+  };
+}
+
+/** Validate a `discardChanges` result. */
+export function validateDiscardChangesResult(
+  value: unknown,
+): ValidationResult<DiscardChangesResult> {
+  if (!isRecord(value)) return fail("DiscardChangesResult must be an object");
+  if (!isString(value.sessionId)) return fail("DiscardChangesResult.sessionId must be a string");
+  const discarded = stringList("DiscardChangesResult.discarded", value.discarded);
+  if (!discarded.ok) return fail(discarded.error);
+  if (!isNumber(value.remaining) || value.remaining < 0) {
+    return fail("DiscardChangesResult.remaining must be a non-negative number");
+  }
+  return {
+    ok: true,
+    value: {
+      sessionId: value.sessionId,
+      discarded: discarded.value,
+      remaining: value.remaining,
+    },
+  };
+}
+
+/** An array of non-empty strings, rebuilt element by element. */
+function stringList(label: string, value: unknown): ValidationResult<string[]> {
+  if (!Array.isArray(value)) return fail(`${label} must be an array`);
+  const out: string[] = [];
+  for (let i = 0; i < value.length; i++) {
+    const entry: unknown = value[i];
+    if (!isString(entry) || entry === "") {
+      return fail(`${label}[${String(i)}] must be a non-empty string`);
+    }
+    out.push(entry);
+  }
+  return { ok: true, value: out };
+}
+
 // ---------------------------------------------------------------------------
 // Primitive helpers
 // ---------------------------------------------------------------------------
@@ -870,6 +1382,22 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isString(value: unknown): value is string {
   return typeof value === "string";
+}
+
+/**
+ * Whether a string carries a control character.
+ *
+ * Checked by code point rather than by a regex, because a regex holding
+ * control characters is itself the thing linters warn about. Applied to the
+ * few wire strings that reach a rendered surface verbatim — an MCP server's
+ * name is one — where a newline would forge a second menu row or log line.
+ */
+function hasControlCharacter(text: string): boolean {
+  for (let index = 0; index < text.length; index += 1) {
+    const code = text.charCodeAt(index);
+    if (code < 0x20 || code === 0x7f) return true;
+  }
+  return false;
 }
 
 function isNumber(value: unknown): value is number {

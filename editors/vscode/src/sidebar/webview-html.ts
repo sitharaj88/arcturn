@@ -180,6 +180,20 @@ export function renderSidebarHtml(options: SidebarHtmlOptions): string {
       <span id="permission-text"></span>
     </div>
 
+    <section id="dryrun" class="dryrun hidden" aria-label="Pending dry-run changes">
+      <div class="dryrun-head" role="status" aria-live="polite">
+        <span id="dryrun-icon"></span>
+        <span id="dryrun-text" class="dryrun-text"></span>
+      </div>
+      <div id="dryrun-files" class="dryrun-files" role="list"></div>
+      <p id="dryrun-note" class="dryrun-note hidden" role="status" aria-live="polite"></p>
+      <div class="dryrun-actions">
+        <button id="dryrun-review" class="dryrun-button" type="button">Review</button>
+        <button id="dryrun-apply" class="dryrun-button dryrun-primary" type="button">Apply</button>
+        <button id="dryrun-discard" class="dryrun-button dryrun-danger" type="button">Discard</button>
+      </div>
+    </section>
+
     <div class="composer">
       <div id="chips" class="chips hidden" role="list" aria-label="Attached context"></div>
       <div id="grow" class="grow" data-value="">

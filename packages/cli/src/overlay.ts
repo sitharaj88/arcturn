@@ -34,7 +34,7 @@ import type { Dirent } from "node:fs";
 import { mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { resolvePath } from "@arcturn/tools";
-import type { Tool, ToolExecutionContext } from "@arcturn/types";
+import type { PermissionRequest, Tool, ToolExecutionContext } from "@arcturn/types";
 
 /** One workspace file whose shadow copy differs from the real file. */
 export interface OverlayChange {
@@ -123,7 +123,7 @@ export interface Overlay {
   diff(): Promise<string>;
 
   /**
-   * Write every pending change back over the real workspace files.
+   * Write pending changes back over the real workspace files.
    *
    * Each file is written via a temp file + rename in the destination
    * directory, so an interrupted apply can never leave a half-written file.
@@ -131,11 +131,35 @@ export interface Overlay {
    *
    * The shadow tree is left in place; a caller that wants the overlay emptied
    * calls {@link Overlay.discard} afterwards.
+   *
+   * @param paths - Absolute real paths to land, a subset of what
+   *   {@link Overlay.changes} reported. Omit for every pending change, which
+   *   is what the terminal's `/apply` does. A path that is not pending is
+   *   simply not in `changes()` and so applies nothing — callers that need a
+   *   selection *validated* (the wire's `applyChanges` does) check it against
+   *   `changes()` themselves, where a wrong name can be named in the refusal.
+   *
+   *   Selective apply exists because a reviewer sitting in an editor wants to
+   *   land three files out of forty, and the alternative — a second applier
+   *   that knew how to write one file — would be a second place for the
+   *   symlink check below to be forgotten. This is one applier with a filter.
    */
-  apply(): Promise<OverlayApplyResult>;
+  apply(paths?: readonly string[]): Promise<OverlayApplyResult>;
 
-  /** Delete the whole shadow tree. Safe to call when it does not exist. */
-  discard(): Promise<void>;
+  /**
+   * Throw pending changes away.
+   *
+   * @param paths - Absolute real paths to forget, a subset of what
+   *   {@link Overlay.changes} reported. Omit to delete the **whole** shadow
+   *   tree, which is what the terminal's `/discard` does and is safe to call
+   *   when there is no tree.
+   *
+   *   Given a subset, only those files' shadow copies are removed; the tree
+   *   and every other pending change survive. A path whose shadow copy is not
+   *   there is a no-op rather than an error — discard is idempotent, and a
+   *   caller retrying after a partial failure must not be handed one.
+   */
+  discard(paths?: readonly string[]): Promise<void>;
 }
 
 /** Per-file cap on {@link Overlay.diff} body lines, before the truncation marker. */
@@ -435,8 +459,8 @@ class ShadowOverlay implements Overlay {
       .join("\n");
   }
 
-  async apply(): Promise<OverlayApplyResult> {
-    const changes = await this.changes();
+  async apply(paths?: readonly string[]): Promise<OverlayApplyResult> {
+    const changes = await this.#selected(paths);
     const applied: string[] = [];
     const errors: OverlayApplyError[] = [];
     for (const change of changes) {
@@ -459,6 +483,24 @@ class ShadowOverlay implements Overlay {
       }
     }
     return { applied, errors };
+  }
+
+  /**
+   * The pending changes a caller asked for, in {@link Overlay.changes} order.
+   *
+   * Filtered from `changes()` rather than reconstructed from the paths: the
+   * change record carries the content to write and the `kind` the caller was
+   * shown, and building one from a path alone would mean re-reading the shadow
+   * tree with slightly different rules than the listing used.
+   *
+   * Paths are compared after `resolve`, so a caller that spells one
+   * differently than the listing did still selects it.
+   */
+  async #selected(paths: readonly string[] | undefined): Promise<OverlayChange[]> {
+    const changes = await this.changes();
+    if (paths === undefined) return changes;
+    const wanted = new Set(paths.map((path) => resolve(path)));
+    return changes.filter((change) => wanted.has(resolve(change.path)));
   }
 
   /**
@@ -489,8 +531,20 @@ class ShadowOverlay implements Overlay {
     }
   }
 
-  async discard(): Promise<void> {
-    await rm(this.dir, { recursive: true, force: true });
+  async discard(paths?: readonly string[]): Promise<void> {
+    if (paths === undefined) {
+      await rm(this.dir, { recursive: true, force: true });
+      return;
+    }
+    for (const path of paths) {
+      const shadow = this.redirect(resolve(path));
+      // Not sheltered: `redirect` hands back the argument, and removing THAT
+      // would delete a real workspace file in the name of discarding a
+      // pending change. There is no shadow copy of an unsheltered path, so
+      // there is nothing here to discard.
+      if (shadow === resolve(path)) continue;
+      await rm(shadow, { force: true });
+    }
   }
 }
 
@@ -504,6 +558,81 @@ class ShadowOverlay implements Overlay {
  */
 export function createOverlay(options: CreateOverlayOptions): Overlay {
   return new ShadowOverlay(options);
+}
+
+/**
+ * Put a redirected tool call's permission ask back in the workspace's terms.
+ *
+ * ## What this is not fixing
+ *
+ * Not rule enforcement. `loop.ts` checks permissions against the tool call's
+ * **raw** `path` — before this wrapper redirects anything — so a rule a person
+ * wrote about their workspace is matched against their workspace, and a denied
+ * write never reaches `execute` and never becomes a pending change. That order
+ * is what makes dry run safe, and it is asserted in `dry-run-wire.test.ts`.
+ *
+ * ## What it is fixing
+ *
+ * The **second** ask, the one the tool makes for itself. `write` calls
+ * `ctx.requestPermission` with `subject: absolutePath` built from the path it
+ * was handed — which, inside a dry run, is the shadow copy. `requesterFor`
+ * runs that as a full check of its own, so under `default` mode the user is
+ * shown a prompt reading
+ *
+ * ```text
+ * Overwrite file /Users/…/.arcturn/overlays/01H…/src/app.ts
+ * ```
+ *
+ * about a file they have never heard of, and the "always allow" it offers
+ * carries `suggestedRule.specifier` of `…/overlays/01H…/src/**` — a rule
+ * scoped to a directory that `/discard` deletes and that no later session will
+ * ever have again. Persist it and you have been told you granted something you
+ * did not grant.
+ *
+ * So the ask is translated on its way to the engine: the subject is mapped
+ * from the shadow root back to the workspace root, and the description and the
+ * suggested specifier get the same substitution, so what a person reads and
+ * what they might keep are both about the real file. Nothing else changes —
+ * the *write* still goes to the shadow copy, which is the whole point.
+ *
+ * @param overlay - Supplies the two roots the mapping is between.
+ * @param request - The ask exactly as the tool built it.
+ */
+function unshadowRequest(
+  overlay: Overlay,
+  request: Omit<PermissionRequest, "id">,
+): Omit<PermissionRequest, "id"> {
+  const swap = (text: string): string =>
+    text.startsWith(overlay.dir + sep)
+      ? join(overlay.cwd, text.slice(overlay.dir.length + 1))
+      : // Not a bare prefix test: a description embeds the path mid-sentence,
+        // and a suggested specifier embeds it followed by a glob. The shadow
+        // root is `<home>/overlays/<sessionId>`, so a coincidental occurrence
+        // of it in prose is not a thing that happens.
+        text.split(overlay.dir + sep).join(overlay.cwd + sep);
+  const suggested = request.suggestedRule;
+  return {
+    ...request,
+    subject: swap(request.subject),
+    description: swap(request.description),
+    ...(suggested?.specifier === undefined
+      ? {}
+      : { suggestedRule: { ...suggested, specifier: swap(suggested.specifier) } }),
+  };
+}
+
+/**
+ * A context whose permission asks are stated about the real workspace file.
+ *
+ * Spread rather than mutated: the caller's context is shared with every other
+ * wrapper in the stack, and swapping a function on it would change what those
+ * see too.
+ */
+function workspaceScoped(ctx: ToolExecutionContext, overlay: Overlay): ToolExecutionContext {
+  return {
+    ...ctx,
+    requestPermission: (request) => ctx.requestPermission(unshadowRequest(overlay, request)),
+  };
 }
 
 /** Tools whose `path` input is rewritten to the shadow copy. */
@@ -573,7 +702,10 @@ export function wrapToolsWithOverlay(tools: readonly Tool[], overlay: Overlay): 
           return tool.execute(input, ctx); // Nothing pending: read the real file.
         }
 
-        return tool.execute({ ...input, path: shadowPath }, ctx);
+        // The write goes to the shadow copy; the permission ask is still about
+        // the real file. See `unshadowRequest` — a deny rule a person wrote
+        // about their workspace must not stop applying because dry run is on.
+        return tool.execute({ ...input, path: shadowPath }, workspaceScoped(ctx, overlay));
       },
     } satisfies Tool;
   });

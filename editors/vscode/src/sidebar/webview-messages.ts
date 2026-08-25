@@ -17,16 +17,19 @@
  * RFC 0004 §0 freezes what a client may drive: `prompt`, `steer`, `abort`,
  * `setModel`, `respondToPermission`, `listModels`, `listSessions`,
  * `createSession`, `openSession`, `sessionHistory`, `deleteSession`,
- * `resolveContext`, `permissionState`, `setPermissionMode`, `listCommands`.
+ * `resolveContext`, `permissionState`, `setPermissionMode`, `listCommands`,
+ * `pendingChanges`, `applyChanges`, `discardChanges`.
  * Every message in the webview→host union
  * below lands on exactly one of those, on a VS Code command the extension
  * already contributes, or on nothing at all (`toggle` is view state; `copy` is
  * the clipboard; `browseForFiles` is a native dialog). No message here invents
  * a verb — the last seven on that list were added to the *engine* first,
  * exactly as §0 prescribes, which is why `deleteSession` below is a wire verb
- * this file forwards rather than an extension-side `fs.unlink`, and why
+ * this file forwards rather than an extension-side `fs.unlink`, why
  * `setPermissionMode` is a wire verb rather than a mode the panel enforces on
- * its own. And `setModel` in
+ * its own, and why `applyChanges` is a wire verb rather than the extension
+ * copying a shadow file over a workspace file — an apply the extension
+ * performed would be an apply no permission engine and no symlink guard saw. And `setModel` in
  * particular is validated as a *string with a ceiling*, not against a
  * catalog: the catalog is the server's and the server validates the id, which
  * is where that check belongs and where `picker.ts`'s free-text row has always
@@ -45,13 +48,18 @@ import type {
   PermissionMode,
   SessionHeader,
 } from "../serve/engine.js";
-import { MAX_CONTEXT_QUERY_LENGTH, MAX_PROMPT_ATTACHMENTS } from "../serve/engine.js";
+import {
+  MAX_CHANGE_SELECTION,
+  MAX_CONTEXT_QUERY_LENGTH,
+  MAX_PROMPT_ATTACHMENTS,
+} from "../serve/engine.js";
 import type { ChatViewModel } from "./chat-state.js";
 import {
   CONNECTION_ACTIONS,
   type ConnectionAction,
   type ConnectionActionId,
 } from "./connection-card.js";
+import type { DryRunView } from "./dry-run.js";
 import { escapeCodicons } from "./picker.js";
 import type { CommandOption } from "./webview-commands.js";
 import type { ModelOption } from "./webview-models.js";
@@ -202,8 +210,22 @@ export function projectCommandOption(descriptor: CommandDescriptor): CommandOpti
   };
 }
 
-/** Commands the webview may ask the host to run. */
-export const WEBVIEW_COMMANDS = ["model", "sessions", "newSession"] as const;
+/**
+ * Commands the webview may ask the host to run.
+ *
+ * Each one is an id the host turns into a VS Code command it already
+ * contributes (see `SIDEBAR_COMMANDS` in `index.ts`) — never a string the page
+ * gets to choose, which is why this is a closed list and the validator below
+ * checks membership rather than shape.
+ *
+ * `cost` is here because `/cost` in the terminal opens a readout, and the
+ * panel already has one: `arcturn.showCost`, driven by the running totals
+ * `cost.ts` folds out of the `turnEnd` events this extension is already
+ * receiving. No verb was added for it and none should be — a `cost` verb would
+ * be a second source for numbers the panel already holds, which is exactly
+ * what `@arcturn/server`'s `built-in-commands.ts` refuses.
+ */
+export const WEBVIEW_COMMANDS = ["model", "sessions", "newSession", "cost"] as const;
 
 /** A command the webview may ask for. */
 export type WebviewCommand = (typeof WEBVIEW_COMMANDS)[number];
@@ -353,6 +375,17 @@ export type HostMessage =
     }
   /** What a `/` could invoke here, projected field by field. */
   | { type: "commands"; status: CommandListStatus; commands: CommandOption[] }
+  /**
+   * What a `--dry-run` session is holding back.
+   *
+   * A whole-view message rather than a count, for the reason `context` is a
+   * whole list rather than deltas: the host owns what the review card acts on,
+   * and a card that kept its own tally could offer to apply a set the engine
+   * no longer has. `status` carries the three different reasons there might be
+   * no card — not asked yet, this engine is not in dry-run mode, this engine
+   * has no such verb — because they are three different sentences.
+   */
+  | { type: "dryRun"; view: DryRunView }
   | {
       type: "session";
       sessionId?: string;
@@ -419,6 +452,39 @@ export type WebviewMessage =
   | { type: "setPermissionMode"; mode: PermissionMode }
   /** Ask for the `/` menu's contents. */
   | { type: "requestCommands" }
+  /** Ask what the dry run is holding back. Read-only; nothing is applied. */
+  | { type: "requestDryRun" }
+  /**
+   * Open the change for review.
+   *
+   * The host answers by opening **VS Code's own diff editor** — the workspace
+   * file against the pending content — not by rendering a patch in this page.
+   * That is the whole reason this loop belongs in an editor, and it is also
+   * why the page never receives the file's bytes: it has nothing to render.
+   *
+   * `path` names one change; omitted, the host opens the first one and, when
+   * there are several, offers the list.
+   */
+  | { type: "showDiff"; path?: string }
+  /**
+   * Land pending changes on the user's real files.
+   *
+   * The host asks the **engine** to write them — this extension never writes a
+   * workspace file itself (RFC 0004 §0), which is also the only version that
+   * inherits the engine's symlink refusal and its mid-run `sessionBusy`.
+   *
+   * `paths` selects a subset; omitted, everything the engine is holding.
+   */
+  | { type: "applyChanges"; paths?: string[] }
+  /**
+   * Throw pending changes away. **Irreversible.**
+   *
+   * The host confirms with a native modal naming the files before anything
+   * happens — `dialog.ts`'s discipline for `deleteSession`, applied to the
+   * other destructive control on this surface. A webview button is not a
+   * confirmation.
+   */
+  | { type: "discardChanges" }
   | { type: "copy"; text: string };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -531,6 +597,12 @@ export function parseWebviewMessage(value: unknown): WebviewMessage | undefined 
       return { type: "requestPermission" };
     case "requestCommands":
       return { type: "requestCommands" };
+    case "requestDryRun":
+      return { type: "requestDryRun" };
+    case "discardChanges":
+      // No payload: the *whole* pending set, which is what the card's Discard
+      // offers. The host names the files in a modal before anything happens.
+      return { type: "discardChanges" };
     case "browseForFiles":
       return { type: "browseForFiles" };
     case "setPermissionMode": {
@@ -646,6 +718,39 @@ export function parseWebviewMessage(value: unknown): WebviewMessage | undefined 
         paths.push(entry);
       }
       return { type: "attach", paths };
+    }
+    case "showDiff": {
+      // Optional, and rebuilt: an absent path means "open the review", a
+      // present one names a row. Bounded and control-character-free like every
+      // other path on this boundary, because it reaches a diff editor's tab
+      // title and the Output channel. Whether it names a pending change is the
+      // engine's answer to give, and `pendingChanges` gives it.
+      const raw = value.path;
+      if (raw === undefined) return { type: "showDiff" };
+      if (typeof raw !== "string") return undefined;
+      if (raw === "" || raw.length > MAX_CONTEXT_QUERY_LENGTH) return undefined;
+      if (hasControlCharacter(raw)) return undefined;
+      return { type: "showDiff", path: raw };
+    }
+    case "applyChanges": {
+      // The one message on this boundary that ends in somebody's files being
+      // written, so it is rebuilt element by element with a ceiling — and an
+      // **empty array is refused** rather than passed through, because on the
+      // wire an omitted selection means "everything" and an empty one would
+      // silently become the same request. The engine refuses it too; this
+      // stops it a round trip earlier and at the boundary that owns shape.
+      const raw = value.paths;
+      if (raw === undefined) return { type: "applyChanges" };
+      if (!Array.isArray(raw)) return undefined;
+      if (raw.length === 0 || raw.length > MAX_CHANGE_SELECTION) return undefined;
+      const paths: string[] = [];
+      for (const entry of raw) {
+        if (typeof entry !== "string") return undefined;
+        if (entry === "" || entry.length > MAX_CONTEXT_QUERY_LENGTH) return undefined;
+        if (hasControlCharacter(entry)) return undefined;
+        paths.push(entry);
+      }
+      return { type: "applyChanges", paths };
     }
     case "detach": {
       const raw = value.id;

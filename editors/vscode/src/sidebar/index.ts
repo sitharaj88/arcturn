@@ -42,6 +42,16 @@ import {
   describeSessionDeletion,
   permissionChoices,
 } from "./dialog.js";
+import {
+  confirmsDiscard,
+  DRY_RUN_SCHEME,
+  type DryRunView,
+  describeDiscard,
+  diffTitle,
+  type PendingChangeRow,
+  pendingDocumentPath,
+  toDryRunView,
+} from "./dry-run.js";
 import { createEngineSession, type EngineSession } from "./engine-session.js";
 import { describePermissionRequest } from "./permission-queue.js";
 import { escapeCodicons, modelPickItems } from "./picker.js";
@@ -59,6 +69,7 @@ import {
   projectModelOption,
   projectSessions,
   type SessionListStatus,
+  type WebviewCommand,
 } from "./webview-messages.js";
 import type { ModelOption } from "./webview-models.js";
 import type { SessionOption } from "./webview-sessions.js";
@@ -97,6 +108,9 @@ const MAX_INDEX_MATCHES = 400;
 /** Command ids this module registers. Builder A declares them in the manifest. */
 export const SIDEBAR_COMMANDS = {
   selectModel: "arcturn.selectModel",
+  showDiff: "arcturn.showDiff",
+  applyChanges: "arcturn.applyChanges",
+  discardChanges: "arcturn.discardChanges",
   showSessions: "arcturn.showSessions",
   newSession: "arcturn.newSession",
   abortRun: "arcturn.abortRun",
@@ -104,6 +118,30 @@ export const SIDEBAR_COMMANDS = {
   reconnect: "arcturn.reconnect",
   showLog: "arcturn.showLog",
 } as const;
+
+/**
+ * Which VS Code command each `WEBVIEW_COMMANDS` id runs.
+ *
+ * A **total** record rather than a chain of ternaries, and that is the point:
+ * `WEBVIEW_COMMANDS` grows when the engine grows a built-in the panel has a
+ * surface for, and a chain ending in an `else` would silently route the new id
+ * to whatever the last branch happened to be. Typed as
+ * `Record<WebviewCommand, …>`, an id with no entry does not compile.
+ *
+ * Every value is a command this module registers below, so a message from the
+ * page can only ever reach one of them — the page never names a VS Code
+ * command, it names one of four ids.
+ */
+const WEBVIEW_COMMAND_TARGETS: Record<WebviewCommand, string> = {
+  model: SIDEBAR_COMMANDS.selectModel,
+  sessions: SIDEBAR_COMMANDS.showSessions,
+  newSession: SIDEBAR_COMMANDS.newSession,
+  // `/cost` in the terminal prints a readout; here it opens the one the panel
+  // already has. No engine round trip: the figures come from the `turnEnd`
+  // events this extension folds in `cost.ts`, which is why RFC 0005's command
+  // list can offer `/cost` without the protocol growing a verb for it.
+  cost: SIDEBAR_COMMANDS.showCost,
+};
 
 /**
  * Wire up the native sidebar.
@@ -187,6 +225,18 @@ export function activateSidebar(
         case "requestCommands":
           void publishCommands();
           return;
+        case "requestDryRun":
+          void publishDryRun();
+          return;
+        case "showDiff":
+          void showDiff(message.path);
+          return;
+        case "applyChanges":
+          void applyChanges(message.paths);
+          return;
+        case "discardChanges":
+          void discardChanges();
+          return;
         case "abort":
           void withEngine((session) => session.controller?.abort());
           return;
@@ -197,13 +247,7 @@ export function activateSidebar(
           engine?.controller?.toggle(message.blockId);
           return;
         case "command":
-          void vscode.commands.executeCommand(
-            message.command === "model"
-              ? SIDEBAR_COMMANDS.selectModel
-              : message.command === "sessions"
-                ? SIDEBAR_COMMANDS.showSessions
-                : SIDEBAR_COMMANDS.newSession,
-          );
+          void vscode.commands.executeCommand(WEBVIEW_COMMAND_TARGETS[message.command]);
           return;
         case "requestModels":
           void publishModels();
@@ -707,6 +751,326 @@ export function activateSidebar(
     await publishCommands();
   }
 
+  /**
+   * What the dry run is holding back, cached for this session.
+   *
+   * The same shape the permission state has, and cleared on the same two
+   * events: a new connection may be a different engine (dry run on or off),
+   * and a new session is a new conversation whose pending set is not the last
+   * one's. A card carried across either would be offering to apply changes the
+   * engine is not holding.
+   */
+  let dryRun: DryRunView | undefined;
+  let dryRunInFlight: Promise<void> | undefined;
+
+  /**
+   * The pending content the diff editor is rendering, keyed by the engine's
+   * own path.
+   *
+   * Held here rather than fetched by the content provider, because a provider
+   * is called synchronously-ish on a URI VS Code decides to open (including on
+   * a window reload) and cannot itself do a protocol round trip with an engine
+   * that may be gone. So `showDiff` fetches first and opens second, and this is
+   * the handoff between the two.
+   *
+   * Cleared with the session for the reason the view is: content from one
+   * conversation's shadow tree is not the next one's.
+   */
+  const pendingContent = new Map<string, string>();
+
+  /**
+   * Serve the right-hand side of the diff.
+   *
+   * The extension reads nothing of the engine's — not the shadow file, not the
+   * overlay directory (RFC 0004 §0). What the editor renders is exactly the
+   * bytes `pendingChanges` put on the wire, which is also exactly the bytes
+   * `applyChanges` will write. A provider that read the shadow tree off disk
+   * would be a second source for the same content, and the first time they
+   * disagreed a reviewer would approve something they had not seen.
+   */
+  const dryRunContentChanged = new vscode.EventEmitter<vscode.Uri>();
+  const dryRunContentProvider: vscode.TextDocumentContentProvider = {
+    onDidChange: dryRunContentChanged.event,
+    provideTextDocumentContent(uri) {
+      return pendingContent.get(uri.query) ?? "";
+    },
+  };
+  disposables.push(
+    dryRunContentChanged,
+    vscode.workspace.registerTextDocumentContentProvider(DRY_RUN_SCHEME, dryRunContentProvider),
+  );
+
+  /** The virtual document holding one change's pending content. */
+  function pendingUri(row: PendingChangeRow): vscode.Uri {
+    return vscode.Uri.from({
+      scheme: DRY_RUN_SCHEME,
+      // The basename is the real file's, so the tab reads right and the
+      // language mode is the one the file would get. The engine's path is the
+      // query, which is what the provider keys on and what never shows in a tab.
+      path: pendingDocumentPath(row.path),
+      query: row.path,
+    });
+  }
+
+  /** Post the review card as it stands, fetching it first when it is not known. */
+  async function publishDryRun(note?: string): Promise<void> {
+    const view = dryRun ?? { status: "loading" as const, changes: [], truncated: false };
+    provider.postDryRun({ ...view, ...(note === undefined ? {} : { note }) });
+    if (view.status !== "loading") return;
+    if (engine === undefined || engine.status !== "ready") return;
+    dryRunInFlight ??= fetchDryRun().finally(() => {
+      dryRunInFlight = undefined;
+    });
+    await dryRunInFlight;
+  }
+
+  async function fetchDryRun(): Promise<void> {
+    try {
+      // `undefined` is an engine with no such verb — or no controller at all,
+      // which is the same outcome for this card and the same conflation
+      // `fetchPermission` makes: either way the panel does not know, so it
+      // offers no review affordance. `dryRun: false` is the third case, an
+      // engine that has the verb and is holding nothing back. `toDryRunView`
+      // is the one place all three are told apart, so the panel cannot show
+      // the reassuring story for one of the others.
+      dryRun = toDryRunView(await ensureEngine().controller?.pendingChanges());
+    } catch (error) {
+      log(
+        `sidebar: pending changes unavailable: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      dryRun = { status: "unavailable", changes: [], truncated: false };
+    }
+    await publishDryRun();
+  }
+
+  /** Forget the review card. A new engine, or a new session. */
+  function clearDryRun(): void {
+    dryRun = undefined;
+    pendingContent.clear();
+  }
+
+  /** The rows the card is currently showing, or `[]` when it is showing none. */
+  function pendingRows(): PendingChangeRow[] {
+    return dryRun?.status === "ready" ? dryRun.changes : [];
+  }
+
+  /**
+   * Open a pending change in **VS Code's own diff editor**.
+   *
+   * The left-hand side is the workspace file itself, not a snapshot the engine
+   * sent: `applyChanges` writes the pending content over the real file whole,
+   * and `bash` is unwrapped under dry run, so "what will this file become" is a
+   * question about the file as it stands right now. A `file:` URI answers it
+   * and keeps answering it while the editor is open.
+   *
+   * The right-hand side is the engine's own bytes, served read-only through
+   * {@link dryRunContentProvider}. Rendering a patch in the webview instead
+   * would throw away the one thing an editor brings to this loop.
+   *
+   * @param path - One change's path. Omitted with several pending, the user
+   *   picks; omitted with one, that one opens.
+   */
+  async function showDiff(path?: string): Promise<void> {
+    await withEngine(async (session) => {
+      const controller = session.controller;
+      if (controller === undefined) return;
+      // Refreshed first: a card the user has been looking at for ten minutes
+      // may be describing a change set the agent has since added to.
+      await refreshDryRun();
+      if (dryRun?.status === "off") {
+        void vscode.window.showInformationMessage(
+          "Arcturn is not running under --dry-run, so edits go straight to the workspace. There is nothing to review.",
+        );
+        return;
+      }
+      if (dryRun?.status === "unavailable") {
+        void vscode.window.showWarningMessage(
+          "This Arcturn engine is too old to review dry-run changes — upgrade the CLI.",
+        );
+        return;
+      }
+      const rows = pendingRows();
+      if (rows.length === 0) {
+        void vscode.window.showInformationMessage("Arcturn has no pending changes to review.");
+        return;
+      }
+      const chosen = await pickRow(rows, path);
+      if (chosen === undefined) return;
+
+      const detail = await controller.pendingChanges(chosen.path);
+      const change = detail?.changes[0];
+      if (change === undefined) {
+        void vscode.window.showWarningMessage(
+          `Arcturn is no longer holding a change for ${chosen.label}.`,
+        );
+        await refreshDryRun();
+        return;
+      }
+      if (change.contentOmitted === true || change.after === undefined) {
+        // Withheld rather than truncated by the engine, and repeated as
+        // withheld here: half a file in a diff editor is a false account of
+        // the change, and a reviewer would approve it.
+        void vscode.window.showWarningMessage(
+          `${chosen.label} is too large for Arcturn to send for review. Apply or discard it without a preview, or review it in a terminal with /diff.`,
+        );
+        return;
+      }
+      pendingContent.set(chosen.path, change.after);
+      const right = pendingUri(chosen);
+      // A `provideTextDocumentContent` result is cached per URI, so a second
+      // review of the same file after another turn would show the first
+      // answer without this.
+      dryRunContentChanged.fire(right);
+      await vscode.commands.executeCommand(
+        "vscode.diff",
+        chosen.kind === "added"
+          ? // Nothing to diff against: an added file's left-hand side is an
+            // empty document rather than a `file:` URI VS Code cannot open.
+            vscode.Uri.from({ scheme: DRY_RUN_SCHEME, path: "/(new file)", query: "" })
+          : vscode.Uri.file(chosen.absolutePath),
+        right,
+        diffTitle(chosen),
+        { preview: true },
+      );
+    });
+  }
+
+  /** Which change to open: the one named, the only one, or the one picked. */
+  async function pickRow(
+    rows: readonly PendingChangeRow[],
+    path: string | undefined,
+  ): Promise<PendingChangeRow | undefined> {
+    if (path !== undefined) return rows.find((row) => row.path === path);
+    if (rows.length === 1) return rows[0];
+    const picked = await vscode.window.showQuickPick(
+      rows.map((row) => ({ label: row.label, description: row.detail, row })),
+      { title: "Arcturn pending changes", placeHolder: "Review a pending change" },
+    );
+    return picked?.row;
+  }
+
+  /**
+   * Land pending changes on the user's real files.
+   *
+   * The **engine** writes them. This extension never copies a shadow file over
+   * a workspace file (RFC 0004 §0, and RFC 0005 §3's rule pointed the other
+   * way): an apply the extension performed is an apply that no permission
+   * engine, no workspace confinement and no symlink guard ever saw, and that
+   * is precisely the guarantee dry run exists to provide.
+   *
+   * No confirmation modal. Apply is the *safe* half of this pair — it does what
+   * the reviewer has just been reading, and it is undoable in the editor and in
+   * source control. The modal is on discard, where the work is gone.
+   *
+   * A per-file failure is reported and the rest still land, which is what
+   * `/apply` does in the terminal.
+   */
+  async function applyChanges(paths?: readonly string[]): Promise<void> {
+    await withEngine(async (session) => {
+      const controller = session.controller;
+      if (controller === undefined) return;
+      try {
+        const result = await controller.applyChanges(paths);
+        for (const failure of result.failed) {
+          log(`sidebar: could not apply ${failure.path}: ${failure.message}`);
+        }
+        if (result.failed.length > 0) {
+          void vscode.window.showWarningMessage(
+            `Arcturn applied ${String(result.applied.length)} file(s); ${String(result.failed.length)} failed and are still pending. ${escapeCodicons(result.failed[0]?.message ?? "")}`,
+          );
+        }
+        await refreshDryRun();
+      } catch (error) {
+        const note = dryRunRefusal(error, "apply");
+        log(`sidebar: could not apply pending changes: ${note}`);
+        await publishDryRun(note);
+      }
+    });
+  }
+
+  /**
+   * Throw pending changes away, after asking.
+   *
+   * Two things are deliberate, and both are `deleteSession`'s discipline
+   * applied to the other irreversible control on this surface. The
+   * confirmation is a **native modal naming the files**, not a webview button
+   * and not a toast: the shadow tree is the only copy of that work, and a
+   * stray click must not be able to lose an afternoon of it. And the deletion
+   * is the engine's `discardChanges` verb — the extension never unlinks
+   * anything, which is also the only version that can refuse mid-run.
+   */
+  async function discardChanges(): Promise<void> {
+    await withEngine(async (session) => {
+      const controller = session.controller;
+      if (controller === undefined) return;
+      // Refreshed first so the modal names what is actually pending now, not
+      // what the card was showing when the user last looked at it.
+      await refreshDryRun();
+      const rows = pendingRows();
+      if (rows.length === 0) {
+        void vscode.window.showInformationMessage("Arcturn has no pending changes to discard.");
+        return;
+      }
+      const prompt = describeDiscard(rows);
+      const choice = await vscode.window.showWarningMessage(
+        prompt.message,
+        { modal: true, detail: prompt.detail },
+        prompt.confirmLabel,
+      );
+      if (!confirmsDiscard(choice, prompt)) {
+        // The card was repainted by the refresh above; repaint it again so the
+        // buttons the page disabled on click come back.
+        await publishDryRun();
+        return;
+      }
+      try {
+        await controller.discardChanges();
+        await refreshDryRun();
+      } catch (error) {
+        const note = dryRunRefusal(error, "discard");
+        log(`sidebar: could not discard pending changes: ${note}`);
+        await publishDryRun(note);
+      }
+    });
+  }
+
+  /**
+   * Re-read the pending set and repaint, in one paint.
+   *
+   * Deliberately not `clearDryRun()` followed by `publishDryRun()`: that posts
+   * a `loading` view first, which the page renders as *no card*, so every
+   * Review click would blink the card out and back. The fetch publishes once,
+   * at the end, with the answer.
+   */
+  async function refreshDryRun(): Promise<void> {
+    pendingContent.clear();
+    if (engine === undefined || engine.status !== "ready") {
+      dryRun = undefined;
+      await publishDryRun();
+      return;
+    }
+    await fetchDryRun();
+  }
+
+  /**
+   * The failure the card prints, in words a user can act on.
+   *
+   * `sessionBusy` and "too old" are the two the engine raises by design and
+   * both are actionable; a dry-run-off refusal is the engine's own sentence
+   * and is quoted rather than paraphrased, because it is already the sentence
+   * the terminal prints.
+   */
+  function dryRunRefusal(error: unknown, verb: string): string {
+    if (isUnsupportedMethodError(error)) {
+      return `This engine is too old to ${verb} dry-run changes — upgrade the Arcturn CLI.`;
+    }
+    const reason = error instanceof Error ? error.message : String(error);
+    if (/sessionBusy/i.test(reason) || /running a turn/i.test(reason)) {
+      return `A run is in flight. Stop it, or wait for it to finish, and ${verb} then.`;
+    }
+    return `The engine refused: ${escapeCodicons(reason)}`;
+  }
+
   function configuredModel(): string | undefined {
     const value = vscode.workspace.getConfiguration("arcturn").get<string>("defaultModel");
     return value === undefined || value === "" ? undefined : value;
@@ -868,6 +1232,10 @@ export function activateSidebar(
       permission = undefined;
       permissionUnavailable = false;
       await publishPermission();
+      // The shadow tree is the engine's, not the session's, but the card is
+      // this panel's account of it and a stale one across a switch is a card
+      // describing a review the user is no longer in.
+      await refreshDryRun();
       await publishSessions();
     });
   }
@@ -948,6 +1316,7 @@ export function activateSidebar(
     permissionUnavailable = false;
     publishSession();
     await publishPermission();
+    await refreshDryRun();
     await publishSessions();
     await provider.reveal();
   }
@@ -978,6 +1347,13 @@ export function activateSidebar(
     });
   }
 
+  /**
+   * Whether the last chat state said a run was in flight.
+   *
+   * The edge, not the level: see `onChat` below.
+   */
+  let wasRunning = false;
+
   /** Build the engine session on first use. Spawns nothing by itself. */
   function ensureEngine(): EngineSession {
     if (engine !== undefined) return engine;
@@ -995,7 +1371,17 @@ export function activateSidebar(
       ...(port === undefined ? {} : { port }),
       ...(model === undefined || model === "" ? {} : { model }),
       host: {
-        onChat: (state) => states.push(state),
+        onChat: (state) => {
+          states.push(state);
+          // A turn that just ended is when a dry run's shadow tree changed.
+          // Without this the review card would only ever appear on a page
+          // load, which is the same as asking the user to remember to look —
+          // the one thing this surface exists not to do. Only on the
+          // *transition* out of a run: refreshing on every streamed delta
+          // would be a `pendingChanges` round trip per token.
+          if (wasRunning && !state.running) void refreshDryRun();
+          wasRunning = state.running;
+        },
         onCost: (cost) => {
           statusBar.update(cost);
           provider.postCost(costLabel(cost));
@@ -1018,6 +1404,10 @@ export function activateSidebar(
             commandsUnavailable = false;
             permission = undefined;
             permissionUnavailable = false;
+            // A new engine may not even be in dry-run mode, and a review card
+            // that survived the reconnect would be offering to apply changes
+            // this engine is not holding.
+            clearDryRun();
             // A path resolved against the last workspace means nothing in this
             // one, and a chip carried across a reconnect is a chip the engine
             // never agreed to.
@@ -1248,6 +1638,18 @@ export function activateSidebar(
         await switchModel(session, modelId.trim());
       }),
     ),
+    /**
+     * The palette's doors to the review loop.
+     *
+     * Three commands rather than one, and the same three the terminal has, so
+     * a person who knows `/diff`, `/apply` and `/discard` finds them where
+     * they look for everything else in this editor. Each runs the *same*
+     * function the panel's card runs — including the discard modal — because
+     * two implementations of a destructive action is one too many.
+     */
+    vscode.commands.registerCommand(SIDEBAR_COMMANDS.showDiff, () => showDiff()),
+    vscode.commands.registerCommand(SIDEBAR_COMMANDS.applyChanges, () => applyChanges()),
+    vscode.commands.registerCommand(SIDEBAR_COMMANDS.discardChanges, () => discardChanges()),
     vscode.commands.registerCommand(SIDEBAR_COMMANDS.showCost, async () => {
       const rows = costBreakdown(statusBar.state);
       await vscode.window.showQuickPick(

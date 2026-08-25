@@ -12,6 +12,18 @@ CLI, the SDK, or the wire protocol.
 
 ### Fixed
 
+- **A dry-run permission prompt named a file you have never heard of.** The
+  overlay rewrites a tool's `path` to the shadow copy before the tool runs, and
+  `write` builds its own permission ask from the path it was handed — so under
+  `--dry-run` the dialog read `Overwrite file
+  /Users/…/.arcturn/overlays/01H…/src/app.ts`, and the "always allow" it offered
+  would have persisted a rule scoped to a directory `/discard` deletes: a grant
+  the user was told they made and did not. The ask is now restated in workspace
+  terms — subject, description and suggested rule — on its way to the permission
+  engine. Rule *enforcement* was never affected: the agent loop checks
+  permissions against the raw path before any redirect, which is why a denied
+  write never becomes a pending change.
+
 - **`@`-mentions were never expanded on the serve path.** `expandMentions` ran
   in `--print` and the TUI and nowhere else, so a prompt arriving over
   `arcturn serve` was handed to the model verbatim: `@src/auth.ts` reached it as
@@ -38,6 +50,134 @@ CLI, the SDK, or the wire protocol.
   expander.
 
 ### Added
+
+- **The dry-run review loop reaches a remote client, and the VS Code panel makes
+  it the best thing the product does.** `--dry-run` sends every file edit to a
+  shadow copy of the workspace and leaves your real files alone until a person
+  has read the change; in a terminal that is `/diff`, then `/apply` or
+  `/discard`. None of it was addressable over `arcturn serve`, so a remote client
+  attached to a dry-run engine watched an agent that appeared to do nothing at
+  all — and the panel's `/` menu could not honestly offer the three commands,
+  because no verb carried them.
+
+  **`pendingChanges`** lists what is waiting: per file, its workspace-relative
+  path, whether it is added or modified, and its size before and after. The list
+  carries **no content**; naming one file fetches the bytes an apply would write.
+  That split is a payload decision taken against the 1 MiB bound `sessionHistory`
+  established — a hundred-file refactor's patches are megabytes, its listing is
+  about twenty kilobytes, and a review response must never be the frame that
+  wedges the socket exactly when a reviewer needs it. A single file too large for
+  the budget comes back marked `contentOmitted` rather than truncated: half a file
+  in a diff editor is a false account of the change, and a reviewer would approve
+  it. Read `dryRun` before you read the list — an engine that is not in dry-run
+  mode answers `dryRun: false`, which is the opposite news from "nothing pending
+  yet" and must not render as the same sentence.
+
+  **`applyChanges`** lands them, and the selection is real: omit the paths to
+  apply everything, or name a subset to land three files out of forty. That
+  selectivity is a filter on the engine's own list, not a second write path —
+  `Overlay.apply` gained an optional path argument and is still the one applier
+  the terminal's `/apply` drives, with the same per-file symlink resolution that
+  refuses a destination outside the workspace and the same temp-file-plus-rename
+  that survives an interrupt. A path the engine did not just list refuses the
+  **whole** request rather than applying the rest, which is also the entire
+  confinement story for a selection: no client string ever becomes a write
+  destination. Applying is not a way around a deny rule either — permissions are
+  checked against the tool call's raw path before the overlay redirects anything,
+  so a denied write never becomes a pending change.
+
+  **`discardChanges`** throws them away. Irreversible: the shadow tree is the only
+  record of that work. It carries no wire-level confirmation, matching
+  `deleteSession` — a confirmation belongs where a person can read what they are
+  losing, which is a native modal in the client naming the files.
+
+  Both writes are **refused mid-run** with `sessionBusy`, and the check is wider
+  than one session on purpose: `--dry-run` is a flag on the served process, so one
+  `arcturn serve` has one shadow tree that every session it hosts writes into, and
+  a run in flight anywhere on the engine blocks an apply asked for anywhere on it.
+  Reading the list is not refused — `/diff` has never had a busy check, and a
+  change set you can watch grow is useful rather than dangerous.
+
+  `PROTOCOL_VERSION` stays `1`. `pendingChanges` degrades like `listModels` — it
+  reads, so an older engine's refusal costs a client a view and nothing else — and
+  the other two reject like `deleteSession`, which is the sharpest case in the
+  batch: an apply reported as done that did not happen tells a reviewer their
+  change landed while the file says otherwise, and a discard reported as done that
+  did not happen leaves them certain their work is gone until the next apply lands
+  it.
+
+  **In VS Code**, a card above the composer appears the moment anything is
+  pending — on screen rather than behind a command, because a pending change you
+  have to remember to look for is one that gets applied unread. Clicking a file
+  opens **VS Code's own diff editor**: your workspace file on the left, the
+  pending content on the right, read-only. Apply and Discard are explicit buttons,
+  discard raises a native modal naming what will be lost, and `/diff`, `/apply`
+  and `/discard` now appear in the panel's `/` menu and the command palette,
+  running the same controls. The extension never writes a workspace file itself —
+  it asks the engine, which is the only version that inherits the symlink refusal
+  and the mid-run guard.
+
+- **`/compact`, `/export`, `/mcp` and `/cost` reach a remote client.** The
+  terminal has twenty-one slash commands; the wire exposed four, so the VS Code
+  panel's `/` menu was almost empty. That was correct — RFC 0005 §1.3 lists only
+  what a client can actually run, because a menu offering `/rewind` to a client
+  with no rewind verb is a menu that lies — so this makes four more of them
+  real rather than listing them anyway.
+
+  **`compact`** drives `Agent.compact()`, the same method the terminal's
+  `/compact` and the run loop's automatic threshold call. There is one
+  compactor. It answers with a report rather than an acknowledgement — the token
+  estimate before and after, and whether anything was folded at all — because a
+  client that cannot say how much context it freed cannot tell a compaction that
+  worked from one that found nothing old enough. Those two numbers are *quoted
+  from the engine's own `compactionEnd` event*, not measured again, so the
+  notification and the response that caused it cannot disagree. It is **refused
+  mid-run** with `sessionBusy`: compaction rewrites the message array the run
+  loop is iterating, so queueing would only move the hazard behind a promise and
+  would race the loop's own automatic compaction. Abort, or wait for `runEnd`.
+
+  **`exportSession`** renders the conversation as markdown or HTML and hands it
+  back — **the engine writes nothing**. The terminal's `/export` drops a file
+  next to the person who ran it; over a socket that would put the document on
+  the engine's disk, which is the wrong machine for the person asking and an
+  arbitrary-write primitive for anyone holding the serve token. The client
+  saves it, and the suggested `filename` is a bare name the protocol client
+  refuses if it carries a separator or `..`. Both renderers are the terminal's
+  own, injected rather than reimplemented. The payload is bounded at 1 MiB —
+  the wire's own backpressure threshold, the same budget `sessionHistory` uses
+  — and over the cap the oldest messages are dropped and the document is
+  **re-rendered**, so what arrives is a well-formed document rather than one cut
+  through a tag, with `truncated` and `droppedMessages` saying so explicitly.
+
+  **`mcpStatus`** reports the configured MCP servers: name, transport, whether
+  each is connected, and its tool count. **Names and status only.** An MCP
+  config is where a workspace keeps its secrets — a stdio server's `env` and
+  `args`, an HTTP server's `url` and `Authorization` header, an OAuth bearer
+  token — and none of it is on this wire; nor is a failed server's own error
+  text, which is prose an MCP server wrote landing in a menu a person reads. The
+  payload is four fields, built by naming them next to the config in
+  `@arcturn/cli` and re-validated field by field on the way out of
+  `@arcturn/server`, so a field added to the config tomorrow is absent by
+  default rather than present until somebody notices.
+
+  **`/cost` gets no verb, and that is the point.** Every figure it shows already
+  rides the event stream a client subscribed to with `openSession` — `turnEnd`
+  carries the usage and the price — so a verb would be a second, drifting source
+  for numbers the client already holds. It is listed as a built-in because the
+  question is "can a client carry this out", and one folding `turnEnd` can; in
+  the VS Code panel it opens the cost breakdown that was already there.
+  `/todos` stayed out: its data is equally reachable, but no client has a
+  surface for it to *open* — todos are rendered continuously rather than
+  summoned — and a menu row that does nothing when chosen is the thing this list
+  exists to prevent.
+
+  `PROTOCOL_VERSION` stays at `1`. `exportSession` and `mcpStatus` degrade like
+  `listModels`: both read, so an older server's `invalidRequest` becomes
+  `undefined` and a client shows nothing rather than something false. `compact`
+  gets `deleteSession`'s treatment instead and **rejects** — a client told
+  "fine" by a server that ignored it would report freed context that was never
+  freed, keep filling the window, and hit the wall it had just asked to have
+  moved.
 
 - **Attachments and `resolveContext` on the wire protocol.** `prompt` takes an
   optional `attachments` array: a `file` becomes a context block headed with its

@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { REMOTE_REACHABLE_BUILT_IN_COMMANDS } from "@arcturn/server";
 import { describe, expect, it } from "vitest";
+import { createBuiltInCommands } from "./commands.js";
 import { expandServedCommand, serveCommandDescriptors } from "./serve-commands.js";
 import { loadSkills, type Skill } from "./skills.js";
 
@@ -15,6 +16,21 @@ async function library(files: Record<string, string>): Promise<readonly Skill[]>
   const warnings: string[] = [];
   return loadSkills([root], warnings);
 }
+
+describe("the reachable built-ins are commands the terminal actually has", () => {
+  it("names no command createBuiltInCommands() does not define", () => {
+    // The third leg of the "two exports, one fact" discipline
+    // (`permissions-wire.test.ts` holds the other two). `@arcturn/server`
+    // decides *which* built-ins this wire can carry out; it does not get to
+    // invent one. A `/delete` listed for `deleteSession` would be a command
+    // that exists in the panel and nowhere else, which is exactly the
+    // divergence RFC 0004 §0 forbids, pointed the other way.
+    const terminal = new Set(createBuiltInCommands().map((command) => command.name));
+    for (const command of REMOTE_REACHABLE_BUILT_IN_COMMANDS) {
+      expect(terminal).toContain(command.name);
+    }
+  });
+});
 
 describe("serveCommandDescriptors", () => {
   it("lists skills alphabetically, then the built-ins in their fixed order", async () => {

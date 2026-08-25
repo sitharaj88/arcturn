@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { CommandDescriptor, ModelCatalogEntry, SessionHeader } from "../serve/engine.js";
+import { MAX_CHANGE_SELECTION } from "../serve/engine.js";
 import { CONNECTION_ACTIONS } from "./connection-card.js";
 import {
   MAX_COPY_LENGTH,
@@ -29,6 +30,13 @@ describe("parseWebviewMessage", () => {
     expect(parseWebviewMessage({ type: "command", command: "model" })).toEqual({
       type: "command",
       command: "model",
+    });
+    // RFC 0005's `/cost` reaches the panel's own readout through this id; the
+    // engine grew no `cost` verb for it, because the numbers already ride the
+    // event stream the panel is folding.
+    expect(parseWebviewMessage({ type: "command", command: "cost" })).toEqual({
+      type: "command",
+      command: "cost",
     });
     expect(parseWebviewMessage({ type: "requestModels" })).toEqual({ type: "requestModels" });
     expect(parseWebviewMessage({ type: "requestSessions" })).toEqual({ type: "requestSessions" });
@@ -395,5 +403,49 @@ describe("projectCommandOption", () => {
   it("invents no source for a built-in, which has no file", () => {
     const builtin: CommandDescriptor = { name: "model", description: "Switch", kind: "builtin" };
     expect("source" in projectCommandOption(builtin)).toBe(false);
+  });
+});
+
+describe("the dry-run review messages", () => {
+  it("takes the three the card sends", () => {
+    expect(parseWebviewMessage({ type: "requestDryRun" })).toEqual({ type: "requestDryRun" });
+    expect(parseWebviewMessage({ type: "showDiff" })).toEqual({ type: "showDiff" });
+    expect(parseWebviewMessage({ type: "discardChanges" })).toEqual({ type: "discardChanges" });
+  });
+
+  it("takes a named change and rebuilds the field", () => {
+    expect(parseWebviewMessage({ type: "showDiff", path: "src/app.ts", extra: 1 })).toEqual({
+      type: "showDiff",
+      path: "src/app.ts",
+    });
+  });
+
+  it("refuses a path with a control character, which would forge a log line", () => {
+    expect(parseWebviewMessage({ type: "showDiff", path: "src/a\nb.ts" })).toBeUndefined();
+    expect(parseWebviewMessage({ type: "showDiff", path: "" })).toBeUndefined();
+    expect(parseWebviewMessage({ type: "showDiff", path: 7 })).toBeUndefined();
+  });
+
+  it("reads an omitted selection as 'everything', and refuses an empty one", () => {
+    expect(parseWebviewMessage({ type: "applyChanges" })).toEqual({ type: "applyChanges" });
+    // On the wire an omitted selection means every pending change; an empty
+    // array would silently become the same request, one character away at the
+    // call site. It is refused rather than passed through.
+    expect(parseWebviewMessage({ type: "applyChanges", paths: [] })).toBeUndefined();
+  });
+
+  it("rebuilds a selection element by element", () => {
+    expect(parseWebviewMessage({ type: "applyChanges", paths: ["a.ts", "b.ts"] })).toEqual({
+      type: "applyChanges",
+      paths: ["a.ts", "b.ts"],
+    });
+    expect(parseWebviewMessage({ type: "applyChanges", paths: ["a.ts", 3] })).toBeUndefined();
+    expect(parseWebviewMessage({ type: "applyChanges", paths: ["a\tb.ts"] })).toBeUndefined();
+    expect(parseWebviewMessage({ type: "applyChanges", paths: "a.ts" })).toBeUndefined();
+  });
+
+  it("bounds the selection so one frame cannot ask for unbounded work", () => {
+    const many = Array.from({ length: MAX_CHANGE_SELECTION + 1 }, (_, i) => `f${String(i)}.ts`);
+    expect(parseWebviewMessage({ type: "applyChanges", paths: many })).toBeUndefined();
   });
 });

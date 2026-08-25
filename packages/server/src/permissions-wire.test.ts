@@ -15,6 +15,7 @@ import {
   createProtocolClient,
   ProtocolClientError,
   type ProtocolRequestError,
+  validateClientRequest,
 } from "@arcturn/protocol";
 import type { AgentEvent, LLMClient, PermissionRule, Tool } from "@arcturn/types";
 import { afterEach, describe, expect, it } from "vitest";
@@ -522,6 +523,21 @@ describe("RFC 0005 §1.3 — listCommands", () => {
     );
     for (const verbs of Object.values(REMOTE_BUILT_IN_COMMAND_VERBS)) {
       expect(verbs.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("names only verbs this wire actually has", () => {
+    // The stronger half of the same invariant. Key-set equality above keeps
+    // the two exports agreeing with each other; this keeps them agreeing with
+    // the protocol. A built-in listed on the strength of a verb that does not
+    // exist is the menu that lies, one indirection further back — and the
+    // refusal sentence would tell a client to call something unroutable.
+    for (const verbs of Object.values(REMOTE_BUILT_IN_COMMAND_VERBS)) {
+      for (const method of verbs) {
+        const result = validateClientRequest({ id: "1", method });
+        const error = result.ok ? "" : result.error;
+        expect(error).not.toMatch(/Unknown method/);
+      }
     }
   });
 });

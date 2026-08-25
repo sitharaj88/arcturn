@@ -118,6 +118,12 @@ Every message is one of two shapes:
 { "id": "13", "method": "permissionState", "params": { "sessionId": "sess_abc" } }
 { "id": "14", "method": "setPermissionMode", "params": { "sessionId": "sess_abc", "mode": "plan" } }
 { "id": "15", "method": "listCommands" }
+{ "id": "16", "method": "compact", "params": { "sessionId": "sess_abc" } }
+{ "id": "17", "method": "exportSession", "params": { "sessionId": "sess_abc", "format": "markdown" } }
+{ "id": "18", "method": "mcpStatus" }
+{ "id": "19", "method": "pendingChanges", "params": { "sessionId": "sess_abc" } }
+{ "id": "20", "method": "applyChanges", "params": { "sessionId": "sess_abc", "paths": ["src/app.ts"] } }
+{ "id": "21", "method": "discardChanges", "params": { "sessionId": "sess_abc" } }
 ```
 
 ```json
@@ -557,7 +563,14 @@ drawn.
       { "name": "model", "description": "Switch the model", "kind": "builtin" },
       { "name": "permissions", "description": "Show the permission mode and rules, and switch mode", "kind": "builtin" },
       { "name": "sessions", "description": "Resume an earlier session in this directory", "kind": "builtin" },
-      { "name": "clear", "description": "Start a fresh session", "kind": "builtin" }
+      { "name": "clear", "description": "Start a fresh session", "kind": "builtin" },
+      { "name": "compact", "description": "Summarise the conversation to free up context", "kind": "builtin" },
+      { "name": "export", "description": "Download the conversation as markdown or HTML", "kind": "builtin" },
+      { "name": "mcp", "description": "Show MCP server status", "kind": "builtin" },
+      { "name": "diff", "description": "Show pending dry-run changes", "kind": "builtin" },
+      { "name": "apply", "description": "Apply pending dry-run changes to the workspace", "kind": "builtin" },
+      { "name": "discard", "description": "Throw away pending dry-run changes", "kind": "builtin" },
+      { "name": "cost", "description": "Show this session's usage and cost", "kind": "builtin" }
     ]
   }
 }
@@ -573,11 +586,31 @@ where the built-in is registered first and the skill is skipped with a warning.
 client with no rewind verb is a menu that lies. `model` is here because `listModels` and
 `setModel` are; `permissions` because `permissionState` and `setPermissionMode` are;
 `sessions` because `listSessions`, `openSession` and `sessionHistory` are; `clear` because
-`createSession` and `openSession` are. Left out, each for the same reason — no verb carries
-it — are `rewind`, `compact`, `diff`/`apply`/`discard`, `export`, `theme`, `mcp`, `todos`,
-`cost`, `scout`, `help` (a client renders its own from this list) and `exit` (a client
-closes its own socket). The list lives in `@arcturn/server`, next to the dispatch table
-that decides what is true.
+`createSession` and `openSession` are; `compact`, `export` and `mcp` because the verbs
+described below carry them; and `diff`, `apply` and `discard` because `pendingChanges`,
+`applyChanges` and `discardChanges` do.
+
+Those last three are listed **whether or not this engine happens to be running
+`--dry-run`**, and that is deliberate: the truth condition for this list is "can the wire
+carry this command out", not "is there anything for it to do right now". A `/diff` against
+an engine with no shadow tree answers *this engine is not running under --dry-run* — the
+same sentence the terminal's `/diff` prints, from the same fact. Withholding the entries
+instead would make a panel's menu differ from a terminal's by engine mode, which is the
+divergence the one-engine rule exists to prevent.
+
+`cost` is here for a different reason, and it is worth stating plainly: there is **no
+`cost` verb**, and there will not be one. Every figure the terminal's `/cost` shows already
+rides the event stream a client subscribed to with `openSession` — `turnEnd` carries the
+usage and the price — so a verb would be a second, drifting source for numbers the client
+is already holding. The truth condition for this list is "can a client carry this command
+out", and a client folding `turnEnd` can.
+
+Left out, each for its own reason: `rewind` (no verb restores a checkpoint), `theme` (a
+terminal concern), `scout` (no verb), `help` (a client renders its own from this list),
+`exit` (a client closes its own socket), and `todos` — whose data rides the event stream
+exactly as `cost`'s does, but which no client has a surface to *open*, since a todo list is
+rendered continuously rather than summoned. The list lives in `@arcturn/server`, next to
+the dispatch table that decides what is true.
 
 Where a wire client reaches only part of what the terminal command does, the description
 promises only the part that works: `/permissions suggest` persists a learned rule locally,
@@ -627,6 +660,317 @@ way to the model, because `<cwd>/.arcturn/skills` is a directory a cloned reposi
 controls. `source` travels with each skill so a menu can show where it came from rather
 than implying it.
 
+## Compacting a conversation
+
+```json
+{ "id": "16", "method": "compact", "params": { "sessionId": "sess_abc" } }
+```
+
+```json
+{
+  "kind": "response",
+  "id": "16",
+  "result": { "sessionId": "sess_abc", "compacted": true, "tokensBefore": 142380, "tokensAfter": 21044 }
+}
+```
+
+There is **one compactor**. This verb drives `Agent.compact()` — the same method the
+terminal's `/compact` calls and the same one the run loop calls when it crosses the
+automatic threshold — so a conversation summarised over the wire is folded at the same turn
+boundary, with the same options, into the same `compaction` session entry.
+
+The result is a report rather than an acknowledgement. Read `compacted` first: `false` is a
+*successful* answer meaning nothing was folded, and it arrives with a `reason` saying which
+kind of nothing it was — there was no turn boundary old enough, or the summarizer failed.
+Those two call for different responses, and neither is an error.
+
+```json
+{
+  "kind": "response",
+  "id": "16",
+  "result": {
+    "sessionId": "sess_abc", "compacted": false, "tokensBefore": 4120, "tokensAfter": 4120,
+    "reason": "Nothing to compact: no turn boundary old enough to summarize."
+  }
+}
+```
+
+The token pair is **quoted from the engine's own `compactionEnd` event**, not measured
+again here. Every attached client already receives that event, and two sources for one pair
+of numbers is how a notification and the response that caused it come to disagree.
+
+**Refused mid-run**, with `sessionBusy`. Compaction rewrites the message array the run loop
+is iterating — `Agent.compact()` throws while running for exactly that reason — so queueing
+would only move the hazard behind a promise, would race the loop's own automatic
+compaction, and would settle at a moment the client cannot observe, making the reported
+numbers describe a conversation that had since moved on. Abort the run, or wait for
+`runEnd`. This is the same refusal `setPermissionMode` and `deleteSession` make.
+
+**Not degradable.** A client told "fine" by a server that ignored this would report freed
+context that was never freed, keep filling the window, and hit the wall it had just asked
+to have moved. An older server's `invalidRequest` rejects like any other failure; test it
+with `isUnsupportedMethodError` if you want to say "this engine is too old" rather than
+quoting `Unknown method`.
+
+## Exporting a conversation
+
+```json
+{ "id": "17", "method": "exportSession", "params": { "sessionId": "sess_abc", "format": "markdown", "includeThinking": false } }
+```
+
+```json
+{
+  "kind": "response",
+  "id": "17",
+  "result": {
+    "sessionId": "sess_abc",
+    "format": "markdown",
+    "filename": "arcturn-session-2026-08-25-1200.md",
+    "content": "# Arcturn Session\n\n…",
+    "messageCount": 42,
+    "truncated": false,
+    "droppedMessages": 0
+  }
+}
+```
+
+**The engine writes nothing.** The terminal's `/export` drops a file next to the person who
+ran it; over a socket that same behaviour would put a file on the *engine's* disk — the
+wrong machine for the person asking, and an arbitrary-write primitive dressed up as a
+convenience for anyone holding the serve token. So the content comes back and the client
+saves it. `filename` is a **name**, never a path, and the protocol client rejects one
+carrying a separator or `..`.
+
+Both renderers are the terminal's own `exportMarkdown` and `exportHtml`, injected into the
+server rather than reimplemented, so a transcript cannot look one way in a terminal and
+another over a socket. `format` is `"markdown"` (default) or `"html"`; `includeThinking`
+is `/export --thinking`, off by default.
+
+The payload is **bounded at 1 MiB** — `ws-server.ts`'s own backpressure threshold, and a
+quarter of the frame size above which `ws` closes the connection with 1009, the same budget
+`sessionHistory` uses and for the same reason: a response to the client's own request is
+essential traffic the backpressure policy never drops, so it must not be the frame that
+wedges the socket. Over the cap, the **oldest messages are dropped and the document is
+re-rendered** from what is left, so what arrives is always a well-formed document rather
+than one cut off mid-tag, and `truncated`/`droppedMessages` say so explicitly. A client
+that sees `truncated: true` must tell the user that earlier messages are missing.
+
+Requires an **open** session: this renders the conversation the agent is holding in memory,
+so `openSession` first. It is deliberately *not* refused mid-run — the terminal's `/export`
+is not either, and an export taken mid-turn is a true snapshot of a conversation still in
+progress.
+
+Degrades like `listModels`: it only reads, so an older server's `invalidRequest` becomes
+`undefined` and a client offers no export. An engine assembled without a transcript
+renderer at all refuses with `invalidRequest` too, and so reaches a client as the same
+`undefined` — the collapse `resolveContext` already has for a missing resolver, and
+coherent for the same reason: "this engine has no exporter" and "this engine predates the
+verb" are one piece of news, and the answer to both is to offer no export.
+
+## MCP server status
+
+```json
+{ "id": "18", "method": "mcpStatus" }
+```
+
+```json
+{
+  "kind": "response",
+  "id": "18",
+  "result": {
+    "servers": [
+      { "name": "files", "transport": "stdio", "state": "connected", "toolCount": 11 },
+      { "name": "issues", "transport": "http", "state": "failed" }
+    ]
+  }
+}
+```
+
+**Names and status. Nothing else.** An MCP config is where a workspace keeps its secrets —
+a stdio server's `env` and `args`, an HTTP server's `url` and its `Authorization` header,
+the OAuth bearer token minted at connect time — and none of it is on this wire. Neither is
+a failed server's own error text: that is prose an MCP server wrote, and this payload lands
+in a menu a person reads and clicks, so it gets the treatment `permissionState.tools`
+already gets for tool names. A person who needs to know *why* a server failed reads the
+engine's log.
+
+That narrowness is structural rather than a redaction pass. The projection is built by
+naming four fields, in `@arcturn/cli` next to the config the credentials live in; the
+server then re-validates with `validateMcpStatus`, which copies the same four out by name
+again and checks two of them against closed enumerations. A field added to `McpServerConfig`
+tomorrow is absent by default rather than present until somebody notices.
+
+`state` is what the engine last **observed**, not a live probe. The terminal's `/mcp` pings
+each connected server with a short timeout, because a person standing at a prompt can
+afford to wait; a request/response verb cannot add one dead server's timeout to every
+client's round trip, and a second liveness field beside `state` would give a client two
+answers to one question. Treat `"connected"` as "the engine believes it is connected".
+
+`toolCount` is present only for a connected server: a `0` on a disconnected one would be
+indistinguishable from a connected server that offers no tools.
+
+Not session-scoped — MCP servers belong to the server process. Degrades like `listModels`:
+an older server's `invalidRequest` becomes `undefined`, and a client shows no listing
+rather than an empty one, because "this engine has no MCP servers" and "this engine cannot
+tell me" are different news.
+
+## Reviewing a dry run
+
+[`--dry-run`](/docs/dry-run) reroutes every `write`/`edit` into a shadow copy of the
+workspace and leaves the real files alone until a person has read the change. In a terminal
+that is `/diff`, then `/apply` or `/discard`. Three verbs put the same loop on the wire, so
+a remote client attached to a dry-run engine can see what is waiting instead of watching an
+agent that appears to do nothing.
+
+```json
+{ "id": "19", "method": "pendingChanges", "params": { "sessionId": "sess_abc" } }
+```
+
+```json
+{
+  "kind": "response",
+  "id": "19",
+  "result": {
+    "sessionId": "sess_abc",
+    "dryRun": true,
+    "changes": [
+      { "path": "src/app.ts", "absolutePath": "/repo/src/app.ts", "kind": "modified", "bytes": 2140, "previousBytes": 1988 },
+      { "path": "src/new.ts", "absolutePath": "/repo/src/new.ts", "kind": "added", "bytes": 412, "previousBytes": 0 }
+    ],
+    "truncated": false,
+    "droppedChanges": 0
+  }
+}
+```
+
+**Read `dryRun` before you read `changes`.** An engine that is not in dry-run mode answers
+`dryRun: false` with an empty list, and that is the opposite news from a dry-run session
+with nothing pending yet: one means *nothing is being held back — your edits already
+landed*, the other means *nothing has been written yet*. A client that renders both as
+"nothing to review" tells one group of users something false.
+
+### Metadata now, bytes per file
+
+The list carries **no content at all**. Ask for one file's content by naming it:
+
+```json
+{ "id": "19", "method": "pendingChanges", "params": { "sessionId": "sess_abc", "path": "src/app.ts" } }
+```
+
+and that row comes back with an `after` field holding exactly what an apply would write.
+
+The split is a payload decision, taken against the 1 MiB bound [`sessionHistory`
+established](#replaying-a-session) — which is `ws-server.ts`'s own backpressure threshold
+and a quarter of the frame size above which `ws` closes the connection with 1009. A
+hundred-file refactor's patches are megabytes; a hundred-file *listing* is about twenty
+kilobytes. Shipping every patch would make the review response the frame that wedges the
+socket exactly when a reviewer most needs it, so the bytes are fetched one file at a time —
+which is also the only granularity a diff editor ever renders. The list is additionally
+capped at 1000 rows, and `truncated` / `droppedChanges` say so out loud when it bites.
+
+A single file whose content exceeds the budget comes back with `contentOmitted: true` and
+no `after`. It is **withheld rather than truncated**: dropping the oldest events from a
+transcript still leaves every surviving event true, but half a file rendered in a diff
+editor is a false account of the change, and a reviewer would approve it.
+
+There is deliberately no `before`. An apply is a whole-file write, not a patch — the engine
+writes `after` over the real file and never diffs against a snapshot — and `bash` is not
+wrapped by the overlay, so the real tree can change under a dry run. The honest left-hand
+side of "what will this file become" is therefore the file as it stands at apply time, not
+a snapshot the engine took earlier. A client diffs against the workspace file it already
+has.
+
+There is no `"deleted"` kind either: the overlay wraps `write`, `edit` and `read`, and none
+of them removes a file, so a dry run cannot hold a deletion back.
+
+### Applying
+
+```json
+{ "id": "20", "method": "applyChanges", "params": { "sessionId": "sess_abc", "paths": ["src/app.ts"] } }
+```
+
+```json
+{
+  "kind": "response",
+  "id": "20",
+  "result": { "sessionId": "sess_abc", "applied": ["src/app.ts"], "failed": [], "remaining": 1 }
+}
+```
+
+**The selection is real, not decorative.** Omit `paths` to land everything; name a subset —
+spelled exactly as `PendingChange.path` reported it — to land part of it. Under the hood
+this is the *same* `Overlay.apply` the terminal's `/apply` drives, given a path filter;
+there is no second applier on this path and there must not be one, because a second applier
+is a second place for the symlink check below to be forgotten.
+
+A name that is not currently pending refuses the **whole** request rather than applying the
+rest. A reviewer who selected four files and silently got three has been handed a status
+that was correct about the wrong set.
+
+That refusal is also the entire confinement story for a selection: the server matches
+`paths` against the rows it just produced and then hands the overlay *its own* absolute
+paths. A `..`, an absolute path, a drive letter or a URL arriving on the wire matches
+nothing and is refused; no client string ever becomes a write destination.
+
+Two further guarantees are inherited rather than re-implemented, because the engine's own
+overlay does the writing:
+
+- **Each file is written via a temp file plus rename** in its destination directory, so an
+  interrupted apply cannot leave a half-written file.
+- **Each destination has its existing ancestors resolved through symlinks** and checked
+  against the workspace root before a byte is written. `bash` is unwrapped under dry run, so
+  an agent really can create `ln -s /etc /repo/src/escape` mid-run; a pending change whose
+  real destination resolves outside the workspace is refused per file with `resolves outside
+  the workspace (symlink); refused` and reported in `failed`. See [Symlink-safe
+  apply](/docs/dry-run#symlink-safe-apply).
+
+A per-file failure does not fail the request: the rest still land and the ones that did not
+are named, which is what `/apply` does in the terminal. `remaining` is counted by re-reading
+the shadow tree rather than by subtraction, so it cannot drift from what a later
+`pendingChanges` will say.
+
+**Applying is not a way around a deny rule.** Permissions are checked in the agent loop
+against the tool call's *raw* path, before the overlay redirects anything — so a rule
+denying `write` under `secrets/**` is matched against the real workspace file, the write
+never runs, and there is no pending change for anyone to apply. Dry run changes where an
+allowed write *goes*; it does not change whether it was allowed.
+
+### Discarding
+
+```json
+{ "id": "21", "method": "discardChanges", "params": { "sessionId": "sess_abc" } }
+```
+
+**Irreversible.** The shadow tree is the only record of that work. `paths` selects a subset
+on exactly `applyChanges`' terms; omitted, the whole tree goes.
+
+There is no wire-level confirmation, and that is [`deleteSession`'s
+discipline](#deleting-a-session) rather than an omission: a confirmation belongs where a
+person can read what they are losing — a native modal in the client, naming the files —
+rather than as a two-phase token the engine keeps state for. What the engine owns is the
+refusal a client cannot make for itself.
+
+### Refused mid-run
+
+Both `applyChanges` and `discardChanges` answer `sessionBusy` while a turn is in flight,
+matching `setPermissionMode` and `deleteSession`. Writing the shadow tree back to disk while
+the agent is still writing into it is a race with the user's files on one side.
+
+The check is **wider than one session**, and the reason is worth stating plainly: `--dry-run`
+is a flag on the served *process*, so one `arcturn serve` has one shadow tree that every
+session it hosts writes into. A run in flight anywhere on the engine blocks an apply asked
+for anywhere on it, and the refusal names which session is busy.
+
+`pendingChanges` is **not** refused mid-run. It only reads, `/diff` has never had a busy
+check either, and a change set you can watch grow is useful rather than dangerous.
+
+### Against an engine that is not in dry-run mode
+
+`pendingChanges` answers `dryRun: false`, as above. `applyChanges` and `discardChanges`
+refuse with `invalidRequest` and say why — "This engine is not running under `--dry-run`, so
+nothing is being held back: file edits reached the workspace as they were made" — which is
+the same thing the terminal's `/apply` prints for a session with no overlay.
+
 ## Reconnecting
 
 `{ method: "openSession", params: { sessionId } }` re-attaches to a session that already
@@ -673,8 +1017,10 @@ during connection setup; a server built against a newer protocol version should 
 prepared to reject or degrade for an older client rather than silently misbehave.
 
 Adding an *optional* verb is not such a change, and `listModels`, `sessionHistory`,
-`deleteSession`, `resolveContext`, `permissionState`, `setPermissionMode` and
-`listCommands` did not bump it — nor did `prompt`'s optional
+`deleteSession`, `resolveContext`, `permissionState`, `setPermissionMode`,
+`listCommands`, `compact`, `exportSession`, `mcpStatus`, `pendingChanges`,
+`applyChanges` and `discardChanges` did not bump it — nor did
+`prompt`'s optional
 `attachments` field or `permissionDecision`'s optional `scope`, which an older server
 validates and drops. An older
 server rejects the new verb with an ordinary `invalidRequest` response the newer client
@@ -683,12 +1029,19 @@ handles, and an older client simply never sends it — both halves keep working.
 **Optional is not the same as degradable**, and the two questions are decided separately.
 A `ProtocolClient` translates an older server's `invalidRequest` into `undefined` only
 where the shrug is true: `listModels`, `sessionHistory`, `resolveContext`,
-`permissionState` and `listCommands` all read, so a client that gets nothing shows nothing
-and has lost only a view. `deleteSession` and `setPermissionMode` reject instead. For the
+`permissionState`, `listCommands`, `exportSession`, `mcpStatus` and `pendingChanges` all
+read, so a client that gets nothing shows nothing and has lost only a view. `deleteSession`,
+`setPermissionMode`, `compact`, `applyChanges` and `discardChanges` reject instead. For the
 delete, "fine" would mean a session that was never deleted; for the mode it is worse — a
 panel told "fine" would show a `plan` chip over an engine still in `yolo`, and a user who
 believes they restricted an agent they did not restrict is the one outcome a permission
-control may not produce. `permissionDecision`'s `scope` is a field rather than a verb: an
+control may not produce. For `compact`, "fine" would mean context a client reports as freed
+and then keeps filling. `applyChanges` and `discardChanges` are the sharpest pair of the
+set, because they fail in opposite directions and both directions are bad: an apply
+reported as done that did not happen tells a reviewer their change landed while the file
+on disk says otherwise — and their next move is to discard the shadow tree that held the
+only copy — while a discard reported as done that did not happen leaves them certain their
+pending work is gone right up until the next apply lands it. `permissionDecision`'s `scope` is a field rather than a verb: an
 older server drops it and the allow lands as an allow-*once*, which narrows rather than
 widens — the only direction a permission field may move silently.
 

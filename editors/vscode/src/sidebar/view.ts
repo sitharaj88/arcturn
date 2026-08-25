@@ -18,6 +18,7 @@
 import * as vscode from "vscode";
 import type { ChatViewModel } from "./chat-state.js";
 import type { ConnectionReport } from "./connection-card.js";
+import type { DryRunView } from "./dry-run.js";
 import type { CommandOption } from "./webview-commands.js";
 import { createNonce, renderSidebarHtml } from "./webview-html.js";
 import {
@@ -114,6 +115,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
   #lastSessions: SessionListView | undefined;
   #lastPermission: PermissionView | undefined;
   #lastCommands: CommandListView | undefined;
+  #lastDryRun: DryRunView | undefined;
   /** What the composer is holding, replayed on reload. See {@link SidebarViewProvider.postContext}. */
   #lastContext: ContextItem[] | undefined;
   /**
@@ -266,6 +268,27 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
     this.#post({ type: "commands", status: view.status, commands: view.commands });
   }
 
+  /**
+   * Push what the dry run is holding back.
+   *
+   * Remembered and replayed like every other list here, and for a sharper
+   * reason than most: `retainContextWhenHidden` is off, so a panel the user
+   * hides and reveals reloads — and a review card that came back *empty* would
+   * be telling somebody there is nothing waiting when there is.
+   *
+   * The `note` is dropped from what is remembered, exactly as
+   * {@link SidebarViewProvider.postPermission} drops its own: a refusal is
+   * about one attempt, and replaying "a run is in flight" into a panel
+   * reopened an hour later would be false.
+   *
+   * @param view - See {@link DryRunView}.
+   */
+  postDryRun(view: DryRunView): void {
+    const { note: _note, ...remembered } = view;
+    this.#lastDryRun = remembered;
+    this.#post({ type: "dryRun", view });
+  }
+
   /** Push the session the panel is attached to. */
   postSession(session: SessionSummary): void {
     this.#lastSession = session;
@@ -336,6 +359,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
         commands: this.#lastCommands.commands,
       });
     }
+    if (this.#lastDryRun !== undefined) this.#post({ type: "dryRun", view: this.#lastDryRun });
     // Last, so the view it opens is already holding the list it will show. One
     // shot: a reload the user did not ask for must not re-open the view.
     if (this.#pendingShowSessions) {

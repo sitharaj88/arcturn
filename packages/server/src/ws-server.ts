@@ -402,6 +402,33 @@ export class ArcturnServer {
         return this.#sessionHost.setPermissionMode(request.params.sessionId, request.params.mode);
       case "listCommands":
         return { commands: await this.#sessionHost.listCommands() };
+      case "compact":
+        // Answers with the summary rather than `{ ok: true }`, for the reason
+        // `setPermissionMode` does: the engine is the authority on what just
+        // happened to the conversation, and a client that had to ask again
+        // would be rendering its own guess in the gap.
+        return this.#sessionHost.compact(request.params.sessionId);
+      case "exportSession":
+        // Nothing is written. The document comes back and the *client* saves
+        // it — see `session-export.ts`.
+        return this.#sessionHost.exportSession(request.params.sessionId, {
+          ...(request.params.format === undefined ? {} : { format: request.params.format }),
+          ...(request.params.includeThinking === undefined
+            ? {}
+            : { includeThinking: request.params.includeThinking }),
+        });
+      case "mcpStatus":
+        return { servers: await this.#sessionHost.mcpStatus() };
+      case "pendingChanges":
+        // Read-only, so no observer is attached and no session state is
+        // touched — the same shape `resolveContext` has.
+        return this.#sessionHost.pendingChanges(request.params.sessionId, request.params.path);
+      case "applyChanges":
+        // The one verb on this wire that writes a user's files. Every guard is
+        // the host's: see `SessionHost.applyChanges`.
+        return this.#sessionHost.applyChanges(request.params.sessionId, request.params.paths);
+      case "discardChanges":
+        return this.#sessionHost.discardChanges(request.params.sessionId, request.params.paths);
       default:
         return exhaustiveCheck(request);
     }

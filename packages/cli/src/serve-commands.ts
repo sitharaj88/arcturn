@@ -115,7 +115,16 @@ function shadowedByBuiltIn(name: string): boolean {
   return REMOTE_REACHABLE_BUILT_IN_COMMANDS.some((command) => command.name === name);
 }
 
-/** Render a verb list as prose: `listModels` / `listModels or setModel`. */
+/**
+ * Render a verb list as prose: `the listModels verb` / `the listModels and
+ * setModel verbs`.
+ *
+ * Phrased as "answered by" at the call site rather than "run it with", because
+ * one entry in `REMOTE_BUILT_IN_COMMAND_VERBS` names the verb that *carries*
+ * its data rather than one that executes it: `/cost` is answered by
+ * `openSession`, whose event subscription is where every figure it shows comes
+ * from. "Run it with openSession" would be advice nobody could follow.
+ */
 function verbPhrase(verbs: readonly string[]): string {
   if (verbs.length <= 1) return `the ${verbs[0] ?? "matching"} verb`;
   return `the ${verbs.slice(0, -1).join(", ")} and ${verbs[verbs.length - 1]} verbs`;
@@ -187,8 +196,9 @@ export function expandServedCommand(
       outcome: "refused",
       name: parsed.name,
       reason:
-        `/${parsed.name} is a built-in command, not prompt text: run it with ` +
-        `${verbPhrase(verbs ?? [])}, which is what listCommands means by kind:"builtin". ` +
+        `/${parsed.name} is a built-in command, not prompt text: on this wire it is ` +
+        `answered by ${verbPhrase(verbs ?? [])}, which is what listCommands means by ` +
+        'kind:"builtin". ' +
         "Nothing was sent and no turn was spent.",
     };
   }

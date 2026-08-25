@@ -41,6 +41,9 @@ export interface FakeMessage {
 export interface FakeUri {
   readonly fsPath: string;
   readonly scheme: string;
+  /** Set by {@link fakeUriFrom}; the dry-run diff keys its content on this. */
+  readonly query?: string;
+  readonly path?: string;
   toString(): string;
 }
 
@@ -66,6 +69,11 @@ export interface FakeState {
   configChangeHandlers: ((event: unknown) => void)[];
   /** Listeners for `window.onDidEndTerminalShellExecution`. */
   shellExecutionEndHandlers: ((event: { terminal: FakeTerminal }) => void)[];
+  /** Schemes registered with `workspace.registerTextDocumentContentProvider`. */
+  contentProviders: {
+    scheme: string;
+    provider: { provideTextDocumentContent(uri: FakeUri): unknown };
+  }[];
   /**
    * Which of the three real host shapes to present.
    *
@@ -102,6 +110,7 @@ export const fake: FakeState = {
   closeHandlers: [],
   configChangeHandlers: [],
   shellExecutionEndHandlers: [],
+  contentProviders: [],
   shellIntegration: "available",
   disposed: 0,
 };
@@ -120,6 +129,7 @@ export function resetFake(): void {
   fake.closeHandlers = [];
   fake.configChangeHandlers = [];
   fake.shellExecutionEndHandlers = [];
+  fake.contentProviders = [];
   fake.shellIntegration = "available";
   fake.disposed = 0;
 }
@@ -136,7 +146,46 @@ export function fakeFolder(fsPath: string, name: string, index = 0): FakeFolder 
 
 /** A uri with just enough behavior for path work and map keys. */
 export function fakeUri(fsPath: string): FakeUri {
-  return { fsPath, scheme: "file", toString: () => `file://${fsPath}` };
+  return { fsPath, scheme: "file", path: fsPath, query: "", toString: () => `file://${fsPath}` };
+}
+
+/**
+ * `vscode.Uri.from` for the parts the dry-run review builds: a scheme, a path
+ * and a query. The query is where the review's virtual document carries the
+ * engine's own path, so it has to survive the round trip through the fake.
+ */
+export function fakeUriFrom(parts: { scheme?: string; path?: string; query?: string }): FakeUri {
+  const scheme = parts.scheme ?? "file";
+  const path = parts.path ?? "";
+  const query = parts.query ?? "";
+  return {
+    fsPath: path,
+    scheme,
+    path,
+    query,
+    toString: () => `${scheme}://${path}${query === "" ? "" : `?${query}`}`,
+  };
+}
+
+/**
+ * `vscode.EventEmitter`, with just enough of it to be wired and fired.
+ *
+ * The dry-run review registers a `TextDocumentContentProvider` whose
+ * `onDidChange` is one of these, so an extension that constructs one at
+ * activation must not fail to activate against this mock.
+ */
+class FakeEventEmitter<T> {
+  readonly #listeners = new Set<(value: T) => void>();
+  readonly event = (listener: (value: T) => void): FakeDisposable => {
+    this.#listeners.add(listener);
+    return new FakeDisposable(() => this.#listeners.delete(listener));
+  };
+  fire(value: T): void {
+    for (const listener of [...this.#listeners]) listener(value);
+  }
+  dispose(): void {
+    this.#listeners.clear();
+  }
 }
 
 class FakeDisposable {
@@ -203,7 +252,8 @@ export function createFakeVscode(): Record<string, unknown> {
     CodeAction,
     CodeActionKind,
     Disposable: FakeDisposable,
-    Uri: { file: fakeUri, parse: fakeUri },
+    Uri: { file: fakeUri, parse: fakeUri, from: fakeUriFrom },
+    EventEmitter: FakeEventEmitter,
     /**
      * `env.shell` is what `user-env.ts` asks for before it probes a login
      * shell. A fixed value here is deliberate: no test in this repository may
@@ -296,6 +346,15 @@ export function createFakeVscode(): Record<string, unknown> {
         fake.configChangeHandlers.push(handler);
         return new FakeDisposable(() => {
           fake.configChangeHandlers = fake.configChangeHandlers.filter((h) => h !== handler);
+        });
+      },
+      registerTextDocumentContentProvider(
+        scheme: string,
+        provider: { provideTextDocumentContent(uri: FakeUri): unknown },
+      ) {
+        fake.contentProviders.push({ scheme, provider });
+        return new FakeDisposable(() => {
+          fake.contentProviders = fake.contentProviders.filter((p) => p.provider !== provider);
         });
       },
     },
