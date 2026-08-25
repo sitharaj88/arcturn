@@ -23,6 +23,7 @@ import type {
   ModelCatalogEntry,
   ProtocolClient,
   SessionHeader,
+  SessionHistory,
   WebSocketLike,
 } from "../serve/engine.js";
 import { createRedactor } from "../serve/redact.js";
@@ -118,10 +119,25 @@ export interface EngineSession {
    * the fallback picker on `undefined` rather than showing an error.
    */
   listModels(): Promise<ModelCatalogEntry[] | undefined>;
-  /** Attach to an existing session. */
+  /** Attach to an existing session, replaying its stored conversation. */
   openSession(sessionId: string): Promise<void>;
   /** Create and attach to a fresh session. */
   newSession(): Promise<void>;
+  /**
+   * Delete a session on the engine. Irreversible, and **not** confirmed here —
+   * the caller owns the modal (see `index.ts`), because this object has no
+   * `vscode` import and a confirmation the user cannot see is not one.
+   *
+   * The engine performs the deletion; this extension never touches a session
+   * file. A refusal (the session is running, the engine is too old) rejects
+   * and leaves everything exactly as it was, panel included.
+   *
+   * When the deleted session is the one currently attached, its controller is
+   * disposed *after* the engine confirms — so the panel stops rendering a
+   * conversation that no longer exists, and the caller is left to decide what
+   * the panel shows instead.
+   */
+  deleteSession(sessionId: string): Promise<void>;
   /** Kill the child, close the client, dispose the controller. Idempotent. */
   dispose(): void;
 }
@@ -234,14 +250,60 @@ export function createEngineSession(options: EngineSessionOptions): EngineSessio
     onDiagnostic: (line) => options.host.onDiagnostic?.(redactor.redact(line)),
   };
 
-  const attach = (header: SessionHeader): void => {
+  /**
+   * The session's stored conversation, or `undefined` when there is none to be
+   * had.
+   *
+   * Never allowed to break an attach. `sessionHistory` is an optional verb —
+   * an engine older than it resolves `undefined` and the panel shows the empty
+   * transcript it always used to — and a genuine failure is a diagnostic, not
+   * a reason to refuse to open a session the user asked for.
+   *
+   * @param connected - The client to ask.
+   * @param sessionId - The session being attached.
+   */
+  const fetchHistory = async (
+    connected: ProtocolClient,
+    sessionId: string,
+  ): Promise<SessionHistory | undefined> => {
+    try {
+      const history = await connected.sessionHistory(sessionId);
+      if (history === undefined) {
+        log(`sidebar: this arcturn engine cannot replay session history (${sessionId})`);
+      }
+      return history;
+    } catch (error) {
+      log(
+        `sidebar: could not replay session ${sessionId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return undefined;
+    }
+  };
+
+  /**
+   * Point the panel at one session, with whatever of it the engine can replay.
+   *
+   * The history is fetched *before* the previous controller is disposed, so
+   * the panel keeps showing the conversation the user is leaving until the one
+   * they are arriving at is ready, rather than blanking for a round trip.
+   */
+  const attach = async (header: SessionHeader): Promise<void> => {
     if (client === undefined) return;
+    const connected = client;
+    const history = await fetchHistory(connected, header.sessionId);
+    // Re-checked after the await: a teardown may have replaced the connection
+    // while the history was in flight, and attaching a controller to a client
+    // this session no longer owns would leak a subscription past `dispose()`.
+    if (client !== connected) return;
     controller?.dispose();
     controller = createSessionController({
-      client,
+      client: connected,
       sessionId: header.sessionId,
       host: controllerHost,
       header,
+      ...(history === undefined ? {} : { history }),
     });
   };
 
@@ -313,7 +375,7 @@ export function createEngineSession(options: EngineSessionOptions): EngineSessio
     });
     await client.authenticate();
 
-    attach(await createAndSubscribe(client));
+    await attach(await createAndSubscribe(client));
     setStatus("ready");
   };
 
@@ -367,10 +429,20 @@ export function createEngineSession(options: EngineSessionOptions): EngineSessio
       return (await requireClient().listModels())?.models;
     },
     async openSession(sessionId: string): Promise<void> {
-      attach(await requireClient().openSession(sessionId));
+      await attach(await requireClient().openSession(sessionId));
     },
     async newSession(): Promise<void> {
-      attach(await createAndSubscribe(requireClient()));
+      await attach(await createAndSubscribe(requireClient()));
+    },
+    async deleteSession(sessionId: string): Promise<void> {
+      // The engine goes first. Disposing the controller before the delete was
+      // confirmed would tear the panel down for a deletion that then failed —
+      // a session still running its turn is refused, and the user must be left
+      // looking at it.
+      await requireClient().deleteSession(sessionId);
+      if (controller?.sessionId !== sessionId) return;
+      controller.dispose();
+      controller = undefined;
     },
     dispose(): void {
       if (disposed) return;

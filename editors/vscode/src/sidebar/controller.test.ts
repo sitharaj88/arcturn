@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { connectToServe } from "../serve/connect.js";
-import type { AgentEvent, PermissionRequest, ProtocolClient } from "../serve/engine.js";
+import type {
+  AgentEvent,
+  PermissionRequest,
+  ProtocolClient,
+  SessionHistory,
+} from "../serve/engine.js";
 import { FakeSocket, flush } from "../serve/test-socket.js";
 import type { ChatViewModel } from "./chat-state.js";
 import { createSessionController, type SessionController } from "./controller.js";
@@ -311,5 +316,135 @@ describe("a listener that throws", () => {
     socket.emitEvent(SESSION, { type: "notice", level: "info", text: "a" });
     socket.emitEvent(SESSION, { type: "notice", level: "info", text: "b" });
     expect(onChat).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("createSessionController: replayed history", () => {
+  const REPLAY: SessionHistory = {
+    sessionId: SESSION,
+    events: [
+      {
+        type: "runStart",
+        sessionId: SESSION,
+        prompt: {
+          role: "user",
+          content: [{ type: "text", text: "the old question" }],
+          timestamp: 1,
+        },
+      },
+      {
+        type: "messageEnd",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "the old answer" }],
+          model: "test/model",
+          usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 },
+          stopReason: "endTurn",
+          timestamp: 2,
+        },
+      },
+      { type: "runEnd", reason: "completed" },
+    ],
+    truncated: false,
+    droppedEvents: 0,
+  };
+
+  async function seeded(history: SessionHistory): Promise<Harness> {
+    const h = await harness();
+    h.controller.dispose();
+    const controller = createSessionController({
+      client: h.client,
+      sessionId: SESSION,
+      host: {
+        onChat: (view) => h.chats.push(view),
+        onCost: (cost) => h.costs.push(cost),
+        askPermission: async () => ({ behavior: "allow" }),
+        onDiagnostic: (line) => h.diagnostics.push(line),
+      },
+      history,
+    });
+    return { ...h, controller };
+  }
+
+  it("builds the transcript through the same reducer live events use", async () => {
+    const h = await seeded(REPLAY);
+    expect(h.controller.state.blocks.map((block) => block.kind)).toEqual(["user", "text"]);
+    expect(h.controller.state.blocks.map((block) => ("text" in block ? block.text : ""))).toEqual([
+      "the old question",
+      "the old answer",
+    ]);
+    // Stored history is never in flight, whatever the replay's last event was.
+    expect(h.controller.state.running).toBe(false);
+  });
+
+  it("keeps folding live events on top of the replay", async () => {
+    const h = await seeded(REPLAY);
+    emit(h, { type: "notice", level: "info", text: "something new" });
+    expect(h.controller.state.blocks.at(-1)).toMatchObject({
+      kind: "notice",
+      text: "something new",
+    });
+    expect(h.controller.state.blocks).toHaveLength(3);
+  });
+
+  it("says earlier messages are not shown when the engine truncated the replay", async () => {
+    const h = await seeded({ ...REPLAY, truncated: true, droppedEvents: 128 });
+    const first = h.controller.state.blocks[0];
+    expect(first).toMatchObject({ kind: "notice", level: "info" });
+    expect("text" in (first ?? {}) ? (first as { text: string }).text : "").toContain(
+      "Earlier messages are not shown",
+    );
+    expect("text" in (first ?? {}) ? (first as { text: string }).text : "").toContain("128");
+  });
+
+  it("never claims a run is in progress just because history ended mid-turn", async () => {
+    const h = await seeded({ ...REPLAY, events: [REPLAY.events[0] as AgentEvent] });
+    expect(h.controller.state.running).toBe(false);
+  });
+
+  it("starts empty when there is no history to replay", async () => {
+    const h = await harness();
+    expect(h.controller.state.blocks).toEqual([]);
+  });
+
+  it("rebuilds a stored tool call as a finished tool row, with no new client logic", async () => {
+    // The engine replays `messageEnd` (carrying the tool call) then `toolEnd`
+    // (carrying its result), which is the same pair the live stream sends —
+    // so `reduceChat` pairs them the same way and this file needed no branch.
+    const h = await seeded({
+      sessionId: SESSION,
+      truncated: false,
+      droppedEvents: 0,
+      events: [
+        {
+          type: "messageEnd",
+          message: {
+            role: "assistant",
+            content: [{ type: "toolCall", id: "tc1", name: "bash", arguments: { command: "ls" } }],
+            model: "test/model",
+            usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 },
+            stopReason: "toolCalls",
+            timestamp: 1,
+          },
+        },
+        {
+          type: "toolEnd",
+          toolCallId: "tc1",
+          result: {
+            role: "toolResult",
+            toolCallId: "tc1",
+            toolName: "bash",
+            content: [{ type: "text", text: "README.md" }],
+            isError: false,
+            timestamp: 2,
+          },
+        },
+        { type: "runEnd", reason: "completed" },
+      ],
+    });
+
+    expect(h.controller.state.blocks).toMatchObject([
+      { kind: "tool", toolCallId: "tc1", name: "bash", status: "ok", result: "README.md" },
+    ]);
   });
 });

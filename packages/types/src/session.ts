@@ -46,4 +46,21 @@ export interface SessionStore {
   branch(sessionId: string, leafId: string): Promise<SessionEntry[]>;
   list(): Promise<SessionHeader[]>;
   setTitle(sessionId: string, title: string): Promise<void>;
+  /**
+   * Permanently remove a session and every entry in it.
+   *
+   * Irreversible: there is no trash, no tombstone and no undo. A store that
+   * implements it must make `open`/`entries` on that id fail as `notFound`
+   * afterwards, and must drop it from `list()`.
+   *
+   * **Optional**, so an existing third-party `SessionStore` (the docs invite
+   * you to write one) keeps compiling. A caller that needs deletion and finds
+   * this absent must *refuse* rather than reach around the store and unlink
+   * files itself — see `SessionHost.deleteSession`, which does exactly that:
+   * a store is the only thing that knows where its sessions live.
+   *
+   * @param sessionId - Session to remove.
+   * @throws When the session does not exist, or the removal fails.
+   */
+  delete?(sessionId: string): Promise<void>;
 }

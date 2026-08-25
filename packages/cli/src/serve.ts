@@ -291,6 +291,20 @@ export function createServeHost(
   const resolveModel = serveModelResolver(runtime.env);
   return new SessionHost({
     agentFactory: (opts) => buildServedAgent(runtime, opts, options.maxCostUsd, resolveModel),
+    // ---- Store injection: one store, four verbs, deliberately one line. ----
+    // `listSessions`, `openSession`'s fallback, `sessionHistory` and
+    // `deleteSession` are all answered from this one reference. Nothing else
+    // needs wiring for the last two: history reads `store.entries` and
+    // deletion calls `store.delete`, both on the store that was already here.
+    // Which is the point of writing it down — the `resolveModel`/`modelCatalog`
+    // pair below got separated once and the two halves drifted into a real
+    // routing bug, so the rule this file now keeps is that anything one
+    // injection serves stays at one injection, with its consumers named.
+    //
+    // A `SessionStore` that does not implement the optional `delete` makes
+    // `SessionHost.deleteSession` refuse loudly rather than unlink anything
+    // itself; `JsonlSessionStore` (what a real `ArcturnRuntime` supplies)
+    // implements it.
     sessionStore: runtime.store,
     defaultCwd: runtime.cwd,
     // ---- Model injection: both halves, deliberately adjacent. ----

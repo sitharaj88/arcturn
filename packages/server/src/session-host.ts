@@ -6,7 +6,7 @@
 
 import { resolve, sep } from "node:path";
 import { type Agent, createSessionId } from "@arcturn/core";
-import { validateModelCatalog } from "@arcturn/protocol";
+import { validateModelCatalog, validateSessionHistory } from "@arcturn/protocol";
 import type {
   AgentEvent,
   AgentEventListener,
@@ -15,8 +15,10 @@ import type {
   PermissionDecision,
   PermissionPrompt,
   SessionHeader,
+  SessionHistory,
   SessionStore,
 } from "@arcturn/types";
+import { buildSessionHistory, type SessionHistoryLimits } from "./session-history.js";
 
 /** Machine-readable failure kinds surfaced by {@link SessionHost}. */
 export type SessionHostErrorCode = "sessionNotFound" | "sessionBusy" | "invalidRequest";
@@ -111,6 +113,12 @@ export interface SessionHostOptions {
    */
   modelCatalog?: () => ModelCatalogEntry[] | Promise<ModelCatalogEntry[]>;
   /**
+   * Bounds on the payload {@link SessionHost.sessionHistory} returns. Both
+   * halves default; see `session-history.ts`. Injectable so a test can prove
+   * the cap actually cuts without writing a megabyte of conversation first.
+   */
+  sessionHistoryLimits?: SessionHistoryLimits;
+  /**
    * Maximum number of concurrently *live* sessions this host will hold (each
    * one is a full agent: LLM connection, tool set, in-memory history).
    * Without a cap, a client could `createSession` in a loop and exhaust
@@ -124,6 +132,26 @@ export interface SessionHostOptions {
    * for the process's lifetime, matching `#sessions`' existing behavior.
    */
   maxSessions?: number;
+}
+
+/**
+ * Whether a store rejected because the id names no session it has.
+ *
+ * `@arcturn/core`'s stores raise `SessionStoreError` with `notFound` (no such
+ * session) or `invalidId` (an id no session could ever have — a traversal
+ * attempt, say); both mean "not a session here" and neither is a server fault.
+ * Duck-typed rather than `instanceof`, because a third-party `SessionStore`
+ * (the SDK docs invite one) is not obliged to use that class, and misreading
+ * its "not found" as an internal fault would be the worse mistake.
+ *
+ * Everything else — a corrupt session file, a permissions error — is
+ * deliberately *not* folded in here. Reporting "this session does not exist"
+ * for a file the server could not read is a lie a user cannot act on.
+ */
+function isMissingSession(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const code = (error as { code?: unknown }).code;
+  return code === "notFound" || code === "invalidId";
 }
 
 const DEFAULT_PERMISSION_TIMEOUT_MS = 5 * 60 * 1000;
@@ -153,6 +181,7 @@ export class SessionHost {
   readonly #permissionTimeoutMs: number;
   readonly #resolveModel: ((modelId: string) => ModelSpec) | undefined;
   readonly #modelCatalog: (() => ModelCatalogEntry[] | Promise<ModelCatalogEntry[]>) | undefined;
+  readonly #sessionHistoryLimits: SessionHistoryLimits;
   readonly #maxSessions: number;
   readonly #sessions = new Map<string, LiveSession>();
 
@@ -171,6 +200,7 @@ export class SessionHost {
     this.#permissionTimeoutMs = options.permissionTimeoutMs ?? DEFAULT_PERMISSION_TIMEOUT_MS;
     this.#resolveModel = options.resolveModel;
     this.#modelCatalog = options.modelCatalog;
+    this.#sessionHistoryLimits = options.sessionHistoryLimits ?? {};
     this.#maxSessions = options.maxSessions ?? DEFAULT_MAX_SESSIONS;
   }
 
@@ -248,6 +278,131 @@ export class SessionHost {
       throw new Error(`Model catalog is not a valid wire payload: ${validation.error}`);
     }
     return validation.value.models;
+  }
+
+  /**
+   * One session's stored conversation, replayed as events.
+   *
+   * Deliberately **not** session-liveness-scoped: a client may want to render
+   * a session it has not attached to, and reading entries needs no agent. It
+   * is also deliberately not part of `openSession` — see `ClientRequest`'s
+   * `sessionHistory` doc for why the replay is a separate, skippable call.
+   *
+   * The payload is bounded (see `session-history.ts`) and normalized against
+   * the wire contract on the way out — the same discipline
+   * {@link SessionHost.listModels} applies to the catalog, for the same
+   * reason: whatever this host hands over, only what the contract defines can
+   * reach a client.
+   *
+   * @param sessionId - Session to replay.
+   * @returns Its history, oldest event first, truncation reported explicitly.
+   * @throws {SessionHostError} `sessionNotFound` when neither the store nor
+   *   this process knows the session.
+   * @throws When the projection is not a valid wire payload — a bug in this
+   *   package, and one worth reporting rather than serving a mangled
+   *   transcript a user would read as their actual conversation.
+   */
+  async sessionHistory(sessionId: string): Promise<SessionHistory> {
+    const store = this.#sessionStore;
+    if (!store) {
+      // No store means nothing was ever persisted, so a live session's history
+      // is genuinely empty — but an id this process has never seen is still
+      // not a session, and saying "no history" for it would be a different
+      // (and false) answer.
+      if (!this.#sessions.has(sessionId)) {
+        throw new SessionHostError("sessionNotFound", `Session ${sessionId} does not exist`);
+      }
+      return { sessionId, events: [], truncated: false, droppedEvents: 0 };
+    }
+
+    let entries: Awaited<ReturnType<SessionStore["entries"]>>;
+    try {
+      entries = await store.entries(sessionId);
+    } catch (error) {
+      if (isMissingSession(error)) {
+        throw new SessionHostError("sessionNotFound", `Session ${sessionId} does not exist`);
+      }
+      // A session the store has but could not read — a torn file, a
+      // permissions problem — is a real fault, and reporting it as "no such
+      // session" would send a user looking for a session they can see listed.
+      throw error;
+    }
+
+    const history = buildSessionHistory(sessionId, entries, this.#sessionHistoryLimits);
+    const validation = validateSessionHistory(history);
+    if (!validation.ok) {
+      throw new Error(`Session history is not a valid wire payload: ${validation.error}`);
+    }
+    return validation.value;
+  }
+
+  /**
+   * Delete a session permanently — from the store, and from this process.
+   *
+   * The engine owns this rather than a client, because a client unlinking the
+   * file would be a second implementation of session storage living outside
+   * the process that owns it: it could not see a session still live in this
+   * host's memory, and it could not know whether a run was in flight.
+   *
+   * Order matters and is deliberate. The busy check runs first; the **store**
+   * delete runs next; the live session is evicted last. Evicting first would
+   * mean telling every attached client "this was deleted" and then discovering
+   * the store could not delete it — a lie that leaves the session on disk.
+   * Done this way, a store failure surfaces as an error with the session
+   * intact and still re-openable.
+   *
+   * Eviction is not `dispose()`'s graceful wind-down: there is nothing left to
+   * wind down to. Pending permission asks are denied, any run that started in
+   * the gap after the busy check is aborted, every observer is sent a final
+   * `notice` saying the session was deleted — so an attached client is *told*
+   * rather than left watching a session that no longer exists — and the
+   * subscription is then dropped.
+   *
+   * @param sessionId - Session to remove.
+   * @throws {SessionHostError} `sessionBusy` when the session is running a
+   *   turn (abort it first — deleting the file out from under an agent still
+   *   appending to it is not a thing to do quietly), or `sessionNotFound`
+   *   when neither the store nor this process knows it.
+   * @throws {Error} When a `sessionStore` is configured but does not implement
+   *   the optional {@link SessionStore.delete}. The same refusal
+   *   {@link SessionHostOptions.resolveModel} makes, for the same reason: the
+   *   store is the only thing that knows where its sessions live, and this
+   *   host guessing at a path would be guessing at which files to unlink.
+   */
+  async deleteSession(sessionId: string): Promise<void> {
+    const live = this.#sessions.get(sessionId);
+    if (live?.agent.isRunning === true) {
+      throw new SessionHostError(
+        "sessionBusy",
+        `Session ${sessionId} is running a turn; abort it before deleting it`,
+      );
+    }
+
+    const store = this.#sessionStore;
+    if (store) {
+      if (typeof store.delete !== "function") {
+        throw new Error(
+          `Cannot delete session ${JSON.stringify(sessionId)}: this server's SessionStore does ` +
+            "not implement the optional delete(sessionId) method, and this host will not " +
+            "guess at which files back it. Refusing rather than reaching around the store.",
+        );
+      }
+      try {
+        await store.delete(sessionId);
+      } catch (error) {
+        if (!isMissingSession(error)) throw error;
+        // The store says it is already gone. If this process is still holding
+        // it live, finish the job — the caller asked for it to not exist, and
+        // it does not. Otherwise there was nothing to delete.
+        if (live === undefined) {
+          throw new SessionHostError("sessionNotFound", `Session ${sessionId} does not exist`);
+        }
+      }
+    } else if (live === undefined) {
+      throw new SessionHostError("sessionNotFound", `Session ${sessionId} does not exist`);
+    }
+
+    if (live !== undefined) this.#evict(sessionId, live);
   }
 
   /**
@@ -435,6 +590,47 @@ export class SessionHost {
       session.pendingPermissions.clear();
       session.agent.abort();
     }
+  }
+
+  /**
+   * Tear one live session out of this host, telling its watchers why.
+   *
+   * The notice goes out *before* the observers are dropped and uses the
+   * ordinary `notice` event rather than a new wire shape, so a client renders
+   * it with whatever it already does for engine diagnostics.
+   */
+  #evict(sessionId: string, session: LiveSession): void {
+    for (const [requestId, pending] of session.pendingPermissions) {
+      clearTimeout(pending.timer);
+      pending.resolve({
+        requestId,
+        behavior: "deny",
+        message: "This session was deleted.",
+      });
+    }
+    session.pendingPermissions.clear();
+    // Belt and braces: `deleteSession` checked `isRunning` before touching the
+    // store, but another connection could have started a run in the gap, and
+    // an agent appending to a session file that no longer exists is worse than
+    // an aborted run.
+    session.agent.abort();
+
+    const deleted: AgentEvent = {
+      type: "notice",
+      level: "warn",
+      text: `Session ${sessionId} was deleted.`,
+    };
+    for (const listener of [...session.observers]) {
+      try {
+        listener(deleted);
+      } catch {
+        // An observer must never be able to break fan-out to the others.
+      }
+    }
+
+    session.unsubscribe();
+    session.observers.clear();
+    this.#sessions.delete(sessionId);
   }
 
   #require(sessionId: string): LiveSession {

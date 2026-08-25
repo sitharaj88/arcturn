@@ -135,6 +135,94 @@ Either way the id is resolved *before* the live session is touched, so a
 refusal leaves the session on the model it was already using — there is no
 half-switched state.
 
+## `sessionHistory` replays events, and had to project them from what is stored
+
+`openSession` returns a `SessionHeader` and calls `#attachObserver`, which subscribes to
+*future* events only. Nothing replayed the past, and `ProtocolClient` had no verb to ask for
+it — so a client attaching to a session with hours of work in it could render an empty chat
+and be telling the truth about everything it knew. `sessionHistory` closes that.
+
+Two decisions worth recording:
+
+**The payload is `AgentEvent`s, not a projected message list.** A `{ role, text }[]` would be
+smaller, and it would force every client to grow a second transcript renderer — one deciding
+all over again how a tool call, a denied permission, a compaction or a sub-agent reads, and
+drifting from the live one the first time either side changed. Replaying the same events the
+live stream carries means a client folds history through the identical reducer. The VS Code
+panel's `reduceChat` needed no new branch to gain the feature, which is the argument made
+concrete.
+
+**Nothing here was recorded, so it has to be projected** (`session-history.ts`). The store
+holds `SessionEntry` values — the resulting messages — never the token stream that produced
+them, so a replayed assistant turn is one `messageEnd` where a live client saw a
+`messageStream` per delta. Two rules keep the projection honest: every string comes from the
+entry that carried it, and only event types the live stream also emits are used. A stored
+`label`, or a `state` entry's `model`, is therefore dropped rather than given a shape a client
+has never seen — which is also what makes the "no new class of data on the wire" claim true
+rather than hopeful. Only the *active branch* is replayed (`pathToLeaf(entries,
+latestEntryId(entries))`, the same thing `Agent.resume` materializes), so a rewound session
+does not show a user a conversation the agent will never continue.
+
+The cap is 1 MiB of serialized events and 1000 events, whichever binds first, keeping the
+newest and cutting at a `runStart` boundary. The byte figure is `ws-server.ts`'s own
+`DEFAULT_BACKPRESSURE_THRESHOLD_BYTES` and a quarter of `DEFAULT_MAX_PAYLOAD_BYTES` — a
+history response is *essential* traffic (`#send` never drops it), so it must not be the frame
+that wedges a socket. The count bound exists because bytes are what the wire pays and element
+count is what a client's reducer pays; 1000 is ~2.5× the 400-block ceiling the richest client
+in this repo trims its transcript to, so it never bites first for a client that would have
+rendered them all. `truncated`/`droppedEvents` are reported explicitly rather than left
+derivable, because a transcript that quietly starts mid-conversation reads as the whole
+conversation.
+
+It is a separate verb rather than part of `openSession` for three reasons: `openSession`'s
+result is a `SessionHeader` that every existing client validates as one (changing it would
+need a `PROTOCOL_VERSION` bump), a client re-attaching after a reconnect often does not want
+the replay again, and a separately-requested payload is one a client can skip.
+
+## `deleteSession` needed a store method that did not exist, and it is optional on purpose
+
+Nothing in the CLI deleted a session before this — `git grep` for a delete/prune/cleanup
+routine over `packages/` found none — so there was no existing path to reuse and
+`SessionStore.delete(sessionId)` was added. It is **optional** on the interface because
+`sdk-sessions.md` invites users to write their own `SessionStore`, and making it required
+would break every one that exists. `JsonlSessionStore` and `MemorySessionStore` both
+implement it.
+
+`SessionHost.deleteSession` therefore refuses — a plain `Error`, reported as
+`ErrorCode.internal` — when a store is configured but cannot delete, rather than reaching
+around it to unlink a path it guessed. That is the same call `setModel` makes without a
+`resolveModel`, for the same reason: the store is the only thing that knows where its
+sessions live.
+
+Ordering is deliberate and is the part most likely to be got wrong by a later edit:
+
+1. Refuse a **running** session (`sessionBusy`) before touching anything.
+2. Delete from the **store**.
+3. **Evict** the live session last — deny pending permission asks, `abort()` (belt and
+   braces: another connection could have started a run in the gap), push a final
+   `{ type: "notice", level: "warn" }` to every observer, unsubscribe, drop it from
+   `#sessions`.
+
+Evicting first would mean telling every attached client "this was deleted" and then
+discovering the store could not delete it — a lie that leaves the session on disk. Done this
+way, a store failure surfaces as an error with the session intact and still re-openable.
+
+**Known limitation: the busy check is per-process.** `isRunning` is read off the live `Agent`
+in *this* host, so a session running in a different process against the same
+`~/.arcturn/sessions` directory — a TUI in another terminal, a second `arcturn serve` — is not
+seen and is not refused. Deleting one is loud rather than silent: the other process's next
+`JsonlSessionStore.append` raises `SessionStoreError` with `notFound` and its run ends with an
+error, instead of quietly writing to a file nobody will read. Fixing it properly needs a lock
+or a liveness marker in the session directory, which does not exist today and is not something
+this verb should invent on its own.
+
+The final `notice` is an ordinary `AgentEvent`, not a new `ServerMessage` kind: a client
+renders it with whatever it already does for engine diagnostics, and no wire shape had to be
+added for a case that happens once per session ever. `ws-server.ts` then clears the session
+from **every** connection's `observedSessions` map — the host has already dropped the
+subscriptions, so what is left is this server's own bookkeeping, which would otherwise keep a
+dead unsubscribe closure alive for the life of each socket.
+
 ## `SessionHostOptions` has two more optional fields than the task brief's minimal list
 
 The brief specifies `{ agentFactory, sessionStore?, defaultCwd }`. Two more
@@ -145,6 +233,9 @@ optional fields were added, both additive/backward-compatible:
   only place to configure it.
 - `resolveModel?: (modelId: string) => ModelSpec` — see above. Optional to
   pass, but `setModel` refuses without it rather than inventing a spec.
+- `sessionHistoryLimits?: { maxBytes?; maxEvents? }` — bounds on what
+  `SessionHost.sessionHistory()` returns; see above. Injectable so a test can
+  prove the cap actually cuts without writing a megabyte of conversation first.
 - `modelCatalog?: () => ModelCatalogEntry[] | Promise<ModelCatalogEntry[]>` —
   what `SessionHost.listModels()` (and therefore the `listModels` wire verb)
   answers with. Injected for the same reason as `resolveModel`: the catalog

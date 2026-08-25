@@ -5,7 +5,16 @@
  * branching is just appending a child to an older node.
  */
 
-import { access, appendFile, mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
+import {
+  access,
+  appendFile,
+  mkdir,
+  readdir,
+  readFile,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import type { SessionEntry, SessionHeader, SessionStore } from "@arcturn/types";
 import { pathToLeaf } from "./tree.js";
@@ -211,6 +220,38 @@ export class JsonlSessionStore implements SessionStore {
     const tmp = `${this.#path(sessionId)}.tmp`;
     await writeFile(tmp, `${body}\n`);
     await rename(tmp, this.#path(sessionId));
+  }
+
+  /**
+   * Delete a session's file.
+   *
+   * The queued write for this session (if any) is drained first, so a delete
+   * issued while an append is in flight lands after it rather than racing it.
+   * That is ordering hygiene, not the safety net: the net is `append`'s own
+   * `access` guard, which refuses to write to a session whose file is gone —
+   * so a later append can never resurrect a deleted session as an orphan
+   * carrying entries with no header line.
+   *
+   * `force` is deliberately **not** used: a delete that silently succeeds for
+   * an id that never existed cannot tell a caller its session is already gone
+   * from a caller's typo, and every other method here reports `notFound`.
+   *
+   * @param sessionId - Session to remove.
+   * @throws SessionStoreError `notFound` when no such session file exists,
+   *   `invalidId` when the id is not a legal one.
+   */
+  async delete(sessionId: string): Promise<void> {
+    assertSessionId(sessionId);
+    await this.#writeQueues.get(sessionId)?.catch(() => undefined);
+    try {
+      await rm(this.#path(sessionId));
+    } catch (error) {
+      if (isMissing(error)) {
+        throw new SessionStoreError(`Session ${sessionId} does not exist`, "notFound");
+      }
+      throw error;
+    }
+    this.#writeQueues.delete(sessionId);
   }
 
   #path(sessionId: string): string {

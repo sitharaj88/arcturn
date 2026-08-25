@@ -34,8 +34,8 @@ export interface Turn {
 export type ToolIcon = "terminal" | "file" | "edit" | "search" | "web" | "list" | "tool";
 
 /**
- * JavaScript source defining `groupTurns`, `toolSummary`, `toolStatusLabel`
- * and `toolIcon`.
+ * JavaScript source defining `groupTurns`, `toolSummary`, `toolStatusLabel`,
+ * `toolIcon`, `showWorking` and `toolGroup`.
  */
 export const TRANSCRIPT_SOURCE = String.raw`
 function turnRole(kind) {
@@ -180,5 +180,42 @@ function toolIcon(name) {
     }
   }
   return "tool";
+}
+
+/**
+ * Whether the panel owes the reader a "the model is working" signal.
+ *
+ * A run has three kinds of moment. Text is arriving, and the caret on the
+ * block being written says so. A tool is running, and that card's own spinner
+ * says so. And then there are the gaps — after Enter and before the first
+ * token, and after a tool settles while the model decides what to do next —
+ * where a correct panel is completely still and an incorrect one is
+ * indistinguishable from a hung one. This is true only in the gaps: two
+ * indicators for one state make the panel look busier than the run it is
+ * describing.
+ */
+function showWorking(blocks, running) {
+  if (!running) return false;
+  var last = blocks.length === 0 ? null : blocks[blocks.length - 1];
+  if (last === null) return true;
+  // Text and thinking are both visibly growing on screen.
+  if (last.kind === "text" || last.kind === "thinking") return false;
+  if (last.kind === "tool" && (last.status === "running" || last.status === "awaitingPermission")) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Where one tool card sits in a run of consecutive ones.
+ *
+ * A turn that ran six greps in a row is one action, not six cards each with
+ * its own border, its own corners and its own 6px of air. The renderer draws
+ * the run as a single stack — outer corners, hairline dividers — and this is
+ * the only decision behind it: what came immediately before and after.
+ */
+function toolGroup(before, after) {
+  if (before === "tool") return after === "tool" ? "mid" : "last";
+  return after === "tool" ? "first" : "solo";
 }
 `;

@@ -16,10 +16,14 @@
  *
  * RFC 0004 §0 freezes what a client may drive: `prompt`, `steer`, `abort`,
  * `setModel`, `respondToPermission`, `listModels`, `listSessions`,
- * `createSession`, `openSession`. Every message in the webview→host union
+ * `createSession`, `openSession`, `sessionHistory`, `deleteSession`. Every
+ * message in the webview→host union
  * below lands on exactly one of those, on a VS Code command the extension
  * already contributes, or on nothing at all (`toggle` is view state; `copy` is
- * the clipboard). No message here invents a verb, and `setModel` in
+ * the clipboard). No message here invents a verb — the last two on that list
+ * were added to the *engine* first, exactly as §0 prescribes, which is why
+ * `deleteSession` below is a wire verb this file forwards rather than an
+ * extension-side `fs.unlink`. And `setModel` in
  * particular is validated as a *string with a ceiling*, not against a
  * catalog: the catalog is the server's and the server validates the id, which
  * is where that check belongs and where `picker.ts`'s free-text row has always
@@ -165,6 +169,15 @@ export type WebviewMessage =
   | { type: "setModel"; modelId: string }
   | { type: "requestSessions" }
   | { type: "openSession"; sessionId: string }
+  /**
+   * Delete a session, permanently.
+   *
+   * The host confirms with a native modal before anything happens, and the
+   * deletion itself is the engine's `deleteSession` verb — this extension
+   * never unlinks a session file itself. The shape is fixed: the panel's
+   * delete control sends exactly this.
+   */
+  | { type: "deleteSession"; sessionId: string }
   | { type: "copy"; text: string };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -259,7 +272,7 @@ export function projectSessions(headers: readonly SessionHeader[], cwd: string):
  *
  * @param value - Whatever arrived on `onDidReceiveMessage`.
  * @returns A freshly built message, or `undefined` when the value is not one
- *   of the eleven the webview is allowed to send. The `action` case is validated
+ *   of the twelve the webview is allowed to send. The `action` case is validated
  *   against {@link CONNECTION_ACTIONS} rather than by shape alone.
  */
 export function parseWebviewMessage(value: unknown): WebviewMessage | undefined {
@@ -323,6 +336,19 @@ export function parseWebviewMessage(value: unknown): WebviewMessage | undefined 
       if (sessionId === "" || sessionId.length > MAX_SESSION_ID_LENGTH) return undefined;
       if (hasControlCharacter(sessionId)) return undefined;
       return { type: "openSession", sessionId };
+    }
+    case "deleteSession": {
+      // Validated exactly like `openSession` — a rebuilt field, a ceiling and
+      // no control characters — and for the same reason: the id reaches the
+      // Output channel and a modal. That this one is destructive changes
+      // nothing here; the confirmation and the refusal to touch files both
+      // live past this boundary, in the host and in the engine respectively.
+      const raw = value.sessionId;
+      if (typeof raw !== "string") return undefined;
+      const sessionId = raw.trim();
+      if (sessionId === "" || sessionId.length > MAX_SESSION_ID_LENGTH) return undefined;
+      if (hasControlCharacter(sessionId)) return undefined;
+      return { type: "deleteSession", sessionId };
     }
     case "copy": {
       const text = value.text;

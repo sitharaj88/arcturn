@@ -8,6 +8,14 @@
 
 export type { AuthenticateFrame } from "./auth.js";
 export { isAuthenticateFrame, tokensMatch } from "./auth.js";
+export type { SessionHistoryLimits } from "./session-history.js";
+export {
+  buildSessionHistory,
+  capSessionEvents,
+  projectSessionEvents,
+  SESSION_HISTORY_MAX_BYTES,
+  SESSION_HISTORY_MAX_EVENTS,
+} from "./session-history.js";
 export type {
   AgentFactoryOptions,
   SessionHostErrorCode,

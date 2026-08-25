@@ -21,7 +21,7 @@ export type {
   ProtocolEventListener,
   WebSocketLike,
 } from "@arcturn/protocol";
-export { createProtocolClient } from "@arcturn/protocol";
+export { createProtocolClient, isUnsupportedMethodError } from "@arcturn/protocol";
 export type {
   AgentEvent,
   AgentEventType,
@@ -35,6 +35,7 @@ export type {
   PermissionRequest,
   PermissionRule,
   SessionHeader,
+  SessionHistory,
   StreamEvent,
   TodoItem,
   ToolResultMessage,

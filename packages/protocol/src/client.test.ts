@@ -3,6 +3,7 @@ import {
   ClientErrorCode,
   createProtocolClient,
   DEFAULT_REQUEST_TIMEOUT_MS,
+  isUnsupportedMethodError,
   type ProtocolClientError,
   ProtocolClosedError,
   ProtocolRequestError,
@@ -814,5 +815,146 @@ describe("createProtocolClient: listModels", () => {
 
     const error = await rejection(promise);
     expect(error.code).toBe(ClientErrorCode.invalidResponse);
+  });
+});
+
+describe("createProtocolClient: sessionHistory", () => {
+  const HISTORY = {
+    sessionId: "s1",
+    events: [
+      {
+        type: "runStart",
+        sessionId: "s1",
+        prompt: { role: "user", content: [{ type: "text", text: "hi" }], timestamp: 1 },
+      },
+      { type: "runEnd", reason: "completed" },
+    ],
+    truncated: false,
+    droppedEvents: 0,
+  };
+
+  it("returns the server's replay", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.sessionHistory("s1");
+    await flush();
+    expect(socket.frames()[0]).toMatchObject({
+      method: "sessionHistory",
+      params: { sessionId: "s1" },
+    });
+    socket.respondOk(0, HISTORY);
+
+    expect(await promise).toEqual(HISTORY);
+  });
+
+  it("degrades to undefined against an old server that does not know the verb", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.sessionHistory("s1");
+    await flush();
+    socket.respondError(0, ErrorCode.invalidRequest, 'Unknown method: "sessionHistory"');
+
+    // A read that cannot happen costs the caller a transcript, not a guarantee.
+    await expect(promise).resolves.toBeUndefined();
+  });
+
+  it("still rejects an id the server does not have", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.sessionHistory("s1");
+    await flush();
+    socket.respondError(0, ErrorCode.sessionNotFound, "Session s1 does not exist");
+
+    const error = await rejection<ProtocolRequestError>(promise);
+    expect(error.code).toBe(ErrorCode.sessionNotFound);
+  });
+
+  it("rejects a payload that is not the documented shape", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.sessionHistory("s1");
+    await flush();
+    socket.respondOk(0, { sessionId: "s1", events: [{ nope: true }] });
+
+    const error = await rejection(promise);
+    expect(error.code).toBe(ClientErrorCode.invalidResponse);
+  });
+});
+
+describe("createProtocolClient: deleteSession", () => {
+  it("sends the verb and resolves when the server confirms", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.deleteSession("s1");
+    await flush();
+    expect(socket.frames()[0]).toMatchObject({
+      method: "deleteSession",
+      params: { sessionId: "s1" },
+    });
+    socket.respondOk(0, { ok: true });
+
+    await expect(promise).resolves.toBeUndefined();
+  });
+
+  it("does NOT translate an old server's refusal into success", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.deleteSession("s1");
+    await flush();
+    socket.respondError(0, ErrorCode.invalidRequest, 'Unknown method: "deleteSession"');
+
+    // The `listModels` degradation would be a lie here: nothing was deleted.
+    const error = await rejection<ProtocolRequestError>(promise);
+    expect(error.code).toBe(ErrorCode.invalidRequest);
+    expect(isUnsupportedMethodError(error)).toBe(true);
+  });
+
+  it("surfaces sessionBusy so a caller can say 'abort the run first'", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const promise = client.deleteSession("s1");
+    await flush();
+    socket.respondError(0, ErrorCode.sessionBusy, "Session s1 is running a turn");
+
+    const error = await rejection<ProtocolRequestError>(promise);
+    expect(error.code).toBe(ErrorCode.sessionBusy);
+    expect(isUnsupportedMethodError(error)).toBe(false);
+  });
+});
+
+describe("isUnsupportedMethodError", () => {
+  it("is true only for a server-reported unknown-method rejection", () => {
+    expect(
+      isUnsupportedMethodError(
+        new ProtocolRequestError(ErrorCode.invalidRequest, 'Unknown method: "x"', {
+          requestId: "1",
+          method: "x",
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      isUnsupportedMethodError(
+        new ProtocolRequestError(ErrorCode.unknownMethod, "nope", { requestId: "1", method: "x" }),
+      ),
+    ).toBe(true);
+    expect(
+      isUnsupportedMethodError(
+        new ProtocolRequestError(ErrorCode.sessionNotFound, "nope", {
+          requestId: "1",
+          method: "x",
+        }),
+      ),
+    ).toBe(false);
+    // A locally-raised failure carrying the same code is this client's own
+    // validation failing — a bug to surface, not a peer to work around.
+    expect(isUnsupportedMethodError(new ProtocolClosedError("closed"))).toBe(false);
+    expect(isUnsupportedMethodError(undefined)).toBe(false);
   });
 });

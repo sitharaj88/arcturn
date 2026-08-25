@@ -1057,3 +1057,323 @@ describe("host messages the panel will not act on", () => {
     expect(panel.byId("model-list").all("model-row")).toHaveLength(2);
   });
 });
+
+describe("motion, as state rather than decoration", () => {
+  /* Appearance is not assertable against a stub with no cascade. What is
+   * assertable is the *mechanism*: which class the script puts on which
+   * element in response to which state change, and — just as important —
+   * which it withholds, because an animation that fires on a repaint is the
+   * one that turns a long answer into a strobe. */
+
+  it("lands a newly submitted prompt, and does not re-land a restored transcript", () => {
+    // A panel that was hidden and came back gets its whole history in one
+    // message. Animating that is a wall of movement describing nothing.
+    panel.send(state({ blocks: [{ kind: "user", id: "u1", text: "first" }] }));
+    const first = panel.byId("turns").childNodes[0] as StubNode;
+    expect(first.className).not.toContain("arc-enter");
+
+    panel.send(
+      state({
+        blocks: [
+          { kind: "user", id: "u1", text: "first" },
+          { kind: "text", id: "t1", text: "answer" },
+          { kind: "user", id: "u2", text: "second" },
+        ],
+      }),
+    );
+    const turns = panel.byId("turns").childNodes as StubNode[];
+    expect(turns[0]).toBe(first);
+    expect(turns[0]?.className).not.toContain("arc-enter");
+    expect(turns[2]?.className).toContain("arc-enter");
+  });
+
+  it("shows a working signal in the gap before the first output, and only there", () => {
+    const working = panel.byId("working");
+    expect(working.classList.contains("hidden")).toBe(true);
+
+    panel.send(state({ running: true, blocks: [{ kind: "user", id: "u1", text: "go" }] }));
+    expect(working.classList.contains("hidden")).toBe(false);
+    expect(working.textContent).toContain("Working");
+
+    // The caret takes over the moment text starts arriving.
+    panel.send(
+      state({
+        running: true,
+        blocks: [
+          { kind: "user", id: "u1", text: "go" },
+          { kind: "text", id: "t1", text: "Sure" },
+        ],
+      }),
+    );
+    expect(working.classList.contains("hidden")).toBe(true);
+
+    panel.send(state({ running: false, blocks: [{ kind: "user", id: "u1", text: "go" }] }));
+    expect(working.classList.contains("hidden")).toBe(true);
+  });
+
+  it("does not re-animate text that is already on screen", () => {
+    // The classic streaming mistake. The caret is a class on the block being
+    // written; nothing inside the rendered markdown carries an entrance.
+    panel.send(state({ running: true, blocks: [{ kind: "text", id: "t1", text: "Half a sen" }] }));
+    panel.send(
+      state({ running: true, blocks: [{ kind: "text", id: "t1", text: "Half a sentence." }] }),
+    );
+    const block = panel.byId("turns").find((node) => node.classList.contains("text-block"));
+    expect(block?.className).toContain("streaming");
+    const animated = (block?.walk() ?? []).filter(
+      (node) => node.classList.contains("arc-enter") || node.classList.contains("arc-pop"),
+    );
+    expect(animated).toEqual([]);
+  });
+
+  it("pops a tool badge when its status settles, and not when it arrives settled", () => {
+    panel.send(state({ blocks: [toolBlock({ status: "ok" })] }));
+    const settledOnArrival = panel
+      .byId("turns")
+      .find((node) => node.classList.contains("tool-status"));
+    expect(settledOnArrival?.className).not.toContain("arc-pop");
+
+    panel.send(state({ blocks: [toolBlock({ id: "tool:k2", status: "running" })] }));
+    panel.send(state({ blocks: [toolBlock({ id: "tool:k2", status: "error" })] }));
+    const card = panel.byId("turns").all("tool").at(-1);
+    expect(card?.find((node) => node.classList.contains("tool-status"))?.className).toContain(
+      "arc-pop",
+    );
+  });
+
+  it("reveals a tool body the host has just expanded", () => {
+    panel.send(state({ blocks: [toolBlock({ collapsed: true })] }));
+    panel.send(state({ blocks: [toolBlock({ collapsed: false, result: "done" })] }));
+    const body = panel.byId("turns").find((node) => node.classList.contains("tool-body"));
+    expect(body?.className).toContain("arc-reveal");
+    expect(body?.classList.contains("hidden")).toBe(false);
+  });
+
+  it("punctuates the end of a turn, once, and never on a transcript that was never running", () => {
+    panel.send(
+      state({
+        running: false,
+        blocks: [
+          { kind: "user", id: "u1", text: "go" },
+          { kind: "text", id: "t1", text: "done" },
+        ],
+      }),
+    );
+    const turn = panel.byId("turns").childNodes[1] as StubNode;
+    expect(turn.className).not.toContain("turn-settled");
+
+    panel.send(
+      state({
+        running: true,
+        blocks: [
+          { kind: "user", id: "u1", text: "go" },
+          { kind: "text", id: "t1", text: "don" },
+        ],
+      }),
+    );
+    expect(turn.className).not.toContain("turn-settled");
+    panel.send(
+      state({
+        running: false,
+        blocks: [
+          { kind: "user", id: "u1", text: "go" },
+          { kind: "text", id: "t1", text: "done" },
+        ],
+      }),
+    );
+    expect(turn.className).toContain("turn-settled");
+  });
+});
+
+describe("how code is packaged", () => {
+  function render(text: string): StubNode {
+    panel.send(state({ blocks: [{ kind: "text", id: "t1", text }] }));
+    return panel.byId("turns");
+  }
+
+  const long = [
+    "```ts",
+    ...Array.from({ length: 40 }, (_, i) => `const a${i} = ${i};`),
+    "```",
+  ].join("\n");
+
+  it("folds a long block behind its line count rather than burying the conversation", () => {
+    const block = render(long).find((node) => node.classList.contains("code-block"));
+    expect(block?.classList.contains("code-clamped")).toBe(true);
+    const more = block?.find((node) => node.classList.contains("code-more"));
+    expect(more?.textContent).toContain("40 lines");
+    expect(more?.getAttribute("aria-expanded")).toBe("false");
+    more?.dispatch("click");
+    expect(block?.classList.contains("code-clamped")).toBe(false);
+    expect(more?.getAttribute("aria-expanded")).toBe("true");
+    expect(more?.textContent).toContain("Show less");
+  });
+
+  it("leaves a short block alone", () => {
+    const block = render("```ts\nconst a = 1;\n```").find((node) =>
+      node.classList.contains("code-block"),
+    );
+    expect(block?.classList.contains("code-clamped")).toBe(false);
+    expect(block?.find((node) => node.classList.contains("code-more"))).toBeUndefined();
+  });
+
+  it("names the file a fence carries, by its basename, with the path in the title", () => {
+    const block = render("```ts src/sidebar/webview-client.ts\nconst a = 1;\n```").find((node) =>
+      node.classList.contains("code-block"),
+    );
+    const file = block?.find((node) => node.classList.contains("code-file"));
+    expect(file?.textContent).toBe("webview-client.ts");
+    expect(file?.title).toBe("src/sidebar/webview-client.ts");
+    expect(block?.find((node) => node.classList.contains("code-lang"))?.textContent).toBe("ts");
+  });
+
+  it("says a fence is still being written instead of offering to copy half of it", () => {
+    const block = render("```py\nprint(").find((node) => node.classList.contains("code-block"));
+    expect(block?.classList.contains("code-open")).toBe(true);
+    expect(block?.find((node) => node.classList.contains("code-copy"))).toBeUndefined();
+    expect(block?.textContent).toContain("writing");
+    // A fence the model has not closed never folds: it would fold around the
+    // top while the tail is what the reader is watching.
+    expect(block?.classList.contains("code-clamped")).toBe(false);
+  });
+
+  it("does not rebuild a settled block when a later one arrives", () => {
+    // The fold is view state that lives in the element, so a repaint throws
+    // it away — along with the reader's text selection and their scroll
+    // position inside the block. Grouping is computed per block on every
+    // render, and it must not become a field that changes under a *text*
+    // block every time something lands after it.
+    panel.send(state({ blocks: [{ kind: "text", id: "t1", text: long }] }));
+    const before = panel.byId("turns").find((node) => node.classList.contains("code-block"));
+    before?.find((node) => node.classList.contains("code-more"))?.dispatch("click");
+    expect(before?.classList.contains("code-clamped")).toBe(false);
+
+    panel.send(state({ blocks: [{ kind: "text", id: "t1", text: long }, toolBlock({ id: "a" })] }));
+    const after = panel.byId("turns").find((node) => node.classList.contains("code-block"));
+    expect(after).toBe(before);
+    expect(after?.classList.contains("code-clamped")).toBe(false);
+  });
+
+  it("stacks consecutive tool calls into one card and leaves a lone one alone", () => {
+    panel.send(state({ blocks: [toolBlock({ id: "tool:a" })] }));
+    expect(panel.byId("turns").all("tool")[0]?.className).toContain("tool-group-solo");
+
+    panel.send(
+      state({
+        blocks: [
+          toolBlock({ id: "tool:a" }),
+          toolBlock({ id: "tool:b" }),
+          toolBlock({ id: "tool:c" }),
+          { kind: "text", id: "t1", text: "and there you go" },
+        ],
+      }),
+    );
+    expect(
+      panel
+        .byId("turns")
+        .all("tool")
+        .map((node) => node.className),
+    ).toEqual([
+      expect.stringContaining("tool-group-first"),
+      expect.stringContaining("tool-group-mid"),
+      expect.stringContaining("tool-group-last"),
+    ]);
+  });
+});
+
+describe("deleting a session from the history list", () => {
+  const HOUR = 3_600_000;
+  const rows = [
+    { sessionId: "01JOLDEST", title: "Find the setModel bug", createdAt: Date.now() - 50 * HOUR },
+    { sessionId: "01JNEWEST", title: "Rebuild the sidebar", createdAt: Date.now() - 3 * HOUR },
+  ];
+
+  function open(): void {
+    panel.byId("sessions").dispatch("click");
+    panel.send({ type: "showSessions" });
+  }
+
+  function list(over: Record<string, unknown> = {}): unknown {
+    return {
+      type: "sessions",
+      status: "ready",
+      sessions: rows,
+      current: "01JNEWEST",
+      cwd: "/repo/arcturn",
+      ...over,
+    };
+  }
+
+  function deletes(): StubNode[] {
+    return panel.byId("sessions-list").all("session-delete");
+  }
+
+  it("puts a delete button on every row, naming what it would delete", () => {
+    open();
+    panel.send(list());
+    expect(deletes()).toHaveLength(2);
+    expect(deletes()[0]?.tagName).toBe("button");
+    expect(deletes()[0]?.getAttribute("aria-label")).toContain("Rebuild the sidebar");
+  });
+
+  it("posts exactly the verb the host is listening for", () => {
+    open();
+    panel.send(list());
+    deletes()[1]?.dispatch("click");
+    expect(panel.posted.at(-1)).toEqual({ type: "deleteSession", sessionId: "01JOLDEST" });
+  });
+
+  it("does not open the session it was asked to delete", () => {
+    // Two intents on one row. Deleting must not also be picking.
+    open();
+    panel.send(list());
+    deletes()[0]?.dispatch("click");
+    expect(panel.posted.filter((message) => message.type === "openSession")).toHaveLength(0);
+    expect(panel.byId("sessions-view").classList.contains("hidden")).toBe(false);
+  });
+
+  it("leaves the row on screen until the host sends a list without it", () => {
+    // The host raises a native modal and may be told no. A row that vanishes
+    // on click would say a session is gone that is still there.
+    open();
+    panel.send(list());
+    deletes()[0]?.dispatch("click");
+    expect(panel.byId("sessions-list").all("session-row")).toHaveLength(2);
+    expect(panel.byId("sessions-list").textContent).toContain("Rebuild the sidebar");
+    panel.send(list({ sessions: [rows[0]], current: undefined }));
+    expect(panel.byId("sessions-list").all("session-row")).toHaveLength(1);
+    expect(panel.byId("sessions-list").textContent).not.toContain("Rebuild the sidebar");
+  });
+
+  it("is reachable without a mouse: Delete removes the highlighted row", () => {
+    // A control that only exists on hover does not exist for a keyboard user.
+    open();
+    panel.send(list());
+    const search = panel.byId("sessions-search");
+    expect(search.getAttribute("aria-activedescendant")).toBe("session-row-0");
+    search.dispatch("keydown", { key: "ArrowDown" });
+    search.dispatch("keydown", { key: "Delete" });
+    expect(panel.posted.at(-1)).toEqual({ type: "deleteSession", sessionId: "01JOLDEST" });
+    // …and the list is still up, because the host has not answered yet.
+    expect(panel.byId("sessions-view").classList.contains("hidden")).toBe(false);
+  });
+
+  it("does not delete when no row is highlighted", () => {
+    open();
+    panel.send(list({ sessions: [], current: undefined }));
+    panel.byId("sessions-search").dispatch("keydown", { key: "Delete" });
+    expect(panel.posted.filter((message) => message.type === "deleteSession")).toHaveLength(0);
+  });
+
+  it("keeps the row itself the option a screen reader reads", () => {
+    // The delete button rides in a presentational wrapper so the listbox's
+    // children are still the rows, and aria-activedescendant still resolves.
+    open();
+    panel.send(list());
+    const row = panel.byId("sessions-list").all("session-row")[0];
+    expect(row?.getAttribute("role")).toBe("option");
+    expect(row?.getAttribute("id")).toBe("session-row-0");
+    expect(row?.parentNode?.getAttribute("role")).toBe("presentation");
+    expect(deletes()[0]?.parentNode).toBe(row?.parentNode);
+  });
+});

@@ -18,6 +18,7 @@ import type {
   PermissionRule,
   ServerMessage,
   SessionHeader,
+  SessionHistory,
 } from "@arcturn/types";
 
 /** Result of validating a value against a wire-protocol type. */
@@ -43,6 +44,8 @@ const CLIENT_METHODS = [
   "permissionDecision",
   "setModel",
   "listModels",
+  "sessionHistory",
+  "deleteSession",
 ] as const;
 
 const SERVER_KINDS = ["response", "event", "sessions"] as const;
@@ -152,6 +155,28 @@ export function validateClientRequest(value: unknown): ClientRequestValidation {
     case "listModels": {
       // No params: the catalog is a property of the server, not of a session.
       return ok<ClientRequest>({ id, method: "listModels" });
+    }
+    case "sessionHistory": {
+      if (!isRecord(params)) return fail('sessionHistory requires an object "params"');
+      if (!isString(params.sessionId)) {
+        return fail("sessionHistory params.sessionId must be a string");
+      }
+      return ok<ClientRequest>({
+        id,
+        method: "sessionHistory",
+        params: { sessionId: params.sessionId },
+      });
+    }
+    case "deleteSession": {
+      if (!isRecord(params)) return fail('deleteSession requires an object "params"');
+      if (!isString(params.sessionId)) {
+        return fail("deleteSession params.sessionId must be a string");
+      }
+      return ok<ClientRequest>({
+        id,
+        method: "deleteSession",
+        params: { sessionId: params.sessionId },
+      });
     }
     default:
       return exhaustiveCheck(method as never, `Unknown method: "${method}"`);
@@ -407,6 +432,59 @@ export function validateModelCatalog(value: unknown): ValidationResult<ModelCata
     models.push(entryResult.value);
   }
   return { ok: true, value: { models } };
+}
+
+/**
+ * Validate a `sessionHistory` result.
+ *
+ * Run at **both** ends, exactly as {@link validateModelCatalog} is: the server
+ * re-validates the payload it built before it leaves the host, and the client
+ * re-validates what arrived before it hands it to a caller. Fields are copied
+ * out one at a time rather than spread, so a server that puts something extra
+ * in the envelope cannot have it ride along into a client.
+ *
+ * The `events` array is **shallow**-validated — each element must be an object
+ * with a string `type` — which is the same latitude {@link validateServerMessage}
+ * gives the `event` kind's payload, and for the same reason stated in this
+ * module's doc: deep validation of every {@link AgentEvent} variant is the
+ * runtime's job, not the wire layer's. Applying a stricter rule here than to
+ * the live stream would mean an event that is fine to push is not fine to
+ * replay, which is precisely the drift replaying events exists to avoid.
+ */
+export function validateSessionHistory(value: unknown): ValidationResult<SessionHistory> {
+  if (!isRecord(value)) return fail("SessionHistory must be an object");
+  if (!isString(value.sessionId)) return fail("SessionHistory.sessionId must be a string");
+  if (!Array.isArray(value.events)) return fail("SessionHistory.events must be an array");
+  if (typeof value.truncated !== "boolean") {
+    return fail("SessionHistory.truncated must be a boolean");
+  }
+  if (!isNumber(value.droppedEvents) || value.droppedEvents < 0) {
+    return fail("SessionHistory.droppedEvents must be a non-negative number");
+  }
+  if (!value.truncated && value.droppedEvents !== 0) {
+    // A payload claiming nothing was dropped while reporting a count is one a
+    // client would render one of two contradictory ways. Neither is safe to
+    // guess, and the honest reading — "this peer is confused" — is a failure.
+    return fail("SessionHistory.droppedEvents must be 0 when truncated is false");
+  }
+  const events: AgentEvent[] = [];
+  for (let i = 0; i < value.events.length; i++) {
+    const event: unknown = value.events[i];
+    if (!isRecord(event) || !isString(event.type)) {
+      return fail(`events[${i}] must be an object with a string "type"`);
+    }
+    // Shallow-validated only; see the doc comment above.
+    events.push(event as AgentEvent);
+  }
+  return {
+    ok: true,
+    value: {
+      sessionId: value.sessionId,
+      events,
+      truncated: value.truncated,
+      droppedEvents: value.droppedEvents,
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------

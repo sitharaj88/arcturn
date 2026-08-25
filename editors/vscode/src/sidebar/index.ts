@@ -22,7 +22,7 @@ import { spawn as nodeSpawn } from "node:child_process";
 import * as vscode from "vscode";
 import type { ResolvedCliLike } from "../serve/args.js";
 import type { SocketFactory } from "../serve/connect.js";
-import type { WebSocketLike } from "../serve/engine.js";
+import { isUnsupportedMethodError, type WebSocketLike } from "../serve/engine.js";
 import { createRedactor } from "../serve/redact.js";
 import type { SpawnLike } from "../serve/supervisor.js";
 import { generateToken } from "../serve/token.js";
@@ -31,7 +31,12 @@ import { type ChatViewModel, toViewModel } from "./chat-state.js";
 import { createCoalescer } from "./coalesce.js";
 import { type ConnectionActionId, type ConnectionReport, reportText } from "./connection-card.js";
 import { costBreakdown, costLabel } from "./cost.js";
-import { answerFromChoice, permissionChoices } from "./dialog.js";
+import {
+  answerFromChoice,
+  confirmsSessionDeletion,
+  describeSessionDeletion,
+  permissionChoices,
+} from "./dialog.js";
 import { createEngineSession, type EngineSession } from "./engine-session.js";
 import { describePermissionRequest } from "./permission-queue.js";
 import { escapeCodicons, modelPickItems } from "./picker.js";
@@ -153,6 +158,9 @@ export function activateSidebar(
           return;
         case "openSession":
           void openSession(message.sessionId);
+          return;
+        case "deleteSession":
+          void deleteSession(message.sessionId);
           return;
         case "setModel":
           void withEngine((session) => switchModel(session, message.modelId));
@@ -351,6 +359,70 @@ export function activateSidebar(
       selectedModel = undefined;
       repaintTranscript();
       publishSession();
+      await publishSessions();
+    });
+  }
+
+  /**
+   * What to call this session in a sentence the user reads.
+   *
+   * The engine's title when the cached list has one, the id otherwise —
+   * never a blank, because a modal asking "delete ?" is a modal nobody can
+   * answer safely.
+   */
+  function sessionLabel(sessionId: string): string {
+    const row = sessions?.find((candidate) => candidate.sessionId === sessionId);
+    return row === undefined || row.title === "" ? sessionId : row.title;
+  }
+
+  /**
+   * Delete a session, after asking.
+   *
+   * Two things are deliberate. The confirmation is a **native modal** naming
+   * the session, not a webview button and not a toast: this is irreversible
+   * and a stray click in a list must not be able to lose an afternoon's work.
+   * And the deletion itself is the engine's `deleteSession` verb — the
+   * extension never unlinks a session file, which is RFC 0004 §0's rule and
+   * also the only version that can refuse to delete a session mid-run.
+   *
+   * When the deleted session was the one on screen the panel opens a fresh
+   * one, so the composer still goes somewhere real. Leaving it attached to
+   * nothing would give the user a prompt box that silently swallows what they
+   * type — which is the failure this whole surface exists to remove.
+   */
+  async function deleteSession(sessionId: string): Promise<void> {
+    await withEngine(async (session) => {
+      const wasAttached = session.controller?.sessionId === sessionId;
+      // Escaped because a notification expands `$(name)` into a glyph, and
+      // both the title and the id came from the engine.
+      const label = escapeCodicons(sessionLabel(sessionId));
+      const prompt = describeSessionDeletion(label);
+      const choice = await vscode.window.showWarningMessage(
+        prompt.message,
+        { modal: true, detail: prompt.detail },
+        prompt.confirmLabel,
+      );
+      if (!confirmsSessionDeletion(choice, prompt)) return;
+
+      try {
+        await session.deleteSession(sessionId);
+      } catch (error) {
+        const reason = isUnsupportedMethodError(error)
+          ? "this arcturn engine is too old to delete sessions — upgrade the CLI"
+          : error instanceof Error
+            ? error.message
+            : String(error);
+        log(`sidebar: could not delete session ${sessionId}: ${reason}`);
+        void vscode.window.showErrorMessage(`Arcturn could not delete session ${label}: ${reason}`);
+        return;
+      }
+
+      // A session that no longer exists was in the cached list.
+      sessions = undefined;
+      if (wasAttached) {
+        await startNewSession(session);
+        return;
+      }
       await publishSessions();
     });
   }

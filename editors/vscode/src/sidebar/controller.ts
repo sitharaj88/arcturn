@@ -11,6 +11,12 @@
  *
  * The verbs used are exactly the ones RFC 0004 §1 lists — `prompt`, `steer`,
  * `abort`, `setModel`, `respondToPermission`, `onEvent` — and nothing else.
+ *
+ * History is folded in the same way live events are, through {@link reduceChat}
+ * and nothing else. That is the whole reason the engine replays `AgentEvent`s
+ * rather than a projected message list: a transcript rebuilt from disk and one
+ * watched as it happened go through the identical code, so they cannot render
+ * differently, and this file needed no new branch to gain the feature.
  */
 
 import type {
@@ -18,6 +24,7 @@ import type {
   PermissionRequest,
   ProtocolClient,
   SessionHeader,
+  SessionHistory,
 } from "../serve/engine.js";
 import {
   type ChatState,
@@ -59,6 +66,13 @@ export interface SessionControllerOptions {
   host: ControllerHost;
   /** The session header, when the caller has one (used only for `cwd`). */
   header?: SessionHeader;
+  /**
+   * The session's stored conversation, folded in before this controller
+   * subscribes. Absent for a new session, and for an engine too old to replay
+   * one (`ProtocolClient.sessionHistory` resolves `undefined`), in which case
+   * the transcript starts empty exactly as it did before.
+   */
+  history?: SessionHistory;
 }
 
 /** One open session. */
@@ -100,7 +114,7 @@ export interface SessionController {
 export function createSessionController(options: SessionControllerOptions): SessionController {
   const { client, sessionId, host } = options;
 
-  let state = initialChatState;
+  let state = seedFromHistory(initialChatState, options.history);
   let cost = initialCostState;
   let disposed = false;
   const observedModels: string[] = [];
@@ -203,4 +217,36 @@ export function createSessionController(options: SessionControllerOptions): Sess
       toolArgs.clear();
     },
   };
+}
+
+/**
+ * Fold a replayed history into transcript state.
+ *
+ * Truncation is announced *first*, as an ordinary `notice` event pushed
+ * through the same reducer, so the panel renders it with the notice styling it
+ * already has and the sentence sits above the oldest message that survived.
+ * Saying it here rather than on the wire keeps the engine from writing UI
+ * copy, and saying it at all is the point: a transcript that quietly starts
+ * mid-conversation reads as the whole conversation, which is the exact class
+ * of silent wrong answer this panel keeps refusing to give.
+ *
+ * @param state - Usually {@link initialChatState}.
+ * @param history - What `sessionHistory` returned, if anything.
+ */
+function seedFromHistory(state: ChatState, history: SessionHistory | undefined): ChatState {
+  if (history === undefined) return state;
+  let next = state;
+  if (history.truncated) {
+    next = reduceChat(next, {
+      type: "notice",
+      level: "info",
+      text: `Earlier messages are not shown — this session is longer than the panel replays (${String(
+        history.droppedEvents,
+      )} older events omitted).`,
+    });
+  }
+  for (const event of history.events) next = reduceChat(next, event);
+  // A replay describes what was already stored, and nothing stored is still in
+  // flight. Live events decide `running` from here on.
+  return next.running ? { ...next, running: false } : next;
 }

@@ -501,6 +501,30 @@ describe("the panel's own messages", () => {
     expect(panel.posted().map((message) => message.type)).toContain("sessions");
   });
 
+  it("routes a delete request at the engine, and never at the filesystem", async () => {
+    const panel = open();
+    panel.send({ type: "deleteSession", sessionId: "01JABCDEFGHJKMNPQRS" });
+    await Promise.resolve();
+    // The engine is down here, so what is provable is that the message was
+    // recognised at the boundary and taken down the engine path — the panel
+    // has no other way to delete anything, which is the point.
+    const dropped = (ledger.outputs[0]?.lines ?? []).filter((line) =>
+      line.includes("dropped an unrecognised webview message"),
+    );
+    expect(dropped).toHaveLength(0);
+    expect(ledger.quickPicks).toHaveLength(0);
+  });
+
+  it("does not raise a destructive modal when the engine cannot act on it anyway", async () => {
+    const panel = open();
+    panel.send({ type: "deleteSession", sessionId: "01JABCDEFGHJKMNPQRS" });
+    await Promise.resolve();
+    await Promise.resolve();
+    // A confirmation the engine could not honour is a prompt that teaches the
+    // user their click did nothing; the reconnect card is the honest answer.
+    expect(ledger.messages.filter((m) => m.message.startsWith("Delete the Arcturn"))).toEqual([]);
+  });
+
   it("replays the model list when the page reloads", async () => {
     const panel = open();
     panel.send({ type: "requestModels" });

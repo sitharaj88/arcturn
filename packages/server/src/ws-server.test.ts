@@ -1,9 +1,10 @@
-import { Agent } from "@arcturn/core";
+import { Agent, MemorySessionStore } from "@arcturn/core";
 import type {
   AgentEvent,
   AssistantMessage,
   ModelCatalogEntry,
   ServerMessage,
+  SessionHistory,
   StreamEvent,
   Tool,
 } from "@arcturn/types";
@@ -656,5 +657,204 @@ describe("ArcturnServer: listModels", () => {
       result: { models: [{ id: "anthropic/claude-sonnet-5", apiKeyEnv: "ANTHROPIC_API_KEY" }] },
     });
     expect(JSON.stringify(responseFor(messages, "1"))).not.toContain("sk-live-should-never-ship");
+  });
+});
+
+describe("ArcturnServer: sessionHistory over the wire", () => {
+  /** A host with a real store, so history has somewhere to come from. */
+  function buildStoredHost(
+    store: MemorySessionStore,
+    llm: AnyLLM,
+    sessionHistoryLimits?: { maxBytes?: number; maxEvents?: number },
+  ): SessionHost {
+    return new SessionHost({
+      agentFactory: (opts) =>
+        new Agent({
+          llm,
+          model: TEST_MODEL,
+          systemPrompt: "You are a test agent.",
+          tools: [],
+          cwd: opts.cwd,
+          sessionId: opts.sessionId,
+          sessionStore: store,
+        }),
+      sessionStore: store,
+      defaultCwd: "/tmp/arcturn-ws-test",
+      ...(sessionHistoryLimits === undefined ? {} : { sessionHistoryLimits }),
+    });
+  }
+
+  it("replays a prior turn to a connection that never saw it happen", async () => {
+    const store = new MemorySessionStore();
+    const host = buildStoredHost(store, createScriptedLLM([textTurn("the stored answer")]));
+    const { url } = await startServer(host);
+
+    const first = await connect(url);
+    const firstMessages = collectMessages(first);
+    send(first, { id: "1", method: "createSession", params: { cwd: "/tmp/arcturn-ws-test" } });
+    await waitFor(firstMessages, (m) => responseFor(m, "1") !== undefined);
+    const sessionId = (responseFor(firstMessages, "1") as { result: { sessionId: string } }).result
+      .sessionId;
+    send(first, { id: "2", method: "openSession", params: { sessionId } });
+    await waitFor(firstMessages, (m) => responseFor(m, "2") !== undefined);
+    send(first, { id: "3", method: "prompt", params: { sessionId, text: "the stored question" } });
+    await waitFor(firstMessages, (m) => responseFor(m, "3") !== undefined);
+    first.close();
+
+    // A brand-new connection: it has seen no events at all for this session.
+    const second = await connect(url);
+    const secondMessages = collectMessages(second);
+    send(second, { id: "9", method: "sessionHistory", params: { sessionId } });
+    await waitFor(secondMessages, (m) => responseFor(m, "9") !== undefined);
+
+    const result = (responseFor(secondMessages, "9") as { result: SessionHistory }).result;
+    expect(result.sessionId).toBe(sessionId);
+    expect(result.truncated).toBe(false);
+    expect(result.events.map((event) => event.type)).toEqual(["runStart", "messageEnd", "runEnd"]);
+    expect(JSON.stringify(result)).toContain("the stored question");
+    expect(JSON.stringify(result)).toContain("the stored answer");
+  });
+
+  it("caps a long session and says so, rather than starting mid-conversation in silence", async () => {
+    const store = new MemorySessionStore();
+    // Three events fit: one whole run is `runStart`, `messageEnd`, `runEnd`.
+    const host = buildStoredHost(store, createScriptedLLM([textTurn("answer")]), { maxEvents: 3 });
+    const { url } = await startServer(host);
+
+    const ws = await connect(url);
+    const messages = collectMessages(ws);
+    send(ws, { id: "1", method: "createSession", params: { cwd: "/tmp/arcturn-ws-test" } });
+    await waitFor(messages, (m) => responseFor(m, "1") !== undefined);
+    const sessionId = (responseFor(messages, "1") as { result: { sessionId: string } }).result
+      .sessionId;
+    send(ws, { id: "2", method: "openSession", params: { sessionId } });
+    await waitFor(messages, (m) => responseFor(m, "2") !== undefined);
+    for (const [index, text] of ["first", "second", "third"].entries()) {
+      const id = `p${String(index)}`;
+      send(ws, { id, method: "prompt", params: { sessionId, text } });
+      await waitFor(messages, (m) => responseFor(m, id) !== undefined);
+    }
+
+    send(ws, { id: "9", method: "sessionHistory", params: { sessionId } });
+    await waitFor(messages, (m) => responseFor(m, "9") !== undefined);
+    const result = (responseFor(messages, "9") as { result: SessionHistory }).result;
+
+    expect(result.truncated).toBe(true);
+    expect(result.droppedEvents).toBe(6);
+    // The newest turn is what survives, whole: a client is handed the part of
+    // the conversation it is about to continue, not a severed half of an old one.
+    expect(result.events).toHaveLength(3);
+    expect(result.events[0]).toMatchObject({ type: "runStart" });
+    expect(JSON.stringify(result)).toContain("third");
+    expect(JSON.stringify(result)).not.toContain("first");
+  });
+});
+
+describe("ArcturnServer: deleteSession over the wire", () => {
+  it("deletes a session, tells every observer, and forgets it on every connection", async () => {
+    const store = new MemorySessionStore();
+    const host = new SessionHost({
+      agentFactory: (opts) =>
+        new Agent({
+          llm: createScriptedLLM([textTurn("hi")]),
+          model: TEST_MODEL,
+          systemPrompt: "You are a test agent.",
+          tools: [],
+          cwd: opts.cwd,
+          sessionId: opts.sessionId,
+          sessionStore: store,
+        }),
+      sessionStore: store,
+      defaultCwd: "/tmp/arcturn-ws-test",
+    });
+    const { url } = await startServer(host);
+
+    const watcher = await connect(url);
+    const watcherMessages = collectMessages(watcher);
+    send(watcher, { id: "1", method: "createSession", params: { cwd: "/tmp/arcturn-ws-test" } });
+    await waitFor(watcherMessages, (m) => responseFor(m, "1") !== undefined);
+    const sessionId = (responseFor(watcherMessages, "1") as { result: { sessionId: string } })
+      .result.sessionId;
+    send(watcher, { id: "2", method: "openSession", params: { sessionId } });
+    await waitFor(watcherMessages, (m) => responseFor(m, "2") !== undefined);
+
+    const deleter = await connect(url);
+    const deleterMessages = collectMessages(deleter);
+    send(deleter, { id: "3", method: "deleteSession", params: { sessionId } });
+    await waitFor(deleterMessages, (m) => responseFor(m, "3") !== undefined);
+    expect(responseFor(deleterMessages, "3")).toMatchObject({ result: { ok: true } });
+
+    // The watcher is told, on the session's own event stream, before its
+    // subscription goes away.
+    await waitFor(watcherMessages, (m) =>
+      eventsFor(m, sessionId).some((event) => event.type === "notice"),
+    );
+    const notice = eventsFor(watcherMessages, sessionId).find(
+      (event): event is Extract<AgentEvent, { type: "notice" }> => event.type === "notice",
+    );
+    expect(notice).toMatchObject({ level: "warn", text: expect.stringContaining(sessionId) });
+
+    // And it is gone: the store no longer lists it, and re-opening fails.
+    send(deleter, { id: "4", method: "listSessions" });
+    await waitFor(deleterMessages, (m) => responseFor(m, "4") !== undefined);
+    expect(
+      (responseFor(deleterMessages, "4") as { result: { sessions: { sessionId: string }[] } })
+        .result.sessions,
+    ).toEqual([]);
+
+    send(deleter, { id: "5", method: "openSession", params: { sessionId } });
+    await waitFor(deleterMessages, (m) => responseFor(m, "5") !== undefined);
+    expect(responseFor(deleterMessages, "5")).toMatchObject({
+      error: { code: "sessionNotFound" },
+    });
+  });
+
+  it("refuses to delete a session whose run is still going", async () => {
+    const store = new MemorySessionStore();
+    const llm = createGatedLLM(textTurn("eventually"));
+    const host = new SessionHost({
+      agentFactory: (opts) =>
+        new Agent({
+          llm,
+          model: TEST_MODEL,
+          systemPrompt: "You are a test agent.",
+          tools: [],
+          cwd: opts.cwd,
+          sessionId: opts.sessionId,
+          sessionStore: store,
+        }),
+      sessionStore: store,
+      defaultCwd: "/tmp/arcturn-ws-test",
+    });
+    const { url } = await startServer(host);
+
+    const ws = await connect(url);
+    const messages = collectMessages(ws);
+    send(ws, { id: "1", method: "createSession", params: { cwd: "/tmp/arcturn-ws-test" } });
+    await waitFor(messages, (m) => responseFor(m, "1") !== undefined);
+    const sessionId = (responseFor(messages, "1") as { result: { sessionId: string } }).result
+      .sessionId;
+    send(ws, { id: "2", method: "openSession", params: { sessionId } });
+    await waitFor(messages, (m) => responseFor(m, "2") !== undefined);
+
+    send(ws, { id: "3", method: "prompt", params: { sessionId, text: "go" } });
+    await waitFor(messages, (m) => eventsFor(m, sessionId).some((e) => e.type === "runStart"));
+
+    send(ws, { id: "4", method: "deleteSession", params: { sessionId } });
+    await waitFor(messages, (m) => responseFor(m, "4") !== undefined);
+    expect(responseFor(messages, "4")).toMatchObject({ error: { code: "sessionBusy" } });
+
+    // The gate is still shut, so the run really was in flight — and the
+    // session survived the refusal intact.
+    send(ws, { id: "5", method: "listSessions" });
+    await waitFor(messages, (m) => responseFor(m, "5") !== undefined);
+    expect(
+      (
+        responseFor(messages, "5") as { result: { sessions: { sessionId: string }[] } }
+      ).result.sessions.map((header) => header.sessionId),
+    ).toEqual([sessionId]);
+
+    llm.release();
+    await waitFor(messages, (m) => responseFor(m, "3") !== undefined);
   });
 });

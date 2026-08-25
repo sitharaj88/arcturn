@@ -462,3 +462,227 @@ describe("SessionHost.listModels", () => {
     expect(await host.listModels()).toEqual([]);
   });
 });
+
+describe("SessionHost.sessionHistory", () => {
+  function storedHost(store: MemorySessionStore): SessionHost {
+    return new SessionHost({
+      agentFactory: (opts) =>
+        new Agent({
+          llm: createScriptedLLM([textTurn("the answer")]),
+          model: TEST_MODEL,
+          systemPrompt: "test",
+          cwd: opts.cwd,
+          sessionId: opts.sessionId,
+          sessionStore: store,
+        }),
+      sessionStore: store,
+      defaultCwd: "/tmp/arcturn-test",
+    });
+  }
+
+  it("replays a session that is not live in this process at all", async () => {
+    const store = new MemorySessionStore();
+    const first = storedHost(store);
+    const header = await first.createSession({});
+    await first.prompt(header.sessionId, "the question");
+
+    // A second host over the same store, as a restarted server would be. It
+    // has never opened this session, and does not need to.
+    const second = storedHost(store);
+    const history = await second.sessionHistory(header.sessionId);
+
+    expect(history.sessionId).toBe(header.sessionId);
+    expect(JSON.stringify(history)).toContain("the question");
+    expect(JSON.stringify(history)).toContain("the answer");
+    expect(history.truncated).toBe(false);
+  });
+
+  it("refuses an id no store and no live session knows", async () => {
+    const host = storedHost(new MemorySessionStore());
+    await expect(host.sessionHistory("nope")).rejects.toMatchObject({ code: "sessionNotFound" });
+  });
+
+  it("does not report an unreadable session as one that does not exist", async () => {
+    const store = new MemorySessionStore();
+    const host = storedHost(store);
+    const header = await host.createSession({});
+    // A torn file, a permissions problem: a real fault, and telling the user
+    // the session does not exist would send them looking for one they can see
+    // listed.
+    store.entries = async () => {
+      throw new Error("EACCES: permission denied");
+    };
+
+    await expect(host.sessionHistory(header.sessionId)).rejects.toThrow(/EACCES/);
+  });
+
+  it("answers an empty history for a live session on a host with no store", async () => {
+    const { host } = buildHost(createScriptedLLM([textTurn("hi")]));
+    const header = await host.createSession({});
+    // Nothing was persisted, so there is nothing to replay — which is not the
+    // same answer as "no such session", and must not be given for one.
+    await expect(host.sessionHistory(header.sessionId)).resolves.toEqual({
+      sessionId: header.sessionId,
+      events: [],
+      truncated: false,
+      droppedEvents: 0,
+    });
+    await expect(host.sessionHistory("nope")).rejects.toMatchObject({ code: "sessionNotFound" });
+  });
+
+  it("applies the injected caps and reports them", async () => {
+    const store = new MemorySessionStore();
+    const host = new SessionHost({
+      agentFactory: (opts) =>
+        new Agent({
+          llm: createScriptedLLM([textTurn("a")]),
+          model: TEST_MODEL,
+          systemPrompt: "test",
+          cwd: opts.cwd,
+          sessionId: opts.sessionId,
+          sessionStore: store,
+        }),
+      sessionStore: store,
+      defaultCwd: "/tmp/arcturn-test",
+      sessionHistoryLimits: { maxEvents: 3 },
+    });
+    const header = await host.createSession({});
+    await host.prompt(header.sessionId, "one");
+    await host.prompt(header.sessionId, "two");
+
+    const history = await host.sessionHistory(header.sessionId);
+    expect(history.truncated).toBe(true);
+    expect(history.droppedEvents).toBe(3);
+    expect(history.events).toHaveLength(3);
+  });
+});
+
+describe("SessionHost.deleteSession", () => {
+  function storedHost(store: MemorySessionStore, llm = createScriptedLLM([textTurn("hi")])) {
+    return new SessionHost({
+      agentFactory: (opts) =>
+        new Agent({
+          llm,
+          model: TEST_MODEL,
+          systemPrompt: "test",
+          cwd: opts.cwd,
+          sessionId: opts.sessionId,
+          sessionStore: store,
+        }),
+      sessionStore: store,
+      defaultCwd: "/tmp/arcturn-test",
+    });
+  }
+
+  it("removes it from the store and evicts it from this process", async () => {
+    const store = new MemorySessionStore();
+    const host = storedHost(store);
+    const header = await host.createSession({});
+
+    await host.deleteSession(header.sessionId);
+
+    expect(await store.list()).toEqual([]);
+    await expect(host.openSession(header.sessionId)).rejects.toMatchObject({
+      code: "sessionNotFound",
+    });
+    // Evicted, so it no longer counts against `maxSessions` either.
+    expect(() => host.abort(header.sessionId)).toThrow(SessionHostError);
+  });
+
+  it("tells every observer before it drops them", async () => {
+    const store = new MemorySessionStore();
+    const host = storedHost(store);
+    const header = await host.createSession({});
+    const seen: AgentEvent[] = [];
+    host.observe(header.sessionId, (event) => seen.push(event));
+
+    await host.deleteSession(header.sessionId);
+
+    expect(seen.at(-1)).toMatchObject({
+      type: "notice",
+      level: "warn",
+      text: expect.stringContaining(header.sessionId),
+    });
+  });
+
+  it("refuses while a run is in flight, and leaves the session intact", async () => {
+    const store = new MemorySessionStore();
+    const llm = createGatedLLM(textTurn("eventually"));
+    const host = storedHost(store, llm as unknown as ReturnType<typeof createScriptedLLM>);
+    const header = await host.createSession({});
+    const running = host.prompt(header.sessionId, "go");
+
+    await expect(host.deleteSession(header.sessionId)).rejects.toMatchObject({
+      code: "sessionBusy",
+    });
+    expect((await store.list()).map((h) => h.sessionId)).toEqual([header.sessionId]);
+
+    llm.release();
+    await running;
+    await host.deleteSession(header.sessionId);
+    expect(await store.list()).toEqual([]);
+  });
+
+  it("refuses loudly when the configured store cannot delete, rather than unlinking anything itself", async () => {
+    const store = new MemorySessionStore();
+    // A third-party `SessionStore` predating the optional `delete`.
+    const older = {
+      create: store.create.bind(store),
+      open: store.open.bind(store),
+      append: store.append.bind(store),
+      entries: store.entries.bind(store),
+      branch: store.branch.bind(store),
+      list: store.list.bind(store),
+      setTitle: store.setTitle.bind(store),
+    };
+    const host = new SessionHost({
+      agentFactory: (opts) =>
+        new Agent({
+          llm: createScriptedLLM([textTurn("hi")]),
+          model: TEST_MODEL,
+          systemPrompt: "test",
+          cwd: opts.cwd,
+          sessionId: opts.sessionId,
+        }),
+      sessionStore: older,
+      defaultCwd: "/tmp/arcturn-test",
+    });
+    const header = await host.createSession({});
+
+    await expect(host.deleteSession(header.sessionId)).rejects.toThrow(/SessionStore/);
+    // And it really is still there: refusing is loud, not silently destructive.
+    expect((await store.list()).map((h) => h.sessionId)).toEqual([header.sessionId]);
+  });
+
+  it("refuses an id nothing knows", async () => {
+    const host = storedHost(new MemorySessionStore());
+    await expect(host.deleteSession("nope")).rejects.toMatchObject({ code: "sessionNotFound" });
+  });
+
+  it("surfaces a store failure as itself, and leaves the session live", async () => {
+    const store = new MemorySessionStore();
+    const host = storedHost(store);
+    const header = await host.createSession({});
+    store.delete = async () => {
+      throw new Error("EROFS: read-only file system");
+    };
+
+    await expect(host.deleteSession(header.sessionId)).rejects.toThrow(/EROFS/);
+    // Not half-deleted: nothing was told the session is gone, and it still is
+    // not — the store goes first precisely so this stays true.
+    expect((await store.list()).map((h) => h.sessionId)).toEqual([header.sessionId]);
+    expect(() => host.abort(header.sessionId)).not.toThrow();
+  });
+
+  it("finishes the job when the store says a still-live session is already gone", async () => {
+    const store = new MemorySessionStore();
+    const host = storedHost(store);
+    const header = await host.createSession({});
+    // Someone removed the file behind the server's back. The caller asked for
+    // this session not to exist, and it does not — evict and succeed.
+    await store.delete(header.sessionId);
+
+    await expect(host.deleteSession(header.sessionId)).resolves.toBeUndefined();
+    expect(() => host.abort(header.sessionId)).toThrow(SessionHostError);
+  });
+});

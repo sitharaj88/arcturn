@@ -115,6 +115,13 @@ describe("renderSidebarHtml", () => {
     const page = html();
     expect(page).toMatch(/id="transcript"[^>]*role="log"/s);
     expect(page).toMatch(/id="transcript"[^>]*aria-live="polite"/s);
+    // …and keeps the purely visual working indicator out of it. It is shown
+    // and hidden several times across a run with tools in it, and each toggle
+    // inside a live region is another "Working" announced over the answer.
+    // The semantic version of the same state is already in the composer hint,
+    // which the prompt box names in aria-describedby and which is written only
+    // when its words actually change.
+    expect(page).toMatch(/id="working"[^>]*aria-hidden="true"/s);
   });
 
   it("ships every element the client script reaches for", () => {
@@ -176,6 +183,48 @@ describe("the client script", () => {
     const inShadows = shadows.join(" ").match(/\brgba?\(/g) ?? [];
     const inFallbacks = SIDEBAR_STYLE.match(/--arc-border:[^;]*rgba?\(/g) ?? [];
     expect(colours.length).toBe(inShadows.length + inFallbacks.length);
+  });
+
+  it("turns every animation off under prefers-reduced-motion", () => {
+    // The house rule, and the reason it is asserted structurally rather than
+    // as a list of names: a per-animation opt-out is one new @keyframes away
+    // from being wrong, and the panel that reads as polished to one user is
+    // the one that makes another feel sick. The override is universal, so a
+    // motion added tomorrow is covered the day it is written.
+    const at = SIDEBAR_STYLE.indexOf("@media (prefers-reduced-motion: reduce)");
+    expect(at).toBeGreaterThan(-1);
+    let depth = 0;
+    let end = at;
+    for (let i = SIDEBAR_STYLE.indexOf("{", at); i < SIDEBAR_STYLE.length; i += 1) {
+      if (SIDEBAR_STYLE[i] === "{") depth += 1;
+      if (SIDEBAR_STYLE[i] === "}") depth -= 1;
+      if (depth === 0) {
+        end = i;
+        break;
+      }
+    }
+    const block = SIDEBAR_STYLE.slice(at, end + 1);
+    expect(block).toMatch(/\*,\s*\*::before,\s*\*::after/);
+    expect(block).toContain("animation-duration: 1ms !important");
+    expect(block).toContain("animation-iteration-count: 1 !important");
+    expect(block).toContain("transition-duration: 1ms !important");
+    // Nothing is display:none'd or visibility-hidden'd to stop it moving: the
+    // panel has to stay entirely usable, not become a quieter dead one.
+    expect(block).not.toContain("display: none");
+    expect(block).not.toContain("visibility: hidden");
+    // And every keyframe animation the sheet defines is inside the sheet the
+    // override applies to — no motion is smuggled in from anywhere else.
+    expect((SIDEBAR_STYLE.match(/@keyframes/g) ?? []).length).toBeGreaterThan(2);
+  });
+
+  it("keeps long code inside its own box rather than widening a 300px panel", () => {
+    // Horizontal overflow is the sidebar's one unrecoverable layout failure:
+    // there is no gesture that scrolls the panel back. The transcript refuses
+    // to scroll sideways at all, and the one element allowed to be wider than
+    // the panel scrolls within itself.
+    expect(SIDEBAR_STYLE).toMatch(/#transcript\s*\{[^}]*overflow-x:\s*hidden/s);
+    expect(SIDEBAR_STYLE).toMatch(/\.code-block pre\s*\{[^}]*overflow-x:\s*auto/s);
+    expect(SIDEBAR_STYLE).toMatch(/body\s*\{[^}]*overflow:\s*hidden/s);
   });
 
   it("parses as JavaScript", () => {

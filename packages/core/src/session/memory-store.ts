@@ -59,6 +59,13 @@ export class MemorySessionStore implements SessionStore {
     this.#headers.set(sessionId, { ...header, title });
   }
 
+  /** @inheritdoc */
+  async delete(sessionId: string): Promise<void> {
+    this.#require(sessionId);
+    this.#headers.delete(sessionId);
+    this.#entries.delete(sessionId);
+  }
+
   #require(sessionId: string): SessionHeader {
     const header = this.#headers.get(sessionId);
     if (!header) throw new SessionStoreError(`Session ${sessionId} does not exist`, "notFound");

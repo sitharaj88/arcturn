@@ -58,11 +58,15 @@ export interface MarkdownItem {
   c: MarkdownBlock[];
 }
 
-/** One block. `code.open` marks a fence the stream has not closed yet. */
+/**
+ * One block. `code.open` marks a fence the stream has not closed yet, and
+ * `code.file` the path its info string named — absent, not empty, when it
+ * named none, so a renderer can ask rather than test for a blank.
+ */
 export type MarkdownBlock =
   | { t: "p"; c: MarkdownInline[] }
   | { t: "h"; level: number; c: MarkdownInline[] }
-  | { t: "code"; lang: string; v: string; open: boolean }
+  | { t: "code"; lang: string; file?: string; v: string; open: boolean }
   | { t: "quote"; c: MarkdownBlock[] }
   | { t: "list"; ordered: boolean; start: number; items: MarkdownItem[] }
   | { t: "hr" };
@@ -78,7 +82,16 @@ export const MARKDOWN_SOURCE = String.raw`/* --- shared helpers ----------------
  */
 var MD_TICK = "\u0060";
 
-var MD_FENCE = new RegExp("^ {0,3}(" + MD_TICK + "{3,}|~{3,})[ \\t]*([^\\s" + MD_TICK + "]*)[ \\t]*$");
+/*
+ * The info string is everything after the marker, not just the first word.
+ * This used to be a single no-whitespace token anchored to end-of-line, which
+ * meant that the moment a model opened a fence with "ts src/foo.ts" after the
+ * markers — as they do, and as CommonMark allows — the line was not a fence at
+ * all, and forty lines of TypeScript rendered as a paragraph with the markers
+ * in it. A backtick fence's info string may not contain a backtick; that is the
+ * one thing still excluded.
+ */
+var MD_FENCE = new RegExp("^ {0,3}(" + MD_TICK + "{3,}|~{3,})[ \\t]*([^" + MD_TICK + "]*)$");
 var MD_HEADING = /^ {0,3}(#{1,6})[ \t]+(.*)$/;
 var MD_HR = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
 var MD_QUOTE = /^ {0,3}>[ \t]?/;
@@ -119,6 +132,60 @@ function mdSafeHref(raw) {
   if (probe.indexOf("https://") === 0) return href;
   if (probe.indexOf("mailto:") === 0) return href;
   return "";
+}
+
+/**
+ * A fence info token that names a file, or "".
+ *
+ * A path or something with an extension — nothing else. The point is to be
+ * unable to mistake a language for a filename: "ts" is not a file, "src/a.ts"
+ * and "Dockerfile.dev" are. Quotes are stripped because 'title="a/b.js"' is
+ * one of the shapes that actually arrives.
+ */
+function mdFenceFile(token) {
+  var value = String(token == null ? "" : token).replace(/^["']+|["']+$/g, "");
+  if (value === "" || value.length > 200) return "";
+  if (value.indexOf("/") !== -1 || value.indexOf("\\") !== -1) return value;
+  return /^[\w.@+-]+\.[A-Za-z0-9]{1,8}$/.test(value) ? value : "";
+}
+
+/**
+ * Split a fence info string into a language and, if it carries one, a path.
+ *
+ * Four shapes, because four are what models emit: "ts", "ts src/a.ts",
+ * "ts:src/a.ts", and "js title=\"app/main.js\"". A bare path on its own
+ * ("src/a.py") names its language by extension. Anything unrecognised stays
+ * the language, which is the old behaviour and the safe one — a label the
+ * reader does not recognise beats a filename row invented out of it.
+ */
+function mdFenceInfo(info) {
+  var text = String(info == null ? "" : info).trim();
+  if (text === "") return { lang: "", file: "" };
+  var parts = text.split(/[ \t]+/);
+  var head = parts[0];
+  var file = "";
+
+  var colon = head.indexOf(":");
+  if (colon > 0) {
+    var tail = mdFenceFile(head.slice(colon + 1));
+    if (tail !== "") {
+      file = tail;
+      head = head.slice(0, colon);
+    }
+  }
+  if (file === "") {
+    var bare = mdFenceFile(head);
+    if (bare !== "") {
+      file = bare;
+      var dot = bare.lastIndexOf(".");
+      head = dot === -1 ? "" : bare.slice(dot + 1);
+    }
+  }
+  for (var i = 1; i < parts.length && file === ""; i += 1) {
+    var eq = parts[i].indexOf("=");
+    file = mdFenceFile(eq === -1 ? parts[i] : parts[i].slice(eq + 1));
+  }
+  return { lang: head.toLowerCase(), file: file };
 }
 
 /* --- inline ---------------------------------------------------------- */
@@ -503,7 +570,10 @@ function mdBlocks(lines, depth) {
         body.push(lines[i]);
         i += 1;
       }
-      blocks.push({ t: "code", lang: fence[2] || "", v: body.join("\n"), open: !closed });
+      var mdInfo = mdFenceInfo(fence[2] || "");
+      var mdCode = { t: "code", lang: mdInfo.lang, v: body.join("\n"), open: !closed };
+      if (mdInfo.file !== "") mdCode.file = mdInfo.file;
+      blocks.push(mdCode);
       continue;
     }
 

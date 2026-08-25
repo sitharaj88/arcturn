@@ -275,6 +275,17 @@ state, so the panel cannot go on showing the previous conversation — but
 whether the engine *replays* the opened session's history into it, or leaves
 the panel correctly empty, is the engine's behaviour and is unobserved here.
 
+Deleting has the same shape and one more gap. The panel's half is covered: the
+row's button and the keyboard paths post `{ type: "deleteSession", sessionId }`
+and then deliberately do *nothing* — no confirmation of its own, no optimistic
+removal — so the row stays on screen until a refreshed list arrives without it.
+What no suite covers is that the round trip closes: that the host's native
+modal is what answers, that a cancelled or failed delete leaves the session
+listed, and that the engine actually removes it. The failure mode the "leaves
+the row on screen" test exists to prevent is the one that cannot be caught
+downstream — a panel claiming a session is gone while the user is still looking
+at the dialog asking whether to delete it.
+
 **Markdown the parser does not implement.** Tables, reference links, setext
 headings, HTML blocks (deliberately — raw HTML renders as text, and there is a
 test for that), and nested emphasis of three or more markers. A model that
@@ -298,8 +309,51 @@ of it is asserted anywhere:
   there are no literal ones, which is not the same as saying light, dark and
   high-contrast all resolve to something with usable contrast. Nobody has
   looked at high-contrast at all.
-- **Motion.** The streaming caret, the running-tool spinner, and their
-  suppression under `prefers-reduced-motion` are CSS-only and untested.
+- **Motion.** Eight animations now say something about state, and the unit
+  suite asserts only the *mechanism* — which class the script puts on which
+  element, in response to which state change, and which it withholds. What it
+  cannot see is whether any of it reads as intended. Specifically unverified:
+  that a submitted prompt settles rather than snaps; that the working
+  indicator's breathing sparkle and staggered dots read as "the model is
+  working" rather than as a generic spinner; that the caret keeps up with the
+  stream and, in particular, that it goes *solid* while tokens land and blinks
+  only in a pause (that behaviour falls out of the reconciler rebuilding the
+  markdown subtree per delta, and it has never been watched); that a long
+  answer does not strobe; that a tool badge's pop is a punctuation mark and
+  not a twitch; that the end-of-turn hairline is noticeable when glanced at
+  and invisible when not. Also unverified: that none of it costs measurable
+  CPU while the panel sits idle — the claim is that `display: none` on the
+  working row and the absence of `.streaming` between runs leave nothing
+  animating, and nobody has watched a profiler to confirm it.
+- **`prefers-reduced-motion`, in a real browser.** The stylesheet's override is
+  universal and `webview-html.test.ts` asserts its shape, which is not the same
+  as having set the OS switch and looked. Two things need eyes there: that
+  every animation lands on its *end* state rather than disappearing (a
+  fill-mode entrance has to stay visible), and that the panel is fully usable
+  and not merely still — the caret is expected to become a static block, and
+  the running-tool spinner a static circle whose "Running" label carries the
+  state instead.
+- **Code packaging at 300px.** The fold threshold (14 lines), the language
+  pill, the filename row, the "writing…" header on an unclosed fence, the fade
+  over folded code and the copy button's hover reveal were all *reasoned* at a
+  300px panel, not seen at one. What needs a narrow sidebar and a real
+  Chromium: that a `code-head` with a long language and a long basename
+  ellipsises the filename rather than pushing the copy button off the row;
+  that a 200-character line scrolls inside its own box and never widens the
+  panel; that `overflow-y: hidden` on a folded block reads as folded rather
+  than as broken; that the fade sits exactly over the cut; and that a
+  paragraph followed by its code block reads as one unit at that width.
+- **That the three kinds of code are actually distinguishable.** Inline code is
+  a bordered chip, a fence is a titled card, tool output is a rule-marked pre.
+  The rules are written; whether they separate at a glance in light, dark and
+  high-contrast is a human claim.
+- **The delete affordance's reveal.** That a 0-opacity button is discoverable
+  on hover, that `:focus-within` brings it up when a keyboard user tabs into
+  the row, that `.session-row.active + .session-delete` brings it up under the
+  arrow-key selection, and that `forced-colors: active` shows it permanently.
+  The *behaviour* is asserted (it posts `deleteSession`, it does not open the
+  session, it does not remove the row, and Delete / Shift+Delete on the search
+  box and Delete on a focused row all reach it); the reveal is CSS.
 - **Real focus behaviour.** The tab order, that `:focus-visible` rings are
   visible against every theme, and that a screen reader announces streamed
   text once rather than re-reading the log. The *roles and properties* are

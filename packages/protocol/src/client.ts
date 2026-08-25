@@ -29,7 +29,13 @@
  * lifetime, and a closed socket is terminal (see `INTEGRATION-protocol-client.md`).
  */
 
-import type { AgentEvent, ModelCatalog, PermissionDecision, SessionHeader } from "@arcturn/types";
+import type {
+  AgentEvent,
+  ModelCatalog,
+  PermissionDecision,
+  SessionHeader,
+  SessionHistory,
+} from "@arcturn/types";
 import { PROTOCOL_VERSION } from "@arcturn/types";
 import { ErrorCode } from "./messages.js";
 import { RequestIdGenerator } from "./request-id.js";
@@ -38,6 +44,7 @@ import {
   validateModelCatalog,
   validateServerMessage,
   validateSessionHeader,
+  validateSessionHistory,
 } from "./validate.js";
 
 /** Default per-request deadline, in milliseconds. */
@@ -286,6 +293,51 @@ export interface ProtocolClient {
    */
   listModels(): Promise<ModelCatalog | undefined>;
   /**
+   * Fetch a session's stored conversation, so a freshly attached client can
+   * render what was already said.
+   *
+   * `openSession` subscribes to *future* events and replays nothing; this is
+   * the verb that answers "what happened before I got here". The result
+   * carries the same {@link AgentEvent}s the live stream does, so a caller
+   * folds them through whatever reducer it already runs on
+   * {@link ProtocolClient.onEvent} — see {@link SessionHistory}.
+   *
+   * The payload is **bounded** by the server and reports its own truncation:
+   * a caller that sees `truncated` must tell the user earlier messages are
+   * not shown rather than silently starting mid-conversation.
+   *
+   * Optional, on the same terms as {@link ProtocolClient.listModels}: a server
+   * that predates the verb rejects it with `invalidRequest` and that one
+   * rejection is translated here into `undefined` — "this server cannot
+   * replay history" — leaving the caller to show the empty transcript it
+   * showed before. Every other failure still rejects. Safe to translate
+   * because the verb only *reads*: `undefined` costs the caller a transcript,
+   * not a guarantee.
+   *
+   * @param sessionId - Session whose history to fetch.
+   * @returns The history, or `undefined` when the server does not implement
+   *   the verb.
+   */
+  sessionHistory(sessionId: string): Promise<SessionHistory | undefined>;
+  /**
+   * Delete a session permanently. Irreversible.
+   *
+   * Deliberately **not** given `listModels`' "old server → `undefined`"
+   * treatment. That translation is safe for a read: the caller loses a list.
+   * For a destructive verb it would be a lie — nothing was deleted, and a
+   * caller told "fine" would refresh its list, still see the session, and have
+   * no idea why. So an older server's `invalidRequest` rejects like any other
+   * failure; a caller that wants to say "this engine is too old" rather than
+   * quoting `Unknown method` can test the error with
+   * {@link isUnsupportedMethodError}.
+   *
+   * @param sessionId - Session to remove.
+   * @throws {ProtocolRequestError} `sessionBusy` when the session is running a
+   *   turn (abort it first), `sessionNotFound` when it does not exist,
+   *   `invalidRequest` from a server that does not implement the verb.
+   */
+  deleteSession(sessionId: string): Promise<void>;
+  /**
    * Subscribe to server-pushed session events.
    *
    * @returns An unsubscribe function; calling it more than once is harmless.
@@ -420,12 +472,36 @@ class ProtocolClientImpl implements ProtocolClient {
       // so on a server that implements it there is nothing left for
       // `invalidRequest` to describe; a server that answers it that way is
       // one whose `validateClientRequest` did not recognise the method.
-      if (error instanceof ProtocolRequestError && isUnsupportedMethodCode(error.code)) {
+      if (error instanceof ProtocolRequestError && isUnsupportedMethodError(error)) {
         return undefined;
       }
       throw error;
     }
     return parseModelCatalog(result);
+  }
+
+  async sessionHistory(sessionId: string): Promise<SessionHistory | undefined> {
+    let result: unknown;
+    try {
+      result = await this.#call("sessionHistory", { sessionId });
+    } catch (error) {
+      // Same reasoning as `listModels`: only a *server-reported* rejection can
+      // mean "I do not know this verb". A local validation failure raises a
+      // plain ProtocolClientError and must still surface as the bug it is.
+      // `sessionNotFound` is deliberately not swallowed — an id the server has
+      // never heard of is the caller's problem, not the server's age.
+      if (error instanceof ProtocolRequestError && isUnsupportedMethodError(error)) {
+        return undefined;
+      }
+      throw error;
+    }
+    return parseSessionHistory(result);
+  }
+
+  async deleteSession(sessionId: string): Promise<void> {
+    // No unsupported-method translation: see the interface doc. A delete that
+    // did not happen must not resolve.
+    await this.#call("deleteSession", { sessionId });
   }
 
   onEvent(listener: ProtocolEventListener): () => void {
@@ -710,16 +786,44 @@ function parseSessionList(result: unknown): SessionHeader[] {
 }
 
 /**
- * Error codes an older server uses for a method it does not implement.
+ * Whether a rejection is an older server saying "I do not know that method".
  *
  * `@arcturn/protocol`'s own `validateClientRequest` fails an unrecognised
  * method with `invalidRequest` and the message `Unknown method: "..."`, and
  * `ws-server.ts` forwards that verbatim; `unknownMethod` is the code
  * {@link ErrorCode} reserves for the same condition, so both are read as
  * "this peer is older than the verb".
+ *
+ * Exported because the two optional verbs answer it differently and both
+ * answers need the same definition of "older". {@link ProtocolClient.listModels}
+ * and {@link ProtocolClient.sessionHistory} translate it into `undefined`
+ * internally; {@link ProtocolClient.deleteSession} refuses to, because a
+ * destructive call that did not happen must not resolve — so its caller tests
+ * the rejection with this instead, to say "upgrade the engine" rather than
+ * showing a user the words `Unknown method`.
+ *
+ * Only a {@link ProtocolRequestError} — a rejection the *server* sent — can
+ * ever be one. A locally-raised {@link ProtocolClientError} carrying the same
+ * code is this client's own validation failing, which is a bug to surface,
+ * not a peer to work around.
+ *
+ * @param error - Anything a `ProtocolClient` call rejected with.
  */
-function isUnsupportedMethodCode(code: string): boolean {
-  return code === ErrorCode.invalidRequest || code === ErrorCode.unknownMethod;
+export function isUnsupportedMethodError(error: unknown): boolean {
+  if (!(error instanceof ProtocolRequestError)) return false;
+  return error.code === ErrorCode.invalidRequest || error.code === ErrorCode.unknownMethod;
+}
+
+/** Parse a `sessionHistory` result, rejecting anything off-contract. */
+function parseSessionHistory(result: unknown): SessionHistory {
+  const validation = validateSessionHistory(result);
+  if (!validation.ok) {
+    throw new ProtocolClientError(
+      ClientErrorCode.invalidResponse,
+      `Invalid sessionHistory result: ${validation.error}`,
+    );
+  }
+  return validation.value;
 }
 
 /** Parse a `listModels` result, rejecting anything off-contract. */

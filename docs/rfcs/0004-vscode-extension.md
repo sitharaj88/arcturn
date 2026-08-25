@@ -56,6 +56,22 @@ extension hack.
 > now that list plus `listModels`. The verb is optional — an engine that
 > predates it answers `invalidRequest` and the client resolves `undefined` —
 > so the extension still runs against an older `arcturn serve`.
+>
+> **Amendment (2026-08-25, second).** The sessions view hit it twice more.
+> Opening a session from the history list showed an *empty chat*: `openSession`
+> subscribes to future events and replays nothing, and the panel had no verb to
+> ask what was already said. Reconstructing it extension-side — reading
+> `~/.arcturn/sessions` directly — is exactly what §0 forbids, so the engine
+> gained **`sessionHistory`** instead (see
+> [Server mode](/docs/server-mode#replaying-a-session)); it replays
+> `AgentEvent`s so the panel's existing reducer builds the transcript with no
+> new client logic. Deleting a session had the same shape and a sharper edge —
+> an extension that unlinked the file itself could not see a session still live
+> in the engine, nor refuse one mid-run — so the engine gained
+> **`deleteSession`** (see
+> [Server mode](/docs/server-mode#deleting-a-session)). Both are optional and
+> additive; `PROTOCOL_VERSION` stays `1`. The frozen list above is now that
+> list plus `listModels`, `sessionHistory` and `deleteSession`.
 
 - **Server lifecycle.** The extension spawns `arcturn serve` per workspace on
   a loopback ephemeral port with a generated token, hands the token to the

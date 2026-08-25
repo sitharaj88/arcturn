@@ -6,16 +6,18 @@
  */
 
 import { describe, expect, it } from "vitest";
-import type { ChatBlock } from "./chat-state.js";
+import type { ChatBlock, ToolBlock, ToolStatus } from "./chat-state.js";
 import { type ToolIcon, TRANSCRIPT_SOURCE, type Turn } from "./webview-transcript.js";
 
 const api = new Function(
-  `${TRANSCRIPT_SOURCE}\nreturn { groupTurns, toolSummary, toolStatusLabel, toolIcon };`,
+  `${TRANSCRIPT_SOURCE}\nreturn { groupTurns, toolSummary, toolStatusLabel, toolIcon, showWorking, toolGroup };`,
 )() as {
   groupTurns: (blocks: readonly ChatBlock[]) => Turn[];
   toolSummary: (argsText: string) => string;
   toolStatusLabel: (status: string) => string;
   toolIcon: (name: string) => ToolIcon;
+  showWorking: (blocks: readonly ChatBlock[], running: boolean) => boolean;
+  toolGroup: (before: string, after: string) => string;
 };
 
 function user(id: string): ChatBlock {
@@ -148,5 +150,58 @@ describe("toolIcon", () => {
   it("draws the generic mark rather than a wrong one for a tool it does not know", () => {
     expect(api.toolIcon("mcp__acme__frobnicate")).toBe("tool");
     expect(api.toolIcon("")).toBe("tool");
+  });
+});
+
+describe("showWorking", () => {
+  function toolAt(status: ToolStatus): ToolBlock {
+    return { ...(tool("tool:k1") as ToolBlock), status };
+  }
+
+  it("says nothing is working when nothing is running", () => {
+    expect(api.showWorking([user("u1")], false)).toBe(false);
+    expect(api.showWorking([], false)).toBe(false);
+  });
+
+  it("covers the wait between a submitted prompt and the first output", () => {
+    // The whole reason it exists: the user has pressed Enter, the host has
+    // echoed the prompt into the log, and nothing else has arrived yet.
+    expect(api.showWorking([user("u1")], true)).toBe(true);
+    expect(api.showWorking([], true)).toBe(true);
+  });
+
+  it("stands down once something on screen is already moving", () => {
+    // Two indicators for one state is a panel that looks busier than the run
+    // it is describing. Streamed text has the caret; a running tool has the
+    // spinner in its own card.
+    expect(api.showWorking([user("u1"), text("t1")], true)).toBe(false);
+    expect(api.showWorking([user("u1"), toolAt("running")], true)).toBe(false);
+    expect(api.showWorking([user("u1"), toolAt("awaitingPermission")], true)).toBe(false);
+    expect(
+      api.showWorking([{ kind: "thinking", id: "th1", text: "hm", collapsed: false }], true),
+    ).toBe(false);
+  });
+
+  it("comes back in the gap after a tool has finished and before the model answers", () => {
+    // A settled tool card is not motion; without this the panel goes still
+    // while the model is deciding what to do next.
+    expect(api.showWorking([user("u1"), toolAt("ok")], true)).toBe(true);
+    expect(api.showWorking([user("u1"), toolAt("error")], true)).toBe(true);
+    expect(api.showWorking([{ kind: "notice", id: "n1", level: "info", text: "x" }], true)).toBe(
+      true,
+    );
+  });
+});
+
+describe("toolGroup", () => {
+  it("gives a lone tool call its own chrome", () => {
+    expect(api.toolGroup("text", "text")).toBe("solo");
+    expect(api.toolGroup("", "")).toBe("solo");
+  });
+
+  it("stacks a run of consecutive tool calls into one card", () => {
+    expect(api.toolGroup("text", "tool")).toBe("first");
+    expect(api.toolGroup("tool", "tool")).toBe("mid");
+    expect(api.toolGroup("tool", "text")).toBe("last");
   });
 });

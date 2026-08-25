@@ -112,6 +112,8 @@ Every message is one of two shapes:
 { "id": "7", "method": "permissionDecision", "params": { "sessionId": "sess_abc", "decision": { "requestId": "req_1", "behavior": "allow" } } }
 { "id": "8", "method": "setModel", "params": { "sessionId": "sess_abc", "model": "openai/gpt-4o" } }
 { "id": "9", "method": "listModels" }
+{ "id": "10", "method": "sessionHistory", "params": { "sessionId": "sess_abc" } }
+{ "id": "11", "method": "deleteSession", "params": { "sessionId": "sess_abc" } }
 ```
 
 ```json
@@ -208,6 +210,106 @@ connection open, so `ProtocolClient.listModels()` translates that one rejection 
 before. Every other failure still rejects, so a broken catalog is never mistaken for an
 old server. Adding it did **not** bump `PROTOCOL_VERSION`; see [Versioning](#versioning).
 
+## Replaying a session
+
+`openSession` subscribes your connection to a session's **future** events and replays
+nothing. `sessionHistory` is what answers "what was already said" — the verb a client needs
+to render a conversation it did not watch happen.
+
+```json
+// Client → server
+{ "id": "10", "method": "sessionHistory", "params": { "sessionId": "sess_abc" } }
+
+// Server → client
+{
+  "kind": "response",
+  "id": "10",
+  "result": {
+    "sessionId": "sess_abc",
+    "events": [
+      { "type": "runStart", "sessionId": "sess_abc", "prompt": { "role": "user", "content": [{ "type": "text", "text": "add a test" }], "timestamp": 1 } },
+      { "type": "messageEnd", "message": { "role": "assistant", "content": [{ "type": "text", "text": "Done." }], "model": "anthropic/claude-sonnet-5", "usage": { "inputTokens": 12, "outputTokens": 3, "cacheReadTokens": 0, "cacheWriteTokens": 0 }, "stopReason": "endTurn", "timestamp": 2 } },
+      { "type": "runEnd", "reason": "completed" }
+    ],
+    "truncated": false,
+    "droppedEvents": 0
+  }
+}
+```
+
+**It replays `AgentEvent`s, not a message list.** That is the whole design: a client folds
+history through the *same* reducer it already runs on `{ kind: "event" }` frames, so a
+transcript rebuilt from disk and one watched live are the same code path and cannot drift.
+A projected `{ role, text }[]` would have been smaller and would have forced every client
+to grow a second renderer deciding all over again how a tool call, a denied permission or a
+compaction reads.
+
+It is a faithful projection, not a recording. Only the resulting messages were stored, never
+the token stream that produced them, so a replayed assistant turn arrives as one
+`messageEnd` where a live client saw a `messageStream` per delta. Two rules keep it honest:
+every string comes from the stored entry that carried it, and only event types the live
+stream also emits are used — a stored `label`, or a state entry's `model`, is dropped rather
+than given a shape no client has ever seen. So the replay can never put a class of data on
+the wire that watching the session live would not already have shown the same client.
+
+Only the **active branch** is replayed — the path from the root to the newest entry, exactly
+what `Agent.resume` materializes. A session that was rewound has abandoned branches in its
+file, and replaying those would show a conversation the agent itself will never continue.
+
+**It is bounded, and it says so.** The payload is capped at 1 MiB of serialized events and
+1000 events, whichever binds first, keeping the newest and cutting at a turn boundary. 1 MiB
+is not a round number picked for looking reasonable: it is the server's own backpressure
+threshold — the point at which it already treats a connection as congested — and a quarter of
+the 4 MiB frame cap above which `ws` closes the socket. A history response is *essential*
+traffic and so is never dropped by the backpressure policy, which is exactly why it must not
+be the frame that wedges the socket.
+
+When the cap bites, `truncated` is `true` and `droppedEvents` says how many were dropped from
+the oldest end. **A client that sees `truncated` must tell the user earlier messages are not
+shown**; a transcript that quietly starts mid-conversation reads as the whole conversation,
+which is the silent wrong answer this field exists to prevent.
+
+`sessionHistory` is **optional and additive**, on the same terms as `listModels`: an older
+server answers `invalidRequest` and `ProtocolClient.sessionHistory()` translates that one
+rejection into `undefined`, leaving a client to show the empty transcript it showed before.
+Safe to translate because the verb only reads — `undefined` costs a caller a transcript, not
+a guarantee. It did **not** bump `PROTOCOL_VERSION`; see [Versioning](#versioning).
+
+## Deleting a session
+
+```json
+// Client → server
+{ "id": "11", "method": "deleteSession", "params": { "sessionId": "sess_abc" } }
+
+// Server → client
+{ "kind": "response", "id": "11", "result": { "ok": true } }
+```
+
+Permanent: the header, every entry, and the file behind them. There is no trash and no undo.
+
+The **engine** owns the deletion. A client unlinking the `.jsonl` itself would be a second
+implementation of session storage living outside the process that owns it: it could not see a
+session still live in the server's memory, and it could not know whether a run was in flight.
+
+- **A session running a turn is refused** with `sessionBusy`. Abort the run first. Deleting
+  the file out from under an agent still appending to it is not a thing to do quietly.
+- **A live but idle session is deleted and evicted** from the server in the same operation.
+  Every connection observing it is sent a final
+  `{ "type": "notice", "level": "warn", "text": "Session … was deleted." }` on that session's
+  event stream *before* its subscription is dropped — an ordinary event, so a client renders
+  it with whatever it already does for engine diagnostics rather than needing a new frame kind.
+- **The store goes first, the eviction second.** Telling every attached client "this was
+  deleted" and then discovering the store could not delete it would be a lie that leaves the
+  session on disk. Done this way, a store failure surfaces as an error with the session intact.
+- A `SessionStore` that does not implement the optional `delete(sessionId)` makes the server
+  **refuse**, loudly, rather than guess at which files back it — the same refusal `setModel`
+  makes without a `resolveModel`.
+
+`deleteSession` is optional and additive too, but a client must **not** read an older server's
+`invalidRequest` as success — nothing was deleted. `ProtocolClient.deleteSession()` therefore
+rejects rather than degrading; `isUnsupportedMethodError(error)` from `@arcturn/protocol` is
+how a client tells "this engine is too old" from "this session is busy".
+
 ## Reconnecting
 
 `{ method: "openSession", params: { sessionId } }` re-attaches to a session that already
@@ -253,7 +355,8 @@ changes in a way old clients can't safely ignore. A server and client should agr
 during connection setup; a server built against a newer protocol version should be
 prepared to reject or degrade for an older client rather than silently misbehave.
 
-Adding an *optional* verb is not such a change, and `listModels` did not bump it. An older
+Adding an *optional* verb is not such a change, and `listModels`, `sessionHistory` and
+`deleteSession` did not bump it. An older
 server rejects the new verb with an ordinary `invalidRequest` response the newer client
 handles, and an older client simply never sends it — both halves keep working. A bump, by
 contrast, breaks in both directions: `SessionHeader.version` is stamped `1` and validated

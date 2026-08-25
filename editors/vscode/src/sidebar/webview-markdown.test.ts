@@ -51,6 +51,36 @@ describe("parseMarkdown: blocks", () => {
     ]);
   });
 
+  it("reads the path out of a fence info string, and still knows the language", () => {
+    // A fence with anything after the language used to fail MD_FENCE outright
+    // and render as prose — four lines of code as a paragraph, with the
+    // backticks in it. Every shape a model actually emits now parses.
+    expect(parseMarkdown("```ts src/sidebar/webview-client.ts\nx\n```")).toEqual([
+      { t: "code", lang: "ts", file: "src/sidebar/webview-client.ts", v: "x", open: false },
+    ]);
+    expect(parseMarkdown("```ts:src/foo.ts\nx\n```")).toEqual([
+      { t: "code", lang: "ts", file: "src/foo.ts", v: "x", open: false },
+    ]);
+    expect(parseMarkdown("```src/foo.py\nx\n```")).toEqual([
+      { t: "code", lang: "py", file: "src/foo.py", v: "x", open: false },
+    ]);
+    expect(parseMarkdown('```js title="app/main.js"\nx\n```')).toEqual([
+      { t: "code", lang: "js", file: "app/main.js", v: "x", open: false },
+    ]);
+  });
+
+  it("carries no filename when the fence names none", () => {
+    // The key is absent rather than empty: a renderer that draws a path row
+    // for every block would draw an empty one for almost every block.
+    expect(Object.keys(parseMarkdown("```ts\nx\n```")[0] ?? {})).toEqual([
+      "t",
+      "lang",
+      "v",
+      "open",
+    ]);
+    expect(parseMarkdown("```\nx\n```")).toEqual([{ t: "code", lang: "", v: "x", open: false }]);
+  });
+
   it("does not read markdown inside a fence", () => {
     const blocks = parseMarkdown("```\n# not a heading\n**not bold**\n```");
     expect(blocks).toEqual([

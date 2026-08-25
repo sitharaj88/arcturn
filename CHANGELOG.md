@@ -10,7 +10,52 @@ CLI, the SDK, or the wire protocol.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **`sessionHistory` on the wire protocol.** A client can now ask a server for a
+  session's stored conversation, so a panel that attaches to a session it never
+  watched can render it. `openSession` subscribes to *future* events and replays
+  nothing — that gap is why opening a session from the VS Code history list
+  showed an empty chat. The result replays the same `AgentEvent`s the live
+  stream carries, deliberately rather than a projected message list: a client
+  folds history through the *same* reducer it already runs on live events, so a
+  transcript rebuilt from disk and one watched as it happened cannot drift.
+  Only the active branch is replayed, so a rewound session never shows a
+  conversation the agent will not continue. The payload is bounded — 1 MiB of
+  events or 1000 events, whichever binds first, keeping the newest and cutting
+  at a turn boundary — and reports `truncated`/`droppedEvents` explicitly, so a
+  client says "earlier messages are not shown" instead of quietly starting
+  mid-conversation. Additive and optional: `PROTOCOL_VERSION` stays at `1`, and
+  `ProtocolClient.sessionHistory()` turns an older server's `invalidRequest`
+  into `undefined`.
+- **`deleteSession` on the wire protocol.** A client can now permanently delete
+  a session. The **engine** performs the deletion — a client unlinking the file
+  itself could not see a session still live in the server's memory, nor know
+  whether a run was in flight. A session running a turn is refused with
+  `sessionBusy`; a live but idle one is deleted and evicted in the same
+  operation, and every connection observing it is sent a final `notice` event
+  saying so before its subscription is dropped. The store is deleted from
+  before the eviction, so a store failure leaves the session intact rather than
+  telling clients it was deleted. Unlike `listModels`, an older server's
+  `invalidRequest` is **not** translated into success — nothing was deleted —
+  and `isUnsupportedMethodError` is exported so a client can say "this engine
+  is too old" rather than quoting `Unknown method`.
+- **`SessionStore.delete(sessionId)`.** A new *optional* method on the store
+  contract, implemented by `JsonlSessionStore` and `MemorySessionStore`.
+  Optional so an existing third-party store keeps compiling; a host wired with
+  one that lacks it refuses to delete rather than guessing which files to
+  unlink.
+- **The VS Code panel shows a session's past conversation.** Attaching to a
+  session now fetches its history and folds it through the existing transcript
+  reducer, so opening one from the history list renders what was said instead
+  of an empty chat. A truncated replay is announced in the transcript rather
+  than silently omitted. Against an engine without `sessionHistory` the panel
+  behaves exactly as it did before.
+- **The VS Code panel can delete a session.** Confirmed first by a native modal
+  naming the session and saying the deletion cannot be undone; the deletion
+  itself goes through the engine's `deleteSession` verb, and the extension never
+  touches a session file. Deleting the session on screen opens a fresh one, so
+  the composer still goes somewhere real.
 
 ## [0.3.0] — 2026-08-25
 

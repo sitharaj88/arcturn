@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+import type { SessionHistory } from "../serve/engine.js";
 import type { ChildLike, SpawnLike } from "../serve/supervisor.js";
-import { FakeSocket, flush } from "../serve/test-socket.js";
+import { FakeSocket, flush, type SentFrame } from "../serve/test-socket.js";
 import { createEngineSession, type EngineSessionOptions } from "./engine-session.js";
 import type { ConnectionStatus } from "./webview-messages.js";
 
@@ -77,9 +78,69 @@ function scriptedSocket(): FakeSocket {
     if (frame.method === "listSessions") {
       return { sessions: [{ version: 1, sessionId: "s1", cwd: "/workspace", createdAt: 3 }] };
     }
+    if (frame.method === "sessionHistory") {
+      return storedHistory(String(frame.params?.sessionId));
+    }
     return {};
   };
   return socket;
+}
+
+/** What a real engine replays for a session with one completed turn in it. */
+function storedHistory(sessionId: string, truncated = false, droppedEvents = 0): SessionHistory {
+  return {
+    sessionId,
+    events: [
+      {
+        type: "runStart",
+        sessionId,
+        prompt: {
+          role: "user",
+          content: [{ type: "text", text: "what did I ask before?" }],
+          timestamp: 1,
+        },
+      },
+      {
+        type: "messageEnd",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "you asked about the parser" }],
+          model: "test/model",
+          usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 },
+          stopReason: "endTurn",
+          timestamp: 2,
+        },
+      },
+      { type: "runEnd", reason: "completed" },
+    ],
+    truncated,
+    droppedEvents,
+  };
+}
+
+/**
+ * A scripted socket that answers one method with an error response instead —
+ * an older engine refusing a verb, or a busy session refusing a delete.
+ */
+function socketRefusing(method: string, code: string, message: string): FakeSocket {
+  const socket = scriptedSocket();
+  const scripted = socket.autoRespond as (frame: SentFrame) => unknown;
+  socket.autoRespond = (frame) => (frame.method === method ? undefined : scripted(frame));
+  const send = socket.send.bind(socket);
+  socket.send = (data: string) => {
+    send(data);
+    const frame = JSON.parse(data) as SentFrame;
+    if (frame.method !== method) return;
+    queueMicrotask(() => socket.emit({ kind: "response", id: frame.id, error: { code, message } }));
+  };
+  return socket;
+}
+
+/** Every block's text, joined — what the user would be looking at. */
+function transcriptText(h: Harness): string {
+  return (h.session.controller?.state.blocks ?? [])
+    .map((block) => ("text" in block ? block.text : ""))
+    .join("\n");
 }
 
 function harness(over: Partial<EngineSessionOptions> = {}): Harness {
@@ -176,8 +237,14 @@ describe("createEngineSession", () => {
     // `ws-server.ts` attaches the event observer in `openSession` only; a
     // connection that merely created a session receives nothing.
     expect(h.socket.lastFrame("openSession")?.params).toEqual({ sessionId: "s-new" });
+    const before = h.session.controller?.state.blocks.length ?? 0;
     h.socket.emitEvent("s-new", { type: "notice", level: "info", text: "hello" });
-    expect(h.session.controller?.state.blocks).toHaveLength(1);
+    // A live event lands on top of whatever the replay already put there.
+    expect(h.session.controller?.state.blocks).toHaveLength(before + 1);
+    expect(h.session.controller?.state.blocks.at(-1)).toMatchObject({
+      kind: "notice",
+      text: "hello",
+    });
   });
 
   it("starts once, however many times it is asked", async () => {
@@ -483,5 +550,94 @@ describe("createEngineSession: telling the user why the engine never started", (
     expect(calls).toBe(0);
     await started(h);
     expect(calls).toBe(1);
+  });
+});
+
+describe("createEngineSession: replaying what was already said", () => {
+  it("renders a session's stored conversation when it attaches, not an empty chat", async () => {
+    const h = harness();
+    await started(h);
+    await h.session.openSession("s-old");
+
+    expect(h.socket.lastFrame("sessionHistory")?.params).toEqual({ sessionId: "s-old" });
+    // The transcript is built by the *same* reducer live events go through —
+    // this file added no rendering logic to gain it.
+    expect(transcriptText(h)).toContain("what did I ask before?");
+    expect(transcriptText(h)).toContain("you asked about the parser");
+    // A replay describes stored history; nothing in it is still in flight.
+    expect(h.session.controller?.state.running).toBe(false);
+  });
+
+  it("replays the session it opened on start, too", async () => {
+    const h = harness();
+    await started(h);
+    expect(h.socket.lastFrame("sessionHistory")?.params).toEqual({ sessionId: "s-new" });
+    expect(transcriptText(h)).toContain("you asked about the parser");
+  });
+
+  it("says earlier messages are missing rather than starting mid-conversation", async () => {
+    const socket = scriptedSocket();
+    const scripted = socket.autoRespond as (frame: SentFrame) => unknown;
+    socket.autoRespond = (frame) =>
+      frame.method === "sessionHistory"
+        ? storedHistory(String(frame.params?.sessionId), true, 42)
+        : scripted(frame);
+
+    const h = harness({ socketFactory: () => socket });
+    await started(h);
+
+    expect(transcriptText(h)).toContain("Earlier messages are not shown");
+    expect(transcriptText(h)).toContain("42");
+  });
+
+  it("still attaches when the engine is too old to replay anything", async () => {
+    const h = harness({
+      socketFactory: () =>
+        socketRefusing("sessionHistory", "invalidRequest", 'Unknown method: "sessionHistory"'),
+    });
+    await started(h);
+
+    expect(h.session.status).toBe("ready");
+    expect(h.session.controller).toBeDefined();
+    expect(transcriptText(h)).toBe("");
+    expect(h.logged.some((line) => line.includes("cannot replay session history"))).toBe(true);
+  });
+});
+
+describe("createEngineSession: deleting a session", () => {
+  it("asks the engine to delete it and detaches when it was the open one", async () => {
+    const h = harness();
+    await started(h);
+    expect(h.session.controller?.sessionId).toBe("s-new");
+
+    await h.session.deleteSession("s-new");
+
+    expect(h.socket.lastFrame("deleteSession")?.params).toEqual({ sessionId: "s-new" });
+    // The panel stops rendering a conversation that no longer exists; what it
+    // shows instead is the caller's decision (see `index.ts`).
+    expect(h.session.controller).toBeUndefined();
+  });
+
+  it("leaves a different session's controller alone", async () => {
+    const h = harness();
+    await started(h);
+    await h.session.deleteSession("some-other-session");
+
+    expect(h.socket.lastFrame("deleteSession")?.params).toEqual({
+      sessionId: "some-other-session",
+    });
+    expect(h.session.controller?.sessionId).toBe("s-new");
+  });
+
+  it("keeps the panel attached when the engine refuses the delete", async () => {
+    const h = harness({
+      socketFactory: () =>
+        socketRefusing("deleteSession", "sessionBusy", "Session s-new is running a turn"),
+    });
+    await started(h);
+
+    await expect(h.session.deleteSession("s-new")).rejects.toMatchObject({ code: "sessionBusy" });
+    // Nothing was deleted, so nothing was torn down.
+    expect(h.session.controller?.sessionId).toBe("s-new");
   });
 });

@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Message, SessionEntry } from "@arcturn/types";
@@ -128,6 +128,38 @@ describe("JsonlSessionStore", () => {
     const entries = await store.entries("s1");
     expect(entries.map((e) => e.id)).toEqual(["a", "b"]);
   });
+
+  it("deletes a session's file, and only that session's", async () => {
+    await store.create({ sessionId: "s1", cwd: "/work" });
+    await store.create({ sessionId: "s2", cwd: "/work" });
+    await store.append("s1", entry("a", null, userMessage("hello")));
+
+    await store.delete("s1");
+
+    expect(await readdir(dir)).toEqual(["s2.jsonl"]);
+    expect((await store.list()).map((header) => header.sessionId)).toEqual(["s2"]);
+    await expect(store.open("s1")).rejects.toMatchObject({ code: "notFound" });
+    await expect(store.entries("s1")).rejects.toMatchObject({ code: "notFound" });
+  });
+
+  it("reports a delete of a session that was never there, rather than succeeding quietly", async () => {
+    await expect(store.delete("nope")).rejects.toMatchObject({ code: "notFound" });
+    await expect(store.delete("../escape")).rejects.toMatchObject({ code: "invalidId" });
+  });
+
+  it("does not let a later append resurrect a deleted session", async () => {
+    await store.create({ sessionId: "s1", cwd: "/work" });
+    await store.append("s1", entry("a", null, userMessage("hello")));
+    await store.delete("s1");
+
+    // `appendFile` would happily create a brand-new file; the store's own
+    // `access` guard is what keeps a deleted session from coming back as a
+    // headerless orphan that `list()` then silently skips forever.
+    await expect(store.append("s1", entry("b", "a", userMessage("zombie")))).rejects.toMatchObject({
+      code: "notFound",
+    });
+    expect(await readdir(dir)).toEqual([]);
+  });
 });
 
 describe("MemorySessionStore", () => {
@@ -142,5 +174,18 @@ describe("MemorySessionStore", () => {
     await store.setTitle("s1", "titled");
     expect((await store.open("s1")).title).toBe("titled");
     await expect(store.open("missing")).rejects.toMatchObject({ code: "notFound" });
+  });
+
+  it("deletes a session and reports a delete of one it never had", async () => {
+    const store = new MemorySessionStore();
+    await store.create({ sessionId: "s1", cwd: "/work" });
+    await store.append("s1", entry("a", null, userMessage("root")));
+
+    await store.delete("s1");
+
+    expect(await store.list()).toEqual([]);
+    await expect(store.open("s1")).rejects.toMatchObject({ code: "notFound" });
+    await expect(store.entries("s1")).rejects.toMatchObject({ code: "notFound" });
+    await expect(store.delete("s1")).rejects.toMatchObject({ code: "notFound" });
   });
 });

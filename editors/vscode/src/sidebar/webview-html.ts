@@ -116,6 +116,12 @@ export function renderSidebarHtml(options: SidebarHtmlOptions): string {
       <div id="starters" class="starters"></div>
     </div>
     <div id="turns"></div>
+    <div id="working" class="working hidden" aria-hidden="true">
+      <span id="working-mark" class="working-mark"></span>
+      <span>Working</span>
+      <span class="working-dots"><span class="working-dot"></span><span
+        class="working-dot"></span><span class="working-dot"></span></span>
+    </div>
   </main>
 
   <div class="jump-wrap">

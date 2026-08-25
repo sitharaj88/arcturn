@@ -6,6 +6,7 @@ import {
   validatePermissionRule,
   validateServerMessage,
   validateSessionHeader,
+  validateSessionHistory,
 } from "./validate.js";
 
 describe("validateClientRequest: accepts every method", () => {
@@ -49,6 +50,8 @@ describe("validateClientRequest: accepts every method", () => {
     ],
     ["setModel", { id: "1", method: "setModel", params: { sessionId: "s1", model: "opus" } }],
     ["listModels", { id: "1", method: "listModels" }],
+    ["sessionHistory", { id: "1", method: "sessionHistory", params: { sessionId: "s1" } }],
+    ["deleteSession", { id: "1", method: "deleteSession", params: { sessionId: "s1" } }],
   ];
 
   it.each(cases)("%s", (_name, value) => {
@@ -335,5 +338,46 @@ describe("validateModelCatalog", () => {
     expect(validateModelCatalog({ models: [{ ...entry, contextWindow: "big" }] }).ok).toBe(false);
     expect(validateModelCatalog({ models: [{ ...entry, credentials: "maybe" }] }).ok).toBe(false);
     expect(validateModelCatalog({ models: [{ ...entry, cost: { input: 1 } }] }).ok).toBe(false);
+  });
+});
+
+describe("validateSessionHistory", () => {
+  const OK = {
+    sessionId: "s1",
+    events: [{ type: "runEnd", reason: "completed" }],
+    truncated: false,
+    droppedEvents: 0,
+  };
+
+  it("accepts a well-formed payload", () => {
+    const result = validateSessionHistory(OK);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value).toEqual(OK);
+  });
+
+  it("copies fields out one at a time, so nothing extra rides along", () => {
+    const result = validateSessionHistory({ ...OK, apiKey: "sk-live-secret" });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(JSON.stringify(result.value)).not.toContain("sk-live-secret");
+  });
+
+  it("shallow-validates events, the same latitude the live event frame gets", () => {
+    // An event shape the wire layer has never heard of is carried, exactly as
+    // `validateServerMessage`'s `event` kind carries it: deep validation of the
+    // AgentEvent union is the runtime's job.
+    const result = validateSessionHistory({ ...OK, events: [{ type: "somethingNew", x: 1 }] });
+    expect(result.ok).toBe(true);
+  });
+
+  it.each([
+    ["not an object", 42],
+    ["no sessionId", { ...OK, sessionId: 1 }],
+    ["events not an array", { ...OK, events: {} }],
+    ["an event with no type", { ...OK, events: [{ nope: true }] }],
+    ["truncated not a boolean", { ...OK, truncated: "yes" }],
+    ["negative droppedEvents", { ...OK, truncated: true, droppedEvents: -1 }],
+    ["droppedEvents without truncated", { ...OK, droppedEvents: 3 }],
+  ])("rejects %s", (_name, value) => {
+    expect(validateSessionHistory(value).ok).toBe(false);
   });
 });

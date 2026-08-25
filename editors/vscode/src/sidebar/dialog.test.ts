@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { createCoalescer } from "./coalesce.js";
-import { ALLOW, ALLOW_ALWAYS, answerFromChoice, DENY, permissionChoices } from "./dialog.js";
+import {
+  ALLOW,
+  ALLOW_ALWAYS,
+  answerFromChoice,
+  confirmsSessionDeletion,
+  DELETE_SESSION,
+  DENY,
+  describeSessionDeletion,
+  permissionChoices,
+} from "./dialog.js";
 import { describePermissionRequest } from "./permission-queue.js";
 
 const request = {
@@ -93,5 +102,36 @@ describe("createCoalescer", () => {
     coalescer.push(2);
     coalescer.flush();
     expect(calls).toEqual([]);
+  });
+});
+
+describe("describeSessionDeletion", () => {
+  it("names the session being deleted, so a stray click is answerable", () => {
+    const prompt = describeSessionDeletion("Fix the parser");
+    expect(prompt.message).toContain("Fix the parser");
+    expect(prompt.confirmLabel).toBe(DELETE_SESSION);
+  });
+
+  it("says the deletion is permanent and not local to this panel", () => {
+    const prompt = describeSessionDeletion("01JABC");
+    expect(prompt.detail).toMatch(/permanently/i);
+    expect(prompt.detail).toMatch(/cannot be undone/i);
+  });
+});
+
+describe("confirmsSessionDeletion", () => {
+  const prompt = describeSessionDeletion("01JABC");
+
+  it("confirms only on the exact confirmation button", () => {
+    expect(confirmsSessionDeletion(DELETE_SESSION, prompt)).toBe(true);
+  });
+
+  it("treats every other answer as a refusal, dismissal included", () => {
+    // A destructive action may not read "no answer" as consent.
+    expect(confirmsSessionDeletion(undefined, prompt)).toBe(false);
+    expect(confirmsSessionDeletion("Cancel", prompt)).toBe(false);
+    expect(confirmsSessionDeletion("", prompt)).toBe(false);
+    expect(confirmsSessionDeletion("delete", prompt)).toBe(false);
+    expect(confirmsSessionDeletion("Allow", prompt)).toBe(false);
   });
 });

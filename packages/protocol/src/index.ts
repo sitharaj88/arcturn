@@ -4,6 +4,7 @@ export { PROTOCOL_VERSION } from "@arcturn/types";
 export {
   ClientErrorCode,
   createProtocolClient,
+  isUnsupportedMethodError,
   type ProtocolClient,
   ProtocolClientError,
   type ProtocolClientOptions,
@@ -37,4 +38,5 @@ export {
   validatePermissionRule,
   validateServerMessage,
   validateSessionHeader,
+  validateSessionHistory,
 } from "./validate.js";

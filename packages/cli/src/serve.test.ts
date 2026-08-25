@@ -1,4 +1,4 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readdir } from "node:fs/promises";
 import { createServer as createHttpServer } from "node:http";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
@@ -7,7 +7,7 @@ import { createClient, registerModel, unregisterModel } from "@arcturn/ai";
 import { JsonlSessionStore } from "@arcturn/core";
 import { createProtocolClient } from "@arcturn/protocol";
 import { ArcturnServer } from "@arcturn/server";
-import type { AgentEvent, ModelSpec } from "@arcturn/types";
+import type { AgentEvent, ModelSpec, SessionHistory } from "@arcturn/types";
 import { afterEach, describe, expect, it } from "vitest";
 import { WebSocket } from "ws";
 import { formatModelCatalog } from "./runtime.js";
@@ -271,6 +271,252 @@ describe("listModels end-to-end: real server, real client, real catalog", () => 
       for (const model of models) expect(printed).toContain(model.id);
     } finally {
       client.close();
+    }
+  });
+});
+
+/**
+ * A connected client on a fresh socket, as a second panel (or a restarted one)
+ * would be. Registered for teardown by the caller.
+ */
+function connect(port: number): ReturnType<typeof createProtocolClient> {
+  return createProtocolClient(new WebSocket(`ws://127.0.0.1:${port}`));
+}
+
+/** Text of every `runStart` prompt in a replay, oldest first. */
+function promptTexts(history: SessionHistory): string[] {
+  return history.events
+    .filter(
+      (event): event is Extract<AgentEvent, { type: "runStart" }> => event.type === "runStart",
+    )
+    .map((event) =>
+      event.prompt.content
+        .filter((part): part is { type: "text"; text: string } => part.type === "text")
+        .map((part) => part.text)
+        .join(""),
+    );
+}
+
+/** Text of every completed assistant message in a replay, oldest first. */
+function assistantTexts(history: SessionHistory): string[] {
+  return history.events
+    .filter(
+      (event): event is Extract<AgentEvent, { type: "messageEnd" }> => event.type === "messageEnd",
+    )
+    .map((event) =>
+      event.message.content
+        .filter((part): part is { type: "text"; text: string } => part.type === "text")
+        .map((part) => part.text)
+        .join(""),
+    );
+}
+
+describe("sessionHistory end-to-end: real server, real client, real session store", () => {
+  it("replays a session's prior turns to a client that just attached", async () => {
+    const runtime = await fakeRuntime({ llm: fakeLLM([{ text: "the first answer" }]) });
+    const sessionHost = createServeHost(runtime);
+    const server = new ArcturnServer({ sessionHost });
+    servers.push(server);
+    const port = await server.start({ host: "127.0.0.1", port: 0 });
+
+    // Panel one: does the work.
+    const first = connect(port);
+    let sessionId: string;
+    try {
+      const header = await first.createSession({ cwd: runtime.cwd });
+      sessionId = header.sessionId;
+      await first.openSession(sessionId);
+      await first.prompt(sessionId, "what did I ask about?");
+    } finally {
+      first.close();
+    }
+
+    // Panel two: a fresh connection that saw none of it, exactly like a VS Code
+    // panel opening a session out of the history list. This is the bug: today
+    // it gets a header, a live event subscription, and an empty chat.
+    const second = connect(port);
+    try {
+      const header = await second.openSession(sessionId);
+      expect(header.sessionId).toBe(sessionId);
+
+      const history = await second.sessionHistory(sessionId);
+      expect(history).toBeDefined();
+      const replayed = history as SessionHistory;
+
+      expect(replayed.sessionId).toBe(sessionId);
+      expect(promptTexts(replayed)).toEqual(["what did I ask about?"]);
+      expect(assistantTexts(replayed)).toEqual(["the first answer"]);
+      expect(replayed.truncated).toBe(false);
+      expect(replayed.droppedEvents).toBe(0);
+      // The run is closed, so a client folding these lands on "not running"
+      // rather than a transcript stuck mid-turn forever.
+      expect(replayed.events.at(-1)).toMatchObject({ type: "runEnd", reason: "completed" });
+    } finally {
+      second.close();
+    }
+  });
+
+  it("replays every turn of a multi-turn session, in order", async () => {
+    const runtime = await fakeRuntime({
+      llm: fakeLLM([{ text: "answer one" }, { text: "answer two" }]),
+    });
+    const sessionHost = createServeHost(runtime);
+    const server = new ArcturnServer({ sessionHost });
+    servers.push(server);
+    const port = await server.start({ host: "127.0.0.1", port: 0 });
+
+    const client = connect(port);
+    try {
+      const header = await client.createSession({ cwd: runtime.cwd });
+      await client.openSession(header.sessionId);
+      await client.prompt(header.sessionId, "question one");
+      await client.prompt(header.sessionId, "question two");
+
+      const history = (await client.sessionHistory(header.sessionId)) as SessionHistory;
+      expect(promptTexts(history)).toEqual(["question one", "question two"]);
+      expect(assistantTexts(history)).toEqual(["answer one", "answer two"]);
+    } finally {
+      client.close();
+    }
+  });
+
+  it("carries no credential value, and refuses an id it has never seen", async () => {
+    const runtime = await fakeRuntime({ env: { ANTHROPIC_API_KEY: "sk-live-secret" } });
+    const sessionHost = createServeHost(runtime);
+    const server = new ArcturnServer({ sessionHost });
+    servers.push(server);
+    const port = await server.start({ host: "127.0.0.1", port: 0 });
+
+    const client = connect(port);
+    try {
+      const header = await client.createSession({ cwd: runtime.cwd });
+      await client.openSession(header.sessionId);
+      await client.prompt(header.sessionId, "hello");
+
+      const history = (await client.sessionHistory(header.sessionId)) as SessionHistory;
+      expect(JSON.stringify(history)).not.toContain("sk-live-secret");
+
+      await expect(client.sessionHistory("sess_never_existed")).rejects.toMatchObject({
+        code: "sessionNotFound",
+      });
+    } finally {
+      client.close();
+    }
+  });
+});
+
+describe("deleteSession end-to-end: real server, real client, real files", () => {
+  it("removes the session from listSessions and from disk", async () => {
+    const runtime = await fakeRuntime();
+    const sessionHost = createServeHost(runtime);
+    const server = new ArcturnServer({ sessionHost });
+    servers.push(server);
+    const port = await server.start({ host: "127.0.0.1", port: 0 });
+
+    const client = connect(port);
+    try {
+      const doomed = await client.createSession({ cwd: runtime.cwd });
+      const keeper = await client.createSession({ cwd: runtime.cwd });
+      await client.openSession(doomed.sessionId);
+      await client.prompt(doomed.sessionId, "write something to disk");
+
+      const before = await readdir(runtime.cwd);
+      expect(before).toContain(`${doomed.sessionId}.jsonl`);
+
+      await client.deleteSession(doomed.sessionId);
+
+      const listed = (await client.listSessions()).map((header) => header.sessionId);
+      expect(listed).not.toContain(doomed.sessionId);
+      expect(listed).toContain(keeper.sessionId);
+
+      // The decisive check: the engine actually unlinked it. A session that is
+      // merely forgotten in memory comes back on the next `arcturn serve`.
+      const after = await readdir(runtime.cwd);
+      expect(after).not.toContain(`${doomed.sessionId}.jsonl`);
+      expect(after).toContain(`${keeper.sessionId}.jsonl`);
+
+      // And it is gone for good: re-opening finds nothing, and so does history.
+      await expect(client.openSession(doomed.sessionId)).rejects.toMatchObject({
+        code: "sessionNotFound",
+      });
+      await expect(client.sessionHistory(doomed.sessionId)).rejects.toMatchObject({
+        code: "sessionNotFound",
+      });
+    } finally {
+      client.close();
+    }
+  });
+
+  it("refuses to delete a session that is running a turn, and leaves it intact", async () => {
+    const runtime = await fakeRuntime({
+      llm: fakeLLM([{ text: "still thinking", delayMs: 250 }]),
+    });
+    const sessionHost = createServeHost(runtime);
+    const server = new ArcturnServer({ sessionHost });
+    servers.push(server);
+    const port = await server.start({ host: "127.0.0.1", port: 0 });
+
+    const client = connect(port);
+    try {
+      const header = await client.createSession({ cwd: runtime.cwd });
+      await client.openSession(header.sessionId);
+
+      const started = new Promise<void>((resolve) => {
+        client.onEvent((_sessionId, event) => {
+          if (event.type === "runStart") resolve();
+        });
+      });
+      const running = client.prompt(header.sessionId, "take your time");
+      await started;
+
+      await expect(client.deleteSession(header.sessionId)).rejects.toMatchObject({
+        code: "sessionBusy",
+      });
+      // Not half-deleted: the file is still there while the run finishes.
+      expect(await readdir(runtime.cwd)).toContain(`${header.sessionId}.jsonl`);
+
+      await running;
+      // Once idle, the same call succeeds.
+      await client.deleteSession(header.sessionId);
+      expect(await readdir(runtime.cwd)).not.toContain(`${header.sessionId}.jsonl`);
+    } finally {
+      client.close();
+    }
+  });
+
+  it("tells an attached client its session was deleted, rather than going silent", async () => {
+    const runtime = await fakeRuntime();
+    const sessionHost = createServeHost(runtime);
+    const server = new ArcturnServer({ sessionHost });
+    servers.push(server);
+    const port = await server.start({ host: "127.0.0.1", port: 0 });
+
+    const watcher = connect(port);
+    const deleter = connect(port);
+    try {
+      const header = await watcher.createSession({ cwd: runtime.cwd });
+      await watcher.openSession(header.sessionId);
+
+      const notices: AgentEvent[] = [];
+      const told = new Promise<void>((resolve) => {
+        watcher.onEvent((sessionId, event) => {
+          if (sessionId !== header.sessionId || event.type !== "notice") return;
+          notices.push(event);
+          resolve();
+        });
+      });
+
+      await deleter.deleteSession(header.sessionId);
+      await told;
+
+      expect(notices.at(-1)).toMatchObject({
+        type: "notice",
+        level: "warn",
+        text: expect.stringContaining(header.sessionId),
+      });
+    } finally {
+      watcher.close();
+      deleter.close();
     }
   });
 });

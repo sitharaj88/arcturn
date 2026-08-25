@@ -37,6 +37,10 @@ describe("parseWebviewMessage", () => {
     expect(parseWebviewMessage({ type: "setModel", modelId: "anthropic/claude-sonnet-5" })).toEqual(
       { type: "setModel", modelId: "anthropic/claude-sonnet-5" },
     );
+    expect(parseWebviewMessage({ type: "deleteSession", sessionId: "01JABC" })).toEqual({
+      type: "deleteSession",
+      sessionId: "01JABC",
+    });
     expect(parseWebviewMessage({ type: "copy", text: "npm test" })).toEqual({
       type: "copy",
       text: "npm test",
@@ -72,6 +76,10 @@ describe("parseWebviewMessage", () => {
       { type: "openSession" },
       { type: "openSession", sessionId: 42 },
       { type: "openSession", sessionId: "   " },
+      { type: "deleteSession" },
+      { type: "deleteSession", sessionId: 42 },
+      { type: "deleteSession", sessionId: "   " },
+      { type: "deleteSession", sessionId: null },
     ]) {
       expect(parseWebviewMessage(value)).toBeUndefined();
     }
@@ -172,6 +180,30 @@ describe("the session list's boundary", () => {
       type: "openSession",
       sessionId: "01JABC",
     });
+  });
+
+  it("holds the destructive verb to exactly the same boundary rules", () => {
+    // The confirmation lives in the host and the deletion in the engine; what
+    // this boundary owes is a rebuilt, bounded, control-character-free id.
+    for (const sessionId of ["a\nb", "a\rb", "a\u0000b", "a\u001bb", "a\u007fb"]) {
+      expect(parseWebviewMessage({ type: "deleteSession", sessionId })).toBeUndefined();
+    }
+    expect(
+      parseWebviewMessage({
+        type: "deleteSession",
+        sessionId: "x".repeat(MAX_SESSION_ID_LENGTH + 1),
+      }),
+    ).toBeUndefined();
+    expect(parseWebviewMessage({ type: "deleteSession", sessionId: "  01JABC  " })).toEqual({
+      type: "deleteSession",
+      sessionId: "01JABC",
+    });
+  });
+
+  it("rebuilds the message rather than spreading whatever arrived", () => {
+    expect(
+      parseWebviewMessage({ type: "deleteSession", sessionId: "01JABC", andAlso: "rm -rf /" }),
+    ).toEqual({ type: "deleteSession", sessionId: "01JABC" });
   });
 });
 

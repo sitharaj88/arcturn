@@ -365,8 +365,40 @@ export class ArcturnServer {
         return { ok: true };
       case "listModels":
         return { models: await this.#sessionHost.listModels() };
+      case "sessionHistory":
+        // Answered whether or not this connection has the session open: a
+        // client may want to render a session before attaching to it, and
+        // reading stored entries needs no agent and no subscription.
+        return this.#sessionHost.sessionHistory(request.params.sessionId);
+      case "deleteSession": {
+        await this.#sessionHost.deleteSession(request.params.sessionId);
+        this.#detachEveryone(request.params.sessionId);
+        return { ok: true };
+      }
       default:
         return exhaustiveCheck(request);
+    }
+  }
+
+  /**
+   * Forget one session on every connection that was observing it.
+   *
+   * `SessionHost.deleteSession` has already sent each observer its final
+   * `notice` and dropped the subscription host-side; what is left here is this
+   * server's own per-connection bookkeeping. Left behind, an
+   * `observedSessions` entry would keep a dead unsubscribe closure alive for
+   * the life of the socket and would make `#attachObserver` treat the id as
+   * already attached — a stale record for a session that no longer exists.
+   *
+   * Every connection, not just the one that asked: a session is deleted for
+   * all of them at once.
+   */
+  #detachEveryone(sessionId: string): void {
+    for (const state of this.#connections.values()) {
+      const unsubscribe = state.observedSessions.get(sessionId);
+      if (unsubscribe === undefined) continue;
+      state.observedSessions.delete(sessionId);
+      unsubscribe();
     }
   }
 
