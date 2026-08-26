@@ -1176,27 +1176,35 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
 .chip:hover { color: var(--vscode-foreground); background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground)); }
 .chip-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .chip:disabled { opacity: 0.5; cursor: default; }
-.hint {
-  flex: 1 1 auto;
-  min-width: 0;
-  font-size: 0.8em;
-  color: var(--arc-muted);
-  white-space: nowrap;
+/* Pushes the permission chip and the send button to the trailing edge. */
+.composer-gap { flex: 1 1 auto; }
+/*
+ * The hint is no longer drawn. It stays in the DOM because it is the
+ * textarea's aria-describedby, and a screen reader still needs to be told that
+ * Enter sends and Escape stops — facts a sighted user reads off the button.
+ * Clipped rather than 'display: none' so it is announced: accname includes a
+ * referenced node either way, but a hidden node is skipped by some
+ * screen-reader review cursors.
+ */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
-  text-align: right;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
 }
 /*
  * The 300px rule. The webview's viewport *is* the sidebar, so a viewport media
  * query is a container query here — and below this width the bar has two icon
- * buttons, two chips and a send button to fit, which is exactly the room a
- * sentence does not have. Hidden rather than shrunk: an ellipsised "Enter to
- * s…" is worse than nothing, and the textarea's aria-describedby still reads
- * this element, because accname includes a referenced node whether or not it
- * is displayed.
+ * buttons, two chips and a send button to fit. The sentence that used to
+ * compete with them for the same row is gone; what is left is closing the gaps
+ * so the chips keep their labels instead of ellipsising them.
  */
 @media (max-width: 380px) {
-  .hint { display: none; }
   .composer-bar { gap: 3px; }
 }
 /*
@@ -1730,7 +1738,6 @@ const CLIENT_SOURCE = String.raw`
   var modelLabel = $("model-label");
   var hint = $("hint");
   var sendButton = $("send");
-  var stopButton = $("abort");
   var dock = $("dock");
   var sessionsButton = $("sessions");
   var sessionsView = $("sessions-view");
@@ -1824,8 +1831,10 @@ const CLIENT_SOURCE = String.raw`
   $("permission-icon").appendChild(icon("warning"));
   $("permission-ask-icon").appendChild(icon("warning"));
   $("working-mark").appendChild(icon("sparkle"));
+  // The one button's face is swapped in syncComposer, never duplicated: two
+  // buttons meant two disabled rules, two labels and two chances to disagree
+  // about whether a run is in flight.
   sendButton.appendChild(icon("send"));
-  stopButton.appendChild(icon("stop"));
 
   /* ---- page state ---------------------------------------------------- */
 
@@ -2371,11 +2380,24 @@ const CLIENT_SOURCE = String.raw`
     var typed = promptBox.value.trim() !== "";
     var running = view.running;
     promptBox.disabled = !ready();
-    sendButton.disabled = !ready() || !typed;
-    sendButton.setAttribute("aria-label", running ? "Steer this run" : "Send");
-    sendButton.title = running ? "Steer this run" : "Send";
-    stopButton.classList.toggle("hidden", !running);
-    stopButton.disabled = !running;
+    // One button, three states — and the rule that decides them is "agree with
+    // Enter", because a button that says Stop while Enter steers is two answers
+    // to one question. Idle: Send. Running with something typed: Steer, exactly
+    // what Enter does. Running with an empty box: Stop. Stopping never depends
+    // on emptying the box — Escape aborts from anywhere in the composer.
+    var action = !running ? "send" : typed ? "steer" : "stop";
+    sendButton.dataset.action = action;
+    sendButton.classList.toggle("stop", action === "stop");
+    sendButton.disabled = action === "send" ? !ready() || !typed : !ready();
+    var label =
+      action === "stop" ? "Stop this run" : action === "steer" ? "Steer this run" : "Send";
+    sendButton.setAttribute("aria-label", label);
+    sendButton.title = action === "stop" ? label + " (Escape)" : label;
+    if (sendButton.dataset.face !== action) {
+      sendButton.dataset.face = action;
+      clear(sendButton);
+      sendButton.appendChild(icon(action === "stop" ? "stop" : "send"));
+    }
     modelChip.disabled = !ready();
     modeChip.disabled = !ready();
     attachButton.disabled = !ready();
@@ -2383,10 +2405,12 @@ const CLIENT_SOURCE = String.raw`
     if (!ready()) closeSuggest();
     starterButtons.forEach(function (node) { node.disabled = !ready(); });
 
+    // Only a screen reader reads this now, so it says what the keys do — the
+    // things a sighted user reads off the button's own face and title.
     var words = [];
     if (!ready()) words.push("Not connected");
-    else if (running && typed) words.push("Enter steers this run");
-    else if (running) words.push("Running…");
+    else if (running && typed) words.push("Enter steers this run, Escape stops it");
+    else if (running) words.push("Running. Escape stops it");
     else words.push("Enter to send, Shift+Enter for a new line");
     // Written only when it changed: this element is the textarea's
     // aria-describedby, and replacing its text node on every keystroke makes a
@@ -3829,8 +3853,22 @@ const CLIENT_SOURCE = String.raw`
     planCard.classList.toggle("open", planOpen);
   });
 
-  sendButton.addEventListener("click", send);
-  stopButton.addEventListener("click", function () { post({ type: "abort" }); });
+  // The button dispatches on the face it is currently wearing, so a click can
+  // never mean something the user did not just read on it.
+  sendButton.addEventListener("click", function () {
+    if (sendButton.dataset.action === "stop") { post({ type: "abort" }); return; }
+    send();
+  });
+
+  // Escape aborts from anywhere in the composer, so stopping never depends on
+  // clearing the box first — the one thing merging the buttons could otherwise
+  // have taken away. It only fires while a run is in flight and while no
+  // popover owns the key, which handleSuggestKey claims first.
+  promptBox.addEventListener("keydown", function (event) {
+    if (event.key !== "Escape" || !view.running) return;
+    event.preventDefault();
+    post({ type: "abort" });
+  });
 
   // Review opens the diff for the whole set; the host picks when there is more
   // than one. Apply and Discard go to the host, which asks the engine — this

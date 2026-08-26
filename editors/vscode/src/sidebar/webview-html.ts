@@ -306,14 +306,14 @@ export function renderSidebarHtml(options: SidebarHtmlOptions): string {
           <span id="model-label" class="chip-label">Select model</span>
           <span id="model-caret"></span>
         </button>
+        <span class="composer-gap"></span>
         <button id="mode" class="chip" type="button" aria-haspopup="listbox"
           aria-expanded="false" aria-controls="mode-popover">
           <span id="mode-icon"></span>
           <span id="mode-label" class="chip-label">Permissions</span>
         </button>
-        <span id="hint" class="hint"></span>
-        <button id="abort" class="send stop hidden" type="button" aria-label="Stop"></button>
         <button id="send" class="send" type="button" aria-label="Send" disabled></button>
+        <span id="hint" class="sr-only"></span>
       </div>
     </div>
   </div>

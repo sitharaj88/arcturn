@@ -964,21 +964,41 @@ describe("the composer", () => {
     expect(panel.posted.filter((message) => message.type === "send")).toHaveLength(0);
   });
 
-  it("offers Stop while a run is in flight, and steering if you type", () => {
+  it("is one button wearing three faces, and each agrees with what Enter does", () => {
+    // The rule the states are chosen by: the button must never say one thing
+    // while Enter does another. Idle it sends; running with text it steers,
+    // which is what Enter does there; running with an empty box it stops.
     panel.send(state({ running: true }));
-    expect(panel.byId("abort").classList.contains("hidden")).toBe(false);
-    expect(panel.byId("hint").textContent).toContain("Running");
+    expect(panel.byId("send").dataset.action).toBe("stop");
+    expect(panel.byId("send").getAttribute("aria-label")).toBe("Stop this run");
+    panel.byId("send").dispatch("click");
+    expect(panel.posted.at(-1)).toEqual({ type: "abort" });
+
     panel.byId("prompt").value = "actually, do this instead";
     panel.byId("prompt").dispatch("input");
-    expect(panel.byId("hint").textContent).toContain("steers");
+    expect(panel.byId("send").dataset.action).toBe("steer");
     expect(panel.byId("send").disabled).toBe(false);
-    panel.byId("abort").dispatch("click");
+
+    panel.send(state({ running: false }));
+    expect(panel.byId("send").dataset.action).toBe("send");
+  });
+
+  it("stops on Escape, so stopping never depends on emptying the box first", () => {
+    // Merging the buttons could have taken this away: with text typed the
+    // button steers, so without a key there would be no way to stop without
+    // deleting what you had written.
+    panel.send(state({ running: true }));
+    panel.byId("prompt").value = "half a thought";
+    panel.byId("prompt").dispatch("input");
+    expect(panel.byId("send").dataset.action).toBe("steer");
+    panel.byId("prompt").dispatch("keydown", { key: "Escape" });
     expect(panel.posted.at(-1)).toEqual({ type: "abort" });
   });
 
-  it("hides Stop when nothing is running", () => {
+  it("does not abort on Escape when nothing is running", () => {
     panel.send(state({ running: false }));
-    expect(panel.byId("abort").classList.contains("hidden")).toBe(true);
+    panel.byId("prompt").dispatch("keydown", { key: "Escape" });
+    expect(panel.posted.filter((message) => message.type === "abort")).toHaveLength(0);
   });
 
   it("grows with the text through an attribute, never an inline style", () => {

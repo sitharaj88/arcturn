@@ -80,8 +80,10 @@ describe("renderSidebarHtml", () => {
   it("is keyboard reachable: the prompt box and every control are focusable elements", () => {
     const page = html();
     expect(page).toMatch(/<textarea[^>]*id="prompt"/);
+    // One send button, which wears a stop face while a run is in flight — so
+    // there is no second control here to be reachable or to fall out of sync.
     expect(page).toMatch(/<button[^>]*id="send"/);
-    expect(page).toMatch(/<button[^>]*id="abort"/);
+    expect(page).not.toMatch(/id="abort"/);
     // The model selector is a button and a text input, not a div with a click
     // handler: the whole point of putting it in the panel is that it is
     // reachable, and a keyboard user has to be able to reach it too.
@@ -305,16 +307,16 @@ describe("the client script", () => {
     expect((SIDEBAR_STYLE.match(/@keyframes/g) ?? []).length).toBeGreaterThan(2);
   });
 
-  it("makes room for two chips at 300px by dropping the hint from the picture only", () => {
-    // The webview's viewport is the sidebar, so this media query is a
-    // container query. `display: none` rather than a shrink because an
-    // ellipsised "Enter to s…" is worse than nothing — and the textarea's
-    // aria-describedby still reads the element, because accname includes a
-    // referenced node whether or not it is rendered.
-    expect(SIDEBAR_STYLE).toMatch(
-      /@media \(max-width: 380px\)[^}]*\{[^}]*\.hint \{ display: none; \}/s,
-    );
+  it("keeps the hint for a screen reader after taking it off the screen", () => {
+    // The sentence competed with two chips and a send button for one narrow
+    // row, and said what the button's own face already says. It is clipped
+    // rather than removed because it is the textarea's aria-describedby: a
+    // screen reader still needs to be told that Enter sends and Escape stops,
+    // which is the half a sighted user reads off the button.
+    expect(SIDEBAR_STYLE).toMatch(/\.sr-only \{[^}]*clip-path: inset\(50%\)/s);
+    expect(SIDEBAR_STYLE).not.toMatch(/\.hint \{/);
     expect(html()).toMatch(/id="prompt"[^>]*aria-describedby="hint"/s);
+    expect(html()).toMatch(/id="hint" class="sr-only"/);
   });
 
   it("truncates the model chip before the mode chip, which is the one that lies when cut", () => {
