@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -144,6 +144,105 @@ describe("grep tool given a file path", () => {
       expect(text).not.toContain("No matches found");
     } finally {
       await rmrf(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+/**
+ * "No matches" is an *answer*, and a model reads it as evidence of absence.
+ * Every case here checks that grep only gives that answer when it actually
+ * searched something — the same failure the wave-3 file-path bug had, in the
+ * two other shapes it still has.
+ */
+describe("grep tool — a no-matches answer must mean it searched", () => {
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "arcturn-grep-absence-"));
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("errors on a path that does not exist instead of reporting no matches", async () => {
+    const tool = createGrepTool();
+    const { ctx } = createFakeContext({ cwd: dir });
+
+    const result = await tool.execute({ pattern: "needle", path: "typo-dir" }, ctx);
+
+    expect(result.isError).toBe(true);
+    const text = (result.content[0] as { text: string }).text;
+    expect(text).not.toContain("No matches");
+    expect(text).toContain("typo-dir");
+  });
+
+  it("errors on a file path that does not exist instead of reporting no matches", async () => {
+    const tool = createGrepTool();
+    const { ctx } = createFakeContext({ cwd: dir });
+
+    const result = await tool.execute({ pattern: "needle", path: "src/typo.ts" }, ctx);
+
+    expect(result.isError).toBe(true);
+    expect((result.content[0] as { text: string }).text).not.toContain("No matches");
+  });
+
+  it("searches a symlinked directory, exactly as the same call with a glob already does", async () => {
+    // A repo with `docs -> ../shared-docs` is ordinary. `walk()` classified
+    // that dirent as neither a file nor a directory and dropped the whole
+    // subtree, while `tinyglobby` — the path the *same tool* takes when a
+    // `glob` argument is present — walked into it. One grep, two answers,
+    // depending on an argument that is supposed to only narrow the search.
+    const outside = await mkdtemp(join(tmpdir(), "arcturn-grep-shared-"));
+    try {
+      await writeFile(join(outside, "shared.md"), "needle in the shared docs\n");
+      await symlink(outside, join(dir, "docs"));
+      await writeFile(join(dir, "own.txt"), "needle at home\n");
+
+      const tool = createGrepTool();
+      const { ctx } = createFakeContext({ cwd: dir });
+
+      const bare = await tool.execute({ pattern: "needle" }, ctx);
+      const narrowed = await tool.execute({ pattern: "needle", glob: "**/*.md" }, ctx);
+
+      const bareText = (bare.content[0] as { text: string }).text;
+      expect(bareText).toContain("own.txt");
+      expect(bareText).toContain("docs/shared.md");
+      // Narrowing with a glob may drop files; it must never *add* one.
+      expect((narrowed.content[0] as { text: string }).text).toContain("docs/shared.md");
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("terminates on a symlink cycle instead of walking it forever", async () => {
+    await mkdir(join(dir, "a"));
+    await writeFile(join(dir, "a", "found.txt"), "needle\n");
+    await symlink(join(dir), join(dir, "a", "loop"));
+
+    const tool = createGrepTool();
+    const { ctx } = createFakeContext({ cwd: dir });
+    const result = await tool.execute({ pattern: "needle" }, ctx);
+
+    expect(result.isError).toBeFalsy();
+    expect((result.content[0] as { text: string }).text).toContain("a/found.txt");
+  });
+
+  it("every path it reports resolves back to a file that contains the match", async () => {
+    await mkdir(join(dir, "nested"), { recursive: true });
+    await writeFile(join(dir, "nested", "hit.txt"), "one\nthe needle here\nthree\n");
+    await writeFile(join(dir, "miss.txt"), "nothing\n");
+
+    const tool = createGrepTool();
+    const { ctx } = createFakeContext({ cwd: dir });
+    const result = await tool.execute({ pattern: "needle" }, ctx);
+
+    const lines = (result.content[0] as { text: string }).text.split("\n");
+    expect(lines.length).toBeGreaterThan(0);
+    for (const line of lines) {
+      const path = line.slice(0, line.indexOf(":"));
+      const contents = await readFile(resolvePath(dir, path), "utf8");
+      expect(contents).toContain("needle");
     }
   });
 });

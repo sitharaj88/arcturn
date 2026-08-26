@@ -70,11 +70,36 @@ describe("matchRules", () => {
   });
 
   it("prefers a nearer scope over a broader one", () => {
+    // Between two rules that both *permit*, the nearer scope wins — a session
+    // `allow` outranks a user `ask`, i.e. the run stops prompting once the
+    // user has said yes for the session.
+    const scoped: PermissionRule[] = [
+      { tool: "bash", action: "ask", scope: "user" },
+      { tool: "bash", action: "allow", scope: "session" },
+    ];
+    expect(matchRules(scoped, "bash", "ls")?.action).toBe("allow");
+  });
+
+  it("does not let a nearer scope cancel an equally specific deny", () => {
+    // Strengthened: this previously asserted `allow`, on the reading that
+    // scope outranks everything. It does not outrank a deny of equal
+    // specificity — `deny` is the one decision no other layer may cancel by
+    // being nearer, only by being STRICTLY more specific. The escape that
+    // reading left open is in `permissions.security.test.ts`.
     const scoped: PermissionRule[] = [
       { tool: "bash", action: "deny", scope: "user" },
       { tool: "bash", action: "allow", scope: "session" },
     ];
+    expect(matchRules(scoped, "bash", "ls")?.action).toBe("deny");
+  });
+
+  it("still lets a strictly more specific nearer allow through", () => {
+    const scoped: PermissionRule[] = [
+      { tool: "bash", action: "deny", scope: "user" },
+      { tool: "bash", specifier: "ls", action: "allow", scope: "session" },
+    ];
     expect(matchRules(scoped, "bash", "ls")?.action).toBe("allow");
+    expect(matchRules(scoped, "bash", "rm -rf /")?.action).toBe("deny");
   });
 
   it("lets a deny win a tie of equal specificity and scope", () => {
@@ -143,10 +168,28 @@ describe("PermissionEngine", () => {
   it("allows read-only tools by default", async () => {
     const requester = vi.fn(allow);
     const engine = new PermissionEngine({ requester });
-    for (const tool of ["read", "grep", "glob", "ls", "fetch"]) {
-      expect((await check(engine, tool, "/x")).behavior).toBe("allow");
+    // A distinct tool call id per tool. Sharing one made this test pass for
+    // the wrong reason: the per-call cache was keyed without the tool name, so
+    // `read`'s allow was handed to every later tool on the same subject —
+    // `fetch` included, which is exactly the tool this list must NOT cover.
+    for (const [index, tool] of ["read", "grep", "glob", "ls"].entries()) {
+      expect((await check(engine, tool, "/x", `call${index}`)).behavior).toBe("allow");
     }
     expect(requester).not.toHaveBeenCalled();
+  });
+
+  it("does NOT treat fetch as read-only, even right after a read of the same subject", async () => {
+    // `fetch` reads nothing local but sends data to an arbitrary host, so it is
+    // gated like a mutating tool. Asked on the same subject and within the same
+    // tool call as an allowed `read`, it must still reach the requester.
+    const requester = vi.fn(allow);
+    const engine = new PermissionEngine({ requester });
+
+    expect((await check(engine, "read", "/x")).behavior).toBe("allow");
+    expect((await check(engine, "fetch", "/x")).behavior).toBe("allow");
+
+    expect(requester).toHaveBeenCalledTimes(1);
+    expect(requester.mock.calls[0]?.[0]?.toolName).toBe("fetch");
   });
 
   it("still honours a deny rule against a read-only tool", async () => {
@@ -237,7 +280,12 @@ describe("PermissionEngine", () => {
     const engine = new PermissionEngine({ mode: "plan", onEvent: (e) => events.push(e) });
     expect((await check(engine, "todo", "")).behavior).toBe("allow");
     expect((await check(engine, "plan", "")).behavior).toBe("allow");
-    expect(events).toHaveLength(0);
+    // "Silently" means no PROMPT — no `permissionRequest`, so no UI raises
+    // anything. Strengthened from "no events at all": each check still records
+    // its decision, because `alwaysAllowTools` is overridable and an allow that
+    // never reaches the audit trail is an allow nobody can review afterwards.
+    expect(events.every((event) => event.type === "permissionDecision")).toBe(true);
+    expect(events).toHaveLength(2);
   });
 
   it("caches a decision for the duration of one tool call", async () => {

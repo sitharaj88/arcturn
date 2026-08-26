@@ -58,6 +58,26 @@ export function createGlobTool(): Tool {
 
       const root = resolvePath(ctx.cwd, typeof input.path === "string" ? input.path : ".");
 
+      // `tinyglobby` answers an empty list for a base directory that isn't
+      // there, which is byte-identical to the answer for a real directory
+      // holding no matches. The model cannot tell a typo from an absence, and
+      // "No files matched" is the more useful-sounding of the two — so it
+      // stops looking. Say which one it actually was.
+      try {
+        if (!(await stat(root)).isDirectory()) {
+          return errorResult(
+            `Cannot search ${root}: it is a file, not a directory. Nothing was searched, so ` +
+              "this is not a report that the pattern matched nothing.",
+          );
+        }
+      } catch {
+        return errorResult(
+          `Cannot search ${root}: no such directory. Nothing was searched, so this is not a ` +
+            `report that the pattern matched nothing. Check the path (relative paths resolve ` +
+            `against ${ctx.cwd}).`,
+        );
+      }
+
       let matches: string[];
       try {
         matches = await tinyGlob(patterns, {

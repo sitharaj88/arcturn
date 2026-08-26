@@ -51,10 +51,19 @@
  * tools the session already grants, and a workflow only ever spends money the
  * user watches). This module treats the two very differently:
  *
+ * A package's `mcp.json` counts as executable code too when any of its entries
+ * is `"type": "stdio"`: that entry is a command line, and merging it into
+ * `~/.arcturn/mcp.json` means the MCP client spawns it — as the user, with the
+ * user's permissions — the next time Arcturn starts. The delay before it runs
+ * is the only thing that distinguishes it from an `extensions/` file, so it
+ * takes the same gate and appears under the same banner. An `"http"` entry is
+ * egress to a URL the disclosure prints, not a local process, and is not gated.
+ *
  * - {@link installPackage} (and {@link updatePackage}, since an update can
- *   introduce or change extension code) never links a single extension file
+ *   introduce or change extension code) never links a single extension file,
+ *   nor merges a single spawning MCP server,
  *   without an explicit, per-install "yes" from {@link InstallOptions.confirmExecutableCode}
- *   that names the files involved. That callback **defaults to a hard "no"**
+ *   that names the files and commands involved. That callback **defaults to a hard "no"**
  *   — an install that doesn't wire up a real confirmation prompt (for
  *   example, a caller that forgot to pass one) fails closed rather than
  *   silently running code.
@@ -97,6 +106,7 @@ import {
   readdir,
   readFile,
   readlink,
+  realpath,
   rename,
   rm,
   stat,
@@ -534,6 +544,16 @@ interface DetectedContents {
   extensions: string[];
   themes: string[];
   mcp?: string;
+  /**
+   * The servers `mcp.json` would merge, already read.
+   *
+   * Held here rather than re-read by {@link inspectPackage} so the two halves
+   * of the disclosure cannot disagree about a transport: whether an entry is
+   * `stdio` (a command line Arcturn spawns locally) decides whether the
+   * executable-code gate fires, and the report and the install must decide it
+   * from the same reading of the same bytes.
+   */
+  mcpServers: McpServerDisclosure[];
 }
 
 async function pathExists(path: string): Promise<boolean> {
@@ -714,8 +734,75 @@ async function detectContents(
   }
 
   const mcp = (await isFile(join(root, "mcp.json"))) ? "mcp.json" : undefined;
+  const mcpServers = mcp ? await describeMcpServers(join(root, mcp), warnings) : [];
 
-  return { skills, agents, workflows, extensions, themes, mcp };
+  // Every list is filtered through the same containment check, so a symlink
+  // out of the tree is invisible to `inspect` and to `add` alike.
+  return {
+    skills: await containedEntries(root, skills, warnings),
+    agents: await containedEntries(root, agents, warnings),
+    workflows: await containedEntries(root, workflows, warnings),
+    extensions: await containedEntries(root, extensions, warnings),
+    themes: await containedEntries(root, themes, warnings),
+    mcp,
+    mcpServers,
+  };
+}
+
+/**
+ * Drop any detected entry whose **real** path leaves the package.
+ *
+ * {@link assertInside} compares the lexical spelling, which is the right check
+ * for a manifest string a package wrote down. It is not enough for the thing
+ * on disk: a repository may ship `skills/helper.md` as a symlink to
+ * `/tmp/whatever`, and git preserves it through the clone. Linking that puts a
+ * path Arcturn reads on every start under the control of whoever can write the
+ * target — and it makes the commit recorded in `.arcturn-install.json` pin
+ * nothing at all, since the bytes the loader sees were never in the commit.
+ *
+ * Applied inside {@link detectContents} rather than at link time so the answer
+ * is computed once and both `inspect` and `add` read it: a disclosure that
+ * listed an entry the install then refused would be describing a different
+ * package from the one being installed.
+ *
+ * @param root - Package root.
+ * @param rels - Detected entries, relative to it.
+ * @param warnings - Collector for non-fatal problems.
+ */
+async function containedEntries(
+  root: string,
+  rels: readonly string[],
+  warnings: string[],
+): Promise<string[]> {
+  if (rels.length === 0) return [];
+  // The root itself is resolved too: on macOS a staging directory under
+  // `/var/...` really lives at `/private/var/...`, so comparing a resolved
+  // entry against an unresolved root would reject every entry in the package.
+  let realRoot: string;
+  try {
+    realRoot = await realpath(root);
+  } catch {
+    realRoot = resolve(root);
+  }
+  const kept: string[] = [];
+  for (const rel of rels) {
+    let real: string;
+    try {
+      real = await realpath(join(root, rel));
+    } catch (error) {
+      warnings.push(`"${rel}" could not be resolved (${errorMessage(error)}); skipped`);
+      continue;
+    }
+    if (real !== realRoot && !real.startsWith(realRoot + sep)) {
+      warnings.push(
+        `"${rel}" is a link that resolves outside the package (to ${real}); skipped — ` +
+          "a package may only provide files it actually contains",
+      );
+      continue;
+    }
+    kept.push(rel);
+  }
+  return kept;
 }
 
 /* Disclosure ------------------------------------------------------------------- */
@@ -856,6 +943,37 @@ function forwardWarnings(probe: readonly string[], wanted: Iterable<string>, out
 }
 
 /**
+ * Name every declared entry that produced no row in the disclosure.
+ *
+ * The loaders key on NAME, not on path: two files that normalize to the same
+ * command name yield one {@link Skill}, and a file with an empty body yields
+ * none. `add` links the files either way, so a disclosure that simply omitted
+ * them was describing a package with fewer files than the one about to be
+ * installed — a reader who counted the entries would count wrong, and the
+ * shadowed file would arrive unannounced.
+ *
+ * @param kind - `"skills"` or `"agents"`, for the message.
+ * @param relPaths - Everything the package declares.
+ * @param shown - The paths that did produce a row.
+ * @param out - The caller's warning collector.
+ */
+function warnUndisclosed(
+  kind: string,
+  relPaths: readonly string[],
+  shown: Iterable<string>,
+  out: string[],
+): void {
+  const listed = new Set(shown);
+  for (const rel of relPaths) {
+    if (listed.has(rel)) continue;
+    out.push(
+      `${kind} entry "${rel}" is not listed above — its name collides with another entry, ` +
+        "or the file is empty — but installing still links it",
+    );
+  }
+}
+
+/**
  * Map each declared entry to the file the real loader would read, so a
  * loader's `source` can be matched back to the path inside the package.
  *
@@ -922,6 +1040,12 @@ async function describeAgents(
     }
   }
   forwardWarnings(probe, wanted.keys(), warnings);
+  warnUndisclosed(
+    "agents",
+    relPaths,
+    out.map((agent) => agent.path),
+    warnings,
+  );
   return out.sort(byName);
 }
 
@@ -1025,6 +1149,12 @@ async function describeSkills(
     }
   }
   forwardWarnings(probe, wanted.keys(), warnings);
+  warnUndisclosed(
+    "skills",
+    relPaths,
+    out.map((skill) => skill.path),
+    warnings,
+  );
   return out.sort(byName);
 }
 
@@ -1299,16 +1429,96 @@ async function linkEntry(
   return name;
 }
 
-async function unlinkEntry(destRoot: string, name: string): Promise<void> {
-  await rm(join(destRoot, name), { recursive: true, force: true });
+/**
+ * Undo one {@link linkEntry}, and **only** when what is there is still this
+ * package's link.
+ *
+ * The destination is a path in a shared root, not a file this package owns
+ * outright: `~/.arcturn/skills/greet.md` may have been a symlink into the
+ * package when `add` finished and be the user's own hand-written skill by the
+ * time `remove` runs. An unconditional `rm -rf` there deletes work `add` never
+ * created — and `linkEntry` refuses to overwrite a stranger's file for exactly
+ * that reason, so the two halves have to agree.
+ *
+ * Three cases, in order:
+ *
+ * - A symlink resolving inside `packageDir` is ours; remove it.
+ * - Anything else that is byte-for-byte the package's own copy is the
+ *   `cp` fallback `linkEntry` takes when `symlink()` is unavailable; remove it.
+ *   This needs {@link InstallProvides.linkedFrom} to know which entry it came
+ *   from — a record written before that field existed falls through to the
+ *   safe answer below.
+ * - Anything else is somebody's file. Leave it and say so.
+ *
+ * @param destRoot - The scanned root the entry was linked into.
+ * @param name - Destination basename, from the install record.
+ * @param packageDir - The installed package's directory (still present).
+ * @param relPath - Where inside the package it was linked from, when known.
+ * @returns `true` when the entry is gone, `false` when it was deliberately kept.
+ */
+async function unlinkEntry(
+  destRoot: string,
+  name: string,
+  packageDir: string,
+  relPath: string | undefined,
+): Promise<boolean> {
+  const dest = join(destRoot, name);
+  let info: Awaited<ReturnType<typeof lstat>>;
+  try {
+    info = await lstat(dest);
+  } catch {
+    return true; // Already gone; nothing was kept.
+  }
+
+  if (info.isSymbolicLink()) {
+    let target: string;
+    try {
+      target = await readlink(dest);
+    } catch {
+      return false;
+    }
+    const resolved = resolve(isAbsolute(target) ? target : resolve(dirname(dest), target));
+    const root = resolve(packageDir);
+    if (resolved !== root && !resolved.startsWith(root + sep)) return false;
+    await rm(dest, { recursive: true, force: true });
+    return true;
+  }
+
+  if (relPath !== undefined && (await sameContent(join(packageDir, relPath), dest))) {
+    await rm(dest, { recursive: true, force: true });
+    return true;
+  }
+  return false;
+}
+
+/** Whether `dest` is still an exact copy of the package's `src` entry. */
+async function sameContent(src: string, dest: string): Promise<boolean> {
+  if (await isDirectory(src)) {
+    if (!(await isDirectory(dest))) return false;
+    const diff = await diffTrees(src, dest, []);
+    return diff.added.length === 0 && diff.removed.length === 0 && diff.modified.length === 0;
+  }
+  return filesEqual(src, dest);
 }
 
 /* MCP config merge -------------------------------------------------------------- */
 
+/**
+ * Merge a package's `mcp.json` servers into the user's own config.
+ *
+ * @param mcpConfigPath - `~/.arcturn/mcp.json`.
+ * @param sourceFile - The package's own `mcp.json`.
+ * @param warnings - Collector for non-fatal problems.
+ * @param exclude - Server names to leave out — `--skills-only` passes every
+ *   `stdio` entry, since merging one would put a command line Arcturn spawns
+ *   into a config the flag promised to keep free of executable code.
+ * @returns The server names actually written.
+ */
 async function mergeMcpServers(
   mcpConfigPath: string,
   sourceFile: string,
   warnings: string[],
+  exclude: readonly string[] = [],
 ): Promise<string[]> {
   let raw: string;
   try {
@@ -1338,7 +1548,12 @@ async function mergeMcpServers(
     ? { ...existing.servers }
     : {};
   const added: string[] = [];
+  const excluded = new Set(exclude);
   for (const [key, value] of Object.entries(parsed.servers)) {
+    if (excluded.has(key)) {
+      warnings.push(`mcp server "${key}" spawns a local command; not merged under --skills-only`);
+      continue;
+    }
     if (key in servers) {
       warnings.push(`mcp server "${key}" is already configured; skipped`);
       continue;
@@ -1392,6 +1607,16 @@ export interface InstallProvides {
   extensions: string[];
   themes: string[];
   mcpServers: string[];
+  /**
+   * Destination basename → the path inside the package it was linked from.
+   *
+   * Only {@link unlinkEntry} reads it, and only for the `cp` fallback: a
+   * symlink carries its own provenance, a copy does not. Optional because
+   * records written before this field existed have none — such a record simply
+   * loses the ability to clean a copy up, which is the safe half of the
+   * trade against deleting a file the package never wrote.
+   */
+  linkedFrom?: Record<string, string>;
 }
 
 /** Persisted at `<packageDir>/.arcturn-install.json`; also what {@link listPackages} returns. */
@@ -1448,6 +1673,60 @@ export interface ExecutableCodeWarning {
   packageName: string;
   /** Extension entries (relative paths inside the package) that would be linked. */
   extensionFiles: string[];
+  /**
+   * `stdio` MCP servers the package's `mcp.json` would merge, each rendered as
+   * `<name>: <command> <args…>`.
+   *
+   * An `extensions/` file runs when jiti next scans `~/.arcturn/extensions`; a
+   * `stdio` server entry runs when the MCP client next scans
+   * `~/.arcturn/mcp.json` and spawns it. The delay differs; the blast radius
+   * does not — both are someone else's program with the user's full
+   * permissions — so both take the same gate. An `http` server is not on this
+   * list: it is egress to a URL the disclosure already prints, not a process
+   * on this machine.
+   *
+   * Absent when the package would merge no such server.
+   */
+  mcpStdioCommands?: string[];
+}
+
+/** The MCP transport whose config entry is a command line Arcturn spawns. */
+const SPAWNING_TRANSPORT = "stdio";
+
+/** `<name>: <command> <args…>` for every stdio server in a disclosure. */
+function stdioServerLines(servers: readonly McpServerDisclosure[]): string[] {
+  return servers
+    .filter((server) => server.transport === SPAWNING_TRANSPORT)
+    .map((server) => `${server.name}: ${server.target}`);
+}
+
+/**
+ * The confirmation an install of these contents owes, or `undefined` when it
+ * would put no executable code on this machine.
+ *
+ * `skillsOnly` suppresses BOTH kinds, because the flag's contract is "no
+ * executable code" rather than "no extensions": under it the extension files
+ * stay unlinked inside the package directory, and a `stdio` server is left out
+ * of the merged `mcp.json` entirely (see {@link materialize}). Nothing runs, so
+ * there is nothing to ask about.
+ *
+ * @param packageName - Name the package would install under.
+ * @param contents - What was detected in the staged tree.
+ * @param skillsOnly - Whether `--skills-only` was requested.
+ */
+function executableCodeGate(
+  packageName: string,
+  contents: DetectedContents,
+  skillsOnly: boolean,
+): ExecutableCodeWarning | undefined {
+  if (skillsOnly) return undefined;
+  const stdio = stdioServerLines(contents.mcpServers);
+  if (contents.extensions.length === 0 && stdio.length === 0) return undefined;
+  return {
+    packageName,
+    extensionFiles: contents.extensions,
+    ...(stdio.length === 0 ? {} : { mcpStdioCommands: stdio }),
+  };
 }
 
 /**
@@ -1517,6 +1796,13 @@ export interface InstallResult {
    * lands unannounced. Absent when the package provided neither.
    */
   landed?: { agents: AgentDisclosure[]; workflows: WorkflowDisclosure[] };
+  /**
+   * The MCP servers that actually merged, described as `inspect` describes
+   * them. A name alone does not tell a reader whether the entry that just
+   * landed in their config is a URL or a command line about to be spawned as
+   * them, so {@link formatInstallSummary} prints the transport and target.
+   */
+  mcpServers?: McpServerDisclosure[];
 }
 
 /**
@@ -1557,12 +1843,16 @@ async function materialize(
   skillsOnly: boolean,
   warnings: string[],
 ): Promise<InstallProvides> {
+  const linkedFrom: Record<string, string> = {};
   /** Link every entry of one kind, dropping the ones that collided. */
   const linkAll = async (rels: readonly string[], destRoot: string): Promise<string[]> => {
     const linked: string[] = [];
     for (const rel of rels) {
       const name = await linkEntry(packageDir, rel, destRoot, warnings);
-      if (name !== undefined) linked.push(name);
+      if (name !== undefined) {
+        linked.push(name);
+        linkedFrom[name] = rel;
+      }
     }
     return linked;
   };
@@ -1575,11 +1865,19 @@ async function materialize(
   const workflows = await linkAll(contents.workflows, paths.workflowsRoot);
   const extensions = skillsOnly ? [] : await linkAll(contents.extensions, paths.extensionsRoot);
   const themes = await linkAll(contents.themes, paths.themesRoot);
+  // `--skills-only` means "no executable code", and a `stdio` server entry is
+  // a command line Arcturn spawns — so it is held back exactly as an
+  // extension file is. An `http` entry is not code and still merges.
+  const excluded = skillsOnly
+    ? contents.mcpServers
+        .filter((server) => server.transport === SPAWNING_TRANSPORT)
+        .map((server) => server.name)
+    : [];
   const mcpServers = contents.mcp
-    ? await mergeMcpServers(paths.mcpConfigPath, join(packageDir, contents.mcp), warnings)
+    ? await mergeMcpServers(paths.mcpConfigPath, join(packageDir, contents.mcp), warnings, excluded)
     : [];
 
-  return { skills, agents, workflows, extensions, themes, mcpServers };
+  return { skills, agents, workflows, extensions, themes, mcpServers, linkedFrom };
 }
 
 /**
@@ -1657,11 +1955,9 @@ export async function installPackage(options: InstallOptions): Promise<InstallRe
     const contents = await detectContents(contentRoot, manifest, warnings);
     const skillsOnly = options.skillsOnly === true;
 
-    if (contents.extensions.length > 0 && !skillsOnly) {
-      const approved = await confirm({ packageName: name, extensionFiles: contents.extensions });
-      if (!approved) {
-        return { installed: false, name, declined: true, warnings };
-      }
+    const gate = executableCodeGate(name, contents, skillsOnly);
+    if (gate && !(await confirm(gate))) {
+      return { installed: false, name, declined: true, warnings };
     }
 
     if (contentRoot === staging) {
@@ -1695,6 +1991,10 @@ export async function installPackage(options: InstallOptions): Promise<InstallRe
     };
     await writeInstallRecord(packageDir, record);
 
+    const mergedServers = contents.mcpServers.filter((server) =>
+      provides.mcpServers.includes(server.name),
+    );
+
     return {
       installed: true,
       name,
@@ -1702,6 +2002,7 @@ export async function installPackage(options: InstallOptions): Promise<InstallRe
       record,
       warnings,
       ...(landed === undefined ? {} : { landed }),
+      ...(mergedServers.length === 0 ? {} : { mcpServers: mergedServers }),
     };
   } finally {
     await rm(staging, { recursive: true, force: true }).catch(() => {});
@@ -1745,6 +2046,13 @@ export interface RemoveResult {
   removedExtensions: string[];
   removedThemes: string[];
   removedMcpServers: string[];
+  /**
+   * Entries this package linked whose destination now holds something else —
+   * a file the user wrote over the link, or a link another package took over.
+   * They are left exactly as they are; deleting them would destroy work this
+   * package never created. Empty on an ordinary uninstall.
+   */
+  keptEntries: string[];
 }
 
 /**
@@ -1763,12 +2071,24 @@ export async function removePackage(name: string, paths: RegistryPaths): Promise
   // workflows has neither field, and an uninstall must still work on it.
   const agents = record.provides.agents ?? [];
   const workflows = record.provides.workflows ?? [];
-  for (const skill of record.provides.skills) await unlinkEntry(paths.skillsRoot, skill);
-  for (const agent of agents) await unlinkEntry(paths.agentsRoot, agent);
-  for (const workflow of workflows) await unlinkEntry(paths.workflowsRoot, workflow);
-  for (const extension of record.provides.extensions)
-    await unlinkEntry(paths.extensionsRoot, extension);
-  for (const theme of record.provides.themes) await unlinkEntry(paths.themesRoot, theme);
+  const kept: string[] = [];
+  const unlinkAll = async (names: readonly string[], destRoot: string): Promise<string[]> => {
+    const removed: string[] = [];
+    for (const entry of names) {
+      if (await unlinkEntry(destRoot, entry, packageDir, record.provides.linkedFrom?.[entry])) {
+        removed.push(entry);
+      } else {
+        kept.push(entry);
+      }
+    }
+    return removed;
+  };
+
+  const removedSkills = await unlinkAll(record.provides.skills, paths.skillsRoot);
+  const removedAgents = await unlinkAll(agents, paths.agentsRoot);
+  const removedWorkflows = await unlinkAll(workflows, paths.workflowsRoot);
+  const removedExtensions = await unlinkAll(record.provides.extensions, paths.extensionsRoot);
+  const removedThemes = await unlinkAll(record.provides.themes, paths.themesRoot);
   if (record.provides.mcpServers.length > 0) {
     await removeMcpServers(paths.mcpConfigPath, record.provides.mcpServers);
   }
@@ -1776,12 +2096,13 @@ export async function removePackage(name: string, paths: RegistryPaths): Promise
 
   return {
     name,
-    removedSkills: record.provides.skills,
-    removedAgents: agents,
-    removedWorkflows: workflows,
-    removedExtensions: record.provides.extensions,
-    removedThemes: record.provides.themes,
+    removedSkills,
+    removedAgents,
+    removedWorkflows,
+    removedExtensions,
+    removedThemes,
     removedMcpServers: record.provides.mcpServers,
+    keptEntries: kept,
   };
 }
 
@@ -1818,10 +2139,28 @@ export interface UpdateReport {
   removedFiles: string[];
   modifiedFiles: string[];
   error?: string;
+  /**
+   * Non-fatal problems: a bad manifest, an entry that could not be relinked,
+   * an mcp server already configured under that name.
+   *
+   * {@link installPackage} has always returned these and every caller prints
+   * them; the update path collected the identical list into a local and threw
+   * it away, so a re-fetch that silently failed to relink half a package
+   * reported nothing at all.
+   */
+  warnings: string[];
 }
 
 function blankReport(name: string, reason: UpdateReason): UpdateReport {
-  return { name, changed: false, reason, addedFiles: [], removedFiles: [], modifiedFiles: [] };
+  return {
+    name,
+    changed: false,
+    reason,
+    addedFiles: [],
+    removedFiles: [],
+    modifiedFiles: [],
+    warnings: [],
+  };
 }
 
 async function walkFiles(root: string, exclude: readonly string[]): Promise<Set<string>> {
@@ -1946,31 +2285,42 @@ export async function updatePackage(name: string, options: UpdateOptions): Promi
     const contents = await detectContents(contentRoot, manifest, warnings);
     const skillsOnly = record.skillsOnly;
 
-    if (contents.extensions.length > 0 && !skillsOnly) {
-      const approved = await confirm({ packageName: name, extensionFiles: contents.extensions });
-      if (!approved) {
-        return {
-          ...blankReport(name, "declined"),
-          fromCommit: record.commit,
-          toCommit: commit,
-          addedFiles: diff.added,
-          removedFiles: diff.removed,
-          modifiedFiles: diff.modified,
-        };
-      }
+    // An update can introduce executable code that was not there before —
+    // a new `extensions/` file, or a new `stdio` server in `mcp.json` — so it
+    // asks the same question an install would, on the same terms.
+    const gate = executableCodeGate(name, contents, skillsOnly);
+    if (gate && !(await confirm(gate))) {
+      return {
+        ...blankReport(name, "declined"),
+        fromCommit: record.commit,
+        toCommit: commit,
+        addedFiles: diff.added,
+        removedFiles: diff.removed,
+        modifiedFiles: diff.modified,
+        warnings,
+      };
     }
 
-    for (const skill of record.provides.skills) await unlinkEntry(options.paths.skillsRoot, skill);
-    for (const agent of record.provides.agents ?? []) {
-      await unlinkEntry(options.paths.agentsRoot, agent);
-    }
-    for (const workflow of record.provides.workflows ?? []) {
-      await unlinkEntry(options.paths.workflowsRoot, workflow);
-    }
-    for (const extension of record.provides.extensions) {
-      await unlinkEntry(options.paths.extensionsRoot, extension);
-    }
-    for (const theme of record.provides.themes) await unlinkEntry(options.paths.themesRoot, theme);
+    const unlinkAll = async (names: readonly string[], destRoot: string): Promise<void> => {
+      for (const entry of names) {
+        const kept = !(await unlinkEntry(
+          destRoot,
+          entry,
+          packageDir,
+          record.provides.linkedFrom?.[entry],
+        ));
+        if (kept) {
+          warnings.push(
+            `"${entry}" in ${destRoot} is no longer this package's link; left in place`,
+          );
+        }
+      }
+    };
+    await unlinkAll(record.provides.skills, options.paths.skillsRoot);
+    await unlinkAll(record.provides.agents ?? [], options.paths.agentsRoot);
+    await unlinkAll(record.provides.workflows ?? [], options.paths.workflowsRoot);
+    await unlinkAll(record.provides.extensions, options.paths.extensionsRoot);
+    await unlinkAll(record.provides.themes, options.paths.themesRoot);
     if (record.provides.mcpServers.length > 0) {
       await removeMcpServers(options.paths.mcpConfigPath, record.provides.mcpServers);
     }
@@ -2004,6 +2354,7 @@ export async function updatePackage(name: string, options: UpdateOptions): Promi
       addedFiles: diff.added,
       removedFiles: diff.removed,
       modifiedFiles: diff.modified,
+      warnings,
     };
   } finally {
     await rm(staging, { recursive: true, force: true }).catch(() => {});
@@ -2091,9 +2442,9 @@ export async function inspectPackage(options: InspectOptions): Promise<PackageDi
       agents: await describeAgents(contentRoot, contents.agents, warnings),
       workflows: await describeWorkflows(contentRoot, contents.workflows),
       skills: await describeSkills(contentRoot, contents.skills, warnings),
-      mcpServers: contents.mcp
-        ? await describeMcpServers(join(contentRoot, contents.mcp), warnings)
-        : [],
+      // Read once, by `detectContents`, so the transport this report prints is
+      // byte-for-byte the transport the gate decided on.
+      mcpServers: contents.mcpServers,
       extensions: [...contents.extensions].sort(),
       themes: [...contents.themes].sort(),
       warnings,
@@ -2166,14 +2517,22 @@ export function formatInspectReport(disclosure: PackageDisclosure): string[] {
     }
   }
 
-  if (disclosure.extensions.length > 0) {
+  // A `stdio` server entry belongs in this banner, not in the neutral list
+  // above it: merging one puts a command line into `~/.arcturn/mcp.json` that
+  // Arcturn spawns on its next start. Printing the command under a heading
+  // that reads "MCP servers" and then telling the reader the package "ships no
+  // executable code" was a report contradicting itself on the one line the
+  // whole command exists to get right.
+  const spawning = stdioServerLines(disclosure.mcpServers);
+  if (disclosure.extensions.length > 0 || spawning.length > 0) {
     lines.push(
       "",
       "!! EXECUTABLE CODE !!",
-      "  Installing this package runs the following files with your full",
+      "  Installing this package runs the following with your full",
       "  permissions. Arcturn will ask again, per install, before linking them.",
     );
     for (const file of disclosure.extensions) lines.push(`    ${file}`);
+    for (const server of spawning) lines.push(`    mcp server (spawned) ${server}`);
   } else {
     lines.push("", "No extensions: this package ships no executable code.");
   }
@@ -2285,6 +2644,14 @@ export function formatInstallSummary(result: InstallResult): string[] {
     lines.push(`  themes:      ${record.provides.themes.join(", ")}`);
   if (record.provides.mcpServers.length) {
     lines.push(`  mcp servers: ${record.provides.mcpServers.join(", ")}`);
+    // The command, not just the name: a `stdio` entry that merged is a process
+    // this machine will start, and the summary is the last thing the person
+    // who approved it reads.
+    for (const server of result.mcpServers ?? []) {
+      lines.push(
+        `    ${server.name}  [${server.transport}]${server.target ? `  ${server.target}` : ""}`,
+      );
+    }
   }
   return lines;
 }
@@ -2307,6 +2674,11 @@ export function formatRemoveSummary(result: RemoveResult): string[] {
   if (result.removedThemes.length) lines.push(`  themes:      ${result.removedThemes.join(", ")}`);
   if (result.removedMcpServers.length) {
     lines.push(`  mcp servers: ${result.removedMcpServers.join(", ")}`);
+  }
+  if (result.keptEntries.length) {
+    lines.push(
+      `  kept (no longer this package's link, so not deleted): ${result.keptEntries.join(", ")}`,
+    );
   }
   return lines;
 }
@@ -2410,15 +2782,32 @@ function parseAddArgv(argv: readonly string[]): ParsedAddArgs {
 
 const ADD_USAGE = "Usage: /add <source> [--name <name>] [--skills-only] [--yes]";
 
+/** Everything a confirmation must name, as one readable clause. */
+function executableCodeSubject(warning: ExecutableCodeWarning): string {
+  const parts: string[] = [];
+  const count = warning.extensionFiles.length;
+  if (count > 0) {
+    parts.push(
+      `${count} extension file${count === 1 ? "" : "s"}: ${warning.extensionFiles.join(", ")}`,
+    );
+  }
+  const servers = warning.mcpStdioCommands ?? [];
+  if (servers.length > 0) {
+    parts.push(
+      `${servers.length} MCP server${servers.length === 1 ? "" : "s"} Arcturn would spawn: ` +
+        servers.join("; "),
+    );
+  }
+  return parts.join(", and ");
+}
+
 async function promptExecutableCode(
   ui: CommandUi,
   warning: ExecutableCodeWarning,
 ): Promise<boolean> {
-  const count = warning.extensionFiles.length;
   const choice = await ui.select(
-    `"${warning.packageName}" includes executable code (${count} extension file${count === 1 ? "" : "s"}: ` +
-      `${warning.extensionFiles.join(", ")}). Installing it runs someone else's code with your ` +
-      "full permissions.",
+    `"${warning.packageName}" includes executable code (${executableCodeSubject(warning)}). ` +
+      "Installing it runs someone else's code with your full permissions.",
     [
       { value: "yes", label: "Install and run this code", data: true },
       { value: "no", label: "Cancel — install nothing", data: false },
@@ -2581,6 +2970,9 @@ async function terminalConfirm(warning: ExecutableCodeWarning): Promise<boolean>
     process.stdout.write(
       `\n"${warning.packageName}" includes executable code:\n` +
         warning.extensionFiles.map((file) => `  ${file}\n`).join("") +
+        (warning.mcpStdioCommands ?? [])
+          .map((server) => `  mcp server (spawned) ${server}\n`)
+          .join("") +
         "Installing it means running someone else's code with your full permissions.\n",
     );
     const answer = await rl.question("Continue? [y/N] ");

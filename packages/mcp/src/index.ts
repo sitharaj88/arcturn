@@ -8,6 +8,7 @@ export {
 } from "./bridge.js";
 export { loadMcpConfig, McpConfigError } from "./config.js";
 export {
+  DEFAULT_MCP_CONNECT_TIMEOUT_MS,
   type McpAuthorizationHandler,
   type McpAuthProviderFactory,
   McpManager,

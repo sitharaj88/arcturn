@@ -1,4 +1,4 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -50,6 +50,21 @@ async function waitFor(check: () => boolean, timeoutMs = 5_000): Promise<void> {
 
 async function scratchDir(): Promise<string> {
   return mkdtemp(join(tmpdir(), "arcturn-bg-agents-"));
+}
+
+/**
+ * A pid guaranteed not to name a live process: a real child, started and
+ * reaped. Asserted rather than assumed, since a fixture that quietly named a
+ * live process would make the "dead owner" test prove the opposite of itself.
+ */
+async function deadPid(): Promise<number> {
+  const { spawn } = await import("node:child_process");
+  const child = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
+  const pid = child.pid;
+  if (pid === undefined) throw new Error("could not spawn a child to reap");
+  await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+  expect(() => process.kill(pid, 0)).toThrow();
+  return pid;
 }
 
 /** A scripted client whose turns don't finish until the test calls `release(index)`. */
@@ -320,17 +335,22 @@ describe("BackgroundAgentManager lifecycle", () => {
   it("reports a record left running by a dead process as interrupted on load", async () => {
     const dir = await scratchDir();
     const manual = manualLLM();
+    // The previous shape of this test built `manager1` in THIS process, left
+    // its turn hanging, and called that "the process dying" — but the owning
+    // process was very much alive, so what it actually pinned down was the bug
+    // below (a second manager stealing a live record). The dead process is
+    // modelled honestly now: a record on disk stamped with a pid that has been
+    // reaped, which is what a restarted CLI really finds.
     const manager1 = new BackgroundAgentManager({
       dir,
       llm: manual,
       model: TEST_MODEL,
       tools: [],
       cwd: "/work",
+      ownerPid: await deadPid(),
     });
     const { id } = manager1.start({ task: "never finishes" });
     await waitFor(() => manual.requests.length === 1);
-    // Simulate the process dying: never release the turn, just construct a
-    // fresh manager over the same directory, as a restarted CLI would.
 
     const manager2 = new BackgroundAgentManager({
       dir,
@@ -343,6 +363,85 @@ describe("BackgroundAgentManager lifecycle", () => {
     expect(status?.status).toBe("interrupted");
     expect(status?.error).toBeTruthy();
     expect(manager2.list().map((row) => row.id)).toContain(id);
+  });
+
+  it("reports a record left running by a process with no owner pid as interrupted", async () => {
+    // Back-compat: records written before owner pids existed have none, and a
+    // missing owner still reads as "gone" — the case this correction is for.
+    const dir = await scratchDir();
+    await mkdir(join(dir, "records"), { recursive: true });
+    await writeFile(
+      join(dir, "records", "bg-old.json"),
+      JSON.stringify({
+        id: "bg-old",
+        sessionId: "sess-old",
+        task: "started by a build that never stamped pids",
+        modelId: TEST_MODEL.id,
+        status: "running",
+        createdAt: Date.now() - 60_000,
+        usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+        costUsd: 0,
+      }),
+      "utf8",
+    );
+    const manager = new BackgroundAgentManager({
+      dir,
+      llm: fakeLLM([]),
+      model: TEST_MODEL,
+      tools: [],
+      cwd: "/work",
+    });
+    expect(manager.get("bg-old")?.status).toBe("interrupted");
+  });
+
+  it("leaves an agent owned by a LIVE process running, and never tells a caller it failed", async () => {
+    // `arcturn serve` beside a terminal: one `~/.arcturn`, two processes. The
+    // serve process building its own manager must not rewrite the terminal's
+    // live record — a user asking `/bg` there was told a running job had been
+    // interrupted, and `result()` resolved immediately with that lie.
+    const dir = await scratchDir();
+    const manual = manualLLM();
+    const owner = new BackgroundAgentManager({
+      dir,
+      llm: manual,
+      model: TEST_MODEL,
+      tools: [],
+      cwd: "/work",
+    });
+    const { id } = owner.start({ task: "a long job the terminal owns" });
+    await waitFor(() => manual.requests.length === 1);
+
+    const beside = new BackgroundAgentManager({
+      dir,
+      llm: fakeLLM([]),
+      model: TEST_MODEL,
+      tools: [],
+      cwd: "/work",
+    });
+
+    expect(beside.get(id)?.status).toBe("running");
+    expect(beside.get(id)?.error).toBeUndefined();
+    // …and the record on disk was not rewritten under the owning process.
+    const onDisk = JSON.parse(await readFile(join(dir, "records", `${id}.json`), "utf8")) as {
+      status: string;
+      ownerPid?: number;
+      error?: string;
+    };
+    expect(onDisk.status).toBe("running");
+    expect(onDisk.ownerPid).toBe(process.pid);
+    expect(onDisk.error).toBeUndefined();
+
+    // `result()` must keep waiting rather than resolve with a fabricated end.
+    let settled: string | undefined;
+    void beside.result(id).then((status) => {
+      settled = status?.status;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(settled).toBeUndefined();
+
+    // The owner finishes; the truth is what lands.
+    manual.release(0);
+    expect((await owner.result(id))?.status).toBe("done");
   });
 
   it("filters to read-only-safe tools by default and never escalates to yolo silently", async () => {

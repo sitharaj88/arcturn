@@ -93,6 +93,7 @@ export {
   matchRules,
   matchSpecifier,
   PermissionEngine,
+  resolveSubject,
   shellSegments,
 } from "./permissions.js";
 export type { SchemaError, SchemaValidationResult } from "./schema.js";
@@ -115,6 +116,7 @@ export type { PlanToolOptions, TodoToolOptions } from "./state-tools.js";
 export { createPlanTool, createTodoTool, isStateToolName } from "./state-tools.js";
 export type { SubagentToolOptions } from "./subagent.js";
 export { createSubagentTool } from "./subagent.js";
+export { resolveSubjectPath } from "./subject-path.js";
 export type {
   AgentMetric,
   TelemetryListenerOptions,

@@ -78,16 +78,61 @@ resolved against the working directory and normalized first, so `.env`, `./.env`
 path still matches the same file named relatively. If none of those keys are present, the
 subject is `""`, which only matches wildcard rules.
 
+### Symlinks are resolved before a rule is matched
+
+Normalizing `..` away is not enough on its own: a symlink is not a `..`, and nothing
+lexical removes it. A link at `<workspace>/keys` pointing at `~/.ssh` makes
+`read("keys/id_rsa")` resolve to `<workspace>/keys/id_rsa` — which matches an
+`allow read "<workspace>/**"` rule and misses a `deny read "~/.ssh/**"` one — while the
+tool opens the private key anyway. `read`, `grep`, `glob` and `ls` never prompt, so for
+them a stored `deny` is the only wall there is, and it has to be a wall around the *file*
+rather than around a spelling.
+
+So a path subject names **where the call really goes**, with symlinks resolved, and
+exactly the case that lies is rewritten:
+
+- A path that never claimed to be inside the working directory is left spelled as it was,
+  so a rule written against `/tmp/**` still matches on macOS (where `/tmp` is a symlink).
+- A path inside the working directory that really is inside it is re-spelled under your
+  own spelling of that directory — an in-workspace `docs -> shared-docs` link stays an
+  ordinary in-workspace path, and `grep` still searches through it.
+- A path inside the working directory that actually leads outside it is reported at its
+  real destination, which is what the rules then see.
+
+Two consequences worth knowing:
+
+- **Write rules against real paths.** The resolved subject is canonical, so on macOS a
+  rule naming `/var/…` will not match a subject resolved to `/private/var/…`. (This is
+  not new: the unresolved subject did not match it either.)
+- **A deny you already had keeps firing.** The pre-resolution spelling is still offered to
+  `deny` rules — and only to those — so resolving a path can never move a subject out from
+  under a refusal that was already covering it. Grants are decided by the resolved subject
+  alone, so no alternate spelling can widen one.
+
+A path that cannot be resolved — a file that does not exist yet, an unreadable parent —
+falls back to the plain resolved spelling rather than failing the call. A dangling symlink
+is still followed to its target, so a `write` cannot hide behind one.
+
 ### Specifier forms
 
 - **Command prefix** — a specifier ending in `" *"` (e.g. `"git *"`) matches a subject
   that is exactly the prefix or starts with `"<prefix> "`. The match is applied
   **per shell segment**: the subject is split on `;`, `&`, `&&`, `||`, `|`, newlines,
-  `$(`, `` ` ``, `<(`, `>(`, and *every resulting segment* must match the prefix for the
-  rule to fire. This is what keeps `allow bash "git *"` from also approving
-  `git status; rm -rf ~` — one segment (`rm -rf ~`) fails the prefix test, so the whole
-  subject fails to match and the rule does not apply. Quoting is not interpreted, which
-  over-splits rather than under-splits, so it can never accidentally widen a rule.
+  `$(`, `` ` ``, `<(`, `>(`. Quoting is not interpreted, which over-splits rather than
+  under-splits, so it can never accidentally widen a rule.
+
+  **The quantifier over those segments depends on the rule's `action`**, and the two
+  readings are opposites on purpose:
+
+  | `action` | Fires when | Why |
+  | --- | --- | --- |
+  | `allow`, `ask` | **every** segment matches the prefix | Approving `git status` must not also approve `git status; rm -rf ~` — one failing segment (`rm -rf ~`) takes the whole grant down. |
+  | `deny` | **any** segment matches the prefix | Refusing `rm -rf *` must also refuse `cd /tmp && rm -rf /etc`. Under the "every" reading the harmless first segment took the *deny* down instead, and appending `&& true` to any command turned its deny off. |
+
+  So the quantifier that makes a grant narrow is the one that makes a refusal
+  escapable, and the engine picks per rule rather than applying one of them to both.
+  `matchSpecifier` exposes it as `{ segments: "all" | "any" }` for a host previewing a
+  rule; `matchRules` sets it from the rule itself.
 - **Glob** — a specifier containing `*` or `?` (and not ending in `" *"`) is compiled to a
   regular expression: `**` crosses directory separators, a single `*` does not, `?`
   matches exactly one non-separator character. `**/*.ts` matches any absolute path ending
@@ -169,14 +214,33 @@ Among rules that match a call's tool and subject, precedence is:
    equally specific, `deny` wins.
 4. **Insertion order**, on a further tie: earlier rules win.
 
-There is one more twist, applied after the above picks a winner: **a more specific `deny`
-beats a broader permissive rule even from a nearer scope.** Scope precedence alone would
-let a project-scoped `{tool: "*", action: "allow", scope: "project"}` override a
-user-scoped `{tool: "bash", specifier: "rm -rf *", action: "deny", scope: "user"}` — which
-would mean a checked-in project config could escalate its own privileges just by being
-cloned. So after the normal precedence picks a winner, the engine separately finds the
-most specific `deny` among *all* matching rules (any scope) and lets it override the
-winner if it is strictly more specific than what precedence alone chose.
+There is one more twist, applied after the above picks a winner: **a `deny` beats a
+permissive rule from a nearer scope unless that rule is *strictly* more specific.** After
+the normal precedence picks a winner, the engine separately finds the most specific `deny`
+among *all* matching rules (any scope) and lets it override the winner whenever the deny is
+**at least as specific** as what precedence alone chose.
+
+The "at least as specific" is load-bearing, not a detail. Scope precedence alone would let
+a project-scoped rule override a user-scoped `deny` — and `project` means
+`<cwd>/.arcturn/config.json`, a file that arrives with a clone. Two lines in a repository:
+
+```json
+{ "tool": "write", "specifier": "**/.env", "action": "allow", "scope": "project" }
+```
+
+would otherwise cancel the user's own
+
+```json
+{ "tool": "write", "specifier": "**/.env", "action": "deny", "scope": "user" }
+```
+
+— same tool, same specifier, same specificity, nearer scope, allow wins. That is a
+checked-in config escalating its own privileges just by being cloned, and it needed no
+cleverness at all. Extending the deny bias (rule 3 above) across scopes closes it.
+
+A **strictly more specific** permissive rule still wins, which is what the
+"allow narrowly, deny widely" shape in the cookbook depends on:
+`allow edit "**/src/**/*.ts"` (specificity 3) still beats `deny edit "*"` (2).
 
 ### The plan-gate exit path bypasses all of this
 
@@ -256,7 +320,9 @@ Exact/prefix matches only — `git push` and `git commit` still fall through to 
 Both specifiers contain `*`, so both score the same specificity (`3`: exact tool + one
 glob/prefix point) — a tie. On a specificity tie the engine's deny bias applies: `deny`
 wins over `allow` automatically, so `git push --force origin main` is refused without
-needing any scope trickery.
+needing any scope trickery. It is refused with a segment appended too
+(`git push --force origin main && git status`), because a `deny` prefix fires on any
+matching segment — see the quantifier table under [Specifier forms](#specifier-forms).
 
 **Restrict edits to `src/`, deny everywhere else:**
 
@@ -291,7 +357,8 @@ config, or to override a broader `allow *` from a lower-precedence scope.
 before matching — so the specifier has to be a glob (`**/.env`), not the bare relative
 string `.env`, or it will never match. Because the subject is normalized first, this glob
 catches `.env`, `./.env`, and `sub/../.env` alike, all resolving to the same absolute
-path — and per the deny-override rule above, no project-scoped `allow *` can out-rank it.
+path — and per the deny-override rule above, no project-scoped `allow` can out-rank it
+unless it is strictly more specific than the deny.
 
 ## `/permissions`
 

@@ -87,6 +87,21 @@ export function latestEntryId(entries: readonly SessionEntry[]): string | null {
 /** Conversation plus agent state reconstructed from a branch. */
 export interface MaterializedBranch {
   messages: Message[];
+  /**
+   * The session entry each replayed message came from, index-aligned with
+   * {@link MaterializedBranch.messages}.
+   *
+   * Exists because the two arrays are NOT the branch in order: a compaction
+   * collapses everything before its cut into one synthetic message carrying
+   * the *compaction entry's* id, and the surviving tail keeps the ids of the
+   * message entries it came from. A caller that re-derives this by walking
+   * the branch and the messages in lockstep gets it right only for a branch
+   * with no compaction on it, and silently mis-links every message after the
+   * first one — which is how a later compaction came to record an `upToId`
+   * that no replay could find. See the round-trip test in
+   * `session/round-trip.test.ts`.
+   */
+  messageEntryIds: string[];
   todos: TodoItem[];
   plan: string | undefined;
   model: string | undefined;
@@ -103,7 +118,9 @@ export function formatCompactionSummary(summary: string): string {
  * Replay a branch into the conversation and state the agent should resume with.
  *
  * Compaction entries fold every message up to and including `upToId` into a
- * single synthetic user message carrying the summary.
+ * single synthetic user message carrying the summary. A compaction whose
+ * `upToId` this replay cannot find folds *nothing* — see the comment at the
+ * cut — so a stale id costs a redundant summary rather than the conversation.
  *
  * @param entries - Branch entries, root-first (e.g. from {@link pathToLeaf}).
  */
@@ -120,7 +137,14 @@ export function materializeBranch(entries: readonly SessionEntry[]): Materialize
         break;
       case "compaction": {
         const cutIndex = items.findIndex((item) => item.id === entry.upToId);
-        const kept = cutIndex === -1 ? [] : items.slice(cutIndex + 1);
+        // An `upToId` this replay cannot find names an entry that is not on
+        // the branch — a file written by a version that mis-linked its ids,
+        // or a compaction carried across a fork. Keeping everything is the
+        // only safe reading: the summary is then redundant with messages it
+        // already covers, which costs context, whereas the old behaviour
+        // (fold everything) silently discarded every message the agent had
+        // said since — including the ones it was holding live at the time.
+        const kept = cutIndex === -1 ? items : items.slice(cutIndex + 1);
         items = [
           {
             id: entry.id,
@@ -146,6 +170,7 @@ export function materializeBranch(entries: readonly SessionEntry[]): Materialize
 
   return {
     messages: items.map((item) => item.message),
+    messageEntryIds: items.map((item) => item.id),
     todos,
     plan,
     model,

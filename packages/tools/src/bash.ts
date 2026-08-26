@@ -99,6 +99,38 @@ function truncateTail(
   return { text: kept, truncated: true };
 }
 
+/**
+ * Give the command a single output stream, so what comes back is in the order
+ * the command actually printed it.
+ *
+ * `stdout` and `stderr` are two independent pipes, and Node drains them on
+ * independent event-loop turns. Merging their chunks into one buffer — which
+ * this tool has always done — merges them by *content*, not by *time*: a
+ * command that finishes in one tick hands back every stdout line followed by
+ * every stderr line. `echo A; echo B 1>&2; echo C; echo D 1>&2` came back as
+ * `A C B D`. Compiler diagnostics, test-runner progress and the errors between
+ * them have exactly that shape, and a model reading the reordered transcript
+ * attributes each failure to the wrong step.
+ *
+ * `exec 2>&1` is a prologue, not a wrapper: it points the shell's own fd 2 at
+ * fd 1 for the rest of the script, the kernel then interleaves both streams
+ * into one pipe in write order, and the command text that follows is not
+ * touched at all — so a trailing backslash, an unbalanced brace or a trailing
+ * `#` comment cannot turn into a syntax error the way a `{ … } 2>&1` wrapper
+ * would. A command's own redirection still wins (`cmd 2>/dev/null` discards
+ * its stderr exactly as before), and the exit status is unaffected.
+ *
+ * win32 is returned unchanged: `cmd.exe` has no `exec` builtin, and its only
+ * equivalent is appending `2>&1` inside the quoted command, which binds to the
+ * last command of a `&`-chain rather than the whole thing and breaks outright
+ * on an unbalanced `)`. Windows keeps the pre-existing behavior — merged by
+ * content, ordered by pipe — and this is the one platform-specific difference
+ * in the bash tool's output.
+ */
+export function mergeStderrIntoStdout(command: string, platform: NodeJS.Platform): string {
+  return platform === "win32" ? command : `exec 2>&1\n${command}`;
+}
+
 function firstWord(command: string): string {
   const trimmed = command.trim();
   const match = trimmed.match(/\S+/);
@@ -264,11 +296,19 @@ export class BackgroundTaskManager {
     // tests; the spawn itself is not injectable, since a fake shell would
     // make the process-tree assertions meaningless.
     const shell = resolveShell();
-    const proc = spawn(shell.executable, shell.args(command), {
-      cwd,
-      detached: true,
-      ...shell.spawnOptions,
-    });
+    // The buffered `output` below merges both pipes, so it has the same
+    // ordering problem a foreground command had — see `mergeStderrIntoStdout`.
+    // `task.command` keeps the command as it was asked for: the wrapping is a
+    // spawn detail, and `poll()` reports it back to a UI and to the model.
+    const proc = spawn(
+      shell.executable,
+      shell.args(mergeStderrIntoStdout(command, process.platform)),
+      {
+        cwd,
+        detached: true,
+        ...shell.spawnOptions,
+      },
+    );
     const task: BackgroundTask = {
       proc,
       command,
@@ -630,7 +670,17 @@ export function createBashTool(
         );
       }
 
-      const invocation = resolveSandboxInvocation(command, cwd, sandboxMode, options.sandboxProbe);
+      // Both spawn targets below run the command through a shell, so the
+      // stderr merge is applied once, here, to whichever one is chosen. The
+      // sandbox backends are POSIX-only by construction, so the win32 branch
+      // of `mergeStderrIntoStdout` only ever affects the unwrapped path.
+      const spawnCommand = mergeStderrIntoStdout(command, shellProbe.platform);
+      const invocation = resolveSandboxInvocation(
+        spawnCommand,
+        cwd,
+        sandboxMode,
+        options.sandboxProbe,
+      );
       const notePrefix = invocation.unavailableNote ? `${invocation.unavailableNote}\n\n` : "";
 
       // A sandbox backend owns its own argv (`sandbox-exec -p … /bin/sh -c`,
@@ -645,7 +695,7 @@ export function createBashTool(
       const spawnTarget = unwrapped
         ? {
             executable: shell.executable,
-            args: shell.args(command),
+            args: shell.args(spawnCommand),
             spawnOptions: shell.spawnOptions,
           }
         : {

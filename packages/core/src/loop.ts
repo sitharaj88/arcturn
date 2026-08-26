@@ -24,7 +24,7 @@ import type {
   UserMessage,
 } from "@arcturn/types";
 import type { AgentHooks, ToolCallInfo } from "./hooks.js";
-import { defaultSubject, type PermissionEngine } from "./permissions.js";
+import { defaultSubject, type PermissionEngine, resolveSubject } from "./permissions.js";
 import { formatSchemaErrors, validateToolInput } from "./schema.js";
 import {
   emptyUsage,
@@ -320,11 +320,25 @@ async function executeToolCall(rt: LoopRuntime, call: ToolCallContent): Promise<
     return finish(errorToolResult(call.id, call.name, "Aborted before the tool ran."));
   }
 
-  const subject = defaultSubject(call.name, input, rt.cwd);
+  // The subject the rules are matched against names the file this call will
+  // really touch, symlinks resolved — not the spelling the model chose. See
+  // `resolveSubject`: for `read`/`grep`/`glob`/`ls` a stored `deny` matched
+  // here is the only wall there is, and a lexical subject let an ordinary
+  // in-workspace symlink walk straight around it.
+  const subject = await resolveSubject(call.name, input, rt.cwd);
+  // ...and the spelling before that resolution, offered to the engine as a
+  // refusal-only alternate. Resolving a symlink MOVES a subject, and a subject
+  // that moves can slide out from under a deny that was already refusing it
+  // (`/var` is a symlink to `/private/var` on macOS; `<cwd>/secrets` may be a
+  // link elsewhere). Keeping the old spelling in the deny comparison is what
+  // makes this change a strict widening of what gets refused — see
+  // `PermissionCheck.alternateSubjects`.
+  const lexicalSubject = defaultSubject(call.name, input, rt.cwd);
   const decision = await rt.permissions.check({
     toolName: call.name,
     toolCallId: call.id,
     subject,
+    ...(lexicalSubject === subject ? {} : { alternateSubjects: [lexicalSubject] }),
     description: subject
       ? `${call.name}: ${subject}`
       : `${call.name} ${JSON.stringify(input).slice(0, 200)}`,

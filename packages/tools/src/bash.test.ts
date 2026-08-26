@@ -11,6 +11,7 @@ import {
   createBashTool,
   defaultKillEnvironment,
   FOREGROUND_KILL_DRAIN_MS,
+  MAX_OUTPUT_BYTES,
 } from "./bash.js";
 import { createFakeContext, denyAllPermissions, removeTempDir } from "./test-utils.js";
 
@@ -25,10 +26,14 @@ function isAlive(pid: number): boolean {
 }
 
 /** Poll `check` (timing-tolerant) until it returns true or `maxWaitMs` elapses. */
-async function waitUntil(check: () => boolean, maxWaitMs: number, stepMs = 50): Promise<boolean> {
+async function waitUntil(
+  check: () => boolean | Promise<boolean>,
+  maxWaitMs: number,
+  stepMs = 50,
+): Promise<boolean> {
   const deadline = Date.now() + maxWaitMs;
   while (Date.now() < deadline) {
-    if (check()) return true;
+    if (await check()) return true;
     await new Promise((r) => setTimeout(r, stepMs));
   }
   return check();
@@ -586,4 +591,200 @@ describePosix("bash tool timeout teaching + repeat-timeout circuit breaker", () 
     expect(Date.now() - started).toBeGreaterThanOrEqual(150);
     expect((result.content[0] as { text: string }).text).toContain("timed out");
   }, 15_000);
+});
+
+/**
+ * The tool's own description says stdout and stderr are merged. They were
+ * merged by *content* but not by *order*: Node delivers the two pipes on
+ * independent event-loop turns, so a command that finishes quickly hands back
+ * all of its stdout followed by all of its stderr. Compiler and test-runner
+ * output is exactly that shape, and a model reading a reordered transcript
+ * attributes each error to the wrong step.
+ */
+describePosix("bash tool — merged output keeps the order the command wrote it", () => {
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "arcturn-bash-order-"));
+  });
+
+  afterEach(async () => {
+    await removeTempDir(dir);
+  });
+
+  it("interleaves a fast burst of stdout and stderr in write order", async () => {
+    const tool = createBashTool(new BackgroundTaskManager());
+    const { ctx } = createFakeContext({ cwd: dir });
+
+    const result = await tool.execute(
+      { command: "echo A; echo B 1>&2; echo C; echo D 1>&2", timeoutMs: 10_000 },
+      ctx,
+    );
+
+    const emitted = (result.content[0] as { text: string }).text
+      .split("\n")
+      .filter((line) => ["A", "B", "C", "D"].includes(line));
+    expect(emitted).toEqual(["A", "B", "C", "D"]);
+  });
+
+  it("keeps a command's own stderr redirection working", async () => {
+    const tool = createBashTool(new BackgroundTaskManager());
+    const { ctx } = createFakeContext({ cwd: dir });
+
+    const result = await tool.execute(
+      { command: "echo visible; echo hidden 2>/dev/null 1>&2", timeoutMs: 10_000 },
+      ctx,
+    );
+
+    const text = (result.content[0] as { text: string }).text;
+    expect(text).toContain("visible");
+    expect(text).not.toContain("hidden");
+  });
+
+  it("does not disturb the exit code", async () => {
+    const tool = createBashTool(new BackgroundTaskManager());
+    const { ctx } = createFakeContext({ cwd: dir });
+
+    const result = await tool.execute({ command: "echo out 1>&2; exit 5" }, ctx);
+    expect(result.details).toMatchObject({ exitCode: 5 });
+    expect((result.content[0] as { text: string }).text).toContain("out");
+  });
+
+  it("interleaves a background task's output in write order too", async () => {
+    const manager = new BackgroundTaskManager();
+    const tool = createBashTool(manager);
+    const { ctx } = createFakeContext({ cwd: dir });
+
+    const started = await tool.execute(
+      { command: "echo one; echo two 1>&2; echo three", background: true },
+      ctx,
+    );
+    const taskId = (started.details as { taskId: string }).taskId;
+    await waitUntil(() => manager.poll(taskId)?.running === false, 10_000);
+
+    const status = manager.poll(taskId);
+    expect(status?.exitCode).toBe(0);
+    expect(status?.output.split("\n").filter(Boolean)).toEqual(["one", "two", "three"]);
+    // The command the manager reports back is the one that was asked for,
+    // not the wrapped form that was actually spawned.
+    expect(status?.command).toBe("echo one; echo two 1>&2; echo three");
+  });
+});
+
+/**
+ * What the command *did*, not what the call said. Every assertion here is on
+ * the filesystem or on a real pid, because "the tool returned a string that
+ * says it worked" is the class of test this suite exists to stop trusting.
+ */
+describePosix("bash tool — observable effects", () => {
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "arcturn-bash-effects-"));
+  });
+
+  afterEach(async () => {
+    await removeTempDir(dir);
+  });
+
+  it("runs the command in ctx.cwd, so a relative path lands there", async () => {
+    const tool = createBashTool(new BackgroundTaskManager());
+    const { ctx } = createFakeContext({ cwd: dir });
+
+    const result = await tool.execute(
+      { command: "mkdir -p made/here && printf 'contents' > made/here/file.txt" },
+      ctx,
+    );
+
+    expect(result.isError).toBeFalsy();
+    expect(await readFile(join(dir, "made", "here", "file.txt"), "utf8")).toBe("contents");
+  });
+
+  it("a denied command leaves no trace of having run", async () => {
+    const tool = createBashTool(new BackgroundTaskManager());
+    const { ctx } = createFakeContext({ cwd: dir, onPermissionRequest: denyAllPermissions() });
+
+    await tool.execute({ command: "touch should-not-exist.txt" }, ctx);
+
+    await expect(readFile(join(dir, "should-not-exist.txt"))).rejects.toThrow();
+  });
+
+  it("a timed-out command's remaining work never happens", async () => {
+    const tool = createBashTool(new BackgroundTaskManager());
+    const { ctx } = createFakeContext({ cwd: dir });
+    const marker = join(dir, "written-after-the-timeout.txt");
+
+    const result = await tool.execute(
+      { command: `echo starting; sleep 3; touch "${marker}"`, timeoutMs: 300 },
+      ctx,
+    );
+
+    expect(result.isError).toBe(true);
+    expect((result.content[0] as { text: string }).text).toContain("starting");
+    // Wait past when the sleep would have finished: the marker must never appear.
+    await new Promise((r) => setTimeout(r, 3_500));
+    await expect(readFile(marker)).rejects.toThrow();
+  }, 15_000);
+
+  it("keeps the tail of a command that writes megabytes, and still reports its exit code", async () => {
+    const tool = createBashTool(new BackgroundTaskManager());
+    const { ctx } = createFakeContext({ cwd: dir });
+
+    // 4 MB out of a process that exits cleanly — ~80x the retained window.
+    const result = await tool.execute(
+      {
+        command:
+          `node -e "const line='x'.repeat(1023); ` +
+          `for (let i = 0; i < 4096; i++) process.stdout.write(line + '\\n'); ` +
+          `process.stdout.write('LAST-LINE-MARKER\\n')"`,
+        timeoutMs: 30_000,
+      },
+      ctx,
+    );
+
+    expect(result.isError).toBeFalsy();
+    const text = (result.content[0] as { text: string }).text;
+    expect(result.details).toMatchObject({ exitCode: 0, outputTruncated: true });
+    // The *tail* is what survives: the last thing printed is the thing a model
+    // needs, and the retained window stays bounded.
+    expect(text).toContain("LAST-LINE-MARKER");
+    expect(text.length).toBeLessThan(2 * MAX_OUTPUT_BYTES);
+  }, 30_000);
+
+  it("a background task outlives the tool call that started it", async () => {
+    const manager = new BackgroundTaskManager();
+    const tool = createBashTool(manager);
+    const { ctx } = createFakeContext({ cwd: dir });
+    const counter = join(dir, "ticks.txt");
+
+    const started = await tool.execute(
+      {
+        command: `i=0; while [ $i -lt 40 ]; do i=$((i+1)); echo $i > "${counter}"; sleep 0.05; done`,
+        background: true,
+      },
+      ctx,
+    );
+    // The call has already returned — that is the whole point of `background`.
+    expect(started.isError).toBeFalsy();
+    const taskId = (started.details as { taskId: string }).taskId;
+
+    const readTicks = async () => Number((await readFile(counter, "utf8").catch(() => "0")).trim());
+    const firstSeen = await waitUntil(async () => (await readTicks()) > 0, 5_000);
+    expect(firstSeen).toBe(true);
+    const before = await readTicks();
+    await new Promise((r) => setTimeout(r, 400));
+    // Still working, after the tool call is long gone.
+    expect(await readTicks()).toBeGreaterThan(before);
+    expect(manager.poll(taskId)?.running).toBe(true);
+
+    // ...and killing it stops the effect, not just the bookkeeping.
+    manager.kill(taskId);
+    await waitUntil(
+      () => manager.poll(taskId)?.running === false,
+      BACKGROUND_KILL_GRACE_MS + 2_000,
+    );
+    const atKill = await readTicks();
+    await new Promise((r) => setTimeout(r, 600));
+    expect(await readTicks()).toBe(atKill);
+  }, 20_000);
 });

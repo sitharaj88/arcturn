@@ -209,6 +209,7 @@ boolean flags accept a `--no-` prefix.
 | `--web-port <n>` | | 0–65535 | Port for the browser client (0 or omitted picks one). |
 | `--web-origin <origin>` | | value, repeatable | Extra browser origin allowed to open a socket. Repeat to allow several. |
 | `--cassette <file>` | | value | With `bisect`: the VCR recording to compare against. |
+| `--record <file>` | | value | Record this run's model and tool calls to a cassette. |
 | `--list-models` | | — | Print the model catalog and exit. |
 | `--list-providers` | | — | Print every provider and preset endpoint, and exit. |
 | `--help` | `-h` | — | Show help. |

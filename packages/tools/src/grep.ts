@@ -1,28 +1,46 @@
 /** The `grep` built-in tool: pure-JS recursive regex content search. */
 
 import type { Dirent } from "node:fs";
-import { readdir, readFile, stat } from "node:fs/promises";
+import { readdir, readFile, realpath, stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { Tool, ToolResult } from "@arcturn/types";
 import { glob as tinyGlob } from "tinyglobby";
+import { looksBinary } from "./binary.js";
 import { displayPath, resolvePath } from "./path-utils.js";
 import { abortedResult, errorResult, textResult } from "./result-utils.js";
 
 const SKIP_DIRS = new Set([".git", "node_modules"]);
 const MAX_MATCHES = 200;
-const BINARY_SNIFF_BYTES = 8000;
 
-/** Heuristic binary-file detector: a NUL byte in the first few KB. */
-function looksBinary(buffer: Buffer): boolean {
-  const len = Math.min(buffer.length, BINARY_SNIFF_BYTES);
-  for (let i = 0; i < len; i++) {
-    if (buffer[i] === 0) return true;
-  }
-  return false;
-}
-
-async function walk(dir: string, signal: AbortSignal, out: string[]): Promise<void> {
+/**
+ * Collect every searchable file under `dir`.
+ *
+ * Symlinks are followed, because the alternative is two different answers from
+ * one tool: `readdir` reports a symlinked subdirectory as neither a file nor a
+ * directory, so the old walk dropped the whole subtree — while the *same*
+ * grep call with a `glob` argument goes through `tinyglobby`, which walks into
+ * it. A repo with `docs -> ../shared-docs` was searched or not searched
+ * depending on an argument that is only supposed to narrow the search.
+ *
+ * `seen` holds the realpath of every directory already visited, which both
+ * terminates a symlink cycle (`a/loop -> .`) and keeps a subtree reachable by
+ * two names from being reported twice.
+ */
+async function walk(
+  dir: string,
+  signal: AbortSignal,
+  out: string[],
+  seen: Set<string>,
+): Promise<void> {
   if (signal.aborted) return;
+  let canonical: string;
+  try {
+    canonical = await realpath(dir);
+  } catch {
+    return;
+  }
+  if (seen.has(canonical)) return;
+  seen.add(canonical);
   let entries: Dirent[];
   try {
     entries = await readdir(dir, { withFileTypes: true });
@@ -31,29 +49,37 @@ async function walk(dir: string, signal: AbortSignal, out: string[]): Promise<vo
   }
   for (const entry of entries) {
     if (signal.aborted) return;
+    const full = join(dir, entry.name);
     if (entry.isDirectory()) {
       if (SKIP_DIRS.has(entry.name)) continue;
-      await walk(join(dir, entry.name), signal, out);
+      await walk(full, signal, out, seen);
     } else if (entry.isFile()) {
-      out.push(join(dir, entry.name));
+      out.push(full);
+    } else if (entry.isSymbolicLink()) {
+      if (SKIP_DIRS.has(entry.name)) continue;
+      let target: Awaited<ReturnType<typeof stat>>;
+      try {
+        target = await stat(full);
+      } catch {
+        continue; // dangling link
+      }
+      if (target.isDirectory()) await walk(full, signal, out, seen);
+      else if (target.isFile()) out.push(full);
     }
   }
 }
 
 async function collectFiles(
   root: string,
+  rootIsFile: boolean,
   globPattern: string | undefined,
   signal: AbortSignal,
 ): Promise<string[]> {
-  try {
-    // A file path names exactly what to search. Without this, walk() calls
-    // readdir on it, swallows ENOTDIR, and reports "no matches" — a silent
-    // false negative a model reads as evidence of absence. Found by a live
-    // watched-fire run in wave 3. A glob cannot narrow a single named file.
-    if ((await stat(root)).isFile()) return [root];
-  } catch {
-    // Missing paths keep their old answer: walk() finds nothing.
-  }
+  // A file path names exactly what to search. Without this, walk() calls
+  // readdir on it, swallows ENOTDIR, and reports "no matches" — a silent
+  // false negative a model reads as evidence of absence. Found by a live
+  // watched-fire run in wave 3. A glob cannot narrow a single named file.
+  if (rootIsFile) return [root];
   if (globPattern) {
     return tinyGlob(globPattern, {
       cwd: root,
@@ -64,7 +90,7 @@ async function collectFiles(
     });
   }
   const out: string[] = [];
-  await walk(root, signal, out);
+  await walk(root, signal, out, new Set<string>());
   return out;
 }
 
@@ -135,9 +161,25 @@ export function createGrepTool(): Tool {
         return errorResult(`Invalid regular expression: ${(error as Error).message}`);
       }
 
+      // A path that is not there is not an absence of matches, it is a
+      // question that could not be asked. Answering "No matches found" to a
+      // typo'd or renamed path hands the model evidence of absence for a file
+      // it never opened — the same silent false negative the file-path case
+      // above was fixed for, one level up.
+      let rootIsFile: boolean;
+      try {
+        rootIsFile = (await stat(root)).isFile();
+      } catch {
+        return errorResult(
+          `Cannot search ${root}: no such file or directory. Nothing was searched, so this is ` +
+            `not a report that /${pattern}/ is absent. Check the path (relative paths resolve ` +
+            `against ${ctx.cwd}).`,
+        );
+      }
+
       let files: string[];
       try {
-        files = await collectFiles(root, globPattern, ctx.signal);
+        files = await collectFiles(root, rootIsFile, globPattern, ctx.signal);
       } catch (error) {
         return errorResult(`Failed to search ${root}: ${(error as Error).message}`);
       }

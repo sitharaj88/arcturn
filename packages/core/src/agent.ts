@@ -109,6 +109,20 @@ export interface AgentResumeOptions extends AgentOptions {
    * older entry starts a new branch from there.
    */
   leafId?: string;
+  /**
+   * Turn the model id stored on the branch back into a spec, so a session
+   * resumes on the model it was last switched to.
+   *
+   * `setModel` writes the id into a `state` entry and `materializeBranch`
+   * reads it back, but core has no model catalog to resolve it against — so
+   * without this the value round-trips to nowhere and a resume silently
+   * reverts to whatever model the caller happened to construct with.
+   *
+   * Optional and inert when omitted: `options.model` is used exactly as
+   * before. Returning `undefined` (an id this build no longer registers)
+   * falls back to `options.model` too.
+   */
+  resolveModel?: (modelId: string) => ModelSpec | undefined;
 }
 
 /**
@@ -199,8 +213,10 @@ export class Agent {
     const branch = leafId === null ? [] : pathToLeaf(entries, leafId);
     const state = materializeBranch(branch);
 
+    const storedModel = state.model === undefined ? undefined : options.resolveModel?.(state.model);
     const agent = new Agent({
       ...options,
+      ...(storedModel === undefined ? {} : { model: storedModel }),
       messages: state.messages,
       todos: state.todos,
       ...(state.plan === undefined ? {} : { plan: state.plan }),
@@ -209,15 +225,17 @@ export class Agent {
     agent.#sessionReady = Promise.resolve();
 
     // Re-link messages to the entries they came from so a later compaction can
-    // record an accurate `upToId`.
-    let index = 0;
-    for (const entry of branch) {
-      const message = state.messages[index];
-      if (!message) break;
-      if (entry.kind === "message" || entry.kind === "compaction") {
-        agent.#entryIds.set(message, entry.id);
-        index++;
-      }
+    // record an accurate `upToId`. The mapping comes from the replay itself
+    // rather than from walking the branch in lockstep with the messages: a
+    // compaction makes those two sequences different lengths AND different
+    // orders, so the lockstep walk mis-linked every message on a branch that
+    // had ever been compacted. The next compaction then wrote an `upToId`
+    // naming a folded-away entry, and the resume after that replayed the
+    // summary alone — the whole conversation since the first compaction gone
+    // from the file's reading of itself while the live agent still held it.
+    for (const [index, message] of state.messages.entries()) {
+      const entryId = state.messageEntryIds[index];
+      if (entryId !== undefined) agent.#entryIds.set(message, entryId);
     }
     return agent;
   }

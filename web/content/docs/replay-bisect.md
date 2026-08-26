@@ -62,11 +62,22 @@ by position) so the recording survives being replayed against a slightly differe
 order. Replaying against a cassette touches neither the network nor the real filesystem —
 a recorded session that ran `rm -rf` deletes nothing on replay.
 
-There is **no CLI command to record one today.** Recording (`createCassetteRecorder`,
-`recordingClient`, `wrapToolsWithRecorder`) is SDK-level machinery in `vcr.ts`, wired up
-by a host application, not exposed as an `arcturn` subcommand or flag. Cassettes are
-consumed by `arcturn bisect --cassette <file>` and by anything you build against `vcr.ts`
-directly — not produced by `arcturn` itself out of the box.
+Record one with `--record` on any ordinary run:
+
+```bash
+arcturn -p "your prompt" --record run.jsonl
+arcturn bisect <session> --cassette run.jsonl
+```
+
+`--record` tees the run: every LLM request and response, and every tool call and its
+result, are appended to the file while the run proceeds normally. The tee sits *inside*
+failover and consensus, so on a multi-model config the cassette names the model that
+actually answered rather than the head of the chain — a cassette is a recording of what
+happened, not of what was attempted.
+
+The same machinery is available at SDK level (`createCassetteRecorder`, `recordingClient`,
+`wrapToolsWithRecorder` in `vcr.ts`) for a host application that wants to wire it up
+itself.
 
 ## arcturn bisect
 
@@ -124,8 +135,9 @@ happens, not trusting the number.
   Reach for `arcturn bisect --cassette` when you need a deterministic answer, and reach
   for `arcturn replay --model` when you're deliberately comparing outcomes, not
   reproducing one.
-- Bisect can only find a divergence that already has a cassette to diverge *from*. There's
-  no built-in way to record one from the CLI — see above.
+- Bisect can only find a divergence that already has a cassette to diverge *from*, so the
+  recording has to exist before the change you are hunting: run with `--record` while the
+  behaviour is still good, then bisect against that file afterwards.
 - `extractPrompts` sends **text only**; image content blocks in an original prompt are
   dropped on replay.
 

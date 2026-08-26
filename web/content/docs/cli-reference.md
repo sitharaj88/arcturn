@@ -44,11 +44,27 @@ an inherited stdin open that never closes; waiting for EOF there would hang fore
 | `-h`, `--help` · `-v`, `--version` | Usage, version |
 
 `--host`, `--port` and `--token` apply to `arcturn serve`; `--cassette` applies to
-`arcturn bisect`.
+`arcturn bisect`, and `--record <file>` on any run writes the cassette it reads.
 
 **`--max-cost` and `--max-turns` are the two worth reaching for by default.** An agent that
 loops on a failure it cannot fix spends real money doing it, and a ceiling turns "I checked
 my bill on Friday" into "the run stopped."
+
+`--max-cost` can only fire for a model that publishes pricing — a cost Arcturn cannot
+compute is a cost it cannot compare. Point `--max-cost` at an unpriced endpoint (Ollama,
+vLLM, an in-house gateway, anything registered by an extension without a `cost`) and
+Arcturn says so at startup rather than letting you believe you are protected; bound those
+runs with `--max-turns` instead.
+
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Success — the run completed, or `--help`/`--version`/a listing printed. A tool the model asked for may still have been *refused*: a non-interactive run cannot ask, so it denies, tells the model, and says so on stderr. |
+| `1` | The run started but did not complete — a provider error, an interrupted run, or a ceiling (`--max-turns`, `--max-cost`) stopping it early. |
+| `2` | Nothing ran — a bad flag, an unknown model, a `--cwd` that is not there, a session that could not be read, a port already in use, or a command that needs a terminal and did not get one. |
+
+The same table is in `arcturn --help`.
 
 ## Subcommands
 

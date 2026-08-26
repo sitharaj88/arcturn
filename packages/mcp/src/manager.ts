@@ -101,9 +101,31 @@ export type McpAuthorizationHandler = (
   config: McpServerConfig,
 ) => boolean | Promise<boolean>;
 
+/**
+ * How long one server gets to complete the MCP `initialize` handshake before
+ * the connection is abandoned.
+ *
+ * The SDK's own default is 60 seconds, and `connect()` is awaited during
+ * startup for every configured server, so a server that accepts the connection
+ * and then never speaks the protocol — a crashed binary still holding stdout
+ * open, an HTTP endpoint that swallows the POST, a package's `mcp.json`
+ * pointing at the wrong command — froze the whole CLI for a minute before it
+ * would print its first prompt. Half a minute is still generous for a cold
+ * `npx` that has to download the server first, and it is bounded.
+ */
+export const DEFAULT_MCP_CONNECT_TIMEOUT_MS = 30_000;
+
 export interface McpManagerOptions {
   /** Overrides how transports are created. Defaults to the real stdio/HTTP transports. */
   transportFactory?: McpTransportFactory;
+  /**
+   * Ceiling on one server's `initialize` handshake, in milliseconds.
+   * Defaults to {@link DEFAULT_MCP_CONNECT_TIMEOUT_MS}. Exceeding it leaves
+   * the server `failed` with a timeout message; the SDK closes the transport
+   * on the way out, so a spawned stdio child is reaped rather than left
+   * running.
+   */
+  connectTimeoutMs?: number;
   /** Client identity advertised during MCP `initialize`. Defaults to a arcturn identity. */
   clientInfo?: { name: string; version: string };
   /** Per-server OAuth providers, passed to the HTTP transports as `authProvider`. */
@@ -136,6 +158,7 @@ export class McpManager {
   private readonly clientInfo: { name: string; version: string };
   private readonly authProviderFactory: McpAuthProviderFactory | undefined;
   private readonly onAuthorizationRequired: McpAuthorizationHandler | undefined;
+  private readonly connectTimeoutMs: number;
 
   constructor(
     private readonly config: McpConfig,
@@ -143,6 +166,7 @@ export class McpManager {
   ) {
     this.authProviderFactory = options.authProviderFactory;
     this.onAuthorizationRequired = options.onAuthorizationRequired;
+    this.connectTimeoutMs = options.connectTimeoutMs ?? DEFAULT_MCP_CONNECT_TIMEOUT_MS;
     this.transportFactory =
       options.transportFactory ??
       ((name, serverConfig) =>
@@ -202,7 +226,9 @@ export class McpManager {
     try {
       const client = this.createClient(name);
       const transport = await this.transportFactory(name, config);
-      await client.connect(transport);
+      // Bounded: a transport that opens and then goes quiet must not hold
+      // startup open for the SDK's 60-second default.
+      await client.connect(transport, { timeout: this.connectTimeoutMs });
       await this.finishConnect(name, client);
       return undefined;
     } catch (primaryError) {
@@ -214,7 +240,7 @@ export class McpManager {
             requestInit: config.headers ? { headers: config.headers } : undefined,
             ...(authProvider === undefined ? {} : { authProvider }),
           });
-          await client.connect(transport);
+          await client.connect(transport, { timeout: this.connectTimeoutMs });
           await this.finishConnect(name, client);
           return undefined;
         } catch (fallbackError) {

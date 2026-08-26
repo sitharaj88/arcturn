@@ -14,10 +14,12 @@
  * The manifest is a flat, append-only JSONL log. Each line is one of:
  *
  * - `{ kind: "turn", id, label, timestamp }` — a user-prompt boundary.
- * - `{ kind: "file", turnId, path, blob, timestamp }` — the state of `path`
- *   immediately before it was first touched during `turnId`. `blob` is a
- *   sha256 hex digest naming a file under `blobs/`, or `null` when the file
- *   did not exist yet.
+ * - `{ kind: "file", turnId, path, blob, mode?, timestamp }` — the state of
+ *   `path` immediately before it was first touched during `turnId`. `blob` is
+ *   a sha256 hex digest naming a file under `blobs/`, or `null` when the file
+ *   did not exist yet. `mode` carries the permission bits so a restore puts
+ *   an executable back executable; it is absent on manifests written before
+ *   the field existed, and on records whose file did not exist.
  * - `{ kind: "error", turnId, path, message, timestamp }` — a snapshot that
  *   failed to capture `path` (e.g. a permission error reading it). Recorded
  *   so the failure is visible without ever blocking the tool call that
@@ -29,9 +31,9 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
-import { resolvePath } from "@arcturn/tools";
+import { resolvePath, resolveSubjectPath } from "@arcturn/tools";
 import type { Tool, ToolExecutionContext } from "@arcturn/types";
 
 /** A user-prompt boundary; every snapshot taken afterwards belongs to it. */
@@ -53,6 +55,17 @@ export interface CheckpointFileRecord {
   path: string;
   /** sha256 hex digest of the file's content under `blobs/`, or `null` if the file did not exist. */
   blob: string | null;
+  /**
+   * The file's permission bits at snapshot time, or absent when the file did
+   * not exist (and on manifests written before this field existed).
+   *
+   * Content alone is not the pre-image. A restore writes through a temp file
+   * and a rename, which gives the result the process umask's mode — so
+   * rewinding past an edit to a shell script, a git hook or any other
+   * executable left the bytes right and the file un-runnable, with nothing
+   * in the restore's report to say so.
+   */
+  mode?: number;
   timestamp: number;
 }
 
@@ -229,12 +242,21 @@ function tryParseLine(line: string): CheckpointManifestEntry | undefined {
   }
 }
 
-/** Write `data` to `path` via a temp file + rename, so a crash cannot leave a partial file. */
-async function writeFileAtomic(path: string, data: Buffer): Promise<void> {
+/**
+ * Write `data` to `path` via a temp file + rename, so a crash cannot leave a
+ * partial file.
+ *
+ * `mode` is applied to the temp file *before* the rename, so the file is never
+ * momentarily visible at the destination with the wrong bits. Absent (an old
+ * manifest, or a pre-image that did not exist) leaves the umask default, which
+ * is exactly what this did before the mode was recorded.
+ */
+async function writeFileAtomic(path: string, data: Buffer, mode?: number): Promise<void> {
   const parent = dirname(path);
   await mkdir(parent, { recursive: true });
   const tmp = join(parent, `.checkpoint-tmp-${randomUUID()}`);
   await writeFile(tmp, data);
+  if (mode !== undefined) await chmod(tmp, mode);
   await rename(tmp, path);
 }
 
@@ -283,8 +305,15 @@ class FileCheckpointStore implements CheckpointStore {
       this.#recorded.add(key);
       const timestamp = Date.now();
       try {
-        const blob = await this.#captureBlob(path);
-        await this.#append({ kind: "file", turnId, path, blob, timestamp });
+        const captured = await this.#captureBlob(path);
+        await this.#append({
+          kind: "file",
+          turnId,
+          path,
+          blob: captured.blob,
+          ...(captured.mode === undefined ? {} : { mode: captured.mode }),
+          timestamp,
+        });
       } catch (error) {
         await this.#append({
           kind: "error",
@@ -379,7 +408,7 @@ class FileCheckpointStore implements CheckpointStore {
 
       try {
         const content = await readFile(this.#blobPath(record.blob));
-        await writeFileAtomic(record.path, content);
+        await writeFileAtomic(record.path, content, record.mode);
         restored.push(record.path);
       } catch (error) {
         errors.push({ path: record.path, message: errorMessage(error) });
@@ -404,20 +433,35 @@ class FileCheckpointStore implements CheckpointStore {
     return resolved === this.#restoreRoot || resolved.startsWith(this.#restoreRoot + sep);
   }
 
-  /** Read the file at `path` (or note its absence) and store it content-addressed. */
-  async #captureBlob(path: string): Promise<string | null> {
+  /**
+   * Read the file at `path` (or note its absence) and store it
+   * content-addressed, alongside the permission bits a restore has to put
+   * back with it.
+   *
+   * The mode is read from the same file the content came from, and only when
+   * the content was readable — a path that did not exist has no mode to
+   * restore, and `blob: null` already says a restore should delete it.
+   */
+  async #captureBlob(path: string): Promise<{ blob: string | null; mode?: number }> {
     let content: Buffer;
+    let mode: number | undefined;
     try {
       content = await readFile(path);
+      // A failure to stat is not a failure to snapshot: the bytes are the
+      // pre-image, the mode is a refinement on it.
+      mode = await stat(path)
+        .then((info) => info.mode & 0o7777)
+        .catch(() => undefined);
     } catch (error) {
-      if (isMissing(error)) return null;
+      if (isMissing(error)) return { blob: null };
       throw error;
     }
     const sha = createHash("sha256").update(content).digest("hex");
+    const withMode = (blob: string) => (mode === undefined ? { blob } : { blob, mode });
     const blobPath = this.#blobPath(sha);
     try {
       await stat(blobPath);
-      return sha; // Already stored under this content hash.
+      return withMode(sha); // Already stored under this content hash.
     } catch {
       // Fall through to write it below.
     }
@@ -425,7 +469,7 @@ class FileCheckpointStore implements CheckpointStore {
     const tmp = join(this.#blobsDir(), `.tmp-${randomUUID()}`);
     await writeFile(tmp, content);
     await rename(tmp, blobPath);
-    return sha;
+    return withMode(sha);
   }
 
   async #append(entry: CheckpointManifestEntry): Promise<void> {
@@ -537,7 +581,24 @@ export function wrapToolsWithCheckpoints(tools: readonly Tool[], store: Checkpoi
         if (typeof rawPath === "string" && rawPath.length > 0) {
           const absolutePath = resolvePath(ctx.cwd, rawPath);
           try {
-            await store.snapshot(absolutePath);
+            // The DESTINATION, not the spelling — the same subject the
+            // permission prompt named. `resolvePath` alone normalizes `..`
+            // but not symlinks, so a snapshot of a symlinked file recorded
+            // the LINK's path while the tool wrote through it to the target:
+            // the restore then renamed a pre-image over the link, destroying
+            // it and leaving the real file holding the change the rewind was
+            // supposed to undo. `resolveSubjectPath` returns `absolutePath`
+            // unchanged for any path with no link in it, so nothing else
+            // moves.
+            // A resolution failure must not cost the snapshot: fall back to
+            // the lexical path, which is what this used before subjects were
+            // resolved at all. Losing the pre-image is the expensive failure,
+            // and it is silent — nothing downstream reports a turn that has
+            // no record for a file it touched.
+            const subject = await resolveSubjectPath(ctx.cwd, absolutePath).catch(
+              () => absolutePath,
+            );
+            await store.snapshot(subject);
           } catch {
             // See TSDoc above: never block the tool call on a checkpoint failure.
           }

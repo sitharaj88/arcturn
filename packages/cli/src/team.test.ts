@@ -1704,6 +1704,78 @@ describe.skipIf(!hasGit)("TeamManager against real git", () => {
     expect(manager.get(status.id)?.status).toBe("merged");
   });
 
+  it("really creates each member's worktree on disk, and really removes it afterwards", async () => {
+    // The existing coverage proves worktrees are *asked for* (argv against a
+    // fake git) and that one line survives in `git worktree list` at the end.
+    // Neither says the checkout existed while the member was working in it, or
+    // that the directory left the filesystem — which is what "cleans them all
+    // up" has to mean on a machine that has to keep running afterwards.
+    const repo = await makeRepo();
+    const plan = planJson([
+      { id: "alpha", files: ["alpha.ts"] },
+      { id: "beta", files: ["beta.ts"] },
+    ]);
+    const live: { dir: string; seeded: boolean; registered: boolean }[] = [];
+    const manager = await managerFor(repo, plan, async (brief, cwd) => {
+      const { stdout } = await execFileAsync("git", ["worktree", "list"], { cwd: repo });
+      live.push({
+        dir: cwd,
+        // A real checkout, not an empty directory: the repository's own seed
+        // file is in it.
+        seeded: (await stat(join(cwd, "seed.txt"))).isFile(),
+        // …and git itself knows about it while it is in use.
+        registered: stdout.includes(cwd),
+      });
+      await writeFile(join(cwd, `${brief.id}.ts`), `export const ${brief.id} = 1;\n`);
+    });
+
+    const status = await manager.start("add two files");
+    expect(live).toHaveLength(2);
+    for (const entry of live) {
+      expect(entry.seeded).toBe(true);
+      expect(entry.registered).toBe(true);
+    }
+    expect(new Set(live.map((entry) => entry.dir)).size).toBe(2);
+
+    // …and every one of them is gone from the filesystem once the team settles.
+    for (const entry of live) await expect(stat(entry.dir)).rejects.toThrow();
+    const { stdout } = await execFileAsync("git", ["worktree", "list"], { cwd: repo });
+    for (const entry of live) expect(stdout).not.toContain(entry.dir);
+    // The work itself is not lost with the checkout: the patches outlive it.
+    for (const member of status.members) {
+      expect(member.patchFile).toBeDefined();
+      expect((await stat(member.patchFile as string)).isFile()).toBe(true);
+    }
+  });
+
+  it("discard removes the member's bytes: nothing lands and the patch leaves disk", async () => {
+    // The other half of the merge test. `merge` is proved by reading the
+    // user's files; `discard` was only ever proved by a `worktree prune` in a
+    // fake git's argv, which says nothing about what is on disk.
+    const repo = await makeRepo();
+    const plan = planJson([
+      { id: "alpha", files: ["alpha.ts"] },
+      { id: "beta", files: ["beta.ts"] },
+    ]);
+    const manager = await managerFor(repo, plan, async (brief, cwd) => {
+      await writeFile(join(cwd, `${brief.id}.ts`), `export const ${brief.id} = 1;\n`);
+    });
+    const status = await manager.start("add two files");
+    const patches = status.members.map((member) => member.patchFile as string);
+    for (const patch of patches) expect((await stat(patch)).isFile()).toBe(true);
+
+    const after = await manager.discard(status.id);
+    expect(after?.status).toBe("discarded");
+
+    // Nothing reached the user's checkout…
+    await expect(stat(join(repo, "alpha.ts"))).rejects.toThrow();
+    await expect(stat(join(repo, "beta.ts"))).rejects.toThrow();
+    const { stdout } = await execFileAsync("git", ["status", "--porcelain"], { cwd: repo });
+    expect(stdout.trim()).toBe("");
+    // …and the discarded work is really gone rather than merely unreferenced.
+    for (const patch of patches) await expect(stat(patch)).rejects.toThrow();
+  });
+
   it("merges into a CRLF checkout, the way a Windows repository is configured", async () => {
     // `core.autocrlf=true` is Git for Windows' default, so a member's worktree
     // is checked out CRLF while the patch cut from it is LF — and a patch that
@@ -2009,3 +2081,164 @@ describe("runtime wiring", () => {
 // is a compile error rather than a surprise at the call site.
 const _statusShape: (status: TeamStatus) => string = (status) => status.members[0]?.id ?? status.id;
 void _statusShape;
+
+// ================================================ two processes, one ~/.arcturn
+
+/**
+ * A pid that is guaranteed not to name a live process: a real child, started
+ * and reaped, whose number the OS will not have handed out again inside a test.
+ *
+ * Asserted rather than assumed — `process.kill(pid, 0)` is the same probe the
+ * manager uses, so a fixture that silently named a live process would make the
+ * "dead owner" tests below prove nothing.
+ */
+async function deadPid(): Promise<number> {
+  const { spawn } = await import("node:child_process");
+  const child = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
+  const pid = child.pid;
+  if (pid === undefined) throw new Error("could not spawn a child to reap");
+  await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+  expect(() => process.kill(pid, 0)).toThrow();
+  return pid;
+}
+
+/** A `running` team record on disk with one live worktree, owned by `ownerPid`. */
+async function writeRunningTeamRecord(
+  dir: string,
+  ownerPid: number | undefined,
+  worktree: string,
+): Promise<void> {
+  const { mkdir, writeFile: write } = await import("node:fs/promises");
+  await mkdir(join(dir, "records"), { recursive: true });
+  await mkdir(worktree, { recursive: true });
+  await write(join(worktree, "work-in-progress.ts"), "half an edit\n", "utf8");
+  await write(
+    join(dir, "records", "team-live.json"),
+    JSON.stringify({
+      id: "team-live",
+      goal: "a goal another process is still working on",
+      roles: [],
+      status: "running",
+      createdAt: Date.now() - 10_000,
+      startedAt: Date.now() - 10_000,
+      warnings: [],
+      needsRecovery: true,
+      ...(ownerPid === undefined ? {} : { ownerPid }),
+      members: [
+        {
+          id: "a",
+          title: "A",
+          role: "implementer",
+          task: "t",
+          files: ["a/**"],
+          status: "running",
+          worktreeDir: worktree,
+          diffStat: { files: 0, added: 0, removed: 0 },
+          merged: false,
+          discarded: false,
+          costUsd: 0,
+          turns: 0,
+          toolCalls: 0,
+        },
+      ],
+    }),
+  );
+}
+
+describe("TeamManager — a second process must not recover a live team", () => {
+  it("leaves a record whose owning process is ALIVE running, and never touches its worktree", async () => {
+    const dir = await scratchDir();
+    const worktree = join(dir, "worktrees", "team-live", "1-a");
+    // `process.pid` stands in for the terminal that owns this live team: it is
+    // the one pid this test can prove is alive.
+    await writeRunningTeamRecord(dir, process.pid, worktree);
+
+    const git = fakeGit((args) =>
+      args[0] === "diff" ? { stdout: "diff --git a/x b/x\n+stolen\n", stderr: "" } : undefined,
+    );
+    const second = new TeamManager({
+      dir,
+      repoRoot: "/repo",
+      plan: scriptedPlanner([""]),
+      spawn: () => new FakeAgent(),
+      execFn: git.execFn,
+    });
+
+    // The record still tells the truth: that team is running, not interrupted.
+    expect(second.get("team-live")?.status).toBe("running");
+    expect(second.get("team-live")?.members[0]?.status).toBe("running");
+
+    // …and the truth survived to disk, rather than being rewritten under the
+    // process that owns it.
+    const onDisk = JSON.parse(await readFile(join(dir, "records", "team-live.json"), "utf8")) as {
+      status: string;
+      members: { status: string }[];
+    };
+    expect(onDisk.status).toBe("running");
+    expect(onDisk.members[0]?.status).toBe("running");
+
+    // Recovery is the destructive half: it captures a diff and tears the
+    // worktree down. A live team must be invisible to it.
+    const report = await second.recover();
+    expect(report.teams).toEqual([]);
+    expect(report.removedWorktrees).toEqual([]);
+    expect(git.argv().join(" ")).not.toContain("worktree remove");
+
+    // The effect that matters: the other process's work is still on disk.
+    expect(await readFile(join(worktree, "work-in-progress.ts"), "utf8")).toBe("half an edit\n");
+    expect(second.get("team-live")?.members[0]?.worktreeDir).toBe(worktree);
+  });
+
+  it("still recovers a record whose owning process is GONE", async () => {
+    const dir = await scratchDir();
+    const worktree = join(dir, "worktrees", "team-live", "1-a");
+    await writeRunningTeamRecord(dir, await deadPid(), worktree);
+
+    const git = fakeGit((args) =>
+      args[0] === "diff"
+        ? { stdout: "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@\n+rescued\n", stderr: "" }
+        : undefined,
+    );
+    const second = new TeamManager({
+      dir,
+      repoRoot: "/repo",
+      plan: scriptedPlanner([""]),
+      spawn: () => new FakeAgent(),
+      execFn: git.execFn,
+    });
+
+    expect(second.get("team-live")?.status).toBe("interrupted");
+    const report = await second.recover();
+    expect(report.teams).toEqual(["team-live"]);
+    expect(report.salvaged).toEqual(["team-live/a"]);
+    expect(git.argv()).toContain(`worktree remove --force ${worktree}`);
+  });
+
+  it("still recovers a record written before owner pids were stamped", async () => {
+    const dir = await scratchDir();
+    const worktree = join(dir, "worktrees", "team-live", "1-a");
+    await writeRunningTeamRecord(dir, undefined, worktree);
+
+    const git = fakeGit();
+    const second = new TeamManager({
+      dir,
+      repoRoot: "/repo",
+      plan: scriptedPlanner([""]),
+      spawn: () => new FakeAgent(),
+      execFn: git.execFn,
+    });
+
+    expect(second.get("team-live")?.status).toBe("interrupted");
+    expect((await second.recover()).teams).toEqual(["team-live"]);
+  });
+
+  it("stamps the owning pid on a team it starts, so another process can see it is live", async () => {
+    const { manager, dir } = await harness({ plan: scriptedPlanner([planJson([{}, {}])]) });
+    const status = await manager.start("split it");
+
+    const onDisk = JSON.parse(
+      await readFile(join(dir, "records", `${status.id}.json`), "utf8"),
+    ) as { ownerPid?: number };
+    expect(onDisk.ownerPid).toBe(process.pid);
+  });
+});

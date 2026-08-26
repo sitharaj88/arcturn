@@ -324,8 +324,13 @@ runtime's job — but they do report a **subject**: the specific thing being act
 `defaultSubject` reads it from whichever of these keys the tool's input carries first:
 `command`, `file_path`, `filePath`, `path`, `url`, `pattern`, `query`, `target`. That's
 why a rule like `{ tool: "bash", specifier: "git *", action: "allow" }` matches any bash
-call whose `command` starts with `git `. See [Permissions](/docs/permissions) for the
-full rule schema, scopes, and the four permission modes.
+call whose `command` starts with `git `.
+
+A path-valued subject is resolved against the working directory **and through any
+symlinks in it** before the rules see it, so a rule cannot be walked around by pointing a
+link at the file it protects. See [Permissions](/docs/permissions) for the full rule
+schema, scopes, the four permission modes, and what symlink resolution does and does not
+change.
 
 ## Writing your own tool
 

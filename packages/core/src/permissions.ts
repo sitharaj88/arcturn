@@ -12,8 +12,11 @@
  *
  * A `permissionRequest` event is emitted only at step 6, when the user is
  * genuinely being asked. Every check, however it resolves, emits exactly one
- * `permissionDecision`. A more specific `deny` also outranks a broader
- * permissive rule from a nearer scope — see {@link matchRules}.
+ * `permissionDecision` — step 1 included, since that list is overridable and
+ * an allow nobody can review afterwards is not one. A `deny` also outranks a
+ * permissive rule from a nearer scope unless that rule is STRICTLY more
+ * specific, so a checked-in project config cannot cancel a user's own deny by
+ * restating it — see {@link matchRules}.
  *
  * Step 3 is *above* every mode, `yolo` included: a stored `deny` is the one
  * thing a mode cannot talk its way past. That is what lets a host confine an
@@ -26,7 +29,10 @@
  * Step 3's matching therefore compares path specifiers the way the filesystem
  * compares names — either separator, and case folded wherever the volume
  * folds it (see {@link defaultCaseInsensitivePaths}) — while commands and
- * URLs stay byte-exact.
+ * URLs stay byte-exact. For the same reason a `"<prefix> *"` command rule is
+ * quantified over shell segments by its own action rather than uniformly:
+ * `every` for a grant, `any` for a refusal (see {@link SegmentPolicy}), since
+ * a deny read as `every` switches off the moment anything is chained to it.
  */
 
 import { statSync } from "node:fs";
@@ -43,6 +49,7 @@ import type {
   PermissionRule,
   PermissionScope,
 } from "@arcturn/types";
+import { resolveSubjectPath as resolveSubjectPathOnDisk } from "./subject-path.js";
 import { createId } from "./util/ids.js";
 
 /**
@@ -97,6 +104,29 @@ export interface PermissionCheck {
   toolCallId: string;
   /** Value matched against rule specifiers (a command, a path, a URL, ...). */
   subject: string;
+  /**
+   * Other spellings of the same subject that a **`deny`** rule may also match.
+   *
+   * Asymmetric on purpose, and the asymmetry is the whole safety argument.
+   * `subject` is the truthful one — the file the call really touches — and it
+   * alone decides an `allow` or an `ask`, so no alternate spelling can widen a
+   * grant. Alternates can only ever contribute a refusal.
+   *
+   * They exist because resolving a symlink moves a subject, and a subject that
+   * moves can walk out from under a rule that was already refusing it. On
+   * macOS `/var` is a symlink to `/private/var`, so a user's
+   * `deny read "/var/log/**"` stops matching the moment the subject is
+   * canonicalized; likewise `deny read "<cwd>/secrets/**"` stops matching when
+   * `secrets` turns out to be a link elsewhere. Both used to fire. Matching the
+   * pre-resolution spelling too keeps every deny that fired before firing now,
+   * so closing the symlink hole cannot open a different one:
+   * *what is refused after this change is a superset of what was refused
+   * before it.*
+   *
+   * The prompt, the audit record and any suggested rule still name `subject`,
+   * because that is the file the decision was really about.
+   */
+  alternateSubjects?: readonly string[];
   /** Human-readable summary rendered by prompts. */
   description?: string;
   /** Rule offered to the user for persistence when they approve. */
@@ -169,6 +199,21 @@ export interface PathMatchOptions {
   readonly caseInsensitivePaths?: boolean;
 }
 
+/**
+ * How a `"<prefix> *"` command rule treats a subject that chains several
+ * commands together.
+ *
+ * `"all"` — every runnable segment must match the prefix. Correct for a rule
+ * that **grants**: approving `git status` may not also approve
+ * `git status; rm -rf ~`.
+ *
+ * `"any"` — one matching segment is enough. Correct for a rule that
+ * **refuses**: `deny bash "rm -rf *"` has to fire on `cd /tmp && rm -rf /etc`,
+ * and under `"all"` it did not, because the harmless first segment failed the
+ * prefix test and took the whole deny down with it.
+ */
+export type SegmentPolicy = "all" | "any";
+
 /** Options for {@link matchSpecifier}. */
 export interface SpecifierMatchOptions extends PathMatchOptions {
   /**
@@ -177,6 +222,12 @@ export interface SpecifierMatchOptions extends PathMatchOptions {
    * command) can say so and skip the heuristic entirely.
    */
   readonly kind?: SubjectKind;
+  /**
+   * Quantifier applied to the shell segments of a chained subject by a
+   * `"<prefix> *"` command rule. Defaults to `"all"`, the permissive-rule
+   * reading; {@link matchRules} passes `"any"` for a `deny`.
+   */
+  readonly segments?: SegmentPolicy;
 }
 
 /** Options for {@link globToRegExp}. */
@@ -401,7 +452,11 @@ export function shellSegments(command: string): string[] {
  *
  * A `"git *"` prefix grants the *whole* subject only when every chained shell
  * segment matches the prefix, so approving `git status` never also approves
- * `git status; rm -rf ~`.
+ * `git status; rm -rf ~`. A *denying* rule reads the same specifier the other
+ * way round — one matching segment is enough — because the quantifier that
+ * makes a grant narrow makes a refusal escapable: see {@link SegmentPolicy}
+ * and {@link SpecifierMatchOptions.segments}, which {@link matchRules} sets
+ * from the rule's own action.
  *
  * Path specifiers and path subjects are compared the way the filesystem
  * compares them — either separator, and case-insensitively where the volume
@@ -424,7 +479,12 @@ export function matchSpecifier(
     const matchesPrefix = (value: string) => value === prefix || value.startsWith(`${prefix} `);
     const segments = shellSegments(subject);
     if (segments.length === 0) return false;
-    return segments.every(matchesPrefix);
+    // A grant needs every segment; a refusal needs only one. See
+    // {@link SegmentPolicy} — reading `any` as `all` on the deny path is how
+    // `deny bash "rm -rf *"` came to ignore `cd /tmp && rm -rf /etc`.
+    return options.segments === "any"
+      ? segments.some(matchesPrefix)
+      : segments.every(matchesPrefix);
   }
   const kind = options.kind ?? subjectKindOf(specifier, subject);
   const caseInsensitive =
@@ -474,7 +534,15 @@ export function matchRules(
     .filter(
       ({ rule }) =>
         (rule.tool === "*" || rule.tool === toolName) &&
-        matchSpecifier(rule.specifier, subject, options),
+        // The action decides how a chained command subject is quantified: a
+        // grant needs every segment, a refusal needs one. Deciding it here,
+        // where the rule is in hand, is what keeps every caller of the engine
+        // — `check`, `evaluate`, a host previewing a rule — on the same
+        // reading. See {@link SegmentPolicy}.
+        matchSpecifier(rule.specifier, subject, {
+          ...options,
+          segments: rule.action === "deny" ? "any" : "all",
+        }),
     );
   if (candidates.length === 0) return undefined;
 
@@ -492,15 +560,60 @@ export function matchRules(
   const sorted = [...candidates].sort(byPrecedence);
   const winner = sorted[0]!;
 
-  // A more specific deny beats a broader permissive rule even from a nearer
-  // scope. Scope precedence alone would let a project-scoped `allow *` override
-  // a user-scoped deny of one dangerous command, so a checked-in config could
-  // escalate its own privileges just by being cloned.
+  // A deny beats a permissive rule from a nearer scope unless that rule is
+  // STRICTLY more specific. Scope precedence alone would let a project-scoped
+  // allow override a user-scoped deny, so a checked-in config could escalate
+  // its own privileges just by being cloned.
+  //
+  // The comparison is `>=`, not `>`, and the difference is the whole point.
+  // With `>`, a project `allow write "**\/.env"` tied the user's own
+  // `deny write "**\/.env"` on specificity, won on scope, and cancelled it —
+  // the escape needed no cleverness at all, just the same rule written the
+  // other way round in a repository someone cloned. `>=` makes the deny bias
+  // that already settles a tie *within* one scope settle it across scopes too,
+  // which is the only reading under which "a deny is the one thing a mode
+  // cannot talk its way past" also survives a config file it did not write.
+  //
+  // A strictly more specific permissive rule still wins, which is what the
+  // "allow narrowly, deny widely" cookbook shape depends on: `allow edit
+  // "**\/src\/**\/*.ts"` (3) over `deny edit "*"` (2) still edits `src`.
   const bestDeny = sorted.find(({ rule }) => rule.action === "deny");
-  if (bestDeny && specificity(bestDeny.rule) > specificity(winner.rule)) {
+  if (bestDeny && specificity(bestDeny.rule) >= specificity(winner.rule)) {
     return bestDeny.rule;
   }
   return winner.rule;
+}
+
+/**
+ * {@link matchRules}, then the same question again for each alternate spelling
+ * of the subject, keeping only a `deny` from those.
+ *
+ * See {@link PermissionCheck.alternateSubjects} for why alternates may refuse
+ * but never grant. Costs one extra {@link matchRules} pass per alternate, and
+ * the loop passes an alternate only when resolving symlinks actually moved the
+ * subject — which is to say almost never.
+ *
+ * @param rules - The rules to search.
+ * @param toolName - The tool being invoked.
+ * @param subject - The truthful subject; decides allow and ask.
+ * @param alternates - Other spellings of the same subject.
+ * @param options - Path-comparison policy, forwarded to {@link matchRules}.
+ */
+function matchRulesAcrossSpellings(
+  rules: readonly PermissionRule[],
+  toolName: string,
+  subject: string,
+  alternates: readonly string[] | undefined,
+  options: PathMatchOptions = {},
+): PermissionRule | undefined {
+  const primary = matchRules(rules, toolName, subject, options);
+  if (primary?.action === "deny" || alternates === undefined) return primary;
+  for (const alternate of alternates) {
+    if (alternate === subject) continue;
+    const matched = matchRules(rules, toolName, alternate, options);
+    if (matched?.action === "deny") return matched;
+  }
+  return primary;
 }
 
 /** Rule-based allow/deny/ask engine with session, project and user scopes. */
@@ -627,10 +740,23 @@ export class PermissionEngine {
     const requestId = createId("perm");
 
     if (this.#alwaysAllowTools.has(check.toolName)) {
-      return { requestId, behavior: "allow" };
+      // Emitted, so "every check emits exactly one permissionDecision"
+      // (see the module doc) is true of this branch too. The list is
+      // overridable, and a host that puts something with teeth on it must
+      // not get an allow that leaves no trace in the audit trail.
+      const allowed: PermissionDecision = { requestId, behavior: "allow" };
+      this.#emit({ type: "permissionDecision", decision: allowed });
+      return allowed;
     }
 
-    const cacheKey = `${check.toolCallId} ${check.subject}`;
+    // The TOOL NAME belongs in this key because it is half of what the
+    // rules matched on. Keyed by `toolCallId + subject` alone, a tool that
+    // asked under one name and then under another within the same call was
+    // handed the first answer back from cache — so an `allow` for a
+    // harmless name served a `deny`d one on the same subject, and the deny
+    // rule never ran. `requestPermission` takes `toolName` from its caller,
+    // so any tool, MCP bridge or extension could reach it.
+    const cacheKey = `${check.toolCallId} ${check.toolName} ${check.subject}`;
     const cached = this.#callCache.get(cacheKey);
     if (cached) return cached;
 
@@ -647,7 +773,7 @@ export class PermissionEngine {
     // being asked. Emitting it for checks the rules already settled would make
     // a UI raise a prompt for, say, every file read, and would mislead any host
     // that tracks outstanding requests.
-    const decision = await this.#resolve(request);
+    const decision = await this.#resolve(request, check.alternateSubjects);
     if (decision.persistRule) {
       this.addRule(decision.persistRule);
       await this.#onPersistRule?.(decision.persistRule);
@@ -697,7 +823,10 @@ export class PermissionEngine {
     return normalized;
   }
 
-  async #resolve(request: PermissionRequest): Promise<PermissionDecision> {
+  async #resolve(
+    request: PermissionRequest,
+    alternateSubjects?: readonly string[],
+  ): Promise<PermissionDecision> {
     const { id: requestId, toolName, subject } = request;
 
     if (this.#mode === "plan" && !this.isReadOnlyTool(toolName)) {
@@ -712,7 +841,13 @@ export class PermissionEngine {
 
     // The matched rule, not just its action: a deny may explain itself, and
     // this is the one decision the model gets no prompt to argue with.
-    const rule = matchRules(this.#rules, toolName, subject, this.#pathMatch);
+    const rule = matchRulesAcrossSpellings(
+      this.#rules,
+      toolName,
+      subject,
+      alternateSubjects,
+      this.#pathMatch,
+    );
     const action = rule?.action ?? "ask";
     if (action === "deny") {
       return {
@@ -769,6 +904,22 @@ const SUBJECT_KEYS = [
 const PATH_SUBJECT_KEYS = new Set<string>(["file_path", "filePath", "path", "target"]);
 
 /**
+ * The first well-known argument a tool call carries, and whether it names a
+ * file. Shared by {@link defaultSubject} and {@link resolveSubject} so the two
+ * can never pick different arguments out of the same call.
+ */
+function subjectArgument(
+  input: Record<string, unknown>,
+): { value: string; isPath: boolean } | undefined {
+  for (const key of SUBJECT_KEYS) {
+    const value = input[key];
+    if (typeof value !== "string" || value.length === 0) continue;
+    return { value, isPath: PATH_SUBJECT_KEYS.has(key) };
+  }
+  return undefined;
+}
+
+/**
  * Derive the permission subject for a tool call from its arguments.
  *
  * Well-known argument names (`command`, `path`, `url`, ...) win; otherwise the
@@ -785,6 +936,13 @@ const PATH_SUBJECT_KEYS = new Set<string>(["file_path", "filePath", "path", "tar
  * comparing two spellings are applied at match time instead, by
  * {@link matchSpecifier}.
  *
+ * **Synchronous and pure, deliberately.** This is what the CLI's transcript
+ * formatter (`display.ts`), its audit log and its provenance report call to
+ * *draw a line*, once per rendered tool call and often per frame. It resolves
+ * `..` lexically and touches nothing; symlinks are resolved by
+ * {@link resolveSubject}, which is what the loop hands the engine, so a
+ * renderer never pays for a `realpath`.
+ *
  * @param _toolName - The tool being invoked (reserved for future overrides).
  * @param input - The tool call arguments.
  * @param cwd - Working directory used to resolve path subjects.
@@ -794,11 +952,57 @@ export function defaultSubject(
   input: Record<string, unknown>,
   cwd?: string,
 ): string {
-  for (const key of SUBJECT_KEYS) {
-    const value = input[key];
-    if (typeof value !== "string" || value.length === 0) continue;
-    if (cwd !== undefined && PATH_SUBJECT_KEYS.has(key)) return resolvePath(cwd, value);
-    return value;
+  const argument = subjectArgument(input);
+  if (argument === undefined) return "";
+  if (cwd !== undefined && argument.isPath) return resolvePath(cwd, argument.value);
+  return argument.value;
+}
+
+/**
+ * The subject the **rules** are matched against: {@link defaultSubject}, with a
+ * path argument re-spelled as the file it actually opens.
+ *
+ * The difference is the whole wall. `read`, `grep`, `glob` and `ls` are in
+ * {@link DEFAULT_READ_ONLY_TOOLS}: they never call `requestPermission`, so a
+ * stored `deny` matched against this subject is the only thing standing in
+ * front of them — and a stored `deny` is the one decision no mode, `yolo`
+ * included, can override. Matched against a lexical subject it was walkable
+ * with an ordinary symlink: `deny read <home>/.ssh/**` refused
+ * `read("<home>/.ssh/id_rsa")` and allowed `read("keys/id_rsa")` through a
+ * `keys -> <home>/.ssh` link, and the key bytes came back in the tool result.
+ *
+ * Only path-valued arguments are touched, and only when a `cwd` is given: a
+ * `command` or a `url` is not a path and is never rewritten. A link that stays
+ * inside the workspace stays ordinary — see {@link resolveSubjectPath}, which
+ * rewrites exactly the case that lies and explains why a resolution failure
+ * degrades to the lexical answer rather than refusing.
+ *
+ * `await`ed at one call site, `executeToolCall` in `loop.ts`, which is already
+ * async and already about to touch the filesystem anyway.
+ *
+ * @param _toolName - The tool being invoked (reserved, as in
+ *   {@link defaultSubject}, for future per-tool subject overrides).
+ * @param input - The tool call arguments.
+ * @param cwd - Working directory used to resolve path subjects.
+ */
+export async function resolveSubject(
+  _toolName: string,
+  input: Record<string, unknown>,
+  cwd?: string,
+): Promise<string> {
+  const argument = subjectArgument(input);
+  if (argument === undefined) return "";
+  if (cwd === undefined || !argument.isPath) return argument.value;
+  const lexical = resolvePath(cwd, argument.value);
+  try {
+    return await resolveSubjectPathOnDisk(cwd, lexical);
+  } catch {
+    // `resolveSubjectPath` catches its own filesystem errors, so reaching here
+    // means something unforeseen. Fall back to the lexical subject — the
+    // subject this returned before symlinks were resolved at all — rather than
+    // failing the tool call: see the failure-direction note in
+    // `subject-path.ts`. A degraded subject leaves the old wall standing; a
+    // thrown error would take down a call the rules may well have allowed.
+    return lexical;
   }
-  return "";
 }

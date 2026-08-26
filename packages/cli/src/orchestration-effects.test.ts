@@ -1,0 +1,839 @@
+/**
+ * Orchestration, asserted on **effects** rather than on return values.
+ *
+ * The limits that make workflows, teams and background agents safe to spend
+ * money on — a run budget, a step deadline, a role's turn ceiling, the promise
+ * that an `exec`-lane role cannot reach the user's checkout — were all covered
+ * by tests that read the field back out, or read the error string the engine
+ * chose. A limit nobody has ever crossed is not a limit, and a lane guarantee
+ * proved by "no `git apply` was issued" is a claim about the code, not about
+ * the tree.
+ *
+ * So every test here crosses the limit and then asks the world what happened:
+ * how many requests the model actually received, whether a real pid is still
+ * alive, whether the bytes in a real checkout moved, whether a journal line
+ * exists on disk. Where a stop is asserted, the matching *non*-stop is
+ * asserted beside it, so "the pipeline halted" can never be satisfied by a
+ * pipeline that never ran.
+ */
+
+import { execFile } from "node:child_process";
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import type { AgentDef } from "./agents.js";
+import {
+  addOrgMemoryEntry,
+  loadOrgMemoryInjector,
+  setOrgMemoryStatus,
+  writeOrgMemory,
+} from "./org-memory.js";
+import type { ArcturnRuntime } from "./runtime.js";
+import { type FakeLLM, fakeLLM } from "./test-helpers/fake-llm.js";
+import { buildTestRuntime, makeScratch, type Scratch } from "./test-helpers/scratch.js";
+import {
+  createRuntimeRunStep,
+  createRuntimeWriteLane,
+  isWorkflowParseError,
+  parseWorkflow,
+  runWorkflow,
+  type Workflow,
+  type WorkflowStepRequest,
+  type WriteLane,
+  type WriteLaneHost,
+} from "./workflow.js";
+import { buildResumeState, createFileRunJournal, readJournalLines } from "./workflow-run.js";
+import { foldJournal, summariseRun } from "./workflow-status.js";
+
+const execFileAsync = (cmd: string, args: readonly string[], cwd: string): Promise<void> =>
+  new Promise((resolve, reject) => {
+    execFile(cmd, [...args], { cwd }, (error) => (error ? reject(error) : resolve()));
+  });
+
+const runtimes: ArcturnRuntime[] = [];
+const roots: string[] = [];
+
+afterEach(async () => {
+  for (const runtime of runtimes.splice(0)) await runtime.dispose();
+  for (const root of roots.splice(0))
+    await rm(root, { recursive: true, force: true, maxRetries: 3 });
+});
+
+/** These drive a real POSIX shell and real process groups. */
+const itPosix = it.skipIf(process.platform === "win32");
+
+/** Does this path exist at all? */
+async function exists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** A scratch tree whose project directory is a real git repository. */
+async function gitScratch(seed: Record<string, string> = {}): Promise<Scratch> {
+  const scratch = await makeScratch();
+  roots.push(scratch.root);
+  const git = (...args: string[]): Promise<void> => execFileAsync("git", args, scratch.cwd);
+  await git("init", "-q", "-b", "main");
+  await git("config", "user.email", "t@example.com");
+  await git("config", "user.name", "t");
+  // Pin the line-ending policy so a checkout's bytes are the repository's
+  // decision and not the runner's — Git for Windows would otherwise rewrite
+  // every file these tests compare.
+  await git("config", "core.autocrlf", "false");
+  await git("config", "core.eol", "lf");
+  for (const [path, body] of Object.entries({ "seed.txt": "seed\n", ...seed })) {
+    await mkdir(join(scratch.cwd, path, ".."), { recursive: true });
+    await writeFile(join(scratch.cwd, path), body, "utf8");
+  }
+  await git("add", "-A");
+  await git("commit", "-qm", "base");
+  return scratch;
+}
+
+/** `git status --porcelain` for a checkout — empty means nothing moved. */
+async function porcelain(cwd: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile("git", ["status", "--porcelain"], { cwd }, (error, stdout) =>
+      error ? reject(error) : resolve(stdout.trim()),
+    );
+  });
+}
+
+/** Build a real runtime over `scratch`, holding on to the scripted client. */
+async function runtimeWith(
+  scratch: Scratch,
+  llm: FakeLLM,
+  overrides: Parameters<typeof buildTestRuntime>[2] = {},
+): Promise<ArcturnRuntime> {
+  const runtime = await buildTestRuntime(scratch, [], {
+    llm,
+    permissionMode: "yolo",
+    onPermissionAsk: async (request) => ({
+      requestId: request.id,
+      behavior: "deny" as const,
+      message: "no interactive user in this test",
+    }),
+    ...overrides,
+  });
+  runtimes.push(runtime);
+  return runtime;
+}
+
+/** A role definition with explicit tools — the only shape a workflow dispatches. */
+function role(name: string, tools: string[], extra: Partial<AgentDef> = {}): AgentDef {
+  return {
+    name,
+    description: `${name} role`,
+    systemPrompt: `You are ${name}.`,
+    tools,
+    source: "<test>",
+    ...extra,
+  };
+}
+
+/** Parse a workflow and assert it parsed. */
+function parseOk(raw: string, name = "wf"): Workflow {
+  const parsed = parseWorkflow(raw, { name });
+  if (isWorkflowParseError(parsed)) throw new Error(`expected a workflow, got: ${parsed.error}`);
+  return parsed;
+}
+
+/** The first step of `workflow`, as a runnable request. */
+function firstRequest(
+  workflow: Workflow,
+  overrides: Partial<WorkflowStepRequest> = {},
+): WorkflowStepRequest {
+  const step = workflow.stages[0]?.steps[0];
+  if (!step) throw new Error("workflow has no first step");
+  return {
+    step,
+    prompt: step.prompt,
+    signal: new AbortController().signal,
+    ...(step.agent === undefined ? {} : { agent: step.agent }),
+    ...overrides,
+  };
+}
+
+/** The production write lane over a real runtime and a real repository. */
+function laneFor(runtime: ArcturnRuntime, runId: string): WriteLane {
+  return createRuntimeWriteLane(runtime as unknown as WriteLaneHost, runId);
+}
+
+// ===================================================================== maxTurns
+
+describe("a role's maxTurns, counted rather than trusted", () => {
+  /**
+   * A model that never stops asking for another tool call, so the *only*
+   * thing that can end the loop is the ceiling under test.
+   */
+  const loopForever = (): FakeLLM =>
+    fakeLLM([{ toolCalls: [{ id: "c", name: "read", arguments: { path: "seed.txt" } }] }]);
+
+  it("stops a write-lane role at exactly the number of turns its role file declares", async () => {
+    const scratch = await gitScratch();
+    const llm = loopForever();
+    const runtime = await runtimeWith(scratch, llm);
+
+    const developer = role("developer", ["read", "edit"], { maxTurns: 3 });
+    const workflow = parseOk("---\nname: demo\n---\n1. @developer keep going\n");
+    const outcome = await createRuntimeRunStep(runtime, {
+      resolveAgent: () => developer,
+      writeLane: laneFor(runtime, "run-turns-3"),
+    })(firstRequest(workflow));
+
+    // Three turns is three requests to the provider — no more, and not the
+    // session default. The field being forwarded proves nothing; this is the
+    // spend it was supposed to bound.
+    expect(llm.requests).toHaveLength(3);
+    // …and the run says *why* it stopped, rather than reporting a role that
+    // quietly ran out of rope as a role that finished.
+    expect(outcome.error).toMatch(/Reached the maximum of 3 turns/);
+    expect(outcome.error).toMatch(/Nothing was applied/);
+  });
+
+  it("spends more turns for a role that declares more — so the count tracks the ceiling", async () => {
+    const scratch = await gitScratch();
+    const llm = loopForever();
+    const runtime = await runtimeWith(scratch, llm);
+
+    const developer = role("developer", ["read", "edit"], { maxTurns: 6 });
+    const workflow = parseOk("---\nname: demo\n---\n1. @developer keep going\n");
+    await createRuntimeRunStep(runtime, {
+      resolveAgent: () => developer,
+      writeLane: laneFor(runtime, "run-turns-6"),
+    })(firstRequest(workflow));
+
+    // The control for the test above: a stop at 3 that had nothing to do with
+    // `maxTurns` would stop at 3 here too.
+    expect(llm.requests).toHaveLength(6);
+  });
+
+  it("clamps a role that asks for more turns than the session's subagent ceiling", async () => {
+    const scratch = await gitScratch();
+    await mkdir(join(scratch.cwd, ".arcturn"), { recursive: true });
+    await writeFile(
+      join(scratch.cwd, ".arcturn", "config.json"),
+      JSON.stringify({ subagentMaxTurns: 2 }),
+      "utf8",
+    );
+    const llm = loopForever();
+    const runtime = await runtimeWith(scratch, llm);
+    expect(runtime.config.subagentMaxTurns).toBe(2);
+
+    const greedy = role("greedy", ["read", "edit"], { maxTurns: 9 });
+    const workflow = parseOk("---\nname: demo\n---\n1. @greedy keep going\n");
+    await createRuntimeRunStep(runtime, {
+      resolveAgent: () => greedy,
+      writeLane: laneFor(runtime, "run-turns-clamp"),
+    })(firstRequest(workflow));
+
+    // "Roles narrow; nothing widens" — a checked-in role file must not be able
+    // to buy itself nine turns in a session that budgeted two.
+    expect(llm.requests).toHaveLength(2);
+  });
+});
+
+// ================================================================== lane walls
+
+describe("lane guarantees, asserted against a real checkout", () => {
+  itPosix("throws away an exec-lane role's edits: the user's bytes never move", async () => {
+    const scratch = await gitScratch({ "src/app.ts": "original\n" });
+    // The role really does change its worktree — through `bash`, the only
+    // mutating tool the exec lane hands it — and then reads the file back, so
+    // the tool result proves the change landed *somewhere* before the lane
+    // threw it away. Without that, "the checkout is unchanged" would be
+    // satisfied by a role that was never able to write anything at all.
+    const llm = fakeLLM([
+      {
+        toolCalls: [
+          {
+            id: "c1",
+            name: "bash",
+            arguments: { command: "printf 'REWRITTEN BY THE REVIEWER\n' > src/app.ts" },
+          },
+        ],
+      },
+      { toolCalls: [{ id: "c2", name: "bash", arguments: { command: "cat src/app.ts" } }] },
+      { text: "I looked at it." },
+    ]);
+    const runtime = await runtimeWith(scratch, llm);
+
+    // `bash` and nothing that writes: the exec lane. It still gets a worktree
+    // (it has to build and test), and that worktree's diff is discarded unread.
+    const reviewer = role("security-reviewer", ["bash", "read"]);
+    const workflow = parseOk("---\nname: demo\n---\n1. @security-reviewer audit it\n");
+    const outcome = await createRuntimeRunStep(runtime, {
+      resolveAgent: () => reviewer,
+      writeLane: laneFor(runtime, "run-exec"),
+    })(firstRequest(workflow));
+
+    expect(outcome.isError).toBe(false);
+    expect(outcome.record?.status).toBe("discarded");
+    // The role's own worktree really did hold the rewrite…
+    expect(JSON.stringify(llm.requests.at(-1)?.messages)).toContain("REWRITTEN BY THE REVIEWER");
+    // …and the user's tree is byte-for-byte what it was, with git agreeing
+    // nothing is pending.
+    expect(await readFile(join(scratch.cwd, "src", "app.ts"), "utf8")).toBe("original\n");
+    expect(await porcelain(scratch.cwd)).toBe("");
+  });
+
+  it("applies a write-lane role's edits: the bytes land in the user's checkout", async () => {
+    const scratch = await gitScratch({ "src/app.ts": "original\n" });
+    const llm = fakeLLM([
+      {
+        toolCalls: [
+          {
+            id: "c1",
+            name: "write",
+            arguments: { path: "src/app.ts", content: "written by the developer\n" },
+          },
+        ],
+      },
+      { text: "Done." },
+    ]);
+    const runtime = await runtimeWith(scratch, llm);
+
+    const developer = role("developer", ["read", "write", "edit"]);
+    const workflow = parseOk("---\nname: demo\n---\n1. @developer change it\n");
+    const outcome = await createRuntimeRunStep(runtime, {
+      resolveAgent: () => developer,
+      writeLane: laneFor(runtime, "run-write"),
+    })(firstRequest(workflow));
+
+    expect(outcome.isError).toBe(false);
+    expect(outcome.record?.status).toBe("applied");
+    // The other half of the wall: the same role shape, one tool different, and
+    // the bytes really do move.
+    expect(await readFile(join(scratch.cwd, "src", "app.ts"), "utf8")).toBe(
+      "written by the developer\n",
+    );
+  });
+
+  it("gives a read-lane role no worktree at all — nothing is created on disk", async () => {
+    const scratch = await gitScratch();
+    const llm = fakeLLM([{ text: "I read it." }]);
+    const runtime = await runtimeWith(scratch, llm);
+
+    const runsDir = join(scratch.home, "workflow-runs", "run-read");
+    const analyst = role("analyst", ["read", "grep"]);
+    const workflow = parseOk("---\nname: demo\n---\n1. @analyst summarise it\n");
+    const outcome = await createRuntimeRunStep(runtime, {
+      resolveAgent: () => analyst,
+      writeLane: laneFor(runtime, "run-read"),
+    })(firstRequest(workflow));
+
+    expect(outcome.isError).toBe(false);
+    // No worktree, no patch, no run directory: a read-lane role is dispatched
+    // through `createSubagent` and the lane is never asked for anything.
+    expect(outcome.record).toBeUndefined();
+    expect(await exists(runsDir)).toBe(false);
+    expect(await porcelain(scratch.cwd)).toBe("");
+  });
+});
+
+// ============================================================ step deadline
+
+describe("stepTimeoutMs, proved by exceeding it", () => {
+  itPosix(
+    "kills the processes a timed-out step started — the pid is gone",
+    async () => {
+      const scratch = await gitScratch();
+      // The role starts a real detached process that would outlive the run by
+      // two minutes, records its own pid where the test can read it, and then
+      // the model hangs past the deadline. `BackgroundTaskManager` spawns the
+      // shell detached as its own process-group leader, so `$$` is the pgid the
+      // reaper has to signal.
+      const llm = fakeLLM([
+        {
+          toolCalls: [
+            {
+              id: "c1",
+              name: "bash",
+              arguments: { command: "echo $$ > pid.txt; sleep 120", background: true },
+            },
+          ],
+        },
+        { text: "still thinking", delayMs: 2_500 },
+      ]);
+      const runtime = await runtimeWith(scratch, llm);
+
+      const runId = "run-deadline";
+      const worktree = join(scratch.home, "workflow-runs", runId, "1-builder");
+      const builder = role("builder", ["bash"]);
+      const workflow = parseOk(
+        "---\nname: demo\nstepTimeoutMs: 700\n---\n1. @builder build it\n2. @builder and again\n",
+      );
+
+      // Read the pid while the step is still alive; the file lives in a worktree
+      // the deadline path keeps for forensics, but reading it early means the
+      // assertion cannot be satisfied by a worktree that was simply deleted.
+      let pid: number | undefined;
+      const watcher = (async () => {
+        const deadline = Date.now() + 5_000;
+        while (Date.now() < deadline) {
+          try {
+            pid = Number.parseInt(await readFile(join(worktree, "pid.txt"), "utf8"), 10);
+            if (Number.isInteger(pid) && pid > 0) return;
+          } catch {
+            // not started yet
+          }
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+      })();
+
+      const result = await runWorkflow(workflow, {
+        resolveAgent: () => builder,
+        agentNames: () => ["builder"],
+        runStep: createRuntimeRunStep(runtime, {
+          resolveAgent: () => builder,
+          writeLane: laneFor(runtime, runId),
+        }),
+      });
+      await watcher;
+
+      // The step was really killed for the reason claimed…
+      expect(result.status).toBe("failed");
+      expect(result.steps[0]?.error).toMatch(/exceeded its .* deadline/);
+      // …and the later stage never ran at all.
+      expect(result.steps[1]?.status).toBe("skipped");
+
+      // The effect: the process the step started is gone. Retried briefly
+      // because SIGTERM→SIGKILL is asynchronous, but bounded well under the five
+      // minutes the process asked for.
+      expect(pid).toBeGreaterThan(0);
+      const alive = (): boolean => {
+        try {
+          process.kill(pid as number, 0);
+          return true;
+        } catch {
+          return false;
+        }
+      };
+      const deadline = Date.now() + 5_000;
+      while (alive() && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      expect(alive()).toBe(false);
+    },
+    20_000,
+  );
+
+  it("lets a step that finishes inside its deadline complete normally", async () => {
+    // The control: the same shape, under the limit. Without it, "the step was
+    // killed" is indistinguishable from a step that could never have run.
+    const scratch = await gitScratch();
+    const llm = fakeLLM([{ text: "quick" }]);
+    const runtime = await runtimeWith(scratch, llm);
+
+    const builder = role("builder", ["bash"]);
+    const workflow = parseOk(
+      "---\nname: demo\nstepTimeoutMs: 30000\n---\n1. @builder build it\n2. @builder and again\n",
+    );
+    const result = await runWorkflow(workflow, {
+      resolveAgent: () => builder,
+      agentNames: () => ["builder"],
+      runStep: createRuntimeRunStep(runtime, {
+        resolveAgent: () => builder,
+        writeLane: laneFor(runtime, "run-in-time"),
+      }),
+    });
+
+    expect(result.status).toBe("done");
+    expect(result.steps.map((step) => step.status)).toEqual(["done", "done"]);
+  });
+});
+
+// ============================================================== run budget
+
+describe("budgetUsd, proved by exceeding it", () => {
+  /**
+   * A model that writes one *distinctly named* file per stage and reports
+   * `costUsd` on every turn, so a stage's spend and a stage's artefact are the
+   * same event and "stage three never ran" is a question the filesystem can
+   * answer.
+   *
+   * @param costUsd - What each turn costs.
+   */
+  const spender = (costUsd: number): FakeLLM =>
+    fakeLLM(
+      [1, 2, 3].flatMap((stage) => [
+        {
+          toolCalls: [
+            {
+              id: `c${stage}`,
+              name: "bash",
+              arguments: { command: `printf ${stage} > stage${stage}.txt` },
+            },
+          ],
+          usage: { costUsd },
+        },
+        { text: `stage ${stage} complete`, usage: { costUsd } },
+      ]),
+    );
+
+  /**
+   * Run a three-stage pipeline whose every stage is the same write-lane role,
+   * against a real journal on disk.
+   *
+   * @param costUsd - Per-turn spend the scripted model reports.
+   * @param budget - The `budgetUsd:` frontmatter line, or `undefined` for none.
+   */
+  async function threeStages(
+    costUsd: number,
+    budget: number | undefined,
+  ): Promise<{
+    scratch: Scratch;
+    journalDir: string;
+    result: Awaited<ReturnType<typeof runWorkflow>>;
+  }> {
+    const scratch = await gitScratch();
+    const llm = spender(costUsd);
+    const runtime = await runtimeWith(scratch, llm);
+    const journalDir = join(scratch.home, "journal");
+    const developer = role("developer", ["read", "write", "edit", "bash"]);
+    const workflow = parseOk(
+      [
+        "---",
+        "name: pipeline",
+        ...(budget === undefined ? [] : [`budgetUsd: ${budget.toFixed(2)}`]),
+        "---",
+        "1. @developer stage one",
+        "2. @developer stage two",
+        "3. @developer stage three",
+        "",
+      ].join("\n"),
+    );
+    const result = await runWorkflow(workflow, {
+      resolveAgent: () => developer,
+      agentNames: () => ["developer"],
+      journal: createFileRunJournal(journalDir),
+      runStep: createRuntimeRunStep(runtime, {
+        resolveAgent: () => developer,
+        writeLane: laneFor(runtime, `run-budget-${budget ?? "none"}`),
+      }),
+    });
+    return { scratch, journalDir, result };
+  }
+
+  /** Every step id that reached a terminal journal line. */
+  async function journalledSteps(dir: string): Promise<string[]> {
+    const lines = await readJournalLines(dir);
+    return lines
+      .filter((line): line is Extract<typeof line, { kind: "stepEnd" }> => line.kind === "stepEnd")
+      .map((line) => line.id);
+  }
+
+  itPosix(
+    "stops the pipeline: the later stage has no journal entry and never wrote its file",
+    async () => {
+      // Each turn costs $0.40, two turns per stage: stage one alone is $0.80 and
+      // stage two crosses $1.00.
+      const { scratch, journalDir, result } = await threeStages(0.4, 1);
+
+      expect(result.status).toBe("failed");
+      expect(result.error).toMatch(/exceeded its \$1\.00 run budget/);
+
+      // The effect, not the report: stage three never reached the journal…
+      const stepIds = await journalledSteps(journalDir);
+      expect(stepIds).toEqual(["1", "2"]);
+      // …and its artefact was never created, while the stages that did run left
+      // theirs behind. Without that second half, a pipeline that never started
+      // would satisfy this test.
+      expect(await exists(join(scratch.cwd, "stage1.txt"))).toBe(true);
+      expect(await exists(join(scratch.cwd, "stage2.txt"))).toBe(true);
+      expect(await exists(join(scratch.cwd, "stage3.txt"))).toBe(false);
+
+      // And the journal says *why* it stopped, which is the one question
+      // `/workflow status` opens this record to answer.
+      const stopLines = (await readJournalLines(journalDir)).filter(
+        (line): line is Extract<typeof line, { kind: "stop" }> => line.kind === "stop",
+      );
+      expect(stopLines.map((line) => line.reason)).toEqual(["cost-ceiling"]);
+      expect(summariseRun(foldJournal("run", await readJournalLines(journalDir))).stopReason).toBe(
+        "cost-ceiling",
+      );
+    },
+  );
+
+  itPosix("runs every stage when the same pipeline stays under budget", async () => {
+    // The control that makes the stop meaningful: identical pipeline, a budget
+    // it cannot cross, and stage three both journals and lands its artefact.
+    const { scratch, journalDir, result } = await threeStages(0.01, 100);
+
+    expect(result.status).toBe("done");
+    expect(await journalledSteps(journalDir)).toEqual(["1", "2", "3"]);
+    expect(await exists(join(scratch.cwd, "stage3.txt"))).toBe(true);
+    expect(
+      summariseRun(foldJournal("run", await readJournalLines(journalDir))).stopReason,
+    ).toBeUndefined();
+  });
+});
+
+// ============================================================== org memory
+
+describe("org memory reaches a role's prompt only after a person approves it", () => {
+  const NOTE = "this repo's vitest needs --run or it hangs forever";
+
+  /**
+   * Write a store holding one entry for `developer`, then hand back the
+   * injector the workflow dispatcher actually calls.
+   *
+   * @param home - The scratch `$ARCTURN_HOME`.
+   * @param approve - Promote the entry to `active` before saving.
+   */
+  async function injectorWith(
+    home: string,
+    approve: boolean,
+  ): Promise<(role: string) => string | undefined> {
+    const file = join(home, "org-memory.json");
+    const added = addOrgMemoryEntry({ entries: [] }, { role: "developer", text: NOTE });
+    if (added.error !== undefined || added.store === undefined || added.entry === undefined) {
+      throw new Error(`fixture failed: ${added.error}`);
+    }
+    // Proposed by construction — the whole point of the gate.
+    expect(added.entry.status).toBe("proposed");
+    let store = added.store;
+    if (approve) {
+      const promoted = setOrgMemoryStatus(store, added.entry.id, "active");
+      if (promoted.store === undefined) throw new Error("fixture failed to approve");
+      store = promoted.store;
+    }
+    await writeOrgMemory(file, store);
+    return loadOrgMemoryInjector(file);
+  }
+
+  /**
+   * Dispatch one write-lane step and return the system prompt the provider
+   * was actually sent — not the `AgentDef` the dispatcher assembled, the
+   * bytes on the request.
+   *
+   * @param approve - Whether the entry was approved first.
+   */
+  async function systemPromptSeen(approve: boolean): Promise<string> {
+    const scratch = await gitScratch();
+    const llm = fakeLLM([{ text: "ok" }]);
+    const runtime = await runtimeWith(scratch, llm);
+    const developer = role("developer", ["read", "write", "edit"]);
+    const workflow = parseOk("---\nname: demo\n---\n1. @developer do it\n");
+    await createRuntimeRunStep(runtime, {
+      resolveAgent: () => developer,
+      writeLane: laneFor(runtime, `run-memory-${approve ? "active" : "proposed"}`),
+      orgMemory: await injectorWith(scratch.home, approve),
+    })(firstRequest(workflow));
+    const seen = llm.requests[0];
+    if (seen === undefined) throw new Error("the role never took a turn");
+    return `${seen.system ?? ""}\n${JSON.stringify(seen.messages)}`;
+  }
+
+  it("keeps a PROPOSED entry out of the prompt the model is sent", async () => {
+    expect(await systemPromptSeen(false)).not.toContain(NOTE);
+  });
+
+  it("puts an APPROVED entry into the prompt the model is sent", async () => {
+    // The control: identical fixture, one human act different.
+    expect(await systemPromptSeen(true)).toContain(NOTE);
+  });
+});
+
+// ================================================================== resume
+
+describe("resume replays the journal instead of re-running — against a real checkout", () => {
+  itPosix(
+    "a completed stage's patch is not applied a second time, and its model is not asked again",
+    async () => {
+      const scratch = await gitScratch();
+      const journalDir = join(scratch.home, "resume-journal");
+      const runId = "run-resume";
+      const developer = role("developer", ["read", "write", "edit", "bash"]);
+      const workflow = parseOk(
+        "---\nname: pipeline\n---\n1. @developer stage one\n2. @developer stage two {{prev}}\n",
+      );
+
+      // ---- run one: stage one lands its patch, then the run is killed.
+      const first = fakeLLM([
+        {
+          toolCalls: [
+            {
+              id: "a1",
+              name: "bash",
+              arguments: { command: "printf 'from stage 1\\n' >> seed.txt" },
+            },
+          ],
+        },
+        { text: "stage one done" },
+        // Stage two is still thinking when the interrupt arrives.
+        { text: "stage two done", delayMs: 3_000 },
+      ]);
+      const runtimeOne = await runtimeWith(scratch, first);
+      const controller = new AbortController();
+      const killed = await runWorkflow(workflow, {
+        resolveAgent: () => developer,
+        agentNames: () => ["developer"],
+        journal: createFileRunJournal(journalDir),
+        runId,
+        signal: controller.signal,
+        // Kill the run the moment stage one has settled — the crash window this
+        // whole mechanism exists for.
+        onEvent: (event) => {
+          if (event.type === "stageEnd" && event.stageIndex === 1) controller.abort();
+        },
+        runStep: createRuntimeRunStep(runtimeOne, {
+          resolveAgent: () => developer,
+          writeLane: laneFor(runtimeOne, runId),
+        }),
+      });
+      expect(killed.status).toBe("cancelled");
+      // Stage one's edit really is in the user's checkout, exactly once.
+      expect(await readFile(join(scratch.cwd, "seed.txt"), "utf8")).toBe("seed\nfrom stage 1\n");
+
+      // ---- run two: resume from what survived on disk.
+      const lines = await readJournalLines(journalDir);
+      const state = buildResumeState(lines);
+      expect([...state.completed.keys()]).toEqual(["1"]);
+
+      const second = fakeLLM([
+        {
+          toolCalls: [
+            {
+              id: "b1",
+              name: "bash",
+              arguments: { command: "printf 'from stage 2\\n' >> seed.txt" },
+            },
+          ],
+        },
+        { text: "stage two done" },
+      ]);
+      const runtimeTwo = await runtimeWith(scratch, second);
+      const resumed = await runWorkflow(workflow, {
+        resolveAgent: () => developer,
+        agentNames: () => ["developer"],
+        journal: createFileRunJournal(journalDir),
+        runId,
+        resumeFrom: state,
+        runStep: createRuntimeRunStep(runtimeTwo, {
+          resolveAgent: () => developer,
+          writeLane: laneFor(runtimeTwo, runId),
+        }),
+      });
+
+      expect(resumed.steps[1]?.error).toBeUndefined();
+      expect(resumed.status).toBe("done");
+      // Stage one was replayed from the journal: its model was never asked
+      // again. Two requests is stage two's own script and nothing else.
+      expect(second.requests).toHaveLength(2);
+      // The effect that matters most: stage one's line appears once, not twice.
+      // A re-executed or re-applied stage one would either duplicate the line or
+      // fail `git apply` outright.
+      expect(await readFile(join(scratch.cwd, "seed.txt"), "utf8")).toBe(
+        "seed\nfrom stage 1\nfrom stage 2\n",
+      );
+    },
+    20_000,
+  );
+
+  itPosix(
+    "resumes past a stage whose patch created a NEW file in the checkout",
+    async () => {
+      // The other half of the same defect. Stage one's patch leaves an
+      // *untracked* file behind, so on resume `git ls-files --others` listed it
+      // into the next worktree's seed and `seed.patches` then replayed the patch
+      // that created it — `git apply` refuses a "new file" that is already there.
+      const scratch = await gitScratch();
+      const journalDir = join(scratch.home, "resume-new-file");
+      const runId = "run-resume-new";
+      const developer = role("developer", ["read", "write", "edit", "bash"]);
+      const workflow = parseOk(
+        "---\nname: pipeline\n---\n1. @developer stage one\n2. @developer stage two {{prev}}\n",
+      );
+
+      const first = fakeLLM([
+        {
+          toolCalls: [
+            { id: "a1", name: "bash", arguments: { command: "printf 'brand new\\n' > fresh.txt" } },
+          ],
+        },
+        { text: "stage one done" },
+        { text: "stage two done", delayMs: 3_000 },
+      ]);
+      const runtimeOne = await runtimeWith(scratch, first);
+      const controller = new AbortController();
+      await runWorkflow(workflow, {
+        resolveAgent: () => developer,
+        agentNames: () => ["developer"],
+        journal: createFileRunJournal(journalDir),
+        runId,
+        signal: controller.signal,
+        onEvent: (event) => {
+          if (event.type === "stageEnd" && event.stageIndex === 1) controller.abort();
+        },
+        runStep: createRuntimeRunStep(runtimeOne, {
+          resolveAgent: () => developer,
+          writeLane: laneFor(runtimeOne, runId),
+        }),
+      });
+      expect(await readFile(join(scratch.cwd, "fresh.txt"), "utf8")).toBe("brand new\n");
+
+      const second = fakeLLM([{ text: "stage two done" }]);
+      const runtimeTwo = await runtimeWith(scratch, second);
+      const resumed = await runWorkflow(workflow, {
+        resolveAgent: () => developer,
+        agentNames: () => ["developer"],
+        journal: createFileRunJournal(journalDir),
+        runId,
+        resumeFrom: buildResumeState(await readJournalLines(journalDir)),
+        runStep: createRuntimeRunStep(runtimeTwo, {
+          resolveAgent: () => developer,
+          writeLane: laneFor(runtimeTwo, runId),
+        }),
+      });
+
+      expect(resumed.steps[1]?.error).toBeUndefined();
+      expect(resumed.status).toBe("done");
+      // Written once, by the stage that was never re-run.
+      expect(await readFile(join(scratch.cwd, "fresh.txt"), "utf8")).toBe("brand new\n");
+    },
+    20_000,
+  );
+});
+
+// ================================================================= ORG-HALT
+
+describe("ORG-HALT short-circuits every later stage — nothing is dispatched", () => {
+  it("never builds the later role's agent, never asks its model, never makes its worktree", async () => {
+    const scratch = await gitScratch();
+    // Stage one halts. Whatever the script says next belongs to stage two, and
+    // stage two must never get to say it.
+    const llm = fakeLLM([
+      { text: "ORG-HALT: the spec contradicts itself; a person has to decide." },
+      { text: "STAGE TWO SHOULD NEVER SPEAK" },
+    ]);
+    const runtime = await runtimeWith(scratch, llm);
+
+    const runId = "run-halt";
+    const developer = role("developer", ["read", "write", "edit"]);
+    const workflow = parseOk(
+      "---\nname: demo\n---\n1. @developer decide\n2. @developer act on {{prev}}\n",
+    );
+    const result = await runWorkflow(workflow, {
+      resolveAgent: () => developer,
+      agentNames: () => ["developer"],
+      runStep: createRuntimeRunStep(runtime, {
+        resolveAgent: () => developer,
+        writeLane: laneFor(runtime, runId),
+      }),
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.steps[1]?.status).toBe("skipped");
+    // The effects: stage two's model was never asked a single question…
+    expect(llm.requests).toHaveLength(1);
+    // …and no worktree was ever cut for it. Only stage one's exists under the
+    // run directory (kept, because a halted step's tree is evidence).
+    const runDir = join(scratch.home, "workflow-runs", runId);
+    expect(await exists(join(runDir, "2-developer"))).toBe(false);
+  });
+});

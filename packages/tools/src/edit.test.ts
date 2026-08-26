@@ -112,3 +112,126 @@ describe("edit tool", () => {
     expect(written).toBe("one\n");
   });
 });
+
+/**
+ * Effect-asserting cases: every expectation below is on the *bytes on disk*
+ * after the call, not on what the call returned. A tool that reports
+ * `Edited …` while it silently rewrote bytes the caller never named passes
+ * every assertion that only looks at the result.
+ */
+describe("edit tool — bytes on disk", () => {
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "arcturn-edit-bytes-"));
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("refuses a file that is not valid UTF-8 instead of corrupting the bytes around the edit", async () => {
+    // `0xe9` is `é` in Latin-1 and an invalid UTF-8 byte. Decoding the file as
+    // UTF-8 turns it into U+FFFD, and writing the result back re-encodes that
+    // as `EF BF BD` — three bytes replacing one, in a line the caller never
+    // mentioned. The old tool did exactly that and reported success.
+    const path = join(dir, "latin1.txt");
+    const original = Buffer.concat([
+      Buffer.from("caf", "latin1"),
+      Buffer.from([0xe9]),
+      Buffer.from("\nTARGET\n"),
+    ]);
+    await writeFile(path, original);
+
+    const tool = createEditTool();
+    const { ctx } = createFakeContext({ cwd: dir });
+    const result = await tool.execute(
+      { path: "latin1.txt", oldText: "TARGET", newText: "REPLACED" },
+      ctx,
+    );
+
+    expect(result.isError).toBe(true);
+    expect((result.content[0] as { text: string }).text).toContain("not valid UTF-8");
+    expect(await readFile(path)).toEqual(original);
+  });
+
+  it("does not write when the file changed between the read and the permission grant", async () => {
+    // The permission prompt sits in front of a human for as long as it takes
+    // them to answer. `newContent` was spliced from a snapshot taken before
+    // it; writing that snapshot back discards whatever the user's editor, a
+    // formatter, or a parallel tool call saved in the meantime — silently,
+    // while reporting a successful edit.
+    const path = join(dir, "race.txt");
+    await writeFile(path, "alpha\nbeta\n");
+    const concurrent = "alpha\nbeta\nadded by someone else\n";
+
+    const tool = createEditTool();
+    const { ctx } = createFakeContext({
+      cwd: dir,
+      onPermissionRequest: async () => {
+        await writeFile(path, concurrent);
+        return { requestId: "test", behavior: "allow" };
+      },
+    });
+
+    const result = await tool.execute(
+      { path: "race.txt", oldText: "alpha", newText: "ALPHA" },
+      ctx,
+    );
+
+    expect(result.isError).toBe(true);
+    expect((result.content[0] as { text: string }).text).toContain("changed on disk");
+    // The concurrent write survived intact — no part of it was clobbered.
+    expect(await readFile(path, "utf8")).toBe(concurrent);
+  });
+
+  it("leaves the file byte-identical when the edit fails to match", async () => {
+    const path = join(dir, "unchanged.txt");
+    const original = Buffer.from("one\ntwo\nthree\n");
+    await writeFile(path, original);
+
+    const tool = createEditTool();
+    const { ctx, permissionRequests } = createFakeContext({ cwd: dir });
+    const result = await tool.execute(
+      { path: "unchanged.txt", oldText: "four", newText: "5" },
+      ctx,
+    );
+
+    expect(result.isError).toBe(true);
+    expect(await readFile(path)).toEqual(original);
+    // A failed match must not even reach the prompt.
+    expect(permissionRequests).toHaveLength(0);
+  });
+
+  it("preserves a CRLF file's exact bytes outside the replaced region", async () => {
+    const path = join(dir, "crlf.txt");
+    await writeFile(path, Buffer.from("one\r\ntwo\r\nthree\r\n"));
+
+    const tool = createEditTool();
+    const { ctx } = createFakeContext({ cwd: dir });
+    // The model reads lines split on "\n", so the oldText it echoes back is
+    // LF-joined even though the file is CRLF.
+    const result = await tool.execute(
+      { path: "crlf.txt", oldText: "one\ntwo", newText: "ONE\nTWO" },
+      ctx,
+    );
+
+    expect(result.isError).toBeFalsy();
+    expect(await readFile(path)).toEqual(Buffer.from("ONE\r\nTWO\r\nthree\r\n"));
+  });
+
+  it("does not invent a trailing newline in a file that has none", async () => {
+    const path = join(dir, "no-trailing-newline.txt");
+    await writeFile(path, Buffer.from("first\nlast"));
+
+    const tool = createEditTool();
+    const { ctx } = createFakeContext({ cwd: dir });
+    const result = await tool.execute(
+      { path: "no-trailing-newline.txt", oldText: "last", newText: "final" },
+      ctx,
+    );
+
+    expect(result.isError).toBeFalsy();
+    expect(await readFile(path)).toEqual(Buffer.from("first\nfinal"));
+  });
+});

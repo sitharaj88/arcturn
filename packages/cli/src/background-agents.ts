@@ -34,6 +34,7 @@ import {
 import type { LLMClient, Message, ModelSpec, PermissionMode, Tool, Usage } from "@arcturn/types";
 import type { CommandContext, CommandUi, SlashCommand } from "./commands.js";
 import { formatCost, formatDuration, oneLine } from "./format.js";
+import { isProcessAlive } from "./process-liveness.js";
 import type { ArcturnRuntime } from "./runtime.js";
 
 /**
@@ -130,6 +131,15 @@ export interface BackgroundAgentManagerOptions {
   maxTurns?: number;
   /** Clock override, for tests. Defaults to `Date.now`. */
   now?: () => number;
+  /**
+   * Does a pid name a live process? Defaults to a `kill(pid, 0)` probe.
+   *
+   * Used to tell a record left behind by a dead process from one another
+   * *living* process is still running — see {@link StoredRecord.ownerPid}.
+   */
+  isProcessAlive?: (pid: number) => boolean;
+  /** This process's own pid, stamped on the agents it starts. For tests. */
+  ownerPid?: number;
 }
 
 /** The system prompt handed to a background agent when none is configured. */
@@ -158,6 +168,21 @@ interface StoredRecord {
   costUsd: number;
   finalText?: string;
   error?: string;
+  /**
+   * The pid of the process running this agent, while it is `running`.
+   *
+   * `~/.arcturn` is shared: `arcturn serve` and a terminal session run over the
+   * same records directory at once. Without this, merely *constructing* the
+   * second process's manager rewrote a live agent's record to `interrupted`,
+   * so `/bg` there reported a running job as failed and `result()` resolved
+   * immediately with that lie — until the owning process finished and wrote
+   * the truth back over it.
+   *
+   * Absent (a record written before this existed) reads as "gone", which is
+   * the pre-existing behaviour and correct for the case this was always right
+   * about: a process that really did die.
+   */
+  ownerPid?: number;
 }
 
 /** A background agent actually in flight (constructed, mid-`prompt()`). */
@@ -254,6 +279,8 @@ export class BackgroundAgentManager {
   readonly #systemPrompt: string;
   readonly #maxTurns: number | undefined;
   readonly #now: () => number;
+  readonly #isProcessAlive: (pid: number) => boolean;
+  readonly #ownerPid: number;
 
   #llm: LLMClient;
   #model: ModelSpec;
@@ -280,6 +307,8 @@ export class BackgroundAgentManager {
     this.#concurrency = Math.max(1, Math.floor(options.concurrency ?? DEFAULT_CONCURRENCY));
     this.#maxTurns = options.maxTurns;
     this.#now = options.now ?? Date.now;
+    this.#isProcessAlive = options.isProcessAlive ?? isProcessAlive;
+    this.#ownerPid = options.ownerPid ?? process.pid;
     mkdirSync(this.#recordsDir, { recursive: true });
     this.#load();
   }
@@ -329,6 +358,7 @@ export class BackgroundAgentManager {
       createdAt: this.#now(),
       usage: emptyUsage(),
       costUsd: 0,
+      ownerPid: this.#ownerPid,
     };
     this.#records.set(id, record);
     this.#order.push(id);
@@ -581,8 +611,12 @@ export class BackgroundAgentManager {
       }
       // A fresh manager has no live handle for anything it didn't itself
       // launch — a record still `"running"` here belongs to a process that
-      // is gone.
-      if (record.status === "running") {
+      // is gone, UNLESS its owner is still alive, which is the ordinary shape
+      // of `arcturn serve` running beside a terminal over one `~/.arcturn`.
+      if (
+        record.status === "running" &&
+        !(record.ownerPid !== undefined && this.#isProcessAlive(record.ownerPid))
+      ) {
         record.status = "interrupted";
         record.endedAt ??= this.#now();
         record.error ??= "The process running this background agent exited before it finished.";

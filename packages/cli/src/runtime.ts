@@ -43,6 +43,9 @@ import {
   type DeferredToolset,
   emptyUsage,
   JsonlSessionStore,
+  latestEntryId,
+  materializeBranch,
+  pathToLeaf,
   wrapToolsWithOffload,
 } from "@arcturn/core";
 import { createSearchCodeTool } from "@arcturn/index";
@@ -471,6 +474,15 @@ export class ArcturnRuntime {
   mcp: McpManager | undefined;
   /** Active cost ceiling in USD, `0` when disabled. */
   costLimitUsd = 0;
+  /**
+   * Whether {@link ArcturnRuntime.model} was named explicitly for this
+   * invocation (a `--model` flag), rather than defaulted from config.
+   *
+   * Read by {@link ArcturnRuntime.resumeSession}: a resumed session adopts
+   * the model it was last switched to, but never over a flag the user typed
+   * just now. Set by `buildRuntime`; `false` for a runtime built without one.
+   */
+  modelPinned = false;
   /** Running token/cost totals for the live session. */
   metrics: SessionMetrics = { turns: 0, usage: emptyUsage(), costUsd: 0, unpricedTurns: 0 };
 
@@ -809,10 +821,20 @@ export class ArcturnRuntime {
    * @param sessionId - Session to resume.
    */
   async resumeSession(sessionId: string): Promise<Agent> {
+    // Before `#agentOptions` reads `this.model`: the resumed agent's model
+    // decides its compaction budget and the cost readout as well as which
+    // provider answers, so adopting it afterwards would leave three things
+    // disagreeing about one session.
+    await this.#adoptStoredModel(sessionId);
     const next = await Agent.resume({
       ...this.#agentOptions({ sessionId }),
       sessionStore: this.store,
       sessionId,
+      // Gated on the same pin `#adoptStoredModel` reads, or a `--model` flag
+      // would hold for the runtime and lose for the agent the runtime is
+      // about to install — the two would disagree about one session, which is
+      // the exact failure this whole path exists to remove.
+      ...(this.modelPinned ? {} : { resolveModel: (id: string) => getModel(id) ?? undefined }),
       // Speculation only has anything to shelter if a second tool call can
       // run while the first one's permission prompt is open — with strictly
       // sequential tools the whole feature is inert.
@@ -820,6 +842,38 @@ export class ArcturnRuntime {
     });
     this.#swap(next);
     return next;
+  }
+
+  /**
+   * Point this runtime at the model the session being resumed was last
+   * switched to.
+   *
+   * `/model` records the switch as a `state` entry, but until this existed
+   * nothing read it back: re-opening a session silently reverted it to
+   * whatever `--model`/config resolved at startup, and the only sign was a
+   * different answer style and a different bill.
+   *
+   * An explicit `--model` still wins ({@link ArcturnRuntime.modelPinned}): a
+   * flag the user typed for THIS invocation outranks a choice recorded in a
+   * file. So does a model id this build no longer registers, which resolves
+   * to nothing and leaves the current one alone.
+   *
+   * Never throws: a session that cannot be read is `Agent.resume`'s problem
+   * to report, and it reports it better than a half-finished model swap.
+   */
+  async #adoptStoredModel(sessionId: string): Promise<void> {
+    if (this.modelPinned) return;
+    try {
+      const entries = await this.store.entries(sessionId);
+      const leafId = latestEntryId(entries);
+      if (leafId === null) return;
+      const stored = materializeBranch(pathToLeaf(entries, leafId)).model;
+      if (stored === undefined || stored === this.model.id) return;
+      const spec = getModel(stored);
+      if (spec) this.model = spec;
+    } catch {
+      // Unreadable session: leave the model alone and let `resume` speak.
+    }
   }
 
   /**
@@ -1674,6 +1728,13 @@ export interface BuildRuntimeOptions {
    * layers that have real side effects.
    */
   wrapAgentTools?: (tools: Tool[]) => Tool[];
+  /**
+   * Last-chance hook over the LLM client, applied INSIDE failover and
+   * consensus. `--record` uses it to tee every request and response into a
+   * cassette; the placement is what makes the recording name the model that
+   * actually answered rather than the head of the chain.
+   */
+  wrapLlm?: (llm: LLMClient) => LLMClient;
   /** Permission mode override (`--permission-mode`). */
   permissionMode?: PermissionMode;
   /** Maximum model turns per run (`--max-turns`). */
@@ -1765,7 +1826,7 @@ export async function buildRuntime(options: BuildRuntimeOptions = {}): Promise<A
   // Per-role models: a cheap one for sub-agents/compaction keeps a long
   // session affordable without downgrading the main loop.
   const router = createModelRouter(config.route ?? {}, (id) => resolveModelSpec(id, env), model);
-  const baseClient =
+  const configuredClient =
     options.llm ??
     createClient({
       env,
@@ -1775,6 +1836,11 @@ export async function buildRuntime(options: BuildRuntimeOptions = {}): Promise<A
         ? {}
         : { requestStallTimeoutMs: config.requestStallTimeoutMs }),
     });
+  // `wrapLlm` sits *inside* failover and consensus on purpose: `--record`'s
+  // tee has to see whichever link actually answered, because a cassette is a
+  // recording of what happened, not of what was attempted.
+  const baseClient =
+    options.wrapLlm === undefined ? configuredClient : options.wrapLlm(configuredClient);
   // One shared client, one link per model: dispatch already routes on the
   // request's model, so the chain only has to override that per attempt.
   const llm =
@@ -2071,6 +2137,25 @@ export async function buildRuntime(options: BuildRuntimeOptions = {}): Promise<A
   // one mid-session, and a guard that only existed when a limit was set at
   // startup would silently ignore it.
   runtime.costLimitUsd = options.maxCostUsd ?? config.maxCostUsd ?? 0;
+  // A ceiling that can never fire is worse than no ceiling, because the user
+  // believes they are protected: the guard compares against
+  // `metrics.costUsd`, which only ever moves for a model that publishes
+  // pricing. Every `openai-compatible` endpoint registered without a `cost`
+  // — Ollama, vLLM, an in-house gateway, an extension's `registerModel` —
+  // lands here, and the run then goes all the way to `--max-turns` spending
+  // whatever it spends. Say so once, at startup, rather than never.
+  if (runtime.costLimitUsd > 0 && modelSpecs.every((spec) => spec.cost === undefined)) {
+    warnings.push(
+      `--max-cost $${runtime.costLimitUsd} cannot be enforced: ${model.displayName} publishes ` +
+        "no pricing, so this run's cost is unknown and the ceiling will never trip. " +
+        "Use --max-turns to bound it instead.",
+    );
+  }
+  // A `--model` flag pins the model for this invocation, so `--continue` and
+  // `/sessions` do not adopt the one recorded in the session they open. A
+  // model that merely came from config is not a choice made about THIS run,
+  // and loses to the session's own record.
+  runtime.modelPinned = options.model !== undefined;
   const costGuard = createCostGuard({
     // A live getter, so raising or lowering the ceiling takes effect at once.
     get limitUsd() {

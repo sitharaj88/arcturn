@@ -69,6 +69,7 @@ import type { AgentEvent, ModelSpec, Tool, Usage } from "@arcturn/types";
 import type { AgentDef } from "./agents.js";
 import type { CommandContext, CommandUi, SlashCommand } from "./commands.js";
 import { formatCost, formatCostTotal, formatDuration, oneLine } from "./format.js";
+import { isProcessAlive } from "./process-liveness.js";
 import type { ArcturnRuntime } from "./runtime.js";
 import { createWorktree, type ExecFn, type GitExecResult, type Worktree } from "./scouts.js";
 
@@ -1035,9 +1036,26 @@ interface StoredTeam {
   /**
    * Set while a process owns this team; cleared once {@link TeamManager.recover}
    * has salvaged and torn down its worktrees. A record loaded with this still
-   * set belongs to a process that died.
+   * set belongs to a process that died — unless {@link StoredTeam.ownerPid}
+   * says otherwise.
    */
   needsRecovery?: boolean;
+  /**
+   * The pid of the process that started this team, while it owns it.
+   *
+   * `~/.arcturn` is shared: `arcturn serve` and a terminal session run side by
+   * side over the same records directory. Without this, *constructing* a
+   * manager in the second process rewrote every still-`running` record to
+   * `interrupted` and marked it recoverable — and the next `recover()` (which
+   * `start`, `merge` and `discard` all await) captured a half-written diff and
+   * tore down the worktrees the *live* team was still editing.
+   *
+   * So a record names its owner, and a loader that finds that owner alive
+   * leaves the record alone. Absent (a record written before this existed) is
+   * read as "gone", which is the pre-existing behaviour and the safe default
+   * for the case this was always right about: a process that really did die.
+   */
+  ownerPid?: number;
 }
 
 /** State for a team this process is actively running. */
@@ -1137,6 +1155,16 @@ export interface TeamManagerOptions {
   gitTimeoutMs?: number;
   /** Clock override, for tests. Defaults to `Date.now`. */
   now?: () => number;
+  /**
+   * Does a pid name a live process? Defaults to a `kill(pid, 0)` probe.
+   *
+   * Used to tell a record left behind by a dead process from one another
+   * *living* process (`arcturn serve` beside a terminal) is still working in —
+   * see {@link StoredTeam.ownerPid}.
+   */
+  isProcessAlive?: (pid: number) => boolean;
+  /** This process's own pid, stamped on the teams it starts. For tests. */
+  ownerPid?: number;
 }
 
 /** Options for {@link TeamManager.start}. */
@@ -1191,6 +1219,8 @@ export class TeamManager {
   readonly #maxTurnsPerMember: number;
   readonly #gitTimeoutMs: number;
   readonly #now: () => number;
+  readonly #isProcessAlive: (pid: number) => boolean;
+  readonly #ownerPid: number;
 
   #spawn: TeamSpawn;
   #roles: ReadonlyMap<string, TeamRole>;
@@ -1226,6 +1256,8 @@ export class TeamManager {
     this.#execFn = options.execFn ?? defaultExecFn;
     this.#gitTimeoutMs = options.gitTimeoutMs ?? GIT_TIMEOUT_MS;
     this.#now = options.now ?? Date.now;
+    this.#isProcessAlive = options.isProcessAlive ?? isProcessAlive;
+    this.#ownerPid = options.ownerPid ?? process.pid;
     mkdirSync(this.#recordsDir, { recursive: true });
     mkdirSync(this.#teamsDir, { recursive: true });
     this.#load();
@@ -1338,6 +1370,7 @@ export class TeamManager {
       warnings: [],
       members: [],
       needsRecovery: true,
+      ownerPid: this.#ownerPid,
     };
     this.#records.set(record.id, record);
     this.#order.push(record.id);
@@ -1594,6 +1627,20 @@ export class TeamManager {
   }
 
   // ----------------------------------------------------------------- internals
+
+  /**
+   * Is this record's owning process still alive and not this manager's?
+   *
+   * A record we started ourselves is excluded deliberately: our own pid is
+   * always alive, and a team this process is genuinely running must not be
+   * recovered out from under itself either. What is left — no pid, a dead pid,
+   * or a pid that is alive but was never recorded — recovers exactly as before.
+   *
+   * @param record - The stored team to judge.
+   */
+  #ownedByLiveProcess(record: StoredTeam): boolean {
+    return record.ownerPid !== undefined && this.#isProcessAlive(record.ownerPid);
+  }
 
   #newId(): string {
     let id: string;
@@ -2031,7 +2078,9 @@ export class TeamManager {
       removedWorktrees: [],
       warnings: [],
     };
-    const stale = [...this.#records.values()].filter((record) => record.needsRecovery === true);
+    const stale = [...this.#records.values()].filter(
+      (record) => record.needsRecovery === true && !this.#ownedByLiveProcess(record),
+    );
     if (stale.length === 0) return report;
 
     for (const record of stale) {
@@ -2156,8 +2205,14 @@ export class TeamManager {
       record.roles ??= [];
       for (const member of record.members) member.unpricedTurns ??= 0;
       // A fresh manager has no live handle for anything it did not itself
-      // launch: a record still running here belongs to a process that is gone.
-      if (record.status === "running" || record.status === "planning") {
+      // launch: a record still running here belongs to a process that is gone
+      // — UNLESS its owner is still alive, which is the ordinary shape of
+      // `arcturn serve` running beside a terminal over one `~/.arcturn`. That
+      // team is not interrupted, and its worktrees are not ours to tear down.
+      if (
+        (record.status === "running" || record.status === "planning") &&
+        !this.#ownedByLiveProcess(record)
+      ) {
         record.status = "interrupted";
         record.endedAt ??= this.#now();
         record.warnings.push("The process running this team exited before it finished.");

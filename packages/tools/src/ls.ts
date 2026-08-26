@@ -64,16 +64,24 @@ export function createLsTool(): Tool {
 
       const entries: Entry[] = await Promise.all(
         dirEntries.map(async (entry): Promise<Entry> => {
-          const isDir = entry.isDirectory();
-          let size = 0;
-          if (!isDir) {
-            try {
-              size = (await stat(join(dirPath, entry.name))).size;
-            } catch {
-              size = 0;
-            }
+          if (entry.isDirectory()) return { name: entry.name, isDir: true, size: 0 };
+          // `readdir` does not look through a symlink, so `isDirectory()` is
+          // false for one pointing at a directory — and this tool's own
+          // description promises directories are suffixed with "/". Without
+          // the stat, a `docs -> ../shared-docs` link is rendered as a file
+          // whose "size" is the directory inode's, and a model that reads it
+          // back is told it is a directory after all. One `stat` per non-dir
+          // entry was already being made for the size; this just also asks
+          // what the entry *is*. A dangling link stats to nothing and stays a
+          // zero-byte file, which is the honest answer for a broken link.
+          try {
+            const target = await stat(join(dirPath, entry.name));
+            return target.isDirectory()
+              ? { name: entry.name, isDir: true, size: 0 }
+              : { name: entry.name, isDir: false, size: target.size };
+          } catch {
+            return { name: entry.name, isDir: false, size: 0 };
           }
-          return { name: entry.name, isDir, size };
         }),
       );
 

@@ -196,6 +196,8 @@ export interface CliArgs {
   webOrigins?: string[];
   /** `--cassette`: VCR recording used by `arcturn bisect`. */
   cassette?: string;
+  /** `--record`: write this run's model and tool calls to a cassette file. */
+  record?: string;
   /** `--model`: catalog model id. */
   model?: string;
   /** `--continue`: resume the newest session for this directory. */
@@ -500,6 +502,7 @@ const VALUE_FLAGS = new Set([
   "--port",
   "--token",
   "--cassette",
+  "--record",
   "--output-format",
   "--web-port",
   "--web-origin",
@@ -660,6 +663,12 @@ export function parseArgs(
         break;
       case "--cassette":
         args.cassette = value;
+        break;
+      case "--record":
+        if (value === undefined || value === "") {
+          return { ok: false, error: "--record needs a file path for the cassette" };
+        }
+        args.record = value;
         break;
       case "--port": {
         const port = Number(value);
@@ -893,10 +902,22 @@ Options
       --port <n>                With serve: port to bind (default 7717).
       --token <secret>          With serve: shared auth token (generated if omitted).
       --cassette <file>         With bisect: the VCR recording to compare against.
+      --record <file>           Record this run's model and tool calls to a cassette,
+                                so "arcturn bisect --cassette <file>" has one to read.
       --list-models             Print the model catalog and exit.
       --list-providers          Print every provider and preset endpoint, and exit.
   -h, --help                    Show this help.
   -v, --version                 Print the version.
+
+Exit codes
+  0   Success. The run completed, or --help/--version/a listing printed.
+      A tool the model asked for may still have been refused: a non-interactive
+      run cannot ask, so it denies, tells the model, and says so on stderr.
+  1   The run started but did not complete — a provider error, an interrupted
+      run, or a ceiling (--max-turns, --max-cost) stopping it early.
+  2   Nothing ran. A bad flag, an unknown model, a --cwd that is not there, a
+      session that could not be read, a port already in use, or a command that
+      needs a terminal and did not get one.
 
 Configuration
   ~/.arcturn/config.json            User settings and permission rules.

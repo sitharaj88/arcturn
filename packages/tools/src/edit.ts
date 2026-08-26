@@ -3,7 +3,7 @@
 import { readFile, stat, writeFile } from "node:fs/promises";
 import type { Tool, ToolResult } from "@arcturn/types";
 import { createUnifiedDiff } from "./diff.js";
-import { resolvePath } from "./path-utils.js";
+import { resolvePath, resolveSubjectPath } from "./path-utils.js";
 import { abortedResult, errorResult, textResult } from "./result-utils.js";
 
 export interface EditToolDetails {
@@ -133,11 +133,26 @@ export function createEditTool(): Tool {
       }
       if (ctx.signal.aborted) return abortedResult();
 
-      let originalContent: string;
+      let originalBuffer: Buffer;
       try {
-        originalContent = await readFile(absolutePath, "utf8");
+        originalBuffer = await readFile(absolutePath);
       } catch (error) {
         return errorResult(`Failed to read ${absolutePath}: ${(error as Error).message}`);
+      }
+      const originalContent = originalBuffer.toString("utf8");
+      // `edit` is a *text* tool: it decodes, splices, and re-encodes the whole
+      // file. Every byte that is not valid UTF-8 decodes to U+FFFD and
+      // re-encodes as `EF BF BD`, so a single Latin-1 byte anywhere in the
+      // file — a `caf\xe9` in a fixture, a stray CP-1252 quote in a legacy
+      // source — is silently destroyed by an edit to an unrelated line, and
+      // the tool reports success. Refuse instead: the caller can rewrite the
+      // file wholesale with `write` if that is really what it meant.
+      if (!Buffer.from(originalContent, "utf8").equals(originalBuffer)) {
+        return errorResult(
+          `${absolutePath} is not valid UTF-8 text, so editing it would corrupt the bytes ` +
+            "outside the region you asked to change. Nothing was written. Use write to " +
+            "replace the whole file, or fix the file's encoding first.",
+        );
       }
 
       let occurrences = countOccurrences(originalContent, oldText);
@@ -178,17 +193,44 @@ export function createEditTool(): Tool {
           : originalContent.replace(oldText, newText);
       const replacements = replaceAll ? occurrences : 1;
 
+      // The subject must name where the bytes land, not how the path was
+      // spelled: `writeFile` follows symlinks, so a link inside the workspace
+      // pointing outside it would otherwise be matched against rules as if it
+      // were an in-workspace file. See `resolveSubjectPath`.
+      const subjectPath = await resolveSubjectPath(ctx.cwd, absolutePath);
+      const viaNote = subjectPath === absolutePath ? "" : ` (via ${absolutePath})`;
       const decision = await ctx.requestPermission({
         toolName: "edit",
         toolCallId: ctx.toolCallId,
-        subject: absolutePath,
-        description: `Edit ${absolutePath} (${replacements} replacement${replacements === 1 ? "" : "s"})`,
-        suggestedRule: { tool: "edit", specifier: absolutePath, action: "allow" },
+        subject: subjectPath,
+        description: `Edit ${subjectPath}${viaNote} (${replacements} replacement${replacements === 1 ? "" : "s"})`,
+        suggestedRule: { tool: "edit", specifier: subjectPath, action: "allow" },
       });
       if (decision.behavior !== "allow") {
-        return errorResult(decision.message ?? `Permission denied to edit ${absolutePath}.`);
+        return errorResult(decision.message ?? `Permission denied to edit ${subjectPath}.`);
       }
       if (ctx.signal.aborted) return abortedResult();
+
+      // Everything above — the match, the replacement, the diff about to be
+      // shown — was computed from a snapshot taken *before* the permission
+      // prompt, and that prompt can sit in front of a human for minutes.
+      // Writing `newContent` blind would silently throw away whatever the
+      // user's editor, a formatter or a concurrent tool call saved in the
+      // meantime, and report success while doing it. Re-read and refuse
+      // instead; the caller re-reads and retries against the current file.
+      let currentBuffer: Buffer;
+      try {
+        currentBuffer = await readFile(absolutePath);
+      } catch (error) {
+        return errorResult(`Failed to read ${absolutePath}: ${(error as Error).message}`);
+      }
+      if (!currentBuffer.equals(originalBuffer)) {
+        return errorResult(
+          `${absolutePath} changed on disk after it was read and before this edit could be ` +
+            "applied, so the edit was not written — applying it would have discarded that " +
+            "change. Read the file again and redo the edit against its current contents.",
+        );
+      }
 
       try {
         await writeFile(absolutePath, newContent, "utf8");
@@ -206,8 +248,11 @@ export function createEditTool(): Tool {
       const recoveryNote = lineEndingRecovered
         ? " (oldText matched after normalizing \\n/\\r\\n line endings; the file's own line endings were preserved.)"
         : "";
+      // See the same note in `write`: a symlink is invisible in the argument.
+      const landedNote =
+        subjectPath === absolutePath ? "" : ` The file it resolves to is ${subjectPath}.`;
       return textResult(
-        `Edited ${absolutePath} (${replacements} replacement${replacements === 1 ? "" : "s"}).${recoveryNote}\n\n${diff}`,
+        `Edited ${absolutePath} (${replacements} replacement${replacements === 1 ? "" : "s"}).${recoveryNote}${landedNote}\n\n${diff}`,
         details as unknown as Record<string, unknown>,
       );
     },

@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -65,5 +65,61 @@ describe("write tool", () => {
     expect(result.isError).toBe(true);
     expect((result.content[0] as { text: string }).text).toContain("nope");
     await expect(readFile(join(dir, "denied.txt"), "utf8")).rejects.toThrow();
+  });
+});
+
+describe("write tool — bytes on disk", () => {
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "arcturn-write-bytes-"));
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("writes the content verbatim, CRLF and a missing trailing newline included", async () => {
+    const content = "first\r\nsecond\r\nno trailing newline";
+    const tool = createWriteTool();
+    const { ctx } = createFakeContext({ cwd: dir });
+
+    await tool.execute({ path: "verbatim.txt", content }, ctx);
+
+    expect(await readFile(join(dir, "verbatim.txt"))).toEqual(Buffer.from(content, "utf8"));
+  });
+
+  it("reports the byte count the file actually has, not the character count", async () => {
+    const content = "café ☕\n"; // 7 characters, 11 UTF-8 bytes
+    const tool = createWriteTool();
+    const { ctx } = createFakeContext({ cwd: dir });
+
+    const result = await tool.execute({ path: "utf8.txt", content }, ctx);
+
+    const onDisk = await stat(join(dir, "utf8.txt"));
+    expect((result.details as { bytes: number }).bytes).toBe(onDisk.size);
+    expect(await readFile(join(dir, "utf8.txt"), "utf8")).toBe(content);
+  });
+
+  it("truncates when overwriting with shorter content, leaving no tail behind", async () => {
+    const tool = createWriteTool();
+    const { ctx } = createFakeContext({ cwd: dir });
+
+    await tool.execute({ path: "shrink.txt", content: "a very long original line\n" }, ctx);
+    await tool.execute({ path: "shrink.txt", content: "short\n" }, ctx);
+
+    expect(await readFile(join(dir, "shrink.txt"))).toEqual(Buffer.from("short\n"));
+  });
+
+  it("does not damage an existing file when it is used as a parent directory", async () => {
+    const blocker = join(dir, "not-a-dir.txt");
+    await writeFile(blocker, "important\n");
+
+    const tool = createWriteTool();
+    const { ctx } = createFakeContext({ cwd: dir });
+    const result = await tool.execute({ path: "not-a-dir.txt/child.txt", content: "x" }, ctx);
+
+    expect(result.isError).toBe(true);
+    expect(await readFile(blocker, "utf8")).toBe("important\n");
   });
 });

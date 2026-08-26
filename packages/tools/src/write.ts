@@ -3,7 +3,7 @@
 import { mkdir, stat, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { Tool, ToolResult } from "@arcturn/types";
-import { resolvePath } from "./path-utils.js";
+import { resolvePath, resolveSubjectPath } from "./path-utils.js";
 import { abortedResult, errorResult, textResult } from "./result-utils.js";
 
 export interface WriteToolDetails {
@@ -60,15 +60,22 @@ export function createWriteTool(): Tool {
         created = true;
       }
 
+      // The permission subject must name where the bytes will actually land,
+      // not where the argument's spelling suggests: `writeFile` follows a
+      // symlink, and a link inside the workspace pointing outside it would
+      // otherwise present a subject that an `allow write <workspace>/**` rule
+      // happily matches. See `resolveSubjectPath`.
+      const subjectPath = await resolveSubjectPath(ctx.cwd, absolutePath);
+      const viaNote = subjectPath === absolutePath ? "" : ` (via ${absolutePath})`;
       const decision = await ctx.requestPermission({
         toolName: "write",
         toolCallId: ctx.toolCallId,
-        subject: absolutePath,
-        description: `${created ? "Create" : "Overwrite"} file ${absolutePath}`,
-        suggestedRule: { tool: "write", specifier: `${parentDir}/**`, action: "allow" },
+        subject: subjectPath,
+        description: `${created ? "Create" : "Overwrite"} file ${subjectPath}${viaNote}`,
+        suggestedRule: { tool: "write", specifier: `${dirname(subjectPath)}/**`, action: "allow" },
       });
       if (decision.behavior !== "allow") {
-        return errorResult(decision.message ?? `Permission denied to write ${absolutePath}.`);
+        return errorResult(decision.message ?? `Permission denied to write ${subjectPath}.`);
       }
       if (ctx.signal.aborted) return abortedResult();
 
@@ -81,8 +88,14 @@ export function createWriteTool(): Tool {
 
       const bytes = Buffer.byteLength(content, "utf8");
       const details: WriteToolDetails = { path: absolutePath, created, bytes };
+      // Say where the bytes went whenever that is not where the path pointed.
+      // A symlink is invisible in the argument, so `Updated <workspace>/x.txt`
+      // would otherwise be the only thing a model ever learns about a write
+      // that landed somewhere else entirely.
+      const landedNote =
+        subjectPath === absolutePath ? "" : ` The file it resolves to is ${subjectPath}.`;
       return textResult(
-        `${created ? "Created" : "Updated"} ${absolutePath} (${bytes} bytes).`,
+        `${created ? "Created" : "Updated"} ${absolutePath} (${bytes} bytes).${landedNote}`,
         details as unknown as Record<string, unknown>,
       );
     },

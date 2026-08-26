@@ -1,8 +1,10 @@
 /** The `read` built-in tool: read a text or image file from disk. */
 
-import { readFile, stat } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { open, readFile, stat } from "node:fs/promises";
 import { extname } from "node:path";
 import type { Tool, ToolResult } from "@arcturn/types";
+import { BINARY_SNIFF_BYTES, looksBinary } from "./binary.js";
 import { formatOutlineEntry, scanOutline } from "./outline.js";
 import { resolvePath } from "./path-utils.js";
 import { abortedResult, errorResult, textResult } from "./result-utils.js";
@@ -17,6 +19,26 @@ export const MAX_LINE_LENGTH = 2000;
  * `read_file` `AUTO_OUTLINE_SIZE` — see `docs/code-index-architecture.md`.
  */
 export const DEFAULT_AUTO_OUTLINE_THRESHOLD_BYTES = 16_384;
+
+/**
+ * File size above which the body is streamed a line at a time instead of
+ * being read into memory whole.
+ *
+ * The cost of the whole-file path is not the file: it is the file, *plus* a
+ * JS string per line from `split("\n")`, plus the joined slice — measured at
+ * a little over 4x the file's size, and paid in full even for
+ * `read({ offset: 1000, limit: 3 })`, because the paging happened after the
+ * materializing. A large log therefore did not return an error the model could
+ * read and recover from; past a few hundred megabytes it took the harness
+ * process down with it.
+ *
+ * 8 MiB is far above any source file that is worth reading into a context
+ * window (the largest file in this monorepo is three orders of magnitude
+ * smaller) and far below the size where the whole-file path hurts, so the
+ * common path keeps its exact previous behavior and only the pathological one
+ * changes.
+ */
+export const STREAMING_THRESHOLD_BYTES = 8 * 1024 * 1024;
 
 const IMAGE_MIME_TYPES: Record<string, string> = {
   ".png": "image/png",
@@ -63,6 +85,71 @@ export interface CreateReadToolOptions {
   autoOutlineThresholdBytes?: number;
 }
 
+/** The lines a streamed read selected, and whether the file continued past them. */
+interface LineWindow {
+  lines: string[];
+  /** True when the stream stopped because the window was full, not at EOF. */
+  moreFollow: boolean;
+}
+
+/**
+ * Collect lines `[startIndex, startIndex + count)` (0-based) by streaming
+ * `path`, holding only the selected lines.
+ *
+ * Stops reading as soon as the window is full — the whole point — so the tail
+ * of a 200 MB log is never touched to answer a question about its first page.
+ * `createReadStream` with an encoding decodes through a `StringDecoder`, so a
+ * multi-byte character straddling a chunk boundary is reassembled rather than
+ * mangled.
+ */
+async function streamLineWindow(
+  path: string,
+  startIndex: number,
+  count: number,
+  signal: AbortSignal,
+): Promise<LineWindow> {
+  const endIndex = startIndex + count;
+  const lines: string[] = [];
+  let pending = "";
+  let index = 0;
+  let moreFollow = false;
+  const stream = createReadStream(path, { encoding: "utf8" });
+  try {
+    for await (const chunk of stream) {
+      if (signal.aborted) break;
+      const parts = (pending + (chunk as string)).split("\n");
+      pending = parts.pop() ?? "";
+      for (const line of parts) {
+        if (index >= startIndex && index < endIndex) lines.push(line);
+        index++;
+        if (index >= endIndex) {
+          moreFollow = true;
+          return { lines, moreFollow };
+        }
+      }
+    }
+  } finally {
+    stream.destroy();
+  }
+  // The trailing fragment is the final line when the file has no trailing
+  // newline; when it does, `split` left an empty string that is a real line.
+  if (index >= startIndex && index < endIndex) lines.push(pending);
+  return { lines, moreFollow };
+}
+
+/** Read the leading bytes of `path` for {@link looksBinary}, without opening the whole file. */
+async function readHead(path: string, bytes: number): Promise<Buffer> {
+  const handle = await open(path, "r");
+  try {
+    const head = Buffer.alloc(Math.min(BINARY_SNIFF_BYTES, Math.max(bytes, 0)));
+    if (head.length === 0) return head;
+    const { bytesRead } = await handle.read(head, 0, head.length, 0);
+    return head.subarray(0, bytesRead);
+  } finally {
+    await handle.close();
+  }
+}
+
 /** Create the `read` tool. No permission is required to read files. */
 export function createReadTool(options: CreateReadToolOptions = {}): Tool {
   const autoOutlineThresholdBytes =
@@ -83,7 +170,9 @@ export function createReadTool(options: CreateReadToolOptions = {}): Tool {
         "declaration outline (kind, name, signature, line number) instead of their body, so a " +
         "large file never floods context — read the region you actually need with offset/limit " +
         "once you know what you're looking for. Passing offset or limit always returns literal " +
-        "lines and skips the outline, regardless of file size.",
+        "lines and skips the outline, regardless of file size. Files above " +
+        `${STREAMING_THRESHOLD_BYTES / (1024 * 1024)}MB are paged a window at a time (no outline), ` +
+        "so a large log can be read through with offset without loading all of it.",
       parameters: {
         type: "object",
         properties: {
@@ -167,6 +256,50 @@ export function createReadTool(options: CreateReadToolOptions = {}): Tool {
         };
       }
 
+      // A file too big to hold in memory is still worth paging through: stream
+      // the requested window and stop there. An outline is skipped at this size
+      // (it needs the whole body, which is the thing being avoided), so the
+      // answer is always literal lines — the head of the file when no offset
+      // was given, with the note saying how to continue.
+      if (fileStat.size > STREAMING_THRESHOLD_BYTES) {
+        try {
+          if (looksBinary(await readHead(absolutePath, BINARY_SNIFF_BYTES))) {
+            return errorResult(
+              `${absolutePath} is a binary file (${fileStat.size} bytes), not text — reading it ` +
+                "would return unreadable replacement characters rather than its contents. Inspect " +
+                "it with a bash command that understands the format instead.",
+              { path: absolutePath, binary: true },
+            );
+          }
+          const startIndex = offset - 1;
+          const window = await streamLineWindow(absolutePath, startIndex, limit, ctx.signal);
+          if (ctx.signal.aborted) return abortedResult();
+          if (window.lines.length === 0) {
+            return errorResult(`Offset ${offset} is beyond the end of ${absolutePath}.`);
+          }
+          const endLine = startIndex + window.lines.length;
+          const body = window.lines
+            .map((line, i) => formatLine(startIndex + i + 1, line))
+            .join("\n");
+          const note = window.moreFollow
+            ? `\n\n[Showing lines ${offset}-${endLine} of a ${fileStat.size}-byte file, which ` +
+              `continues past here. Use offset=${endLine + 1} to continue reading.]`
+            : "";
+          const streamedDetails: ReadToolDetails = {
+            path: absolutePath,
+            startLine: offset,
+            endLine,
+            truncated: window.moreFollow,
+          };
+          return textResult(
+            `${body}${note}`,
+            streamedDetails as unknown as Record<string, unknown>,
+          );
+        } catch (error) {
+          return errorResult(`Failed to read ${absolutePath}: ${(error as Error).message}`);
+        }
+      }
+
       let buffer: Buffer;
       try {
         buffer = await readFile(absolutePath);
@@ -174,6 +307,21 @@ export function createReadTool(options: CreateReadToolOptions = {}): Tool {
         return errorResult(`Failed to read ${absolutePath}: ${(error as Error).message}`);
       }
       if (ctx.signal.aborted) return abortedResult();
+
+      // Everything below decodes the file as UTF-8. For a .pdf, a .zip, a
+      // compiled object or a sqlite database that produces thousands of U+FFFD
+      // replacement characters, returned as "file contents" with no error and
+      // no warning — context spent on noise the model cannot tell apart from
+      // real text. `grep` has skipped these since it was written; `read` has
+      // been handing them straight back.
+      if (looksBinary(buffer)) {
+        return errorResult(
+          `${absolutePath} is a binary file (${fileStat.size} bytes), not text — reading it ` +
+            "would return unreadable replacement characters rather than its contents. Inspect " +
+            "it with a bash command that understands the format instead.",
+          { path: absolutePath, binary: true },
+        );
+      }
 
       const text = buffer.toString("utf8");
       const allLines = text.split("\n");

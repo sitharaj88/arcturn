@@ -10,7 +10,9 @@
 // Every subcommand's implementation is imported inside its own branch below:
 // the interactive path — the one whose time-to-first-paint the user feels —
 // must not pay for the ACP host, the WebSocket server, VCR or provenance.
-import type { SessionEntry } from "@arcturn/types";
+import { type Stats, statSync } from "node:fs";
+import { resolve as resolvePath } from "node:path";
+import type { LLMClient, SessionEntry, Tool } from "@arcturn/types";
 import type { CliArgs, RegistryCliCommand } from "./args.js";
 import { loadConfig } from "./config.js";
 import { loadExtensions } from "./extensions.js";
@@ -57,6 +59,72 @@ export interface RunCliOptions {
 }
 
 /**
+ * Reject a `--cwd` that is not an existing directory.
+ *
+ * `resolveArcturnPaths` only ever *resolves* the path — nothing checked that
+ * it was there. A typo therefore ran: the session was bucketed under a
+ * directory that did not exist, `write` created the entire missing path and
+ * dropped files into it, and `bash` came back with `spawn /bin/sh ENOENT`,
+ * which reads like a broken shell rather than "the directory you named is not
+ * there". Every command that accepts `--cwd` goes through {@link runCli}, so
+ * one check at the top covers a run, `serve`, `acp`, `mcp` and all four
+ * provenance verbs.
+ *
+ * The parser cannot do this: it is pure and synchronous by design, and a
+ * relative `--cwd` is resolved against the process's own directory, which is
+ * a runtime fact.
+ *
+ * @param cwd - The `--cwd` value as typed, or `undefined` when the flag was
+ *   not given (in which case there is nothing to check).
+ * @returns An error message naming the path, or `undefined` when it is usable.
+ */
+export function cwdRejection(cwd: string | undefined): string | undefined {
+  if (cwd === undefined) return undefined;
+  const absolute = resolvePath(cwd);
+  let stats: Stats;
+  try {
+    stats = statSync(absolute);
+  } catch {
+    return `--cwd ${absolute} does not exist. Create it first, or point --cwd at a directory that does.`;
+  }
+  if (!stats.isDirectory()) {
+    return `--cwd ${absolute} is not a directory.`;
+  }
+  return undefined;
+}
+
+/** The two wrappers and the flush a `--record` run needs. */
+interface OpenRecorder {
+  /** Tees every LLM request/response into the cassette. */
+  wrapLlm: (llm: LLMClient) => LLMClient;
+  /** Tees every tool call and its result into the cassette. */
+  wrapTools: (tools: Tool[]) => Tool[];
+  /** Flush and close the file. */
+  close: () => Promise<void>;
+}
+
+/**
+ * Open a cassette for `--record`.
+ *
+ * VCR is imported here rather than at module scope for the reason the rest of
+ * this file lazily imports: an interactive launch must not pay for a feature
+ * it is not using.
+ *
+ * @param file - Path of the `.jsonl` cassette to append to.
+ */
+async function openRecorder(file: string): Promise<OpenRecorder> {
+  const { createCassetteRecorder, recordingClient, wrapToolsWithRecorder } = await import(
+    "./vcr.js"
+  );
+  const recorder = createCassetteRecorder(file);
+  return {
+    wrapLlm: (llm) => recordingClient(llm, recorder),
+    wrapTools: (tools) => wrapToolsWithRecorder(tools, recorder),
+    close: () => recorder.close(),
+  };
+}
+
+/**
  * Run an already-parsed command line.
  *
  * @param args - Parsed arguments (see `parseArgs`).
@@ -64,6 +132,14 @@ export interface RunCliOptions {
  * @returns The process exit code.
  */
 export async function runCli(args: CliArgs, options: RunCliOptions = {}): Promise<number> {
+  // Before anything reads config, opens a session store or spawns a tool: a
+  // `--cwd` that is not there is a usage error, not a run in a phantom tree.
+  const badCwd = cwdRejection(args.cwd);
+  if (badCwd !== undefined) {
+    process.stderr.write(`arcturn: ${badCwd}\n`);
+    return 2;
+  }
+
   if (args.listModels || args.listProviders) {
     // The preset models are registered here for the same reason `buildRuntime`
     // registers them: a listing must show exactly what `--model` will accept.
@@ -154,6 +230,12 @@ export async function runCli(args: CliArgs, options: RunCliOptions = {}): Promis
   }
 
   try {
+    // `--record` tees this run into a cassette. Without it `arcturn bisect`
+    // was a verb nobody could reach: it refuses to start without
+    // `--cassette <file>` and told the user to "record one with VCR first",
+    // while `vcr.ts`'s recorder had no caller anywhere in the product.
+    const recorder = args.record === undefined ? undefined : await openRecorder(args.record);
+
     const runtime = await buildRuntime({
       ...(args.cwd === undefined ? {} : { cwd: args.cwd }),
       ...(args.model === undefined ? {} : { model: args.model }),
@@ -162,6 +244,8 @@ export async function runCli(args: CliArgs, options: RunCliOptions = {}): Promis
       ...(args.maxCostUsd === undefined ? {} : { maxCostUsd: args.maxCostUsd }),
       ...(args.dryRun === undefined ? {} : { dryRun: args.dryRun }),
       ...(args.resume === undefined ? {} : { resume: args.resume }),
+      ...(recorder === undefined ? {} : { wrapLlm: recorder.wrapLlm }),
+      ...(recorder === undefined ? {} : { wrapAgentTools: recorder.wrapTools }),
       continueSession: args.continueSession,
     });
 
@@ -207,6 +291,7 @@ export async function runCli(args: CliArgs, options: RunCliOptions = {}): Promis
         outputFormat: args.outputFormat,
       });
       await runtime.dispose();
+      await recorder?.close();
       return result.exitCode;
     }
 
@@ -215,16 +300,19 @@ export async function runCli(args: CliArgs, options: RunCliOptions = {}): Promis
         "arcturn: stdout is not a terminal. Use --print for non-interactive runs.\n",
       );
       await runtime.dispose();
+      await recorder?.close();
       return 2;
     }
 
     // Erased here — not earlier — so the banner stays up through runtime
     // construction and its replacement paints in the same breath.
     options.bootScreen?.erase();
-    return await runInteractive({
+    const code = await runInteractive({
       runtime,
       ...(args.prompt === "" ? {} : { initialPrompt: args.prompt }),
     });
+    await recorder?.close();
+    return code;
   } catch (error) {
     if (error instanceof ModelResolutionError) {
       process.stderr.write(`arcturn: ${error.message}\n`);
@@ -284,6 +372,12 @@ export async function readPipedStdin(
   stdin: StdinLike,
   hasPromptArgument: boolean,
   graceMs: number = STDIN_FIRST_BYTE_GRACE_MS,
+  onWaiting: () => void = () => {
+    process.stderr.write(
+      "arcturn: reading the prompt from stdin; send EOF (Ctrl-D) when done, or pass a " +
+        'prompt argument instead: arcturn -p "your question".\n',
+    );
+  },
 ): Promise<string> {
   if (stdin.isTTY === true) return "";
   const iterator = stdin[Symbol.asyncIterator]();
@@ -313,7 +407,21 @@ export async function readPipedStdin(
     }
     first = raced;
   } else {
-    first = await iterator.next();
+    // No prompt argument: stdin *is* the prompt, and blocking to EOF is the
+    // only correct behaviour. But an inherited pipe that never closes turns
+    // that into an unexplained, permanent silence — the same shape as the
+    // hang above, and indistinguishable from a crash to whoever is watching.
+    // We cannot guess our way out of it, so we say what we are doing instead:
+    // one line on stderr, only when no byte has arrived in the grace period,
+    // so an ordinary `cat q.txt | arcturn -p` never sees it.
+    let announced: ReturnType<typeof setTimeout> | undefined = setTimeout(onWaiting, graceMs);
+    announced.unref?.();
+    try {
+      first = await iterator.next();
+    } finally {
+      clearTimeout(announced);
+      announced = undefined;
+    }
   }
 
   for (let step = first; step.done !== true; step = await iterator.next()) {
@@ -389,10 +497,18 @@ async function runReplayCommand(
     return 2;
   }
 
-  const runtime = await buildRuntime({
-    ...(cwd === undefined ? {} : { cwd }),
-    ...(model === undefined ? {} : { model }),
-  });
+  let runtime: Awaited<ReturnType<typeof buildRuntime>>;
+  try {
+    runtime = await buildRuntime({
+      ...(cwd === undefined ? {} : { cwd }),
+      ...(model === undefined ? {} : { model }),
+    });
+  } catch (error) {
+    // A `--model` the catalog does not have is a usage error. Unguarded, it
+    // escaped `runCli` and reached `main.ts` as a raw stack trace.
+    process.stderr.write(`arcturn: ${error instanceof Error ? error.message : String(error)}\n`);
+    return 2;
+  }
   for (const warning of runtime.warnings) process.stderr.write(`arcturn: ${warning}\n`);
   process.stderr.write(
     `arcturn: replaying ${prompts.length} prompt${prompts.length === 1 ? "" : "s"} on ${runtime.model.displayName}\n`,
@@ -734,7 +850,10 @@ async function runBlameCommand(
  */
 async function runBisectCommand(target: string, args: CliArgs): Promise<number> {
   if (args.cassette === undefined) {
-    process.stderr.write("arcturn: bisect needs --cassette <file> (record one with VCR first).\n");
+    process.stderr.write(
+      "arcturn: bisect needs --cassette <file>. Record one first:\n" +
+        '  arcturn -p "your prompt" --record <file>\n',
+    );
     return 2;
   }
   const [
@@ -764,6 +883,20 @@ async function runBisectCommand(target: string, args: CliArgs): Promise<number> 
     return 2;
   }
 
+  // Each probe below builds its runtime with `extensions: false` — a replay
+  // must not attach an extension's tools or its event listeners. But model
+  // *registration* is a side effect of extension loading that a replay cannot
+  // do without: a session recorded on a model an extension registered is
+  // otherwise unresolvable, and the run died on an uncaught
+  // `ModelResolutionError` listing every model except the one it was asked
+  // for. So the catalog is filled here, once, ahead of the probes — exactly
+  // what `--list-models` already does for the same reason — and the probes
+  // keep their empty `ExtensionHost`.
+  registerBundledCatalog();
+  for (const warning of await loadExtensionsForCatalog(args.cwd)) {
+    process.stderr.write(`arcturn: ${warning}\n`);
+  }
+
   const probe = cassetteProbe(args.cassette, prompts, async (cassette, slice) => {
     const runtime = await buildRuntime({
       ...(args.cwd === undefined ? {} : { cwd: args.cwd }),
@@ -782,7 +915,15 @@ async function runBisectCommand(target: string, args: CliArgs): Promise<number> 
     }
   });
 
-  const result = await bisectTurns(prompts, probe);
-  process.stdout.write(`${formatBisectResult(result, { label: (prompt) => prompt })}\n`);
-  return result.firstBadIndex === undefined ? 0 : 1;
+  try {
+    const result = await bisectTurns(prompts, probe);
+    process.stdout.write(`${formatBisectResult(result, { label: (prompt) => prompt })}\n`);
+    return result.firstBadIndex === undefined ? 0 : 1;
+  } catch (error) {
+    // Without this the failure escaped `runCli` entirely and `main.ts` printed
+    // a raw stack trace — for the ordinary case of a model the catalog does
+    // not have, which is a usage error, not a crash.
+    process.stderr.write(`arcturn: ${error instanceof Error ? error.message : String(error)}\n`);
+    return 2;
+  }
 }

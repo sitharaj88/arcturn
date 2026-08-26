@@ -10,6 +10,7 @@ import { runCli } from "./cli-main.js";
 import type { CommandUi, SelectOption } from "./commands.js";
 import {
   createRegistryCommands,
+  type ExecutableCodeWarning,
   formatInspectReport,
   formatInstallSummary,
   formatPackageList,
@@ -490,13 +491,34 @@ describe("installPackage", () => {
       "mcp.json": JSON.stringify({ servers: { demo: { type: "stdio", command: "other" } } }),
     });
     const paths = await makeRegistry();
+    // A `stdio` entry is a command line Arcturn spawns, so it takes the
+    // executable-code gate — the confirmations are recorded here rather than
+    // waved through, so the merge below is provably a merge that was approved.
+    const asked: ExecutableCodeWarning[] = [];
+    const confirmExecutableCode = (warning: ExecutableCodeWarning): boolean => {
+      asked.push(warning);
+      return true;
+    };
 
-    const one = await installPackage({ source: first.url, name: "pkg-one", paths });
+    const one = await installPackage({
+      source: first.url,
+      name: "pkg-one",
+      paths,
+      confirmExecutableCode,
+    });
     expect(one.record?.provides.mcpServers).toEqual(["demo"]);
+    expect(asked).toHaveLength(1);
+    expect(asked[0]?.mcpStdioCommands).toEqual(["demo: echo"]);
 
-    const two = await installPackage({ source: second.url, name: "pkg-two", paths });
+    const two = await installPackage({
+      source: second.url,
+      name: "pkg-two",
+      paths,
+      confirmExecutableCode,
+    });
     expect(two.record?.provides.mcpServers).toEqual([]);
     expect(two.warnings.some((warning) => warning.includes("demo"))).toBe(true);
+    expect(asked).toHaveLength(2);
 
     const mcpConfig = JSON.parse(await readFile(paths.mcpConfigPath, "utf8"));
     expect(mcpConfig.servers.demo.command).toBe("echo"); // first package's entry wins
@@ -745,7 +767,7 @@ describe("formatting helpers", () => {
     expect(formatPackageList([])[0]).toContain("No packages installed");
   });
 
-  it("formats a remove summary", () => {
+  it("formats a remove summary, naming what it deliberately did not delete", () => {
     const lines = formatRemoveSummary({
       name: "x",
       removedSkills: ["a.md"],
@@ -754,11 +776,17 @@ describe("formatting helpers", () => {
       removedExtensions: [],
       removedThemes: [],
       removedMcpServers: [],
+      keptEntries: ["mine.md"],
     });
     expect(lines[0]).toContain('Removed "x"');
     expect(lines.some((line) => line.includes("a.md"))).toBe(true);
     expect(lines.some((line) => line.includes("dev.md"))).toBe(true);
     expect(lines.some((line) => line.includes("ship.md"))).toBe(true);
+    // A kept entry is not a silent omission: the whole point is that the user
+    // can see which of their files survived the uninstall, and why.
+    const kept = lines.find((line) => line.includes("mine.md"));
+    expect(kept).toBeDefined();
+    expect(kept).toContain("not deleted");
   });
 
   it("formats every update reason", () => {

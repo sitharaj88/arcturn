@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -90,5 +90,71 @@ describe("glob tool", () => {
 
     const result = await tool.execute({ pattern: "**/*.nonexistent" }, ctx);
     expect((result.content[0] as { text: string }).text).toContain("No files matched");
+  });
+});
+
+describe("glob tool — a no-files answer must mean it looked", () => {
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "arcturn-glob-absence-"));
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("errors on a base path that does not exist instead of reporting no files", async () => {
+    // `tinyglobby` on a missing cwd returns an empty list, which is
+    // indistinguishable from "this directory has no .ts files in it". The
+    // model reads the second meaning and stops looking.
+    const tool = createGlobTool();
+    const { ctx } = createFakeContext({ cwd: dir });
+
+    const result = await tool.execute({ pattern: "**/*.ts", path: "typo-dir" }, ctx);
+
+    expect(result.isError).toBe(true);
+    const text = (result.content[0] as { text: string }).text;
+    expect(text).not.toContain("No files matched");
+    expect(text).toContain("typo-dir");
+  });
+
+  it("errors when the base path is a file rather than a directory", async () => {
+    await writeFile(join(dir, "not-a-dir.txt"), "x");
+    const tool = createGlobTool();
+    const { ctx } = createFakeContext({ cwd: dir });
+
+    const result = await tool.execute({ pattern: "**/*.ts", path: "not-a-dir.txt" }, ctx);
+
+    expect(result.isError).toBe(true);
+    expect((result.content[0] as { text: string }).text).not.toContain("No files matched");
+  });
+
+  it("still reports no files for a real directory that genuinely has none", async () => {
+    await mkdir(join(dir, "empty"));
+    const tool = createGlobTool();
+    const { ctx } = createFakeContext({ cwd: dir });
+
+    const result = await tool.execute({ pattern: "**/*.ts", path: "empty" }, ctx);
+
+    expect(result.isError).toBeFalsy();
+    expect((result.content[0] as { text: string }).text).toContain("No files matched");
+  });
+
+  it("every path it returns exists and matches the requested extension", async () => {
+    await mkdir(join(dir, "pkg"), { recursive: true });
+    await writeFile(join(dir, "pkg", "a.ts"), "a");
+    await writeFile(join(dir, "pkg", "b.js"), "b");
+
+    const tool = createGlobTool();
+    const { ctx } = createFakeContext({ cwd: dir });
+    const result = await tool.execute({ pattern: "**/*.ts" }, ctx);
+
+    const lines = (result.content[0] as { text: string }).text.split("\n").filter(Boolean);
+    expect(lines).toHaveLength(1);
+    for (const line of lines) {
+      expect(line.endsWith(".ts")).toBe(true);
+      expect((await stat(resolvePath(dir, line))).isFile()).toBe(true);
+    }
   });
 });

@@ -263,6 +263,7 @@ import {
   type RunJournal,
   readJournalLines,
   type WorkflowFailureKind,
+  type WorkflowStopReason,
   writeManifest,
 } from "./workflow-run.js";
 import {
@@ -2499,6 +2500,28 @@ export async function runWorkflow(
    */
   let budgetExhausted = false;
   /**
+   * Record, once, why the whole run halted — the `stop` line
+   * {@link WorkflowStopReason} was defined for.
+   *
+   * It had no writer at all: `workflow-status.ts` reads it, folds it into
+   * `JournalRun.stopReason` and renders it as `stopped: <reason>` / `stop:
+   * <reason>`, and every run in the wild left that blank. So a pipeline killed
+   * by its own `budgetUsd:` ceiling looked, in `/workflow status`, exactly like
+   * one that hit a broken step — which is the single question an operator opens
+   * that view to answer.
+   *
+   * Best-effort like every other roll-up: the crash-consistency guarantee is
+   * the per-step `stepEnd`, and a run must not fail over a diagnostic.
+   *
+   * @param reason - Why the pipeline stopped.
+   */
+  let stopRecorded = false;
+  const recordStop = (reason: WorkflowStopReason): void => {
+    if (stopRecorded) return;
+    stopRecorded = true;
+    void journalAppend({ kind: "stop", reason, ts: now() });
+  };
+  /**
    * The human-question gate's pending pauses, once a step raised an `ORG-ASK`.
    *
    * Filled like {@link failure} is — from the step results after a stage
@@ -3096,6 +3119,7 @@ export async function runWorkflow(
           shouldAbortForCost(usage.costUsd ?? 0, workflow.budgetUsd)
         ) {
           budgetExhausted = true;
+          recordStop("cost-ceiling");
           failure ??= workflowBudgetExceededError(
             workflow.name,
             usage.costUsd ?? 0,
@@ -3163,8 +3187,17 @@ export async function runWorkflow(
     context.signal?.removeEventListener("abort", onExternalAbort);
   }
 
-  if (cancelled) return finish("cancelled", results, prev, usage, "Workflow cancelled.");
-  if (failure !== undefined) return finish("failed", results, prev, usage, failure);
+  if (cancelled) {
+    recordStop("cancelled");
+    return finish("cancelled", results, prev, usage, "Workflow cancelled.");
+  }
+  if (failure !== undefined) {
+    // `cost-ceiling` was already recorded at the crossing above, and
+    // `recordStop` keeps the first reason: a budget breach that also leaves a
+    // failed step must not be relabelled as a plain error on the way out.
+    recordStop("error");
+    return finish("failed", results, prev, usage, failure);
+  }
   // The human-question gate: a pause is a clean, resumable stop — not a failure.
   // The message is human-facing (it reaches `--print`/CI on `result.error`); the
   // structured pause rides on `result.pause` for the command to act on.
@@ -6364,11 +6397,34 @@ export function createRuntimeWriteLane(host: WriteLaneHost, runId = createRunId(
       windowsHide: true,
     });
 
+  /**
+   * The run's frozen baseline, on disk beside its patches.
+   *
+   * Frozen **to disk**, not merely memoized, because a run outlives the
+   * process that started it: `/workflow resume <runId>` builds a brand-new
+   * lane over the same run directory. Re-reading the live checkout there was
+   * a real defect — by the time a resume starts, this run's own earlier stages
+   * have already applied their patches to that checkout, so a fresh baseline
+   * carried stage 1's edit *and* `seed.patches` replayed stage 1's patch on top
+   * of it. `git apply` refused, `createWorktree` threw, and every resume of a
+   * pipeline whose earlier stage wrote anything failed at its next worktree
+   * with "patch does not apply". The file's *existence* is the freeze, so a
+   * run that began against a clean checkout is distinguishable from one nobody
+   * has looked at yet.
+   */
+  const baselineFile = join(parentDir, "_run-baseline.patch");
   // Captured lazily, once per run: "what the user's checkout already looked
   // like before this run touched it".
   let baseline: Promise<string | undefined> | undefined;
   const baselinePatch = async (): Promise<string | undefined> => {
     baseline ??= (async () => {
+      try {
+        const frozen = await readFile(baselineFile, "utf8");
+        return frozen.trim() === "" ? undefined : baselineFile;
+      } catch {
+        // Not frozen yet — this is the run's first worktree, in its first
+        // process. Capture it below.
+      }
       let diff = "";
       try {
         diff = (
@@ -6381,13 +6437,15 @@ export function createRuntimeWriteLane(host: WriteLaneHost, runId = createRunId(
         // and for the third the role's own patch still faces `git apply` on
         // the way back, which refuses rather than guessing. Seeding is a
         // convenience for the role; the apply is the guarantee.
+        //
+        // Deliberately NOT frozen: nothing was read, so a later process must
+        // still be allowed to try.
         return undefined;
       }
-      if (diff.trim() === "") return undefined;
-      const file = join(parentDir, "_run-baseline.patch");
       await mkdir(parentDir, { recursive: true });
-      await writeFile(file, diff, "utf8");
-      return file;
+      // Written even when empty — see {@link baselineFile}.
+      await writeFile(baselineFile, diff, "utf8");
+      return diff.trim() === "" ? undefined : baselineFile;
     })();
     return await baseline;
   };
@@ -6395,10 +6453,20 @@ export function createRuntimeWriteLane(host: WriteLaneHost, runId = createRunId(
   // Captured lazily, once per run, for the same reason as `baselinePatch`:
   // a snapshot of every untracked-but-not-ignored file the checkout held
   // before this run touched anything. See "Untracked files" above for why
-  // this must be frozen once rather than re-read from the live checkout.
+  // this must be frozen once rather than re-read from the live checkout — and
+  // {@link baselineFile} for why the freeze has to survive the process.
+  const untrackedSeedDir = join(parentDir, "_run-untracked");
   let untracked: Promise<string | undefined> | undefined;
   const untrackedSnapshot = async (): Promise<string | undefined> => {
     untracked ??= (async () => {
+      try {
+        // Already frozen by an earlier process running this same run id; an
+        // empty snapshot means "frozen, nothing to carry".
+        const already = await readdir(untrackedSeedDir);
+        return already.length === 0 ? undefined : untrackedSeedDir;
+      } catch {
+        // Not frozen yet — capture it below.
+      }
       let listing = "";
       try {
         listing = (
@@ -6416,8 +6484,15 @@ export function createRuntimeWriteLane(host: WriteLaneHost, runId = createRunId(
         return undefined;
       }
       const paths = listing.split("\0").filter((path) => path !== "");
+      // Created even when there is nothing to carry: the directory's existence
+      // is the freeze, exactly as `_run-baseline.patch`'s is — see
+      // {@link baselineFile}. Without it, a resumed run re-listed a checkout
+      // that this run's own earlier stages had already added files to, and
+      // then replayed the patch that created them: `git apply` refused with
+      // "already exists" and the later stage could not be seeded at all.
+      await mkdir(untrackedSeedDir, { recursive: true });
       if (paths.length === 0) return undefined;
-      const dir = join(parentDir, "_run-untracked");
+      const dir = untrackedSeedDir;
       let bytes = 0;
       let copied = 0;
       for (const relPath of paths) {

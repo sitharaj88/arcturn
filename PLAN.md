@@ -236,6 +236,43 @@ than inherited from whatever the emulator happened to be set to.
 
 ## Remaining follow-ups
 
+**Closed (2026-08-26): the read side of the symlink door.** `loop.ts` no longer
+matches rules against a lexical subject. It awaits `resolveSubject`
+(`packages/core/src/permissions.ts`), which routes a path argument through
+core's own `resolveSubjectPath` (`packages/core/src/subject-path.ts`) — the
+same "rewrite exactly the case that lies" semantics the tools already use for
+`write`/`edit`, duplicated rather than imported because core and tools are
+siblings and neither dependency edge is worth one function. The two copies are
+held to byte-identical answers by a conformance test in
+`packages/cli/src/symlink-subject.security.test.ts`, which also proves the
+bytes: `deny read <secrets>/**` now refuses `read("keys/id_rsa")` through a
+`keys -> <secrets>` link, and the key does not reach the model. `defaultSubject`
+stays synchronous and pure, so `display.ts`, `audit.ts` and `provenance.ts`
+still draw a line without touching the filesystem. Resolving a subject *moves*
+it, so the pre-resolution spelling is still offered to `deny` rules and to
+nothing else (`PermissionCheck.alternateSubjects`): what is refused after this
+change is a superset of what was refused before it. Resolution failure degrades
+to the lexical subject rather than refusing — a file that does not exist yet is
+the normal argument to `write` — and a dangling link is followed by name, so
+nothing that actually redirects bytes can fail to resolve. Known limit, tested
+and recorded: the subject is canonical, so a rule written against a symlinked
+*prefix* (macOS `/var` vs `/private/var`) does not match it — as it did not
+before either.
+
+Still open, and the other half of the same audit: a rule wall only ever sees
+the argument `defaultSubject` picks, so `grep`'s `glob:` and `glob`'s
+`pattern:` choose files nobody checked. That needs the tool to confine its
+collected file set to the realpath of the root the subject named — which
+reverses a deliberate decision in `walk()`'s doc comment and is the owner's
+call to make.
+
+Hooks fail open by design, documented in `hooks.md` and agreed by the code and
+its tests: a `preToolUse` hook that exits non-zero, prints garbage or hangs
+lets the call through. Every other guarantee in this repo is structural; this
+one asks nicely. The shape of a fix is an opt-in `failClosed` per hook rather
+than flipping a published contract.
+
+
 `isUnsupportedMethodError` reads every server-sent `invalidRequest` as "this
 peer predates the verb", so a legitimate refusal — an unknown run id, an
 unknown background-agent id, a missing exporter — collapses into "the engine
@@ -246,12 +283,28 @@ predicate is the defect: it needs a distinguishable code (or an error field)
 so a refusal and an absence stop being one piece of news.
 
 Delegation, left unexposed deliberately and needing CLI work first:
-`/team` needs an owner lease in its record — constructing a `TeamManager`
-rewrites every still-running record to `interrupted`, so a read-only status
-verb would declare a terminal's live team dead — plus a mid-run guard on
-`merge`/`discard`. `/scout` has no durable record at all, so there is nothing
-to list or cancel. `/bg` spend is not folded into `--max-cost`, and its
-records have the same cross-process ownership gap.
+`/scout` has no durable record at all, so there is nothing to list or cancel.
+`/bg` spend is not folded into `--max-cost`.
+
+**Narrowed (2026-08-26): the cross-process ownership gap is closed.** A team
+and a background-agent record now carry `ownerPid`, and both `#load`
+implementations leave a record alone when that pid is still alive
+(`process-liveness.ts`). This was worse than a mislabel: `TeamManager#load`
+also set `needsRecovery`, and `recover()` — awaited by `start`, `merge` and
+`discard` — captures each worktree's diff and then *deletes* it, so a serve
+process merely constructing a manager beside a terminal could tear down the
+live team's worktrees mid-edit. A record with no pid (written by an older
+build) still reads as "gone", which is the old behaviour and correct for the
+case it was always right about. What remains: this is an ownership *stamp*,
+not a lease — nothing renews it, so a dead owner whose pid the OS has reused
+leaves its worktrees un-recovered until that number frees up (a leak, where
+the old behaviour was a deletion), and there is still no mid-run guard
+stopping the *owning* process's own `merge`/`discard` from racing a member
+that is still writing. Cross-process *cancellation* is also still absent: a
+serve process cannot cancel a terminal's live background agent, because
+`cancel()` needs the in-process `AbortController` the owner holds. It now
+returns `false` for the right reason rather than because the record was
+silently relabelled.
 
 A workflow step's permission asks go to the runtime's requester rather than
 the calling session's, and `arcturn serve` installs none, so they fail closed.
@@ -260,14 +313,53 @@ process-wide mutation racing every other hosted session — so it is recorded
 rather than half-fixed.
 
 
-A resumed session silently reverts to the server's default model rather than
-the one it was last switched to. `Agent.setModel` writes the id into the
-session's `state` entry and `materializeBranch` reads it back, but
-`Agent.resume` never applies `state.model` — and `arcturn serve` does not call
-`Agent.resume` at all, so `openSession` rebuilds the agent on `runtime.model`.
-Found while fixing the `setModel` routing bug; fixing it needs a resolver on
-the core resume path. Until then, re-attaching a session is a silent model
-change.
+**Narrowed (2026-08-26).** The core resolver now exists:
+`Agent.resume` takes an optional `resolveModel(id)` and applies `state.model`
+through it, and `ArcturnRuntime.resumeSession` passes the catalog plus adopts
+the model onto the runtime itself (so the compaction budget and the cost
+readout agree with the provider that answers). An explicit `--model` still
+wins — `runtime.modelPinned`. `--continue`, `--resume` and `/sessions` are
+all fixed. What remains is **`arcturn serve` only**: `openSession` builds its
+agent through `buildSessionAgent`, not `Agent.resume`, so a re-attached served
+session is still a silent model change. The fix is to route the same
+`#adoptStoredModel` read into the session-agent path — but a served runtime
+hosts many sessions off one `runtime.model`, so it cannot simply assign to it
+the way the single-session terminal does; the model has to travel on the
+session agent instead. Recorded rather than half-fixed for that reason.
+
+Two hazards in `/rewind`'s coverage, characterised while writing the
+round-trip suite and deliberately not fixed:
+
+- Only `write` and `edit` are wrapped (`CHECKPOINTED_TOOL_NAMES`), so a
+  `bash`-driven mutation — `mv`, `rm`, `sed -i`, a build script — is invisible
+  to the manifest. The bad case is not "the rewind misses it": it is that a
+  rewind can *destroy* data it never captured. Agent writes `b.txt` (recorded
+  absent) and then `mv a.txt b.txt`; a rewind deletes `b.txt` because the
+  manifest says it never existed, and `a.txt` was never snapshotted, so both
+  are gone. Catching it needs either a snapshot hook on `bash` (which cannot
+  know the paths in advance) or a pre-turn worktree diff.
+- `entries()` on a session with an unparsable line anywhere except the last
+  throws for the WHOLE session, so a single garbled byte mid-file costs every
+  message ever stored in it. The torn-write case that used to reach this is
+  fixed (`#prepareAppend` drops a torn tail before appending, so a partial
+  write can no longer be demoted to mid-file corruption), but genuine
+  corruption still has no partial-read path. An honest reader would surface
+  the entries it *could* parse alongside a count of the ones it could not,
+  which is a `SessionStore` interface change and so is recorded here.
+
+Two live agents on one session id — `arcturn serve` and a terminal, reachable
+today — silently fork it. Each holds its own in-memory branch tip, so their
+appends become sibling branches off the node they last shared, and a default
+resume follows the *last appended* entry: whichever process wrote most
+recently owns the whole history and the other's turns become an unreachable
+branch. Nothing warns, in either process. The bytes are safe — `O_APPEND`
+keeps whole lines whole, proved by a 24-way concurrent append test — so this
+is purely a tip-ownership problem, and the fix is an owner lease on the
+session file (the same shape `/team` needs, per the delegation note above)
+rather than anything in the writer. Pinned by
+`session/round-trip.test.ts` → "silently forks when two live agents append
+from the same tip", which asserts today's exact behaviour so a fix has
+something to turn red.
 
 
 Engine gaps surfaced by the VS Code extension build (RFC 0004), each routed
@@ -388,3 +480,53 @@ shipping a login that has never succeeded contradicted this project's own honest
 MCP OAuth (`arcturn mcp auth`) is unaffected and still works — it uses RFC 8414 discovery and
 RFC 7591 dynamic client registration, so it needs no hardcoded endpoint and no borrowed client
 id.
+
+
+## Orchestration follow-ups, characterised not fixed (2026-08-26)
+
+Found while re-testing workflows/teams/scouts/background agents on **effects**
+rather than return values (`packages/cli/src/orchestration-effects.test.ts`).
+Three defects were fixed with red-first tests — the cross-process ownership
+rewrite above, a run's baseline being re-read on resume (which made
+`/workflow resume` fail to seed the next worktree for any pipeline whose
+earlier stage had written anything), and `stop` journal lines having no writer
+at all. What is left is recorded rather than half-done:
+
+- **The `stop` vocabulary is only partly written.** `runWorkflow` now records
+  `cost-ceiling` when its `budgetUsd:` ceiling trips, `cancelled` on an
+  interrupt and `error` for a step failure that stops the pipeline, so
+  `/workflow status` finally renders the `stopped:` line it has always been
+  able to read. `repeated-transient` and `deterministic-failure` still have no
+  writer: distinguishing them needs the per-step `WorkflowFailureKind` (which
+  `createRuntimeRunStep` computes and then drops) carried onto
+  `WorkflowStepResult` and back up to the stage loop. `turn-ceiling` and
+  `run-deadline` have no writer because they have no *mechanism* — there is a
+  per-role `maxTurns` and a per-step `stepTimeoutMs`, but nothing run-level for
+  either, so those two members of the union describe a feature that does not
+  exist.
+
+- **A team member gets no org memory.** `createRuntimeRunStep` is the single
+  injection point (`workflow.ts`), so an approved entry for `@developer`
+  reaches that role in a `/workflow` step and not in a `/team` member running
+  the same role — `buildMemberPrompt` embeds `brief.role.systemPrompt`
+  verbatim and `team.ts` never mentions memory. Wiring it means deciding
+  whether a team supervisor's decomposition prompt should see it too, which is
+  a design call, not a patch.
+
+- **Nothing proves the production wiring passes `orgMemory`.** The injector is
+  now tested end to end — store → `loadOrgMemoryInjector` →
+  `createRuntimeRunStep` → the `system` string the provider is actually sent —
+  but both production call sites (`createWorkflowCommands`,
+  `serve-workflows.ts`) pass the option by hand, and deleting either line would
+  leave the suite green. Note also that `createWorkflowCommands` spreads
+  `options.step` *after* `orgMemory`, so an embedder passing an explicitly
+  `undefined` `orgMemory` key disables memory silently. That precedence is
+  consistent with the rest of the escape hatch, so it is written down rather
+  than reversed.
+
+- **Cancelling a team member, a scout or a background agent kills no process.**
+  All three are in-process agents driven by an `AbortController`; the only OS
+  processes any of them spawn are `git`. So "assert the pid is gone" has no
+  subject there. It does on the workflow lanes, where a role's `bash` starts
+  real detached process groups — that one is now proved by exceeding
+  `stepTimeoutMs` and asserting `kill(pid, 0)` fails.
