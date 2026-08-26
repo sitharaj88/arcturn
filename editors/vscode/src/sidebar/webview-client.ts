@@ -1371,7 +1371,15 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
 .dot-present { color: var(--arc-ok); }
 .dot-unknown { color: var(--arc-muted); }
 .dot-absent { color: var(--arc-err); opacity: 0.75; }
-.model-name, .session-name { flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/*
+ * Shrink, never grow. With 'flex: 1 1 auto' the name took the whole row and
+ * shoved the badge to the far edge, so 'GLM-5.2' and its CURRENT sat at
+ * opposite ends of a sidebar with a hand's width of nothing between them — and
+ * a badge that far from the thing it labels stops reading as its label. The
+ * basis still shrinks, so a long id ellipsises rather than pushing the badge
+ * off; what is left over now collects after the pair instead of inside it.
+ */
+.model-name, .session-name { flex: 0 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .model-current, .session-current {
   flex: none;
   padding: 0 5px;
