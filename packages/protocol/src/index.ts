@@ -56,6 +56,7 @@ export {
   validateCompactionSummary,
   validateContextResolution,
   validateDiscardChangesResult,
+  validateLineRange,
   validateMcpServerSummary,
   validateMcpStatus,
   validateModelCatalog,

@@ -391,7 +391,11 @@ export class ArcturnServer {
       case "resolveContext":
         // Read-only: nothing is attached and no turn is started, so unlike
         // `openSession` this attaches no observer and touches no session state.
-        return this.#sessionHost.resolveContext(request.params.sessionId, request.params.query);
+        return this.#sessionHost.resolveContext(
+          request.params.sessionId,
+          request.params.query,
+          request.params.range,
+        );
       case "permissionState":
         return this.#sessionHost.permissionState(request.params.sessionId);
       case "setPermissionMode":

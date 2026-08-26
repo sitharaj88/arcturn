@@ -37,6 +37,17 @@ const ledger = vi.hoisted(() => ({
   shownOutputs: 0,
   forgotEnvironment: 0,
   config: {} as Record<string, unknown>,
+  /** Every `WorkspaceConfiguration.update` the seam performed, in order. */
+  configWrites: [] as { key: string; value: unknown; target: unknown }[],
+  /** Listeners the seam put on the three editor streams and on configuration. */
+  activeEditorHandlers: [] as ((editor: unknown) => void)[],
+  selectionHandlers: [] as ((event: { textEditor: unknown }) => void)[],
+  closedDocumentHandlers: [] as ((document: unknown) => void)[],
+  configHandlers: [] as ((event: { affectsConfiguration(section: string): boolean }) => void)[],
+  /** What `window.activeTextEditor` answers. */
+  activeEditor: undefined as unknown,
+  /** How many times the seam asked what is on screen. */
+  activeEditorReads: 0,
   folders: [{ uri: { fsPath: "/workspace" } }] as { uri: { fsPath: string } }[] | undefined,
   disposed: 0,
   reset(): void {
@@ -54,6 +65,13 @@ const ledger = vi.hoisted(() => ({
     ledger.shownOutputs = 0;
     ledger.forgotEnvironment = 0;
     ledger.config = {};
+    ledger.configWrites = [];
+    ledger.activeEditorHandlers = [];
+    ledger.selectionHandlers = [];
+    ledger.closedDocumentHandlers = [];
+    ledger.configHandlers = [];
+    ledger.activeEditor = undefined;
+    ledger.activeEditorReads = 0;
     ledger.folders = [{ uri: { fsPath: "/workspace" } }];
     ledger.disposed = 0;
   },
@@ -165,6 +183,10 @@ vi.mock("vscode", () => {
         ledger.quickPicks.push({ items, options });
         return Promise.resolve(undefined);
       },
+      showInformationMessage: (message: string, ...items: string[]) => {
+        ledger.messages.push({ level: "info", message, items });
+        return Promise.resolve(undefined);
+      },
       showWarningMessage: (message: string, ...items: string[]) => {
         ledger.messages.push({ level: "warning", message, items });
         return Promise.resolve(undefined);
@@ -178,7 +200,20 @@ vi.mock("vscode", () => {
         return Promise.resolve(undefined);
       },
       showInputBox: () => Promise.resolve(undefined),
+      get activeTextEditor() {
+        ledger.activeEditorReads += 1;
+        return ledger.activeEditor;
+      },
+      onDidChangeActiveTextEditor(handler: (editor: unknown) => void) {
+        ledger.activeEditorHandlers.push(handler);
+        return { dispose: () => {} };
+      },
+      onDidChangeTextEditorSelection(handler: (event: { textEditor: unknown }) => void) {
+        ledger.selectionHandlers.push(handler);
+        return { dispose: () => {} };
+      },
     },
+    ConfigurationTarget: { Global: 1, Workspace: 2, WorkspaceFolder: 3 },
     commands: {
       registerCommand(id: string, handler: (...args: never[]) => unknown) {
         ledger.commands.set(id, handler);
@@ -203,7 +238,23 @@ vi.mock("vscode", () => {
       },
       getConfiguration: () => ({
         get: (key: string, fallback?: unknown) => ledger.config[key] ?? fallback,
+        inspect: (key: string) => ({ key, workspaceValue: undefined, globalValue: undefined }),
+        update: (key: string, value: unknown, target: unknown) => {
+          ledger.configWrites.push({ key, value, target });
+          ledger.config[key] = value;
+          return Promise.resolve();
+        },
       }),
+      onDidCloseTextDocument(handler: (document: unknown) => void) {
+        ledger.closedDocumentHandlers.push(handler);
+        return { dispose: () => {} };
+      },
+      onDidChangeConfiguration(
+        handler: (event: { affectsConfiguration(section: string): boolean }) => void,
+      ) {
+        ledger.configHandlers.push(handler);
+        return { dispose: () => {} };
+      },
       registerTextDocumentContentProvider(scheme: string, provider: unknown) {
         ledger.contentProviders.push({ scheme, provider });
         return { dispose: () => {} };
@@ -766,3 +817,95 @@ describe("the workflow surface at the host seam", () => {
     expect(dropped).toHaveLength(2);
   });
 });
+
+describe("ambient awareness of the file the user is looking at", () => {
+  /** A stand-in editor, of the shape `active-editor.ts` reads. */
+  function editorOn(fsPath: string, scheme = "file"): unknown {
+    return {
+      document: { uri: { scheme, fsPath } },
+      selection: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+    };
+  }
+
+  it("subscribes to the editor at activation, and spawns nothing by doing so", () => {
+    activate();
+    // Three streams, and the third is the one that is easy to forget: without
+    // onDidCloseTextDocument the chip goes on offering a file the user closed.
+    expect(ledger.activeEditorHandlers).toHaveLength(1);
+    expect(ledger.selectionHandlers).toHaveLength(1);
+    expect(ledger.closedDocumentHandlers).toHaveLength(1);
+    expect(ledger.spawns).toBe(0);
+  });
+
+  it("starts no engine when the user moves around the editor", () => {
+    activate();
+    // RFC 0004 §3's budget survives the feature: watching is a listener, and a
+    // listener that reached for `withEngine` would spawn `arcturn serve` the
+    // first time somebody opened a file — before they ever opened the panel.
+    for (const handler of ledger.activeEditorHandlers) handler(editorOn("/workspace/a.ts"));
+    for (const handler of ledger.selectionHandlers) {
+      handler({ textEditor: editorOn("/workspace/a.ts") });
+    }
+    for (const handler of ledger.closedDocumentHandlers) {
+      handler({ uri: { scheme: "file", fsPath: "/workspace/a.ts" } });
+    }
+    expect(ledger.spawns).toBe(0);
+  });
+
+  it("asks what is already on screen rather than waiting for the next tab switch", () => {
+    // A window restored with one file open fires no editor event at all. A
+    // panel that only listened would sit next to that file knowing nothing
+    // about it until the user clicked somewhere else — which is the state this
+    // whole feature exists to end.
+    ledger.activeEditor = editorOn("/workspace/a.ts");
+    activate();
+    expect(ledger.activeEditorReads).toBeGreaterThan(0);
+    expect(ledger.spawns).toBe(0);
+  });
+
+  it("registers a command that turns the watching off and on again", async () => {
+    activate();
+    const toggle = ledger.commands.get(SIDEBAR_COMMANDS.toggleActiveEditorContext);
+    expect(toggle).toBeDefined();
+    // Default on: the panel's own starter prompts say "the file I have open".
+    await (toggle as () => Promise<void>)();
+    expect(ledger.configWrites.at(-1)).toMatchObject({
+      key: "context.activeEditor",
+      value: false,
+    });
+    await (toggle as () => Promise<void>)();
+    expect(ledger.configWrites.at(-1)).toMatchObject({
+      key: "context.activeEditor",
+      value: true,
+    });
+  });
+
+  it("turns the watching off when the chip's own control asks, and only off", async () => {
+    const panel = openPanel();
+    panel.send({ type: "disableActiveEditorContext" });
+    await Promise.resolve();
+    expect(ledger.configWrites).toEqual([{ key: "context.activeEditor", value: false, target: 1 }]);
+  });
+
+  it("watches the configuration, so the setting takes effect without a reload", () => {
+    activate();
+    const affected: string[] = [];
+    for (const handler of ledger.configHandlers) {
+      handler({
+        affectsConfiguration: (section: string) => {
+          affected.push(section);
+          return false;
+        },
+      });
+    }
+    expect(affected).toContain("arcturn.context.activeEditor");
+  });
+});
+
+/** Open the panel the way `resolveWebviewView` does, and hand back the wire. */
+function openPanel(): ReturnType<typeof fakeView> {
+  activate();
+  const panel = fakeView();
+  ledger.views[0]?.provider.resolveWebviewView(panel.view);
+  return panel;
+}

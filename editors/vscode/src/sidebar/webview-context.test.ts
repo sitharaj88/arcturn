@@ -24,10 +24,12 @@ interface Trigger {
 }
 
 const api = new Function(
-  `${CONTEXT_SOURCE}\nreturn { formatBytes, contextMeta, contextScore, rankContext, orderCandidates, triggerAt, applyTrigger };`,
+  `${CONTEXT_SOURCE}\nreturn { formatBytes, contextMeta, ambientMeta, ambientTitle, contextScore, rankContext, orderCandidates, triggerAt, applyTrigger };`,
 )() as {
   formatBytes: (bytes: number) => string;
   contextMeta: (item: ContextItem) => string;
+  ambientMeta: (item: ContextItem & { selection?: unknown }) => string;
+  ambientTitle: (item: ContextItem & { selection?: unknown }) => string;
   contextScore: (path: string, query: string) => number;
   rankContext: (items: ContextItem[], query: string) => ContextItem[];
   orderCandidates: (items: ContextItem[], query: string) => ContextItem[];
@@ -269,5 +271,69 @@ describe("orderCandidates", () => {
       "auth.ts",
       "packages/x/auth.ts",
     ]);
+  });
+});
+
+describe("what the ambient chip says will happen", () => {
+  const looking = {
+    id: "src/auth.ts",
+    path: "src/auth.ts",
+    label: "src/auth.ts",
+    bytes: 4300,
+    kind: "file" as const,
+    ok: true,
+  };
+
+  it("reads like any other chip when the whole file is what is meant", () => {
+    expect(api.ambientMeta(looking)).toBe("4.2 KB");
+  });
+
+  it("counts the selected lines, because that is what now goes", () => {
+    // `PromptAttachment` carries a range and `expandMentions` reads one, so the
+    // label naming 12-40 describes what is sent. This line used to read "whole
+    // file" — it was the word designed to change when the wire learned to carry
+    // a range, and the label was designed not to. The size stays the file's,
+    // because that is the number the engine measured before it sliced.
+    expect(api.ambientMeta({ ...looking, selection: { startLine: 12, endLine: 40 } })).toBe(
+      "29 lines of 4.2 KB",
+    );
+  });
+
+  it("says one line rather than 1 lines, and drops the size nothing measured", () => {
+    expect(api.ambientMeta({ ...looking, bytes: 0, selection: { startLine: 7, endLine: 7 } })).toBe(
+      "1 line",
+    );
+  });
+
+  it("gives the engine's refusal, not a size, for a file it will not read", () => {
+    expect(
+      api.ambientMeta({
+        ...looking,
+        ok: false,
+        bytes: 0,
+        reason: "escapes the workspace",
+        selection: { startLine: 1, endLine: 2 },
+      }),
+    ).toBe("escapes the workspace");
+  });
+
+  it("explains itself on hover, and only bothers to when a selection is showing", () => {
+    const plain = api.ambientTitle(looking);
+    expect(plain).toContain("src/auth.ts");
+    expect(plain).not.toContain("line range");
+    const ranged = api.ambientTitle({ ...looking, selection: { startLine: 12, endLine: 40 } });
+    expect(ranged).toContain("line range");
+    expect(ranged).toContain("whole file");
+  });
+
+  it("says nothing about ranges over a chip the engine already refused", () => {
+    const refused = api.ambientTitle({
+      ...looking,
+      ok: false,
+      reason: "escapes the workspace",
+      selection: { startLine: 1, endLine: 2 },
+    });
+    expect(refused).toContain("escapes the workspace");
+    expect(refused).not.toContain("line range");
   });
 });

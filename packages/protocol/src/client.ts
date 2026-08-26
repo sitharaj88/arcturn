@@ -40,6 +40,7 @@ import type {
   CompactionSummary,
   ContextResolution,
   DiscardChangesResult,
+  LineRange,
   McpStatus,
   ModelCatalog,
   OrgMemoryList,
@@ -334,13 +335,24 @@ export interface ProtocolClient {
    * before anything is sent. A prompt with no attachments never pays for the
    * probe and behaves exactly as it always did.
    *
+   * A `file` attachment's `range` is the same argument one level down, and it
+   * degrades *worse*: an engine that has `resolveContext` but predates ranges
+   * validates the attachment, drops the field it does not know, and sends the
+   * model the **whole file** while answering `ok` — a client asking about
+   * lines 12–40 of an 800-line file would be billed for all 800 and told
+   * nothing. The one probe answers both questions: it carries a range, and an
+   * engine that understands ranges echoes it back on
+   * {@link ContextResolution.range}. A ranged attachment to an engine that
+   * does not is rejected locally, with nothing sent.
+   *
    * @param sessionId - Session to run in.
    * @param text - The prompt as typed, mentions left in place.
    * @param attachments - Optional context, named by path (or, for a pasted
    *   image, carried inline). See {@link PromptAttachment}.
    * @throws {ProtocolRequestError} `invalidRequest` when the engine cannot
-   *   honour attachments at all, or refuses these ones (outside the workspace,
-   *   over the byte budget, an image for a model with no vision).
+   *   honour attachments at all (or their line ranges), or refuses these ones
+   *   (outside the workspace, over the byte budget, an image for a model with
+   *   no vision, a range starting past the end of the file).
    */
   prompt(sessionId: string, text: string, attachments?: readonly PromptAttachment[]): Promise<void>;
   /**
@@ -475,9 +487,18 @@ export interface ProtocolClient {
    *
    * @param sessionId - Session whose `cwd` the query resolves against.
    * @param query - The mention text, as typed, without its `@`.
+   * @param range - A selection to ask about. The answer echoes it back on
+   *   {@link ContextResolution.range}, and an engine that does not understand
+   *   ranges answers without it — which is how {@link ProtocolClient.prompt}
+   *   knows not to send one. The engine does **not** read the file to check
+   *   the range here; whether it fits is answered at prompt time.
    * @returns The resolution, or `undefined` when the engine has no such verb.
    */
-  resolveContext(sessionId: string, query: string): Promise<ContextResolution | undefined>;
+  resolveContext(
+    sessionId: string,
+    query: string,
+    range?: LineRange,
+  ): Promise<ContextResolution | undefined>;
   /**
    * Read the permission regime this session runs under: its mode, its rules,
    * and the names of the tools it holds.
@@ -982,7 +1003,7 @@ class ProtocolClientImpl implements ProtocolClient {
   #closeCalled = false;
   #handshake: Promise<void> | undefined;
   /** Memoized answer to "does this engine know RFC 0005's context verbs?". */
-  #contextSupport: Promise<boolean> | undefined;
+  #contextSupport: Promise<{ attachments: boolean; ranges: boolean }> | undefined;
 
   constructor(socket: WebSocketLike, options: ProtocolClientOptions) {
     this.#socket = socket;
@@ -1044,7 +1065,8 @@ class ProtocolClientImpl implements ProtocolClient {
       // See the interface doc: an old engine would drop the field and answer
       // `ok`, spending the turn. Refusing locally is the `deleteSession`
       // judgement — never resolve on a request that did not do what it said.
-      if (!(await this.#supportsContext(sessionId))) {
+      const support = await this.#supportsContext(sessionId);
+      if (!support.attachments) {
         // ProtocolClientError, not ProtocolRequestError: no request was made,
         // so there is no server rejection and no request id to name. The code
         // is still the server's `invalidRequest`, because a caller branching on
@@ -1056,6 +1078,17 @@ class ProtocolClientImpl implements ProtocolClient {
           { method: "prompt" },
         );
       }
+      // The same judgement one field down. An engine that drops `range` sends
+      // the model the whole file — which is not a smaller version of what was
+      // asked for, it is a different prompt, at a cost the user did not choose.
+      if (!support.ranges && attachments.some((item) => "range" in item && item.range)) {
+        throw new ProtocolClientError(
+          ErrorCode.invalidRequest,
+          "This arcturn engine is older than attachment line ranges, and would send the " +
+            "model the whole file instead of the selection. Nothing was sent.",
+          { method: "prompt" },
+        );
+      }
       await this.#call("prompt", { sessionId, text, attachments: [...attachments] });
       return;
     }
@@ -1063,7 +1096,8 @@ class ProtocolClientImpl implements ProtocolClient {
   }
 
   /**
-   * Whether this engine implements RFC 0005's context verbs, cached per client.
+   * Whether this engine implements RFC 0005's context verbs — and its line
+   * ranges — cached per client.
    *
    * The probe is a real `resolveContext` for `"."` — the session's own working
    * directory, which every session has and which nothing can be attached from
@@ -1071,14 +1105,23 @@ class ProtocolClientImpl implements ProtocolClient {
    * because the engine behind one socket does not change mid-connection, and a
    * probe per prompt would double the round trips of every attachment send.
    *
+   * **One probe answers both questions.** It carries a `range`, which an engine
+   * that understands ranges echoes back and one that does not silently drops —
+   * so `ranges` costs no extra round trip, and the range on a *directory* is
+   * harmless because the echo is a statement about the parameter, not about
+   * the path.
+   *
    * A probe that fails for any reason *other* than an unknown method resolves
-   * `true`: the verb is evidently there, and a transient fault on the probe
-   * must not be reported to the caller as "your engine is too old".
+   * to full support: the verb is evidently there, and a transient fault on the
+   * probe must not be reported to the caller as "your engine is too old".
    */
-  #supportsContext(sessionId: string): Promise<boolean> {
-    this.#contextSupport ??= this.resolveContext(sessionId, ".")
-      .then((resolution) => resolution !== undefined)
-      .catch(() => true);
+  #supportsContext(sessionId: string): Promise<{ attachments: boolean; ranges: boolean }> {
+    this.#contextSupport ??= this.resolveContext(sessionId, ".", { start: 1, end: 1 })
+      .then((resolution) => ({
+        attachments: resolution !== undefined,
+        ranges: resolution?.range !== undefined,
+      }))
+      .catch(() => ({ attachments: true, ranges: true }));
     return this.#contextSupport;
   }
 
@@ -1154,10 +1197,18 @@ class ProtocolClientImpl implements ProtocolClient {
     await this.#call("deleteSession", { sessionId });
   }
 
-  async resolveContext(sessionId: string, query: string): Promise<ContextResolution | undefined> {
+  async resolveContext(
+    sessionId: string,
+    query: string,
+    range?: LineRange,
+  ): Promise<ContextResolution | undefined> {
     let result: unknown;
     try {
-      result = await this.#call("resolveContext", { sessionId, query });
+      result = await this.#call("resolveContext", {
+        sessionId,
+        query,
+        ...(range === undefined ? {} : { range }),
+      });
     } catch (error) {
       // Same reasoning as `listModels` and `sessionHistory`: only a
       // *server-reported* rejection can mean "I do not know this verb", and a

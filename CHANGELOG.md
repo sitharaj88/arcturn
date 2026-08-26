@@ -51,6 +51,55 @@ CLI, the SDK, or the wire protocol.
 
 ### Added
 
+- **A file attachment can carry a line range, so a client can send a
+  *selection*.** A panel that knows the user has lines 12–40 highlighted had no
+  way to say so: `PromptAttachment` was `{ kind: "file", path }` and nothing
+  else, so the only option was to send the whole file and hope. For an 800-line
+  file that is mostly noise, and "explain this function" quietly became "explain
+  this file". A `file` attachment now takes an optional
+  `range: { start, end }` — **1-based, inclusive at both ends**, deliberately
+  the convention `@src/auth.ts:12-34` speaks and the one an editor's gutter
+  shows, so a 0-based client adds one to each end and the whole conversion is
+  one documented step rather than a guess.
+
+  **Only the coordinates travel.** RFC 0005 §3 keeps every read inside the
+  engine, so the extension still never opens the file: the engine confines the
+  path exactly as it does for a mention, reads it with the one reader
+  attachments and mentions already share, and slices. An excerpt therefore
+  inherits the same size caps and the same truncation marker a whole file has,
+  and is charged against the total attachment budget for what was actually
+  read — three lines of a 300 KiB file cost three lines. A range on an image is
+  refused rather than ignored, because an image has no lines.
+
+  **The block says it is an excerpt**, so the model does not answer as though it
+  had seen the file: `src/auth.ts (attached file) — excerpt, lines 12-14 of 60;
+  the rest of the file was not read`. An `end` past the last line is *clamped
+  and the clamp reported*, naming the range that was asked for — a
+  select-to-end, or a file edited since the selection was taken, produces one
+  routinely. A `start` past the last line is **refused**, not clamped: the only
+  thing to clamp to would be the file's tail, and substituting a different
+  selection for the one the client named is the exact failure a range exists to
+  prevent. On the wire, only ranges that cannot mean anything are rejected —
+  `start` below 1, `end` before `start`, a bound that is not a whole number.
+  There is no ceiling on `end`, because there is nothing to bound: the engine
+  never reads more of a file than the file.
+
+  **`@src/auth.ts:12-34` is the same feature in the text grammar, and now
+  works.** `findMentionTokens` used to take the whole run as a path, so the
+  suffix did not narrow a mention — it defeated it, and the file was never
+  injected at all. It now parses on both spellings (`@"my notes.md":12-34`
+  included), means the same 1-based inclusive range, and goes through the same
+  reader. A file genuinely named `notes:12-34` still resolves, because the
+  literal reading is retried when the stripped one finds nothing.
+
+  **An engine that predates ranges is detected, not trusted.** A `range` is a
+  new field on an existing parameter, so an older engine validates the
+  attachment, drops the field and sends the model the whole file while answering
+  `ok`. `resolveContext` now takes and echoes a `range`, and the probe
+  `ProtocolClient.prompt` already ran once per session before sending any
+  attachment carries one — so a ranged attachment to an engine that would drop
+  it is rejected locally, with nothing sent, and at no extra round trip.
+
 - **`/workflow` reaches a remote client in full, budget ceiling and human gate
   included.** A markdown workflow is one of Arcturn's signature features — a
   numbered list that is real control flow, an `@role` per step with its own

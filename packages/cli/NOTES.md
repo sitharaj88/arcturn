@@ -150,6 +150,41 @@ Sub-agents get a read-only tool set by filtering the parent's tools against
   specifier back to the real workspace path on the way to the engine. The write still goes to the
   shadow copy.
 
+## One line-range convention, two spellings, one reader
+
+`@src/auth.ts:12-34` in prose and `{ kind: "file", path, range }` on the wire are the same
+feature, and the thing that keeps them the same is that neither of them slices. Both hand a
+`LineRange` to `readContextFile`, which is already the only place a context file is read —
+so an excerpt inherits the confinement, the 2 MiB file ceiling, the 2000-line / 200 KiB
+inline cap and the truncation marker that a whole file has always had, rather than
+acquiring a second set of numbers that agree until they do not.
+
+The convention is **1-based, inclusive at both ends**, stated on `LineRange` in
+`@arcturn/types` because an off-by-one here is invisible: the model reads a shifted window
+and answers confidently, and nothing in the pipeline can tell. A 0-based editor API — VS
+Code's `Selection`, Monaco, most tree-sitter ranges — adds one to each end.
+
+Two details in the parser that are easy to get wrong:
+
+- **Line counting follows `wc -l`, not an editor's phantom final line.** `"a\nb\n"` is two
+  lines here, and three in VS Code. Rather than pick the editor's count and make "lines 1-2
+  of 2" read wrong for every human, the extra line is handled by the clamp: an editor that
+  selects through its phantom line simply has its `end` clamped to the last real one, which
+  is the right excerpt either way.
+- **`:12-34` is only *probably* a suffix.** A file genuinely named `notes:12-34` is legal,
+  so `MentionToken` keeps the unstripped run and `expandMentions` retries it literally when
+  the stripped path resolves to nothing. The retry costs a second `confineToWorkspace` call
+  only in the case where the first one already found nothing, so the ordinary
+  `@src/auth.ts:12-34` still costs exactly one. A suffix whose numbers cannot mean a range
+  (`:0`, `:34-12`) is not treated as one at all and the whole run stays a path — quiet,
+  exactly as a nonexistent mention has always been, because refusing a prompt over one
+  token inside prose would be a much bigger change than the suffix is worth.
+
+Where a *mention* range fails in a way worth saying out loud — a `start` past the end of
+the file, a range on a `.png` — it becomes a `MentionRefusal` and therefore a `notice`,
+which is the mention channel's existing "reported, not fatal" rule. The identical failure
+on an attachment is fatal, because the client named those lines.
+
 ## The serve path's delegation adapters narrow where the caps are
 
 `serve-background.ts` and `serve-org-memory.ts` exist for the reason `serve-mcp.ts` does:
@@ -193,6 +228,14 @@ Both are reached through `runtime.paths`, which is now shared by four serve feat
 - Prompt history is per-process; it is not persisted between runs.
 - No `@`-completion for file paths in the editor — only `/` for commands.
 - Images are accepted by the contracts but there is no way to attach one from the CLI.
+- A line range does not lift `readContextFile`'s 2 MiB per-file ceiling, so twenty lines of
+  a 3 MiB generated file are still refused as "too large to inline". Lifting it honestly
+  means a streaming line reader, which is a *second* read path — and one reader is the
+  whole point of routing ranges through this one. Recorded rather than half-fixed.
+- An excerpt whose lines are long enough to pass 200 KiB is still byte-truncated by
+  `truncateText`, so the block's heading names a wider span than the fence holds. The
+  truncation marker is present, so nothing is silently lost, but the two numbers do not
+  reconcile without reading the marker.
 - `--print` has no stdin mode (`echo … | arcturn -p`); the prompt must be an argument.
 - MCP resources and prompts are not surfaced (`McpManager.listResources` / `listPrompts` exist);
   `/mcp` only reports connection state and tool counts.

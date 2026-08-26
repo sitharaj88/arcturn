@@ -30,7 +30,13 @@
  *   the part the served path was missing.
  */
 
-import type { ContextResolution, ImageContent, ModelSpec, PromptAttachment } from "@arcturn/types";
+import type {
+  ContextResolution,
+  ImageContent,
+  LineRange,
+  ModelSpec,
+  PromptAttachment,
+} from "@arcturn/types";
 
 /**
  * Total byte budget for one prompt's attachments, across all of them.
@@ -116,6 +122,16 @@ export interface ContextQueryRequest {
   cwd: string;
   /** The mention text, as typed, without its `@`. */
   query: string;
+  /**
+   * The selection the client asked about, when it asked about one.
+   *
+   * A resolver must **echo it back** on {@link ContextResolution.range} and
+   * must not read the file to check it — this verb stats and never reads. The
+   * echo exists so a client can tell an engine that understands ranges from
+   * one that silently drops them; see `ContextResolution.range` for why that
+   * distinction is worth a field.
+   */
+  range?: LineRange;
 }
 
 /**
@@ -130,8 +146,9 @@ export interface ContextResolver {
    *
    * @throws {ContextRefusedError} When an **attachment** cannot be honoured —
    *   outside the workspace, missing, not a file, over
-   *   {@link PROMPT_ATTACHMENT_MAX_BYTES}, or an image type this engine cannot
-   *   send. Nothing is appended to the session and no turn is spent.
+   *   {@link PROMPT_ATTACHMENT_MAX_BYTES}, an image type this engine cannot
+   *   send, or a `range` whose `start` is past the end of the file. Nothing is
+   *   appended to the session and no turn is spent.
    */
   buildPrompt(request: PromptContextRequest): Promise<ResolvedPrompt>;
   /**

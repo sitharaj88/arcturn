@@ -15,7 +15,9 @@ import {
   MAX_PROMPT_LENGTH,
   MAX_SESSION_ID_LENGTH,
   parseWebviewMessage,
+  projectActiveEditorItem,
   projectCommandOption,
+  projectContextItem,
   projectModelOption,
   projectSessions,
 } from "./webview-messages.js";
@@ -326,6 +328,18 @@ describe("parseWebviewMessage, the RFC 0005 composer verbs", () => {
     expect(parseWebviewMessage({ type: "browseForFiles" })).toEqual({ type: "browseForFiles" });
   });
 
+  it("accepts the request to stop watching the editor, which carries no payload", () => {
+    // No payload at all: the chip's one control turns the feature off, and a
+    // boolean on the wire would let the page turn it back *on* for somebody
+    // who had switched it off in their settings.
+    expect(parseWebviewMessage({ type: "disableActiveEditorContext" })).toEqual({
+      type: "disableActiveEditorContext",
+    });
+    expect(parseWebviewMessage({ type: "disableActiveEditorContext", enabled: true })).toEqual({
+      type: "disableActiveEditorContext",
+    });
+  });
+
   it("accepts exactly the four permission modes the engine defines", () => {
     for (const mode of ["default", "acceptEdits", "plan", "yolo"]) {
       expect(parseWebviewMessage({ type: "setPermissionMode", mode })).toEqual({
@@ -369,6 +383,65 @@ describe("parseWebviewMessage, the RFC 0005 composer verbs", () => {
         mimeType: "image/png",
       }),
     ).toBeUndefined();
+  });
+});
+
+describe("the ambient chip's boundary", () => {
+  const resolution = {
+    query: "src/auth.ts",
+    path: "/w/src/auth.ts",
+    relativePath: "src/auth.ts",
+    inWorkspace: true,
+    exists: true,
+    bytes: 4300,
+    kind: "file" as const,
+  };
+
+  it("carries the engine's own answer through, exactly as an @ chip does", () => {
+    // Same projection, so the ambient chip and an explicit one cannot come to
+    // disagree about what "attachable" means or what a file weighs.
+    const ambient = projectActiveEditorItem(resolution);
+    const explicit = projectContextItem(resolution);
+    expect(ambient.id).toBe(explicit.id);
+    expect(ambient.path).toBe(explicit.path);
+    expect(ambient.bytes).toBe(4300);
+    expect(ambient.ok).toBe(true);
+    expect(ambient.selection).toBeUndefined();
+  });
+
+  it("puts the selected lines in the label, and keeps the path as identity", () => {
+    const item = projectActiveEditorItem(resolution, { startLine: 12, endLine: 40 });
+    expect(item.label).toBe("src/auth.ts:12-40");
+    expect(item.path).toBe("src/auth.ts");
+    expect(item.selection).toEqual({ startLine: 12, endLine: 40 });
+  });
+
+  it("escapes the path before the range is appended, not after", () => {
+    // The digits are ours; the path is the engine's, and a filename containing
+    // `$(check)` renders as a badge in a VS Code label if it is not escaped.
+    const item = projectActiveEditorItem(
+      { ...resolution, relativePath: "$(check)/a.ts" },
+      { startLine: 3, endLine: 3 },
+    );
+    expect(item.label).toBe("\\$(check)/a.ts:3");
+  });
+
+  it("carries the engine's refusal for a file outside the workspace", () => {
+    // Not dropped. A user looking at a file the engine will not read has to be
+    // told that, or the panel silently answers about nothing.
+    const item = projectActiveEditorItem({
+      query: "/etc/passwd",
+      path: "/etc/passwd",
+      relativePath: "",
+      inWorkspace: false,
+      exists: false,
+      bytes: 0,
+      kind: "missing",
+      reason: "escapes the workspace",
+    });
+    expect(item.ok).toBe(false);
+    expect(item.reason).toBe("escapes the workspace");
+    expect(item.id).toBe("/etc/passwd");
   });
 });
 

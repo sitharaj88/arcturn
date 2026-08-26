@@ -342,6 +342,11 @@ the TUI and `--print` call — so `@src/auth.ts` reaches the model as the file, 
 file. Before this existed, that expansion ran only in the local CLI, and every remote
 client was silently degraded; see RFC 0005 §0.
 
+A mention may name a **line range** — `@src/auth.ts:12-34`, or `@src/auth.ts:12` for a
+single line — in which case only those lines are injected, headed as an excerpt. It is the
+same feature, the same convention and the same reader as a `file` attachment's `range`;
+see [Attachments](#attachments).
+
 One exception, covered under [Commands](#commands): a prompt that *is* a command — one
 beginning with `/name` — expands into that skill's body instead, and the body's own
 mentions are left alone. A prompt is either a command or it is prose, never both.
@@ -371,6 +376,64 @@ remote user is told rather than left wondering.
 A `file` becomes a context block headed with its path and the word `(attached file)`, so
 the model can tell attached context from the user's own words. An `image` becomes a vision
 block.
+
+#### A selection, not the whole file
+
+A `file` attachment takes an optional `range`, so a client that knows the user has lines
+12–40 highlighted can say so instead of sending an 800-line file and hoping:
+
+```json
+{ "kind": "file", "path": "src/auth.ts", "range": { "start": 12, "end": 40 } }
+```
+
+**Lines are 1-based and both ends are inclusive.** `{ "start": 12, "end": 40 }` means what
+a person means by "lines 12 to 40" — 29 lines, the first being line 12 and the last being
+line 40 — and one line is `{ "start": 7, "end": 7 }`. This is deliberately the convention
+`@src/auth.ts:12-34` speaks and the one every editor's gutter shows. A client built on a
+**0-based** editor API (VS Code's `Selection.start.line`, Monaco, most tree-sitter ranges)
+must add one to each end before sending; an off-by-one here is invisible in the result,
+because the model simply reads a shifted window and answers confidently.
+
+Only the *coordinates* travel. The engine opens the file under the same confinement,
+applies the same caps, and slices — one reader, and the read still happens where the
+permission engine can see it. A range is accepted for `kind: "file"` only: an image has no
+lines, so a range on one is **refused**, not ignored.
+
+The injected block says it is an excerpt and which lines it holds, so the model does not
+answer as though it had seen the file:
+
+```text
+src/auth.ts (attached file) — excerpt, lines 12-14 of 60; the rest of the file was not read:
+```
+
+An `end` past the last line is **clamped, and the clamp is reported** — a select-to-end, or
+a file edited since the selection was taken, produces one routinely:
+
+```text
+src/auth.ts (attached file) — excerpt, lines 58-60 of 60; 58-10000000 was requested, but the
+file ends at line 60, so the range was clamped; the rest of the file was not read:
+```
+
+A `start` past the last line is **refused**, not clamped: there is no excerpt to clamp to,
+and quietly substituting the file's tail would hand the model a different selection than
+the one the client named. So is a range against an empty file.
+
+There is no upper bound on `end` beyond "a whole number", because there is nothing to
+bound: the engine never reads more of a file than the file, so `1–10,000,000` costs exactly
+what attaching that file with no range costs, and the 2 MiB per-file ceiling, the 2000-line
+/ 200 KiB inline cap and the total attachment budget all still apply. What *is* rejected on
+the wire is a range that cannot mean anything — `start` below 1, `end` before `start`, or a
+bound that is not a whole number. Those are client bugs, and clamping one would mean
+inventing an intent nobody expressed.
+
+An excerpt is charged against the total budget for **what was actually read**, so attaching
+three lines of a 300 KiB file costs three lines.
+
+The `:12-34` suffix on a mention means exactly the same thing, read by the same reader:
+`@src/auth.ts:12-34` (and `@src/auth.ts:12` for one line, and `@"my notes.md":12-34` for a
+path with spaces) injects that excerpt rather than the whole file. A suffix whose numbers
+cannot mean a range is not treated as one, and the whole run stays a path — which is also
+how a file genuinely named `notes:12-34` still resolves.
 
 **A `file` is always a path, never bytes.** RFC 0005 §3 puts every file read inside the
 engine: a file read by a client is a file the permission engine never saw, and a client
@@ -436,6 +499,20 @@ oracle for the paths confinement exists to hide. Such a path reports `inWorkspac
 `exists: false` and `bytes: 0` because the server *did not look*, which is not the same
 answer as "there is nothing there".
 
+`resolveContext` also takes the optional `range` a `file` attachment takes, and **echoes it
+back** on the result:
+
+```json
+{ "id": "12", "method": "resolveContext", "params": {
+    "sessionId": "sess_abc", "query": "src/auth.ts", "range": { "start": 12, "end": 40 } } }
+```
+
+The echo is a statement about the *parameter*, not about the file: it says this engine
+understood the range, which is exactly what a client needs to know before it trusts a
+ranged attachment not to arrive as a whole file. It does **not** say the range fits — this
+verb stats and never reads, and a file's line count cannot be known without reading it.
+Whether the range fits is answered at prompt time, in the injected block or in a refusal.
+
 `resolveContext` is **optional and additive**, on the same terms as `listModels`:
 `ProtocolClient.resolveContext()` translates an older server's `invalidRequest` into
 `undefined`, which is safe because the verb only reads — `undefined` costs a caller a
@@ -448,6 +525,14 @@ model never saw the file, and the client was told everything was fine. So
 `ProtocolClient.prompt()` probes `resolveContext` once per session before sending any
 attachment and **rejects locally** when the engine has no such verb. Nothing is sent, and
 nothing is silently dropped.
+
+A `file` attachment's `range` is the same argument one level down, and it degrades *worse*:
+an engine that has `resolveContext` but predates ranges validates the attachment, drops the
+field, and sends the model the **whole file** while answering `ok` — a client asking about
+lines 12–40 of an 800-line file would be billed for all 800 and told nothing. The one probe
+answers both questions: it carries a range, and the echo above is how an engine that
+understands ranges says so. A ranged attachment to an engine that does not is rejected
+locally, with nothing sent, and no extra round trip is spent finding out.
 
 ## Permissions
 
@@ -1638,7 +1723,8 @@ Adding an *optional* verb is not such a change, and `listModels`, `sessionHistor
 `applyChanges`, `discardChanges`, `listCheckpoints`, `rewindTo`, `listWorkflows`,
 `runWorkflow`, `workflowStatus` and `resumeWorkflow` did not bump it — nor did
 `prompt`'s optional
-`attachments` field or `permissionDecision`'s optional `scope`, which an older server
+`attachments` field (or a `file` attachment's optional `range`), `resolveContext`'s
+optional `range`, or `permissionDecision`'s optional `scope`, all of which an older server
 validates and drops. An older
 server rejects the new verb with an ordinary `invalidRequest` response the newer client
 handles, and an older client simply never sends it — both halves keep working.

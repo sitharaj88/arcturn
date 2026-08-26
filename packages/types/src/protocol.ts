@@ -169,7 +169,11 @@ export type ClientRequest =
    * only reads, so an older server's `invalidRequest` costs a client a preview,
    * never a guarantee. See `ProtocolClient.resolveContext`.
    */
-  | { id: string; method: "resolveContext"; params: { sessionId: string; query: string } }
+  | {
+      id: string;
+      method: "resolveContext";
+      params: { sessionId: string; query: string; range?: LineRange };
+    }
   /**
    * Ask what permission regime this session is running under.
    *
@@ -910,14 +914,80 @@ export type ClientRequest =
  * for `image` and only for `image`, capped with everything else against the
  * total attachment budget, and restricted to the image types the engine
  * already knows how to send.
+ *
+ * ### Why a `file` may carry a range, and the engine still does the reading
+ *
+ * A client that knows the user has lines 12–40 selected should be able to say
+ * so, rather than sending an 800-line file and hoping the model finds the part
+ * that matters. So `file` takes an optional {@link LineRange} — but only the
+ * *coordinates* of the selection, never its text. The engine opens the file
+ * under the same confinement, applies the same size caps, and slices; one
+ * reader, one set of rules, and the read still happens where the permission
+ * engine can see it. A range is accepted for `kind: "file"` only: an image has
+ * no lines, so a range on one is refused rather than ignored.
  */
 export type PromptAttachment =
-  /** A workspace file, read by the engine and injected as a context block. */
-  | { kind: "file"; path: string }
+  /**
+   * A workspace file, read by the engine and injected as a context block.
+   *
+   * `range` narrows it to a *selection*: see {@link LineRange} for the
+   * convention, and {@link PromptAttachment} above for why the engine — never
+   * the client — is the one that slices.
+   */
+  | { kind: "file"; path: string; range?: LineRange }
   /** A workspace image, read by the engine and sent as a vision block. */
   | { kind: "image"; path: string }
   /** An image with no path — a paste, a drop from outside the filesystem. */
   | { kind: "image"; data: string; mimeType: string };
+
+/**
+ * A span of lines inside a text file — one editor selection, on the wire.
+ *
+ * ## The convention, stated once
+ *
+ * **Lines are 1-based, and both ends are inclusive.** `{ start: 12, end: 40 }`
+ * means exactly what a person means by "lines 12 to 40": line 12 is the first
+ * line of the excerpt, line 40 is the last, and the excerpt is
+ * `end - start + 1` = 29 lines long. One line is `{ start: 7, end: 7 }` —
+ * never `{ start: 7, end: 8 }`, and there is no such thing as an empty range.
+ *
+ * This is deliberately the convention `@file:12-34` speaks, and the one every
+ * editor's gutter shows, rather than any internal representation: the number a
+ * user can see next to their selection is the number that should appear here.
+ * A client built on a **0-based** editor API — VS Code's `Selection.start.line`
+ * is 0-based, as are Monaco's document offsets and most tree-sitter ranges —
+ * must add one to each end before sending. An off-by-one in this conversion is
+ * invisible in the result (the model simply reads a slightly shifted window
+ * and answers confidently), which is why the convention is written here rather
+ * than left to be inferred.
+ *
+ * ## What the engine does with an imperfect one
+ *
+ * Only ranges that cannot *mean* anything are rejected on the wire: `start`
+ * below 1, `end` before `start`, or a bound that is not a whole number. Those
+ * are client bugs, and clamping one would mean inventing an intent nobody
+ * expressed.
+ *
+ * A range that merely does not fit the file is not a client bug — a
+ * select-to-end, or a file edited since the selection was taken, produces one
+ * routinely — so:
+ *
+ * - An `end` past the last line is **clamped, and the clamp is reported** in
+ *   the injected block, along with the range that was asked for.
+ * - A `start` past the last line is **refused**, because there is no excerpt to
+ *   clamp to and quietly substituting the file's tail would hand the model a
+ *   different selection than the one that was named.
+ *
+ * There is no upper bound on `end` beyond "a whole number": the engine never
+ * reads more than the file, so `{ start: 1, end: 10_000_000 }` costs exactly
+ * what attaching that file costs and not a byte more.
+ */
+export interface LineRange {
+  /** First line of the excerpt. 1-based, and included. Must be at least `1`. */
+  start: number;
+  /** Last line of the excerpt. 1-based, and included. Must be at least `start`. */
+  end: number;
+}
 
 /**
  * What a resolved context item turns out to be.
@@ -970,6 +1040,25 @@ export interface ContextResolution {
    * the item is attachable as-is.
    */
   reason?: string;
+  /**
+   * The {@link LineRange} the query asked about, echoed back normalized.
+   *
+   * Present **only** when the request carried a `range`, and absent otherwise —
+   * which makes it the one thing a client can use to tell an engine that
+   * understands ranges from one that silently drops them. That distinction
+   * matters because `range` is a new field on an existing parameter: an older
+   * engine validates a ranged `file` attachment, copies out the fields it
+   * knows, drops this one, and sends the model the *whole file* while answering
+   * `ok`. `ProtocolClient.prompt` reads this echo before sending any ranged
+   * attachment and refuses locally when it is missing.
+   *
+   * It is an echo and nothing more. It says the engine understood the
+   * parameter; it does **not** say the range fits the file, because
+   * `resolveContext` stats and never reads, and how many lines a file has
+   * cannot be known without reading it. Whether the range fits is answered at
+   * prompt time, in the injected block (clamped and reported) or in a refusal.
+   */
+  range?: LineRange;
 }
 
 /**

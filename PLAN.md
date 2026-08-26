@@ -273,9 +273,6 @@ change.
 Engine gaps surfaced by the VS Code extension build (RFC 0004), each routed
 around in the extension per the one-engine rule and owed a proper fix here:
 
-- `@file:12-34` line-range mentions: `findMentionTokens` treats the whole run
-  as a path, so the suffix defeats content injection (quoted paths behave
-  differently — the asymmetry should go when the suffix is taught).
 - `createSession` over the wire does not subscribe the connection to events
   (`ws-server.ts` attaches the observer only on `openSession`); every client
   must know to call both. Either subscribe on create or document it loudly.
@@ -300,6 +297,26 @@ the verb is additive and optional, an older server rejects it with an ordinary
 the VS Code picker degrades to exactly its old behaviour on that. A bump would
 instead have severed every existing pair, since `SessionHeader.version` is
 validated as `1` at both ends.
+
+**Done (2026-08-26): line ranges, on the wire and in the mention grammar.** The
+gap that used to sit here — "`@file:12-34` line-range mentions: `findMentionTokens`
+treats the whole run as a path, so the suffix defeats content injection" — is
+closed, together with the reason it mattered. A `file` attachment now carries an
+optional `range: { start, end }`, **1-based and inclusive at both ends**, so a
+client that knows the user has lines 12–40 selected can say so instead of
+sending an 800-line file and hoping; and `@src/auth.ts:12-34` (plus `:12` for
+one line, plus the quoted `@"my notes.md":12-34` whose asymmetry this entry
+predicted) means exactly the same thing. One convention, two spellings, and
+one reader: both hand a `LineRange` to `readContextFile`, so an excerpt
+inherits the confinement, the size caps and the truncation marker a whole file
+already had. The injected block states that it is an excerpt and which lines it
+covers; an `end` past the file is clamped *and reported*, a `start` past it is
+refused rather than answered with the file's tail, and the wire rejects only
+ranges that cannot mean anything (`start < 1`, `end < start`, a non-integer).
+`resolveContext` takes and echoes a `range`, which turns the probe
+`ProtocolClient.prompt` already ran into a capability check — so an engine that
+would drop the field and send the whole file is caught locally, at no extra
+round trip. `PROTOCOL_VERSION` stays at `1` on `listModels`' terms.
 
 Contracts v2 (from packages/ai/NOTES.md): optional thinking `signature` on StreamEvent
 and ToolCallContent — needed for full reasoning continuity on Gemini tool turns and to

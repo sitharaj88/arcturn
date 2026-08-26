@@ -1657,6 +1657,113 @@ describe("the chips above the composer", () => {
   });
 });
 
+describe("the ambient chip — the file the user is looking at", () => {
+  const ambient = {
+    id: "src/auth.ts",
+    path: "src/auth.ts",
+    label: "src/auth.ts",
+    bytes: 4300,
+    kind: "file",
+    ok: true,
+  };
+
+  it("appears with the explicit chips and is not one of them", () => {
+    // The distinction is the whole point. An `@` chip is a thing the user put
+    // there and that stays until they remove it; this one changes under them
+    // as they move around the editor, and a row where those two look identical
+    // is a row that lies about which of its entries is stable.
+    panel.send({ type: "context", items: contextItems, active: ambient });
+    const chips = panel.byId("chips").all("context-chip");
+    expect(chips).toHaveLength(3);
+    expect(chips[0]?.classList.contains("chip-ambient")).toBe(true);
+    expect(chips[1]?.classList.contains("chip-ambient")).toBe(false);
+    expect(chips[2]?.classList.contains("chip-ambient")).toBe(false);
+  });
+
+  it("shows the file and its real size when nothing is selected", () => {
+    panel.send({ type: "context", items: [], active: ambient });
+    const chip = panel.byId("chips").all("context-chip")[0];
+    expect(chip?.textContent).toContain("src/auth.ts");
+    expect(chip?.textContent).toContain("4.2 KB");
+  });
+
+  it("shows the selected lines, and counts them, because that is what goes", () => {
+    panel.send({
+      type: "context",
+      items: [],
+      active: { ...ambient, label: "src/auth.ts:12-40", selection: { startLine: 12, endLine: 40 } },
+    });
+    const chip = panel.byId("chips").all("context-chip")[0];
+    expect(chip?.textContent).toContain("src/auth.ts:12-40");
+    expect(chip?.textContent).toContain("29 lines");
+    expect(chip?.textContent).not.toContain("whole file");
+    expect(chip?.title).toContain("line range");
+  });
+
+  it("shows the engine's refusal for a file outside the workspace", () => {
+    // Not hidden and not silently dropped: somebody reading a file the engine
+    // will not touch has to see that before they press send, or the answer
+    // they get is about nothing.
+    panel.send({
+      type: "context",
+      items: [],
+      active: {
+        ...ambient,
+        id: "/etc/passwd",
+        path: "/etc/passwd",
+        label: "/etc/passwd",
+        bytes: 0,
+        kind: "missing",
+        ok: false,
+        reason: "escapes the workspace",
+      },
+    });
+    const chip = panel.byId("chips").all("context-chip")[0];
+    expect(chip?.classList.contains("chip-bad")).toBe(true);
+    expect(chip?.textContent).toContain("escapes the workspace");
+  });
+
+  it("shows no chip row at all when there is no file and nothing attached", () => {
+    panel.send({ type: "context", items: [], active: ambient });
+    expect(panel.byId("chips").classList.contains("hidden")).toBe(false);
+    panel.send({ type: "context", items: [] });
+    expect(panel.byId("chips").classList.contains("hidden")).toBe(true);
+    expect(panel.byId("chips").all("context-chip")).toHaveLength(0);
+  });
+
+  it("turns the watching off rather than pretending to remove a chip", () => {
+    // A dismiss that only cleared this one chip would be undone by the next
+    // keystroke in the editor. The control does the thing it can actually do.
+    panel.send({ type: "context", items: [], active: ambient });
+    const dismiss = panel.byId("chips").all("chip-remove")[0];
+    expect(dismiss?.getAttribute("aria-label")).toContain("Stop");
+    dismiss?.dispatch("click");
+    expect(panel.posted.at(-1)).toEqual({ type: "disableActiveEditorContext" });
+  });
+
+  it("does not detach the ambient chip, which the host does not hold in that set", () => {
+    panel.send({ type: "context", items: contextItems, active: ambient });
+    const removes = panel.byId("chips").all("chip-remove");
+    removes[1]?.dispatch("click");
+    expect(panel.posted.at(-1)).toEqual({ type: "detach", id: "src/auth.ts" });
+  });
+
+  it("renders codicon syntax in the path as the characters the engine sent", () => {
+    panel.send({
+      type: "context",
+      items: [],
+      active: { ...ambient, id: "$(check)/a.ts", path: "$(check)/a.ts", label: "$(check)/a.ts:3" },
+    });
+    expect(panel.byId("chips").textContent).toContain("$(check)");
+  });
+
+  it("ignores an ambient chip that is not a record, rather than throwing at the row", () => {
+    panel.send({ type: "context", items: contextItems, active: "src/auth.ts" });
+    expect(panel.byId("chips").all("chip-ambient")).toHaveLength(0);
+    expect(panel.byId("chips").all("context-chip")).toHaveLength(2);
+  });
+});
+
 describe("the / command menu", () => {
   const commands = [
     {

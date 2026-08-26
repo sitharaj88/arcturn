@@ -22,7 +22,7 @@
 import { type Dirent, readdirSync, readFileSync } from "node:fs";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { extname, join, relative, resolve, sep } from "node:path";
-import type { ImageContent } from "@arcturn/types";
+import type { ImageContent, LineRange } from "@arcturn/types";
 
 /** One entry offered by a mention completion source. */
 export interface MentionSuggestion {
@@ -328,7 +328,17 @@ export type ContextFileContent =
    */
   | { kind: "tooLarge"; text: string; bytes: number; limit: number }
   /** A directory, a socket, or something that vanished between checks. */
-  | { kind: "notAFile" };
+  | { kind: "notAFile" }
+  /**
+   * A {@link LineRange} was asked for that this file cannot answer — a `start`
+   * past the last line, or a range on an image. Nothing was injected.
+   *
+   * Its own outcome rather than an empty `text` block, because those two are
+   * the difference between "the selection you named is not there" and "the
+   * selection you named is blank", and a model handed the second would answer
+   * about emptiness it was never shown.
+   */
+  | { kind: "rangeRefused"; reason: string };
 
 /**
  * File extensions this engine turns into vision blocks, and the media type each
@@ -355,8 +365,57 @@ const MAX_TEXT_FILE_BYTES = 2 * 1024 * 1024;
 
 /** One `@token` found in submitted text. */
 interface MentionToken {
-  /** Raw path text as typed, quotes stripped. */
+  /** Path text as typed, quotes stripped and any `:12-34` suffix taken off. */
   path: string;
+  /**
+   * The same run with the suffix still on it.
+   *
+   * Kept because `:12-34` is only *probably* a line range: a file genuinely
+   * named `notes:12-34` is legal on every platform this runs on, and the
+   * literal reading has to be able to win when the stripped one resolves to
+   * nothing. See {@link expandMentions}.
+   */
+  raw: string;
+  /** The selection the suffix named, when it named a usable one. */
+  range?: LineRange;
+}
+
+/**
+ * A trailing `:12-34` or `:12` on a mention.
+ *
+ * Anchored at both ends, and the line numbers must be the very last thing in
+ * the run, so `@src/auth.ts` and a Windows-shaped `@C:\Users\me\notes.md` are
+ * untouched — the tail after the final colon has to be digits for this to fire
+ * at all.
+ */
+const MENTION_RANGE_SUFFIX = /^(.+):(\d+)(?:-(\d+))?$/;
+
+/**
+ * Split a `path:start-end` run into its two halves, when it has two.
+ *
+ * A single number (`@src/auth.ts:12`) is one line: `{ start: 12, end: 12 }`,
+ * matching {@link LineRange}'s inclusive convention rather than inventing a
+ * half-open one for this spelling alone.
+ *
+ * Returns `undefined` — leaving the whole run to be treated as a path, exactly
+ * as it was before the suffix was taught — when the numbers cannot mean a
+ * range: `:0`, `:34-12`, or a value too large to be a whole number. That is
+ * the quiet outcome a nonexistent mention has always had, and it is the right
+ * one here: refusing the prompt over a token inside prose would be a far
+ * bigger change than the suffix is worth.
+ *
+ * @param run - The mention's text after `@`, quotes already stripped.
+ */
+function parseRangeSuffix(run: string): { path: string; range: LineRange } | undefined {
+  const match = MENTION_RANGE_SUFFIX.exec(run);
+  if (!match) return undefined;
+  const [, path, startText, endText] = match;
+  if (path === undefined || startText === undefined) return undefined;
+  const start = Number(startText);
+  const end = endText === undefined ? start : Number(endText);
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end)) return undefined;
+  if (start < 1 || end < start) return undefined;
+  return { path, range: { start, end } };
 }
 
 /**
@@ -366,6 +425,12 @@ interface MentionToken {
  * whitespace (so `foo@bar.com` is left alone), and its path is either a
  * double-quoted span (spaces allowed, unterminated quotes run to the end of
  * the string) or a run of non-whitespace characters.
+ *
+ * Either spelling may carry a `:12-34` line-range suffix — `@src/auth.ts:12-34`
+ * and `@"my notes.md":12-34` both work, which is why the quoted form checks
+ * past its closing quote. Before this, the whole run was taken as a path, so
+ * the suffix did not narrow the mention: it defeated it, and the file was
+ * never injected at all.
  *
  * @param text - Submitted prompt text.
  */
@@ -383,6 +448,7 @@ function findMentionTokens(text: string): MentionToken[] {
     }
     let end: number;
     let path: string;
+    let range: LineRange | undefined;
     if (text[at + 1] === '"') {
       const close = text.indexOf('"', at + 2);
       if (close === -1) {
@@ -391,6 +457,16 @@ function findMentionTokens(text: string): MentionToken[] {
       } else {
         end = close + 1;
         path = text.slice(at + 2, close);
+        // The suffix sits *outside* the quotes: the quotes exist to let a path
+        // hold spaces, and the line numbers are not part of the name.
+        let k = end;
+        while (k < n && !/\s/.test(text[k]!)) k++;
+        const suffix = text.slice(end, k);
+        const parsed = suffix === "" ? undefined : parseRangeSuffix(`x${suffix}`);
+        if (parsed?.path === "x") {
+          range = parsed.range;
+          end = k;
+        }
       }
     } else {
       let j = at + 1;
@@ -398,7 +474,17 @@ function findMentionTokens(text: string): MentionToken[] {
       end = j;
       path = text.slice(at + 1, j);
     }
-    if (path.length > 0) tokens.push({ path });
+    const raw = path;
+    if (range === undefined) {
+      const parsed = parseRangeSuffix(path);
+      if (parsed) {
+        path = parsed.path;
+        range = parsed.range;
+      }
+    }
+    if (path.length > 0) {
+      tokens.push({ path, raw, ...(range === undefined ? {} : { range }) });
+    }
     i = Math.max(end, at + 1);
   }
   return tokens;
@@ -477,6 +563,77 @@ export async function confineToWorkspace(
   return { outcome: "inside", path: resolved, realPath: realTarget, relativePath };
 }
 
+/**
+ * What {@link sliceRange} made of a range against a file's actual contents.
+ *
+ * `note` is the honest sentence that goes above the fence, and it is built
+ * here rather than at the injection site for one reason: this is the only
+ * place that knows how many lines the file has, so it is the only place that
+ * can say `of 800` — or say that the range was clamped — without guessing.
+ */
+type RangeSlice =
+  | { outcome: "sliced"; content: string; note: string }
+  | { outcome: "refused"; reason: string };
+
+/**
+ * Cut a {@link LineRange} out of a file's text, clamping what can be clamped
+ * and refusing what cannot.
+ *
+ * The convention is `LineRange`'s: **1-based, inclusive at both ends**. Line
+ * counting follows `wc -l` rather than an editor's phantom final line — a file
+ * ending in `\n` has as many lines as it has newlines, not one more — so
+ * "lines 1-2 of 2" means what a person reading a two-line file expects. An
+ * editor that counts the phantom line and asks for one past the end simply has
+ * its `end` clamped, which is the right outcome either way.
+ *
+ * @param raw - The whole file, already read and confined.
+ * @param range - The selection, as the client named it.
+ */
+function sliceRange(raw: string, range: LineRange): RangeSlice {
+  const lines = raw.split("\n");
+  if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
+  const total = raw === "" ? 0 : lines.length;
+
+  if (range.start > total) {
+    // Refused, not clamped. There is no excerpt to clamp *to*, and quietly
+    // substituting the file's tail would hand the model a different selection
+    // than the one that was named — which is the exact substitution a range
+    // exists to prevent.
+    return {
+      outcome: "refused",
+      reason:
+        total === 0
+          ? `starts at line ${String(range.start)}, but the file is empty`
+          : `starts at line ${String(range.start)}, but the file has ${String(total)} lines`,
+    };
+  }
+
+  const clamps: string[] = [];
+  let end = range.end;
+  if (end > total) {
+    end = total;
+    clamps.push(`the file ends at line ${String(total)}`);
+  }
+  const lineCeiling = range.start + MAX_TEXT_LINES - 1;
+  if (end > lineCeiling) {
+    end = lineCeiling;
+    clamps.push(`this engine inlines at most ${String(MAX_TEXT_LINES)} lines`);
+  }
+  const clamped =
+    clamps.length === 0
+      ? ""
+      : `; ${String(range.start)}-${String(range.end)} was requested, but ` +
+        `${clamps.join(" and ")}, so the range was clamped`;
+
+  return {
+    outcome: "sliced",
+    content: lines.slice(range.start - 1, end).join("\n"),
+    note:
+      `excerpt, lines ${String(range.start)}-${String(end)} of ${String(total)}${clamped}; ` +
+      "the rest of the file was not read",
+  };
+}
+
 /** Truncate text to {@link MAX_TEXT_LINES} lines and {@link MAX_TEXT_BYTES} bytes. */
 function truncateText(raw: string): { content: string; truncated: boolean } {
   let truncated = false;
@@ -502,14 +659,26 @@ function truncateText(raw: string): { content: string; truncated: boolean } {
  * two that drift. The caller has already run {@link confineToWorkspace}; this
  * function never resolves a path and never checks one.
  *
+ * A `range` narrows the result to an excerpt. It changes nothing about *which*
+ * file is read, or under what caps — the 2 MiB ceiling below still gates the
+ * read, because slicing happens after the bytes are in hand and this stays one
+ * reader with one set of numbers. What it does change is the heading, which
+ * then states plainly that the model is looking at part of a file and which
+ * part, so a clamped or narrowed range is never something the model has to
+ * infer from the content it was given.
+ *
  * @param realPath - The symlink-resolved path from a `"inside"` verdict.
  * @param heading - What to call the file in the emitted block, e.g.
  *   `"@src/auth.ts"` for a mention or `"src/auth.ts (attached)"` for an
  *   attachment. This is what makes a context block "say what it is".
+ * @param range - Optional selection, 1-based and inclusive at both ends. See
+ *   {@link LineRange} for the convention and {@link sliceRange} for what
+ *   happens to one that does not fit.
  */
 export async function readContextFile(
   realPath: string,
   heading: string,
+  range?: LineRange,
 ): Promise<ContextFileContent> {
   let info: Awaited<ReturnType<typeof stat>>;
   try {
@@ -521,6 +690,15 @@ export async function readContextFile(
 
   const mimeType = IMAGE_MIME_TYPES[extname(realPath).toLowerCase()];
   if (mimeType) {
+    if (range) {
+      // Refused rather than ignored, and refused before the read. `kind: "file"`
+      // on a `.png` is the one way a range can reach here for something with no
+      // lines — the wire validator rejects a range on `kind: "image"` outright.
+      return {
+        kind: "rangeRefused",
+        reason: "is an image, and a line range means nothing for one",
+      };
+    }
     if (info.size > MAX_IMAGE_BYTES) {
       return {
         kind: "tooLarge",
@@ -542,11 +720,19 @@ export async function readContextFile(
     };
   }
   const raw = await readFile(realPath, "utf8");
-  const { content, truncated } = truncateText(raw);
+  let selected = raw;
+  let note = "";
+  if (range) {
+    const slice = sliceRange(raw, range);
+    if (slice.outcome === "refused") return { kind: "rangeRefused", reason: slice.reason };
+    selected = slice.content;
+    note = ` — ${slice.note}`;
+  }
+  const { content, truncated } = truncateText(selected);
   const marker = truncated ? "\n… truncated (2000 line / 200KB cap)" : "";
   return {
     kind: "text",
-    text: `\n\n${heading}:\n\`\`\`\n${content}${marker}\n\`\`\``,
+    text: `\n\n${heading}${note}:\n\`\`\`\n${content}${marker}\n\`\`\``,
     truncated,
   };
 }
@@ -566,6 +752,12 @@ export async function readContextFile(
  * - **Everything else** that resolves to a file is read as UTF-8 and
  *   appended as a fenced block, capped at 2000 lines / 200KB with a
  *   truncation marker when either limit is hit.
+ * - A **`:12-34` suffix** (or `:12` for one line) narrows the mention to those
+ *   lines, 1-based and inclusive at both ends — the same {@link LineRange}
+ *   convention a `prompt` attachment's `range` speaks, read by the same
+ *   reader. The injected block says it is an excerpt and which lines it holds.
+ *   A suffix whose numbers cannot mean a range (`:0`, `:34-12`) is not a
+ *   suffix, and the whole run is treated as a path, as it always was.
  * - **Nonexistent paths, directories, and anything resolving outside `cwd`**
  *   (traversal via `../`, or an absolute path elsewhere) are left completely
  *   untouched — no note, no error.
@@ -582,18 +774,37 @@ export async function expandMentions(text: string, cwd: string): Promise<Expande
   const appended: string[] = [];
 
   for (const token of tokens) {
-    const verdict = await confineToWorkspace(root, token.path);
+    let verdict = await confineToWorkspace(root, token.path);
+    let range = token.range;
+    if (range !== undefined && verdict.outcome === "missing" && token.raw !== token.path) {
+      // The suffix might not have been a suffix. A file really named
+      // `notes:12-34` is legal, and the literal reading has to win when the
+      // stripped one resolves to nothing — but only then, so an ordinary
+      // `@src/auth.ts:12-34` costs exactly one confinement call as before.
+      const literal = await confineToWorkspace(root, token.raw);
+      if (literal.outcome === "inside") {
+        verdict = literal;
+        range = undefined;
+      }
+    }
     if (verdict.outcome === "outside") {
       // Reported, not read. A `@here` in prose that happens not to exist stays
       // silent (the `"missing"` branch below); only an actual escape is worth
       // a sentence, so this stays quiet for ordinary typing.
-      refusals.push({ what: `@${token.path}`, reason: verdict.reason });
+      refusals.push({ what: `@${token.raw}`, reason: verdict.reason });
       continue;
     }
     if (verdict.outcome === "missing") continue;
 
-    const content = await readContextFile(verdict.realPath, `@${verdict.relativePath}`);
+    const content = await readContextFile(verdict.realPath, `@${verdict.relativePath}`, range);
     if (content.kind === "notAFile") continue;
+    if (content.kind === "rangeRefused") {
+      // Reported like an escape rather than skipped like a typo: the user
+      // named lines, and a mention that quietly injected nothing is exactly
+      // what the missing suffix used to do.
+      refusals.push({ what: `@${token.raw}`, reason: content.reason });
+      continue;
+    }
     if (content.kind === "image") {
       images.push(content.content);
       imagePaths.push(verdict.relativePath);

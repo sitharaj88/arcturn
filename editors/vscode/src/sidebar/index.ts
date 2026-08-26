@@ -32,6 +32,13 @@ import { createRedactor } from "../serve/redact.js";
 import type { SpawnLike } from "../serve/supervisor.js";
 import { generateToken } from "../serve/token.js";
 import { forgetFailedUserEnvironment, resolveUserEnvironment } from "../user-env.js";
+import {
+  type AmbientEditor,
+  ambientIsRedundant,
+  createAmbientTracker,
+  sameAmbient,
+  type TextEditorLike,
+} from "./active-editor.js";
 import { type ChatViewModel, toViewModel } from "./chat-state.js";
 import { createCoalescer } from "./coalesce.js";
 import { type ConnectionActionId, type ConnectionReport, reportText } from "./connection-card.js";
@@ -67,10 +74,12 @@ import { SidebarViewProvider } from "./view.js";
 import type { CommandOption } from "./webview-commands.js";
 import { contextGlob, narrowCandidates } from "./webview-context.js";
 import {
+  type ActiveEditorItem,
   type CommandListStatus,
   type ContextItem,
   type ModelListStatus,
   type PermissionStateStatus,
+  projectActiveEditorItem,
   projectCommandOption,
   projectContextItem,
   projectModelOption,
@@ -123,6 +132,32 @@ export const SIDEBAR_VIEW_ID = SidebarViewProvider.viewId;
  */
 const MAX_INDEX_MATCHES = 400;
 
+/**
+ * The setting that decides whether the panel watches the editor.
+ *
+ * Spelled as a group — `arcturn.context.*` — for the reason `arcturn.serve.*`
+ * is: this is the first of a family, and a flat `arcturn.activeEditorContext`
+ * would leave the second one with nowhere to go.
+ *
+ * **Default: on.** Three reasons, in order of how much they cost to ignore.
+ * The panel already ships four starter prompts, and three of them say "the
+ * file I have open" or "the code I have selected" — with nothing watching,
+ * those buttons ask the model a question about a file it was never told, and
+ * it answers confidently about nothing. Second, this is what a person coming
+ * from Claude's extension expects, and a panel that silently knows less than
+ * the one next to it reads as broken rather than as careful. Third, the
+ * exposure a default-on adds is bounded and visible: the extension reads no
+ * file (the engine does, from a path, where the permission engine can see it),
+ * the chip is on screen before anything is sent, and nothing leaves the
+ * machine until somebody presses send — which is already true of every `@`
+ * they type.
+ *
+ * What that argument does *not* justify is having no switch, which is why
+ * there are three: this setting, the `arcturn.toggleActiveEditorContext`
+ * command, and the chip's own dismiss control.
+ */
+const ACTIVE_EDITOR_SETTING = "context.activeEditor";
+
 /** Command ids this module registers. Builder A declares them in the manifest. */
 export const SIDEBAR_COMMANDS = {
   selectModel: "arcturn.selectModel",
@@ -135,6 +170,7 @@ export const SIDEBAR_COMMANDS = {
   showCost: "arcturn.showCost",
   reconnect: "arcturn.reconnect",
   showLog: "arcturn.showLog",
+  toggleActiveEditorContext: "arcturn.toggleActiveEditorContext",
 } as const;
 
 /**
@@ -233,6 +269,9 @@ export function activateSidebar(
           return;
         case "browseForFiles":
           void browseForFiles();
+          return;
+        case "disableActiveEditorContext":
+          void setAmbientEnabled(false);
           return;
         case "requestPermission":
           void publishPermission();
@@ -383,9 +422,46 @@ export function activateSidebar(
     );
   }
 
+  /**
+   * The chip the *editor* put there, as the engine last resolved it.
+   *
+   * Held apart from `attached` on purpose, and the separation is the feature.
+   * `attached` is a set somebody assembled and expects to survive until they
+   * change it: `clearContext` empties it after every send, and `detach` takes
+   * one out. This is neither — it follows the caret, it is not cleared by
+   * sending, and its dismiss control turns the watching off rather than
+   * removing a chip that would reappear on the next keystroke.
+   *
+   * `undefined` until the engine has answered for the path. Deliberately no
+   * "pending" state: a chip has to say what a file weighs and whether it can
+   * be sent, both of which are the engine's to say, and a chip that appeared
+   * first and acquired its facts afterwards would be showing a claim it had
+   * not checked.
+   */
+  let ambientItem: ActiveEditorItem | undefined;
+
+  /** Whether the panel is watching the editor at all. */
+  function ambientEnabled(): boolean {
+    return vscode.workspace.getConfiguration("arcturn").get<boolean>(ACTIVE_EDITOR_SETTING, true);
+  }
+
+  /**
+   * The ambient chip, when there is one worth showing.
+   *
+   * Suppressed when an explicit chip already names the same file: one file is
+   * one attachment, and two chips for it would make the row a summary rather
+   * than the statement about what the next prompt carries that it is supposed
+   * to be. See `ambientIsRedundant`.
+   */
+  function visibleAmbient(): ActiveEditorItem | undefined {
+    if (ambientItem === undefined) return undefined;
+    const paths = [...attached.values()].map((item) => item.path);
+    return ambientIsRedundant(ambientItem.path, paths) ? undefined : ambientItem;
+  }
+
   /** Push the chip row as it stands. */
   function publishContext(): void {
-    provider.postContext([...attached.values()]);
+    provider.postContext([...attached.values()], visibleAmbient());
   }
 
   /** Forget every chip — a new session, or a new engine. */
@@ -596,6 +672,171 @@ export function activateSidebar(
     }
   }
 
+  /* ---- ambient awareness of the active editor ------------------------- */
+
+  /**
+   * The editor's event storm, coalesced into the handful of answers worth a
+   * round trip.
+   *
+   * Built here rather than in `activate()` because everything it feeds — the
+   * chip row, `resolveContext`, the attachment set — lives in this closure,
+   * and because this whole module is already gated on `arcturn.serve.enabled`:
+   * a window with the sidebar switched off has no panel to put a chip on and
+   * should not be listening for one. Registering a listener costs nothing that
+   * `01-activation.test.ts` measures — no process, no socket — and the handler
+   * below is careful to keep it that way.
+   */
+  const ambientTracker = createAmbientTracker({
+    onSettled: (editor) => void refreshAmbient(editor),
+  });
+  disposables.push({ dispose: () => ambientTracker.dispose() });
+
+  /**
+   * Ask the engine about the file the user is looking at, and publish the chip.
+   *
+   * Two rules, both of which are the reason this is not simply `attachPaths`
+   * with a different source.
+   *
+   * **It never starts an engine.** `engine?.controller` rather than
+   * `withEngine`: opening a file must not spawn `arcturn serve`, or RFC 0004
+   * §3's activation budget would be spent by the act of using the editor. Until
+   * the panel is open and connected there is simply no chip, and
+   * `onConnection("ready")` calls this again.
+   *
+   * **The panel measures nothing.** The bytes, the kind and the refusal are all
+   * the engine's answer to `resolveContext` — the same round trip the `@`
+   * picker makes, so an ambient chip and an explicit one cannot report the same
+   * file differently. RFC 0005 §3: the panel never reads a file.
+   *
+   * @param editor - What the tracker settled on, or `undefined` for "nothing".
+   */
+  async function refreshAmbient(editor: AmbientEditor | undefined): Promise<void> {
+    /** Take the chip away, and repaint only if there was one. */
+    function dropChip(): void {
+      if (ambientItem === undefined) return;
+      ambientItem = undefined;
+      publishContext();
+    }
+    if (!ambientEnabled() || editor === undefined) {
+      dropChip();
+      return;
+    }
+    const controller = engine?.controller;
+    if (controller === undefined) {
+      // No connection yet — and no chip, rather than one with no size on it.
+      // `onConnection("ready")` re-runs this the moment there is somebody to
+      // ask; nothing is lost but a few hundred milliseconds during which the
+      // composer is disabled anyway.
+      dropChip();
+      return;
+    }
+    let resolution: Awaited<ReturnType<typeof controller.resolveContext>>;
+    try {
+      resolution = await controller.resolveContext(editor.fsPath);
+    } catch (error) {
+      // A failed round trip is a diagnostic, never a chip: the alternative is
+      // a warning tint on the file somebody is quietly reading, every time the
+      // socket hiccups.
+      log(
+        `sidebar: could not resolve the active editor: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return;
+    }
+    if (resolution === undefined) {
+      // This engine has no `resolveContext`, so it has no attachments either.
+      // Said once per connection by `announceNoContext`, and no chip — a chip
+      // whose file could never be sent is worse than none.
+      announceNoContext();
+      dropChip();
+      return;
+    }
+    // A late answer must not overwrite a newer one. Compared whole rather than
+    // by path: two resolves for the same file with different selections can be
+    // in flight at once, and the slower one landing last would put a range on
+    // the chip that the user has already moved off.
+    if (!sameAmbient(ambientTracker.current(), editor)) return;
+    ambientItem = projectActiveEditorItem(resolution, editor.selection);
+    publishContext();
+  }
+
+  /** Re-ask about whatever is being watched — a new connection, a new session. */
+  function refreshAmbientNow(): void {
+    void refreshAmbient(ambientTracker.current());
+  }
+
+  /**
+   * Turn the watching off (or back on) and make the panel agree immediately.
+   *
+   * Written to the scope the user already chose. A setting somebody set for
+   * this workspace is updated *there*; anything else goes to their user
+   * settings, because "do not watch my editor" is a preference about how they
+   * work rather than about one repository. Guessing wrong here is not a
+   * cosmetic error — it writes a value that an existing narrower scope
+   * overrides, and the control then visibly does nothing.
+   */
+  async function setAmbientEnabled(enabled: boolean): Promise<void> {
+    const config = vscode.workspace.getConfiguration("arcturn");
+    const scoped = config.inspect<boolean>(ACTIVE_EDITOR_SETTING);
+    const target =
+      scoped?.workspaceFolderValue !== undefined
+        ? vscode.ConfigurationTarget.WorkspaceFolder
+        : scoped?.workspaceValue !== undefined
+          ? vscode.ConfigurationTarget.Workspace
+          : vscode.ConfigurationTarget.Global;
+    try {
+      await config.update(ACTIVE_EDITOR_SETTING, enabled, target);
+    } catch (error) {
+      log(
+        `sidebar: could not write ${ACTIVE_EDITOR_SETTING}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return;
+    }
+    // `onDidChangeConfiguration` will fire for this too, and both paths are
+    // idempotent — the chip is either there or it is not.
+    applyAmbientSetting();
+  }
+
+  /** Bring the chip into line with the setting, in both directions. */
+  function applyAmbientSetting(): void {
+    if (!ambientEnabled()) {
+      ambientTracker.clear();
+      return;
+    }
+    // Turning it back on should not require the user to click into a file
+    // again: the editor they are looking at is already there to be read.
+    ambientTracker.observe(vscode.window.activeTextEditor as TextEditorLike | undefined);
+    refreshAmbientNow();
+  }
+
+  disposables.push(
+    vscode.window.onDidChangeActiveTextEditor((editor) => {
+      if (!ambientEnabled()) return;
+      ambientTracker.observe(editor as TextEditorLike | undefined);
+    }),
+    vscode.window.onDidChangeTextEditorSelection((event) => {
+      if (!ambientEnabled()) return;
+      // Only the editor that is actually active: VS Code fires this for every
+      // visible editor, including the other half of a split the user is not in.
+      if (event.textEditor !== vscode.window.activeTextEditor) return;
+      ambientTracker.observe(event.textEditor as TextEditorLike);
+    }),
+    vscode.workspace.onDidCloseTextDocument((document) => {
+      ambientTracker.closed(document.uri.fsPath);
+    }),
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (!event.affectsConfiguration(`arcturn.${ACTIVE_EDITOR_SETTING}`)) return;
+      applyAmbientSetting();
+    }),
+  );
+
+  // Seed from whatever is already on screen. Without this, a window restored
+  // with a file open and never switched away from fires no editor event at
+  // all, and the panel would sit next to that file knowing nothing about it
+  // until the user clicked a different tab. Costs a comparison and a timer:
+  // there is no engine to ask yet, so `refreshAmbient` records the file and
+  // stops, and `onConnection("ready")` is what turns it into a chip.
+  applyAmbientSetting();
+
   /**
    * The attachments to send with the next prompt.
    *
@@ -606,6 +847,30 @@ export function activateSidebar(
    */
   function pendingAttachments(): PromptAttachment[] {
     const items: PromptAttachment[] = [];
+    // The file the user is looking at goes first, because it is the one their
+    // sentence is most likely about. Only when it is on screen: `visibleAmbient`
+    // is what the chip row rendered, so nothing can be attached here that was
+    // not visible before send — and nothing visible is silently left off.
+    const ambient = visibleAmbient();
+    if (ambient?.ok === true) {
+      // The selection travels as a range now that `PromptAttachment` has
+      // somewhere to put one. `ActiveEditorItem.selection` is already 1-based
+      // and inclusive — `rangeFromSelection` converts from VS Code's 0-based
+      // lines at the one place that reads an editor — which is the convention
+      // `LineRange` documents, so the numbers cross unchanged. An image has no
+      // range: the engine refuses one rather than ignoring it.
+      const range =
+        ambient.selection === undefined
+          ? undefined
+          : { start: ambient.selection.startLine, end: ambient.selection.endLine };
+      items.push(
+        ambient.kind === "image"
+          ? { kind: "image", path: ambient.path }
+          : range === undefined
+            ? { kind: "file", path: ambient.path }
+            : { kind: "file", path: ambient.path, range },
+      );
+    }
     for (const item of attached.values()) {
       if (!item.ok) continue;
       const bytes = pasted.get(item.id);
@@ -1678,6 +1943,9 @@ export function activateSidebar(
       }
       selectedModel = undefined;
       clearContext();
+      // The file on screen is the same file; the session it would be attached
+      // to is not, and `resolveContext` runs against the session's own cwd.
+      refreshAmbientNow();
       repaintTranscript();
       publishSession();
       // The mode is a property of the session, not of the engine: a different
@@ -1773,6 +2041,8 @@ export function activateSidebar(
     await session.newSession();
     selectedModel = undefined;
     clearContext();
+    // Same argument as `openSession`'s: a new session, the same open file.
+    refreshAmbientNow();
     repaintTranscript();
     // A session that exists now was not in the cached list.
     sessions = undefined;
@@ -1890,6 +2160,13 @@ export function activateSidebar(
             // one, and a chip carried across a reconnect is a chip the engine
             // never agreed to.
             clearContext();
+            // The ambient chip is cleared by the same argument and then asked
+            // again, because the file the user is looking at has not changed —
+            // only who was available to answer for it. This is also the moment
+            // the very first chip appears: nothing could be resolved before
+            // there was a connection.
+            ambientItem = undefined;
+            refreshAmbientNow();
             // A new connection is also a new session store to ask. Cleared,
             // not re-fetched: a user who never opens history should not cost a
             // `listSessions` round trip on every reconnect, and a panel that
@@ -2044,6 +2321,24 @@ export function activateSidebar(
     }),
     vscode.commands.registerCommand(SIDEBAR_COMMANDS.reconnect, () => restart()),
     vscode.commands.registerCommand(SIDEBAR_COMMANDS.showLog, () => output.show(true)),
+    /**
+     * The discoverable half of the toggle.
+     *
+     * The chip's own control can only switch the watching *off* — it is only
+     * on screen when it is on — so this is the door back, and the one a user
+     * who has never seen the chip can find. It reports where it landed,
+     * because a palette command that changes a setting and says nothing leaves
+     * somebody pressing it twice.
+     */
+    vscode.commands.registerCommand(SIDEBAR_COMMANDS.toggleActiveEditorContext, async () => {
+      const next = !ambientEnabled();
+      await setAmbientEnabled(next);
+      void vscode.window.showInformationMessage(
+        next
+          ? "Arcturn will include the file you have open with your next message."
+          : "Arcturn will stop including the file you have open.",
+      );
+    }),
     vscode.commands.registerCommand(SIDEBAR_COMMANDS.abortRun, () =>
       withEngine((session) => session.controller?.abort()),
     ),

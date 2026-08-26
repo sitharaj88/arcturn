@@ -23,6 +23,7 @@ import type { RewindView } from "./rewind.js";
 import type { CommandOption } from "./webview-commands.js";
 import { createNonce, renderSidebarHtml } from "./webview-html.js";
 import {
+  type ActiveEditorItem,
   type CommandListStatus,
   type ConnectionStatus,
   type ContextItem,
@@ -122,6 +123,15 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
   #lastWorkflows: WorkflowView | undefined;
   /** What the composer is holding, replayed on reload. See {@link SidebarViewProvider.postContext}. */
   #lastContext: ContextItem[] | undefined;
+  /**
+   * The ambient chip, replayed with the rest.
+   *
+   * Remembered on the *same* terms as `#lastContext` and posted on the same
+   * message, because they are one row and one truth: a reload that brought
+   * back the attachments without the file the user is looking at would be the
+   * panel forgetting half of what the next prompt carries.
+   */
+  #lastActiveEditor: ActiveEditorItem | undefined;
   /**
    * Whether the page has announced itself since the current document loaded.
    *
@@ -227,9 +237,10 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
    * reloads — and chips that vanished while the host was still going to attach
    * them on the next `send` would be the panel and the prompt disagreeing.
    */
-  postContext(items: ContextItem[]): void {
+  postContext(items: ContextItem[], active?: ActiveEditorItem): void {
     this.#lastContext = items;
-    this.#post({ type: "context", items });
+    this.#lastActiveEditor = active;
+    this.#post(contextMessage(items, active));
   }
 
   /**
@@ -390,7 +401,9 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
     if (this.#lastModels !== undefined) this.#post(modelsMessage(this.#lastModels));
     if (this.#lastSession !== undefined) this.#post(sessionMessage(this.#lastSession));
     if (this.#lastSessions !== undefined) this.#post(sessionsMessage(this.#lastSessions));
-    if (this.#lastContext !== undefined) this.#post({ type: "context", items: this.#lastContext });
+    if (this.#lastContext !== undefined) {
+      this.#post(contextMessage(this.#lastContext, this.#lastActiveEditor));
+    }
     if (this.#lastPermission !== undefined) this.#post(permissionMessage(this.#lastPermission));
     if (this.#lastCommands !== undefined) {
       this.#post({
@@ -415,6 +428,11 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
   #post(message: HostMessage): void {
     void this.#view?.webview.postMessage(message);
   }
+}
+
+/** Build the `context` message, omitting the ambient chip rather than sending `undefined`. */
+function contextMessage(items: ContextItem[], active?: ActiveEditorItem): HostMessage {
+  return { type: "context", items, ...(active === undefined ? {} : { active }) };
 }
 
 /** Build the `models` message, omitting `current` rather than sending `undefined`. */

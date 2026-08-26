@@ -37,6 +37,7 @@ import type {
   CompactionSummary,
   ContextResolution,
   DiscardChangesResult,
+  LineRange,
   McpServerSummary,
   ModelCatalogEntry,
   ModelSpec,
@@ -1020,12 +1021,19 @@ export class SessionHost {
    *
    * @param sessionId - Session whose `cwd` the query resolves against.
    * @param query - The mention text, as typed, without its `@`.
+   * @param range - The selection the client asked about, when it asked about
+   *   one. Echoed back on the answer and never checked against the file — this
+   *   verb stats and never reads. See `ContextResolution.range`.
    * @throws {SessionHostError} `sessionNotFound` when the session is not live,
    *   or `invalidRequest` when no {@link SessionHostOptions.contextResolver}
    *   was wired — this host has no idea what a mention means, and an answer
    *   invented here would be one a client renders as fact.
    */
-  async resolveContext(sessionId: string, query: string): Promise<ContextResolution> {
+  async resolveContext(
+    sessionId: string,
+    query: string,
+    range?: LineRange,
+  ): Promise<ContextResolution> {
     const session = this.#require(sessionId);
     const resolver = this.#contextResolver;
     if (!resolver) {
@@ -1035,7 +1043,11 @@ export class SessionHost {
           "would resolve to. Refusing rather than answering with a guess.",
       );
     }
-    const resolution = await resolver.resolve({ cwd: session.header.cwd, query });
+    const resolution = await resolver.resolve({
+      cwd: session.header.cwd,
+      query,
+      ...(range === undefined ? {} : { range }),
+    });
     // Normalized against the wire contract on the way out — the same discipline
     // `listModels` and `sessionHistory` apply, for the same reason: the resolver
     // is injected, so whatever it hands over, only what the contract defines can

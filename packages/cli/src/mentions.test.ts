@@ -218,3 +218,101 @@ describe("expandMentions", () => {
     expect(result.images).toEqual([]);
   });
 });
+
+/** A file whose every line names itself, 1-based and zero-padded. */
+function numbered(count: number): string {
+  const lines: string[] = [];
+  for (let i = 1; i <= count; i++) lines.push(`L${String(i).padStart(3, "0")}`);
+  return `${lines.join("\n")}\n`;
+}
+
+describe("expandMentions — @path:12-34 line ranges", () => {
+  it("injects only the named lines, and says it is an excerpt", async () => {
+    const dir = await workspace({ "big.ts": numbered(60) });
+    const result = await expandMentions("look at @big.ts:12-14 please", dir);
+
+    // The token itself survives in the prose, exactly as an unranged one does.
+    expect(result.text).toContain("@big.ts:12-14 please");
+    expect(result.text).toContain("L012");
+    expect(result.text).toContain("L014");
+    expect(result.text).not.toContain("L011");
+    expect(result.text).not.toContain("L015");
+    expect(result.text).toContain("excerpt, lines 12-14 of 60");
+    expect(result.refusals).toEqual([]);
+  });
+
+  it("reads @path:12 as the single line 12, both ends inclusive", async () => {
+    const dir = await workspace({ "big.ts": numbered(60) });
+    const result = await expandMentions("@big.ts:12", dir);
+    expect(result.text).toContain("excerpt, lines 12-12 of 60");
+    expect(result.text).toContain("L012");
+    expect(result.text).not.toContain("L013");
+  });
+
+  it("accepts the suffix on a quoted path too", async () => {
+    const dir = await workspace({ "my file.ts": numbered(30) });
+    const result = await expandMentions('@"my file.ts":5-6 here', dir);
+    expect(result.text).toContain("excerpt, lines 5-6 of 30");
+    expect(result.text).toContain("L005");
+    expect(result.text).not.toContain("L007");
+  });
+
+  it("clamps an end past the last line and reports the clamp", async () => {
+    const dir = await workspace({ "big.ts": numbered(60) });
+    const result = await expandMentions("@big.ts:58-9000", dir);
+    expect(result.text).toContain("excerpt, lines 58-60 of 60");
+    expect(result.text).toContain("58-9000 was requested");
+    expect(result.text).toContain("clamped");
+    expect(result.text).not.toContain("L057");
+  });
+
+  it("refuses a start past the last line, with a reason, injecting nothing", async () => {
+    const dir = await workspace({ "big.ts": numbered(60) });
+    const result = await expandMentions("@big.ts:900-950", dir);
+    expect(result.text).toBe("@big.ts:900-950");
+    expect(result.refusals).toEqual([
+      { what: "@big.ts:900-950", reason: "starts at line 900, but the file has 60 lines" },
+    ]);
+  });
+
+  it("refuses a range on an image, which has no lines", async () => {
+    const dir = await workspace({ "shot.png": TINY_PNG });
+    const result = await expandMentions("@shot.png:1-2", dir);
+    expect(result.images).toEqual([]);
+    expect(result.refusals[0]?.reason).toMatch(/image/);
+  });
+
+  it("prefers a real file whose NAME ends in something that looks like a range", async () => {
+    // `notes:12-34` is a legal filename; the literal reading has to win when
+    // the stripped one resolves to nothing.
+    const dir = await workspace({ "notes:12-34": "LITERAL_NAME_SENTINEL\n" });
+    const result = await expandMentions("@notes:12-34", dir);
+    expect(result.text).toContain("LITERAL_NAME_SENTINEL");
+    expect(result.text).not.toContain("excerpt");
+  });
+
+  it("leaves a suffix that cannot mean a range as part of the path", async () => {
+    const dir = await workspace({ "big.ts": numbered(10) });
+    for (const text of ["@big.ts:0-4", "@big.ts:8-3"]) {
+      const result = await expandMentions(text, dir);
+      // Quiet, exactly as a nonexistent mention has always been — not a refusal
+      // of the prompt over one token inside prose.
+      expect(result.text).toBe(text);
+      expect(result.refusals).toEqual([]);
+    }
+  });
+
+  it("does not mistake a path with a colon in it for a range", async () => {
+    const dir = await workspace({ "a:b.ts": "COLON_NAME_SENTINEL\n" });
+    const result = await expandMentions("@a:b.ts", dir);
+    expect(result.text).toContain("COLON_NAME_SENTINEL");
+  });
+
+  it("still refuses a ranged mention that escapes the workspace, unread", async () => {
+    const dir = await workspace({});
+    const result = await expandMentions("@../../etc/passwd:1-2", dir);
+    expect(result.text).toBe("@../../etc/passwd:1-2");
+    expect(result.refusals[0]?.what).toBe("@../../etc/passwd:1-2");
+    expect(result.refusals[0]?.reason).toMatch(/outside the workspace/);
+  });
+});

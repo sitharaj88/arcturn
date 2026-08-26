@@ -39,9 +39,10 @@ terminal*, so you can always read what it ran and re-run it yourself.
 | Arcturn: Abort Run | `arcturn.abortRun` | — | Stops the turn in flight. |
 | Arcturn: Show Cost | `arcturn.showCost` | — | The breakdown behind the status bar figure. |
 | Arcturn: Reconnect | `arcturn.reconnect` | — | Restarts `arcturn serve` and reattaches after the engine dies. |
+| Arcturn: Toggle Active File Context | `arcturn.toggleActiveEditorContext` | — | Turns off — or back on — the panel's habit of including the file you have open with your next message. Same switch as `arcturn.context.activeEditor` and as the chip's own dismiss control. |
 | Arcturn: Show Log | `arcturn.showLog` | — | Opens the **Arcturn Sidebar** output channel — everything the engine wrote, redacted, plus which environment the extension resolved. This is where you look when something did not start. |
 
-The last seven drive the sidebar, so they are hidden from the palette when
+The last eight drive the sidebar, so they are hidden from the palette when
 `arcturn.serve.enabled` is off — with no serve there is no engine behind them,
 and six entries that can only fail is not a menu.
 
@@ -58,6 +59,37 @@ what that costs.
 | `arcturn.defaultModel` | *(empty)* | Passed to the engine as `--model` when a terminal is launched from the extension. Empty means the engine's own default. |
 | `arcturn.serve.enabled` | `true` | Run `arcturn serve` for the native sidebar. Turn it off for terminal integration only; the Arcturn view goes away with it. |
 | `arcturn.serve.port` | `0` | Loopback port for `arcturn serve`. `0` picks an ephemeral port, which is what you want. |
+| `arcturn.context.activeEditor` | `true` | Include the file you have open with your next panel message. See below. |
+
+### The file you have open
+
+The panel watches which file is in front of you and shows it as a chip above
+the composer — dashed border, an eye, and its real size — so "explain this
+function" is a sentence you can just type. Select something and the chip names
+the lines: `src/auth.ts:12-40`.
+
+It is deliberately not the same chip as the ones you add with `@`. Those stay
+where you put them; this one follows your caret, and a row where the two looked
+identical would be a row that lies about which of its entries is stable. When
+you have lines selected the chip names them and counts them — `src/auth.ts:12-40
+· 29 lines of 4.2 KB` — and those are the lines the engine reads. The size is
+the file's, because that is what the engine measured before it sliced.
+
+The usual rules hold. The extension never reads the file — the engine does,
+from the path, where the permission engine can see the read happen. The byte
+count on the chip is the engine's answer to `resolveContext`, not a `stat` the
+panel did. A file outside the workspace shows the engine's refusal instead of
+being quietly dropped. And nothing is attached that you cannot see before you
+press send.
+
+Three ways to turn it off, because some people will not want their editor
+watched: the setting, `Arcturn: Toggle Active File Context` in the palette, and
+the `×` on the chip itself — which switches the feature off rather than
+removing a chip that would be back on your next keystroke.
+
+Default is **on**. The panel's own starter prompts say "the file I have open"
+and "the code I have selected"; with nothing watching, those buttons ask the
+model about a file it was never told and get a confident answer about nothing.
 
 ## Where this actually is
 
@@ -101,10 +133,12 @@ next window reload; a listening socket you believe you switched off is worse
 than a lost turn, and the session itself lives in the engine's store and
 resumes. Turning it back on starts a fresh one.
 
-One known sharp edge worth stating plainly: the `:12-34` line range in a
-mention is context for the model to read, not an instruction the engine's
-mention expander parses today — it inlines whole files, not ranges. The range
-tells the agent where to look; it does not yet narrow what gets injected.
+The `:12-34` line range in a mention is parsed by the engine and narrows what
+gets injected: the model is given those lines, told they are an excerpt, and
+told which lines they are, so it does not answer as though it read the file. A
+range running past the end of the file is clamped and the clamp is stated; a
+range starting past the end is refused rather than quietly becoming the file's
+tail, which would be a different selection than the one you named.
 
 ## Your shell's environment, and why the extension goes looking for it
 

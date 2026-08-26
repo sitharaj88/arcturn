@@ -981,6 +981,20 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
  * it, never by colour alone: the reason is the whole reason the round trip
  * happened, and a user who cannot see the tint still reads why.
  */
+/*
+ * The chip that is not like the others.
+ *
+ * It has to be distinguishable *without* colour, because what separates it
+ * from its neighbours is not a status: an '@' chip stays where the user put
+ * it, and this one follows the caret. A dashed border says "provisional" in a
+ * way a tint does not, the eye says what it is following, and the hover
+ * spells both out for anyone who reads neither.
+ */
+.context-chip.chip-ambient {
+  border-style: dashed;
+  background: transparent;
+}
+.context-chip.chip-ambient .chip-name { color: var(--arc-muted); }
 .context-chip.chip-bad { border-color: var(--arc-warn); }
 .context-chip.chip-bad .chip-icon, .context-chip.chip-bad .chip-size { color: var(--arc-warn); }
 .chip-remove {
@@ -1533,6 +1547,8 @@ const CLIENT_SOURCE = String.raw`
     at: [["circle", stroked({ cx: "8", cy: "8", r: "2.3" })],
          ["path", stroked({ d: "M10.3 5.7v3a1.8 1.8 0 0 0 3.5 0 5.9 5.9 0 1 0-2.3 4.6" })]],
     shield: [["path", stroked({ d: "M8 1.9l5 1.9v4.1c0 3-2.1 5.2-5 6.2-2.9-1-5-3.2-5-6.2V3.8z" })]],
+    eye: [["path", stroked({ d: "M1.3 8S3.9 3.6 8 3.6 14.7 8 14.7 8 12.1 12.4 8 12.4 1.3 8 1.3 8z" })],
+          ["circle", stroked({ cx: "8", cy: "8", r: "1.9" })]],
     image: [["rect", stroked({ x: "2.1", y: "3.1", width: "11.8", height: "9.8", rx: "1.5" })],
             ["circle", stroked({ cx: "5.7", cy: "6.4", r: "1.1" })],
             ["path", stroked({ d: "M2.4 11.2l3.3-3 2.6 2.3 2.2-2 3.1 2.8" })]],
@@ -1730,6 +1746,15 @@ const CLIENT_SOURCE = String.raw`
   /* ---- RFC 0005 §2 state ---------------------------------------------- */
   /* The host owns the attachment set; this is only ever a render of it. */
   var chips = [];
+  /*
+   * The file the user is looking at, as the host last resolved it.
+   *
+   * Held apart from 'chips' because it *is* apart: 'chips' is the set somebody
+   * assembled with '@' and a file dialog, and it changes only when they change
+   * it; this one changes under them as they move around the editor. The row
+   * renders both, and renders them differently, for exactly that reason.
+   */
+  var ambient = undefined;
   /*
    * The one popover shared by '@' and '/'. 'kind' is which of the two is open,
    * 'trigger' is the token in the composer it is completing, and 'query' is
@@ -2290,7 +2315,11 @@ const CLIENT_SOURCE = String.raw`
    */
   function renderChips() {
     clear(chipRow);
-    chipRow.classList.toggle("hidden", chips.length === 0);
+    chipRow.classList.toggle("hidden", chips.length === 0 && !ambient);
+    // First, because it is the one that answers 'this file' in the prompt
+    // somebody is about to type, and because a chip that moves position as
+    // attachments come and go is a chip nobody can learn where to look for.
+    if (ambient) chipRow.appendChild(ambientChip(ambient));
     for (var i = 0; i < chips.length; i += 1) {
       chipRow.appendChild(contextChip(chips[i]));
     }
@@ -2328,6 +2357,38 @@ const CLIENT_SOURCE = String.raw`
     remove.appendChild(icon("close"));
     remove.addEventListener("click", function () { post({ type: "detach", id: item.id }); });
     wrap.appendChild(remove);
+    return wrap;
+  }
+
+  /*
+   * The ambient chip: the file the editor is showing, not one anybody attached.
+   *
+   * Different from 'contextChip' in three ways, and each of them is the same
+   * point made once. The border is dashed and the icon is an eye, so the row
+   * reads at a glance as "one of these is following me and the rest are not".
+   * The second line is 'ambientMeta', which says 'whole file' when the label
+   * names a selection — the engine's attachment carries a path and no range,
+   * and a chip reading 'auth.ts:12-40' with nothing beside it would be letting
+   * somebody believe twenty-eight lines were sent.
+   *
+   * And the dismiss control turns the *watching* off instead of removing the
+   * chip. Removing it would last until the next keystroke in the editor, which
+   * is not a control, it is a flicker.
+   */
+  function ambientChip(item) {
+    var wrap = el("span", "context-chip chip-ambient" + (item.ok ? "" : " chip-bad"));
+    wrap.setAttribute("role", "listitem");
+    var mark = el("span", "chip-icon");
+    mark.appendChild(icon(item.ok ? "eye" : "warning"));
+    wrap.appendChild(mark);
+    wrap.appendChild(pathName("chip-name", item.label));
+    var meta = ambientMeta(item);
+    if (meta !== "") wrap.appendChild(el("span", "chip-size", meta));
+    wrap.title = ambientTitle(item);
+    var off = button("chip-remove", "Stop including the file I have open");
+    off.appendChild(icon("close"));
+    off.addEventListener("click", function () { post({ type: "disableActiveEditorContext" }); });
+    wrap.appendChild(off);
     return wrap;
   }
 
@@ -3889,6 +3950,11 @@ const CLIENT_SOURCE = String.raw`
     }
     if (message.type === "context") {
       chips = contextItems(message.items);
+      // One message carries both, so the row the user reads is always one
+      // paint of one host-side truth — two messages could arrive in either
+      // order and leave the chip row briefly disagreeing with itself.
+      ambient = contextItems([message.active])[0];
+      if (ambient) ambient.selection = lineRange(message.active);
       renderChips();
       return;
     }
@@ -4088,6 +4154,24 @@ const CLIENT_SOURCE = String.raw`
       });
     }
     return out;
+  }
+
+  /*
+   * A selection, rebuilt field by field like everything else that crosses in.
+   *
+   * Two finite numbers or nothing: these end up in a rendered sentence about
+   * what the next prompt will carry, and 'undefined-NaN' would be the chip
+   * saying something nobody can act on.
+   */
+  function lineRange(entry) {
+    if (!entry || typeof entry !== "object") return undefined;
+    var range = entry.selection;
+    if (!range || typeof range !== "object") return undefined;
+    var from = range.startLine;
+    var to = range.endLine;
+    if (typeof from !== "number" || typeof to !== "number") return undefined;
+    if (!isFinite(from) || !isFinite(to)) return undefined;
+    return { startLine: from, endLine: to };
   }
 
   renderChip();

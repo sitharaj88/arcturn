@@ -96,8 +96,13 @@ vi.mock("vscode", () => {
       registerWebviewViewProvider: () => ({ dispose: () => {} }),
       showQuickPick: () => Promise.resolve(undefined),
       showWarningMessage: () => Promise.resolve(undefined),
+      showInformationMessage: () => Promise.resolve(undefined),
       showInputBox: () => Promise.resolve(undefined),
+      activeTextEditor: undefined,
+      onDidChangeActiveTextEditor: () => ({ dispose: () => {} }),
+      onDidChangeTextEditorSelection: () => ({ dispose: () => {} }),
     },
+    ConfigurationTarget: { Global: 1, Workspace: 2, WorkspaceFolder: 3 },
     commands: {
       registerCommand: (id: string, handler: (...args: never[]) => unknown) => {
         commands.set(id, handler);
@@ -107,8 +112,14 @@ vi.mock("vscode", () => {
     },
     workspace: {
       workspaceFolders: [{ uri: { fsPath: "/workspace" } }],
-      getConfiguration: () => ({ get: (_k: string, fallback?: unknown) => fallback }),
+      getConfiguration: () => ({
+        get: (_k: string, fallback?: unknown) => fallback,
+        inspect: () => undefined,
+        update: () => Promise.resolve(),
+      }),
       registerTextDocumentContentProvider: () => ({ dispose: () => {} }),
+      onDidCloseTextDocument: () => ({ dispose: () => {} }),
+      onDidChangeConfiguration: () => ({ dispose: () => {} }),
     },
   };
 });

@@ -26,6 +26,7 @@ import type {
   ContextKind,
   ContextResolution,
   DiscardChangesResult,
+  LineRange,
   McpConnectionState,
   McpServerSummary,
   McpStatus,
@@ -317,10 +318,20 @@ export function validateClientRequest(value: unknown): ClientRequestValidation {
           `resolveContext params.query must be at most ${String(MAX_CONTEXT_QUERY_LENGTH)} characters`,
         );
       }
+      let queryRange: LineRange | undefined;
+      if (params.range !== undefined) {
+        const parsed = validateLineRange(params.range);
+        if (!parsed.ok) return fail(`resolveContext params.range invalid: ${parsed.error}`);
+        queryRange = parsed.value;
+      }
       return ok<ClientRequest>({
         id,
         method: "resolveContext",
-        params: { sessionId: params.sessionId, query: params.query },
+        params: {
+          sessionId: params.sessionId,
+          query: params.query,
+          ...(queryRange === undefined ? {} : { range: queryRange }),
+        },
       });
     }
     case "permissionState": {
@@ -1035,6 +1046,44 @@ const CONTEXT_KINDS = ["file", "image", "directory", "missing", "other"] as cons
  * that. Inline data is an `image`-only affordance — a paste has no path, and so
  * has no confinement to bypass.
  */
+/**
+ * Validate one {@link LineRange}.
+ *
+ * The convention is `LineRange`'s own — 1-based, inclusive at both ends — and
+ * the three rules here are the only ones that can be checked without opening
+ * the file: a bound must be a whole number, `start` must be at least 1, and
+ * `end` must not come before `start`. Each of those is a client bug rather
+ * than a user's selection, and clamping one would mean inventing an intent
+ * nobody expressed.
+ *
+ * There is deliberately **no upper bound**. A range whose `end` runs past the
+ * file is an ordinary thing — select-to-end, or a file edited since the
+ * selection was taken — and the engine clamps and reports it at read time. It
+ * cannot cost anything to allow: the engine never reads more of a file than
+ * the file, so `{ start: 1, end: 10_000_000 }` is exactly as expensive as
+ * attaching that file with no range at all, and the existing per-file and
+ * total-byte caps still bound both.
+ */
+export function validateLineRange(value: unknown): ValidationResult<LineRange> {
+  if (!isRecord(value)) return fail("LineRange must be an object");
+  if (!isNumber(value.start) || !Number.isSafeInteger(value.start)) {
+    return fail("LineRange.start must be a whole number");
+  }
+  if (!isNumber(value.end) || !Number.isSafeInteger(value.end)) {
+    return fail("LineRange.end must be a whole number");
+  }
+  if (value.start < 1) {
+    return fail("LineRange.start must be at least 1 — line numbers are 1-based");
+  }
+  if (value.end < value.start) {
+    return fail(
+      `LineRange.end (${String(value.end)}) must not be before LineRange.start ` +
+        `(${String(value.start)}) — both ends are inclusive`,
+    );
+  }
+  return { ok: true, value: { start: value.start, end: value.end } };
+}
+
 export function validatePromptAttachment(value: unknown): ValidationResult<PromptAttachment> {
   if (!isRecord(value)) return fail("PromptAttachment must be an object");
   const kind = value.kind;
@@ -1054,9 +1103,26 @@ export function validatePromptAttachment(value: unknown): ValidationResult<Promp
         `PromptAttachment.path must be at most ${String(MAX_CONTEXT_QUERY_LENGTH)} characters`,
       );
     }
+    // A line range is a `file` idea only. An image has no lines, so a range on
+    // one cannot be honoured — and this validator is where it is *refused*
+    // rather than dropped, because a dropped range is the whole file arriving
+    // while the client believes it sent a selection.
+    if (value.range !== undefined) {
+      if (kind !== "file") {
+        return fail(
+          'PromptAttachment.range is accepted for kind "file" only — an image has no lines',
+        );
+      }
+      const range = validateLineRange(value.range);
+      if (!range.ok) return fail(`PromptAttachment.range invalid: ${range.error}`);
+      return { ok: true, value: { kind: "file", path: value.path, range: range.value } };
+    }
     const attachment: PromptAttachment =
       kind === "file" ? { kind: "file", path: value.path } : { kind: "image", path: value.path };
     return { ok: true, value: attachment };
+  }
+  if (value.range !== undefined) {
+    return fail('PromptAttachment.range is accepted for kind "file" only — an image has no lines');
   }
   if (kind !== "image") {
     return fail(
@@ -1119,6 +1185,12 @@ export function validateContextResolution(value: unknown): ValidationResult<Cont
   if (!value.exists && value.bytes !== 0) {
     return fail("ContextResolution.bytes must be 0 when exists is false");
   }
+  let range: LineRange | undefined;
+  if (value.range !== undefined) {
+    const parsed = validateLineRange(value.range);
+    if (!parsed.ok) return fail(`ContextResolution.range invalid: ${parsed.error}`);
+    range = parsed.value;
+  }
   return {
     ok: true,
     value: {
@@ -1130,6 +1202,7 @@ export function validateContextResolution(value: unknown): ValidationResult<Cont
       bytes: value.bytes,
       kind: value.kind as ContextKind,
       ...(value.reason === undefined ? {} : { reason: value.reason }),
+      ...(range === undefined ? {} : { range }),
     },
   };
 }

@@ -128,6 +128,11 @@
         "command": "arcturn.showLog",
         "title": "Show Log",
         "category": "Arcturn"
+      },
+      {
+        "command": "arcturn.toggleActiveEditorContext",
+        "title": "Toggle Active File Context",
+        "category": "Arcturn"
       }
     ],
     "keybindings": [
@@ -187,6 +192,10 @@
         },
         {
           "command": "arcturn.showLog",
+          "when": "config.arcturn.serve.enabled"
+        },
+        {
+          "command": "arcturn.toggleActiveEditorContext",
           "when": "config.arcturn.serve.enabled"
         }
       ],
@@ -249,6 +258,12 @@
           "default": true,
           "scope": "window",
           "markdownDescription": "Run `arcturn serve` for the native sidebar. Turn this off for terminal integration only; the Arcturn view disappears with it."
+        },
+        "arcturn.context.activeEditor": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "Include the file you have open in the Arcturn panel, as a chip you can see before you send. The panel shows the file — and the line range, when you have a selection — and the engine reads it from its path the way any other attachment is read; the extension never reads it. Turn this off to keep the panel from watching your editor. `Arcturn: Toggle Active File Context` and the chip's own dismiss control do the same thing.\n\nNote: the engine's attachment carries a path and no line range, so a selection sends the whole file. The chip says so rather than implying otherwise."
         },
         "arcturn.serve.port": {
           "type": "number",

@@ -203,6 +203,158 @@ describe("createContextResolver().resolve", () => {
   });
 });
 
+describe("createContextResolver() — ranged file attachments", () => {
+  /** A file whose every line names itself, 1-based and zero-padded. */
+  function numbered(count: number): string {
+    const lines: string[] = [];
+    for (let i = 1; i <= count; i++) lines.push(`L${String(i).padStart(3, "0")}`);
+    return `${lines.join("\n")}\n`;
+  }
+
+  it("injects only the selected lines, headed as an excerpt", async () => {
+    await writeFile(join(cwd, "big.ts"), numbered(60), "utf8");
+    const result = await resolver.buildPrompt({
+      cwd,
+      text: "explain",
+      attachments: [{ kind: "file", path: "big.ts", range: { start: 12, end: 14 } }],
+    });
+    expect(result.text).toContain("big.ts (attached file) — excerpt, lines 12-14 of 60");
+    expect(result.text).toContain("L012");
+    expect(result.text).toContain("L014");
+    expect(result.text).not.toContain("L011");
+    expect(result.text).not.toContain("L015");
+  });
+
+  it("counts lines the way `wc -l` does, so a trailing newline is not a line", async () => {
+    await writeFile(join(cwd, "two.txt"), "alpha\nbeta\n", "utf8");
+    const result = await resolver.buildPrompt({
+      cwd,
+      text: "x",
+      attachments: [{ kind: "file", path: "two.txt", range: { start: 1, end: 2 } }],
+    });
+    expect(result.text).toContain("excerpt, lines 1-2 of 2");
+    expect(result.text).toContain("alpha\nbeta");
+  });
+
+  it("clamps an editor's phantom final line rather than refusing it", async () => {
+    // VS Code reports three lines for "alpha\nbeta\n"; the third is empty.
+    // A selection that includes it must not fail — it must clamp.
+    await writeFile(join(cwd, "two.txt"), "alpha\nbeta\n", "utf8");
+    const result = await resolver.buildPrompt({
+      cwd,
+      text: "x",
+      attachments: [{ kind: "file", path: "two.txt", range: { start: 1, end: 3 } }],
+    });
+    expect(result.text).toContain("excerpt, lines 1-2 of 2");
+    expect(result.text).toContain("clamped");
+  });
+
+  it("clamps an absurd end rather than refusing it, and says what was asked for", async () => {
+    await writeFile(join(cwd, "big.ts"), numbered(60), "utf8");
+    const result = await resolver.buildPrompt({
+      cwd,
+      text: "explain",
+      attachments: [{ kind: "file", path: "big.ts", range: { start: 1, end: 10_000_000 } }],
+    });
+    expect(result.text).toContain("excerpt, lines 1-60 of 60");
+    expect(result.text).toContain("1-10000000 was requested");
+    expect(result.text).toContain("the file ends at line 60");
+  });
+
+  it("refuses a start past the end of the file, fatally, rather than an empty block", async () => {
+    await writeFile(join(cwd, "big.ts"), numbered(60), "utf8");
+    await expect(
+      resolver.buildPrompt({
+        cwd,
+        text: "explain",
+        attachments: [{ kind: "file", path: "big.ts", range: { start: 61, end: 70 } }],
+      }),
+    ).rejects.toThrow(/starts at line 61, but the file has 60 lines/);
+  });
+
+  it("refuses a range against an empty file", async () => {
+    await writeFile(join(cwd, "empty.txt"), "", "utf8");
+    await expect(
+      resolver.buildPrompt({
+        cwd,
+        text: "explain",
+        attachments: [{ kind: "file", path: "empty.txt", range: { start: 1, end: 2 } }],
+      }),
+    ).rejects.toThrow(/the file is empty/);
+  });
+
+  it("refuses a range on an image attached as a file", async () => {
+    await writeFile(join(cwd, "shot.png"), Buffer.from("AAAA", "base64"));
+    await expect(
+      resolver.buildPrompt({
+        cwd,
+        text: "explain",
+        attachments: [{ kind: "file", path: "shot.png", range: { start: 1, end: 2 } }],
+      }),
+    ).rejects.toThrow(/image/);
+  });
+
+  it("still refuses a ranged attachment reached through an escaping symlink", async () => {
+    // The lexical check passes here; only the symlink-resolved comparison
+    // catches it. A range must not become a second way in.
+    await writeFile(join(outside, "s.txt"), numbered(60).replace(/L/g, "OUT"), "utf8");
+    await symlink(join(outside, "s.txt"), join(cwd, "link.txt"));
+    await expect(
+      resolver.buildPrompt({
+        cwd,
+        text: "look",
+        attachments: [{ kind: "file", path: "link.txt", range: { start: 1, end: 2 } }],
+      }),
+    ).rejects.toThrow(/symlink leading outside the workspace/);
+  });
+
+  it("still confines a ranged attachment, and reads nothing outside the workspace", async () => {
+    await writeFile(join(outside, "s.txt"), numbered(60).replace(/L/g, "OUT"), "utf8");
+    await expect(
+      resolver.buildPrompt({
+        cwd,
+        text: "explain",
+        attachments: [{ kind: "file", path: join(outside, "s.txt"), range: { start: 1, end: 2 } }],
+      }),
+    ).rejects.toThrow(/outside the workspace/);
+  });
+
+  it("charges the byte budget for the excerpt, not for the file it came from", async () => {
+    await writeFile(join(cwd, "big.ts"), numbered(60), "utf8");
+    const tight = createContextResolver({ maxAttachmentBytes: 200 });
+    await expect(
+      tight.buildPrompt({ cwd, text: "x", attachments: [{ kind: "file", path: "big.ts" }] }),
+    ).rejects.toThrow(/attachment budget/);
+    const excerpt = await tight.buildPrompt({
+      cwd,
+      text: "x",
+      attachments: [{ kind: "file", path: "big.ts", range: { start: 12, end: 14 } }],
+    });
+    expect(excerpt.text).toContain("L013");
+  });
+
+  it("echoes a resolveContext range back without reading the file", async () => {
+    await writeFile(join(cwd, "big.ts"), numbered(60), "utf8");
+    // The echo is a statement about the *parameter*, not about the file: it is
+    // what tells a client this engine will not silently drop the range. It is
+    // answered for a path that does not fit the range, and for one that is not
+    // a file at all.
+    expect(
+      await resolver.resolve({ cwd, query: "big.ts", range: { start: 1, end: 9999 } }),
+    ).toMatchObject({ kind: "file", range: { start: 1, end: 9999 } });
+    expect(await resolver.resolve({ cwd, query: ".", range: { start: 1, end: 1 } })).toMatchObject({
+      kind: "directory",
+      range: { start: 1, end: 1 },
+    });
+    expect(
+      await resolver.resolve({ cwd, query: "../nope", range: { start: 1, end: 1 } }),
+    ).toMatchObject({ inWorkspace: false, range: { start: 1, end: 1 } });
+    // And absent when nothing was asked, which is the half that makes it a
+    // usable signal.
+    expect(await resolver.resolve({ cwd, query: "big.ts" })).not.toHaveProperty("range");
+  });
+});
+
 describe("the wire's inline media allowlist and the engine's own list agree", () => {
   it("accepts exactly the media types this engine can send", () => {
     // `@arcturn/protocol` cannot import `@arcturn/cli`, so its inline-image

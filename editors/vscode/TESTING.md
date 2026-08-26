@@ -32,9 +32,10 @@ rots. So it is split into pieces that are each driven directly:
 | `webview-models.ts` | `MODEL_LIST_SOURCE` | `webview-models.test.ts` |
 | `webview-sessions.ts` | `SESSION_LIST_SOURCE` | `webview-sessions.test.ts` |
 | `webview-transcript.ts` | `TRANSCRIPT_SOURCE` | `webview-transcript.test.ts` |
+| `webview-context.ts` | `CONTEXT_SOURCE` | `webview-context.test.ts` |
 | the page itself | `SIDEBAR_SCRIPT` | `webview-render.test.ts` |
 
-The four pure modules are compiled with `new Function(SOURCE)` and called, so
+The five pure modules are compiled with `new Function(SOURCE)` and called, so
 the tests exercise **the bytes that ship** rather than a second copy of the
 algorithm kept in step by hand. Each returns plain data — the markdown parser
 returns a *tree of objects*, never a string of HTML — so none of them needs a
@@ -162,7 +163,7 @@ the terminal.
 
 ## What integration covers
 
-30 tests across two launches.
+34 tests across two launches.
 
 **Launch 1 — `default`** (workspace with `arcturn.serve.enabled: true`)
 
@@ -192,6 +193,20 @@ the terminal.
   "the log contains no injection" is worthless until a benign mention has been
   seen arriving through the same channel. A final test sends a normal mention
   again, because a refusal that wedges the extension is not a fix.
+- **Ambient awareness of the active editor** (`04b-active-editor`) — a real
+  file is opened, a real selection is dragged across it twice and the editor is
+  closed, and then the stand-in engine's spawn log is read: **nothing was
+  executed**. That is the claim that matters, because the three editor
+  listeners are registered by `activateSidebar`, which runs during
+  `activate()`; a handler written the obvious way — reaching for `withEngine` —
+  would start `arcturn serve` the first time anybody opened a file, long before
+  they opened the panel. The file has to run before `05-sidebar-view`, which
+  deliberately spends that budget. Also here, through VS Code's own
+  configuration API rather than a fake: `arcturn.context.activeEditor` resolves
+  `true` with nothing set, and `arcturn.toggleActiveEditorContext` writes it
+  false and then true again — the round trip that catches a write landing in a
+  scope some narrower one overrides, where the control would visibly do
+  nothing.
 - **The sidebar view** (`05-sidebar-view`) — `arcturn.sidebar` is contributed
   as a `webview` view in the `arcturn` activity-bar container; the workbench
   has synthesised `arcturn.sidebar.focus` (which the shipped
@@ -344,6 +359,52 @@ the row on screen" test exists to prevent is the one that cannot be caught
 downstream — a panel claiming a session is gone while the user is still looking
 at the dialog asking whether to delete it.
 
+**Needs a real engine, for the ambient chip.** The panel now watches the
+active editor. Both halves either side of the round trip are covered:
+`active-editor.test.ts` drives the decisions with no editor in the room (which
+schemes count, that a caret is not a selection, that losing focus to the panel
+does not lose the file, that closing it does, and that a drag costs one
+`resolveContext` and not two hundred); `webview-render.test.ts` runs the
+shipped script for the chip itself in each state; `04b-active-editor` proves in
+a real editor that none of it spawns anything. What no suite covers is the
+round trip. The `@` picker asks about workspace-relative paths; this asks about
+`document.uri.fsPath`, which is absolute — `confineToWorkspace` resolves it
+against the session's `cwd` either way, and the *attachment* that follows is
+the relative path the engine itself handed back, so the two surfaces put the
+same string on the wire. That reasoning has not been watched against a live
+engine, and neither has: that the resulting attachment reaches the model with
+the file's contents in it, that the engine's refusal for a file outside the
+workspace reads as a sentence a person can act on when it lands on the chip,
+or that a window whose workspace root differs from the session's `cwd`
+(multi-root, or a session opened elsewhere) does not report every open file as
+outside the workspace.
+
+One more, and it is the load-bearing one: **that `pendingAttachments` actually
+puts the ambient file on the wire.** The decision it rests on is pure and
+covered (`ambientIsRedundant` — the ambient chip stands down when an `@` chip
+already names the same file, so one file is one attachment), and the chip that
+must match it is covered against the stub DOM. The four lines of glue between
+them run inside `activateSidebar`'s closure and are reached only by a `send`
+through a live controller, which is the same gap `pendingAttachments` already
+had for pasted-image bytes. Also unobserved for the same reason: that a late
+`resolveContext` answer is discarded when the caret has moved on
+(`sameAmbient(tracker.current(), editor)` in `refreshAmbient`) — the comparison
+is unit-tested, the guard around it is not.
+
+**A gap, recorded rather than hidden: a selection does not reach the engine as
+a range.** `PromptAttachment` is `{ kind: "file"; path }` — there is nowhere on
+it to put lines, and `expandMentions` does not read a range off a mention
+either (a `@file.ts:12-40` token is confined as the literal path
+`file.ts:12-40`, found missing, and silently skipped). So the ambient chip
+names the lines the user highlighted and says `whole file` next to them, and
+`ambientTitle` spells out why on hover. Three tests pin that wording
+(`webview-context.test.ts`), which is what will fail first if somebody teaches
+the wire to carry a range and forgets the chip. Closing the gap properly is
+engine work: a `range` on `PromptAttachment`, validated in
+`packages/protocol/src/validate.ts`, honoured in `packages/cli/src/context.ts`.
+Worth noting because it is the same gap on the terminal path — `Send Selection`
+types `@file.ts:12-34`, and the engine drops it.
+
 **Needs a real engine, for the composer's four new surfaces.** RFC 0005 §2
 landed the `@` picker, the `/` menu, the mode chip and the capability line. The
 unit suite drives all four end to end against fixtures — `webview-render.test.ts`
@@ -429,6 +490,30 @@ What no suite covers, and what wants human eyes:
   wording has not been read by anyone in situ, and the wider cross-session case
   ("session X is running on this engine") needs two panels against one
   `arcturn serve` to see at all.
+
+**The ambient chip, specifically — what needs eyes.** Everything below is a
+claim about what a person sees or feels, and none of it is asserted anywhere:
+
+- **That the dashed border and the eye actually read as "different".** The
+  whole design rests on somebody being able to tell at a glance which chip
+  follows their caret and which one they put there. Nobody has looked at the
+  row with one of each in it, in any theme, and high-contrast is untested for
+  the dashed border in particular.
+- **That the chip is not distracting.** It changes as you move around the
+  editor. At 300px, with a long path and a range on it, whether that reads as
+  quiet context or as a flicker at the edge of your vision is a question only a
+  person can answer — and it is the question that decides whether the default
+  should have been `true`.
+- **That 150ms is the right debounce.** Below it and every cursor move is a
+  round trip; above it and the chip visibly lags the caret. The number was
+  reasoned about, not measured against a person scrolling a real file.
+- **That the dismiss control is understood.** The `×` on this chip turns the
+  feature off rather than removing the chip, which is not what an `×` usually
+  means. The `aria-label` and the tooltip say so; whether somebody reads them
+  before clicking is unobserved, and the failure mode is a user who thinks the
+  panel broke.
+- **That the "whole file" note lands.** It is the honest half of the range gap,
+  and it is three words on a 0.82em line in a narrow panel.
 
 **Drag and drop, specifically.** A drop into the webview is read as
 `text/uri-list` and the URIs are forwarded to the host verbatim, which turns

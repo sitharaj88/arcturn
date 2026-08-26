@@ -109,6 +109,10 @@ const orderedFiles = [
   "out/integration/02-commands.test.js",
   "out/integration/03-terminal.test.js",
   "out/integration/04-mention-injection.test.js",
+  // Opens real editors and moves real selections, and then asserts that none
+  // of it cost a spawn. That observation is only available before
+  // `05-sidebar-view` deliberately spends the budget.
+  "out/integration/04b-active-editor.test.js",
   "out/integration/05-sidebar-view.test.js",
   "out/integration/06-engine-failure.test.js",
 ];

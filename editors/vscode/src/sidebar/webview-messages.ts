@@ -58,6 +58,7 @@ import {
   MAX_WORKFLOW_NAME_LENGTH,
   MAX_WORKFLOW_RUN_ID_LENGTH,
 } from "../serve/engine.js";
+import { ambientLabel } from "./active-editor.js";
 import type { ChatViewModel } from "./chat-state.js";
 import {
   CONNECTION_ACTIONS,
@@ -189,6 +190,54 @@ export function projectContextItem(resolution: ContextResolution): ContextItem {
     kind: resolution.kind,
     ok,
     ...(resolution.reason === undefined ? {} : { reason: escapeCodicons(resolution.reason) }),
+  };
+}
+
+/**
+ * The chip for the file the user is looking at.
+ *
+ * A `ContextItem` with one extra field, deliberately: it is the *same* row an
+ * `@` mention produces — same projection, same `ok`, same bytes, same refusal
+ * — so the ambient chip and an explicit one cannot come to disagree about what
+ * a file weighs or whether the engine will read it. What is added is the
+ * lines, which change what the chip is *called* and nothing else.
+ *
+ * `selection` is present when a selection is what the label names, and the
+ * page uses it for one purpose: to say plainly that the whole file is what
+ * goes on the wire. See {@link projectActiveEditorItem}.
+ */
+export interface ActiveEditorItem extends ContextItem {
+  /** The 1-based inclusive lines the label names, when there is a selection. */
+  selection?: { startLine: number; endLine: number };
+}
+
+/**
+ * Project the engine's answer about the active file into the ambient chip.
+ *
+ * Everything factual comes from {@link projectContextItem} — one projection,
+ * so `ok` cannot mean two things on one chip row. The only work here is the
+ * label, and the order of operations in it is load-bearing: the *path* is
+ * escaped and the range is appended after, because the digits are this
+ * module's own and escaping them would put a zero-width space in a line
+ * number.
+ *
+ * `id` stays the path, not the label. Two selections in one file are one
+ * attachment, and a chip keyed by its range would let the same file appear
+ * twice.
+ *
+ * @param resolution - One `resolveContext` answer for the active file.
+ * @param selection - The 1-based inclusive lines, when something is selected.
+ */
+export function projectActiveEditorItem(
+  resolution: ContextResolution,
+  selection?: { startLine: number; endLine: number },
+): ActiveEditorItem {
+  const item = projectContextItem(resolution);
+  if (selection === undefined) return item;
+  return {
+    ...item,
+    label: ambientLabel(item.label, selection),
+    selection: { startLine: selection.startLine, endLine: selection.endLine },
   };
 }
 
@@ -339,7 +388,21 @@ export type HostMessage =
    * deltas could disagree with what the next prompt carries — which is the one
    * thing a chip row must never do.
    */
-  | { type: "context"; items: ContextItem[] }
+  | {
+      type: "context";
+      items: ContextItem[];
+      /**
+       * The file the user is looking at, when the panel is watching for it.
+       *
+       * On the *same* message as the explicit chips, not one of its own, for
+       * the reason the list is whole rather than deltas: the row the user
+       * reads has to be the set the next prompt carries, and two messages can
+       * arrive in either order. Absent when `arcturn.context.activeEditor` is
+       * off, when no file is open, or when the engine has not answered for it
+       * yet — the chip appears only once its byte count is the engine's.
+       */
+      active?: ActiveEditorItem;
+    }
   /**
    * The answer to one `resolveContext`, echoing the query it answers.
    *
@@ -464,6 +527,20 @@ export type WebviewMessage =
   | { type: "attach"; paths: string[] }
   /** Drop one chip, by the `id` the host gave it. */
   | { type: "detach"; id: string }
+  /**
+   * Stop watching the active editor.
+   *
+   * What the ambient chip's dismiss control sends, and the reason it carries
+   * no payload: it turns `arcturn.context.activeEditor` **off** and can do
+   * nothing else. A boolean here would let a page turn the watching back on
+   * for somebody who had switched it off in their settings, which is the one
+   * direction this control must not be able to move.
+   *
+   * Deliberately not a per-message dismissal. The chip is a render of where
+   * the caret is; removing it for one prompt would put it back on the next
+   * keystroke, and a control that undoes itself is worse than no control.
+   */
+  | { type: "disableActiveEditorContext" }
   /**
    * Attach an image that has no path — a paste, or a drop from outside the
    * filesystem. The only inbound message carrying bytes rather than a
@@ -728,6 +805,10 @@ export function parseWebviewMessage(value: unknown): WebviewMessage | undefined 
       return { type: "discardChanges" };
     case "browseForFiles":
       return { type: "browseForFiles" };
+    case "disableActiveEditorContext":
+      // No payload read at all, deliberately: whatever else the page put on
+      // this message is dropped, so the only thing it can express is "off".
+      return { type: "disableActiveEditorContext" };
     case "setPermissionMode": {
       // Against the engine's own four names, not a shape check: this is the
       // one message on this boundary that changes what the agent is allowed to

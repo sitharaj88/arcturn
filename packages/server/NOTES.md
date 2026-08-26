@@ -315,6 +315,42 @@ about why. It also bounds what a path attachment makes this server read off
 disk, which never crosses the wire at all. One ceiling for both costs, because a
 client should not have to know which it is paying.
 
+## A `file` attachment's `range`: clamped at the reader, refused at the boundary, probed on the wire
+
+Three decisions worth writing down, because each of them could plausibly have gone the
+other way.
+
+**The clamp lives at the reader, not at the validator.** `validatePromptAttachment` rejects
+only ranges that cannot *mean* anything — `start` below 1, `end` before `start`, a bound
+that is not a whole number. It puts no ceiling on `end`, so `{ start: 1, end: 10_000_000 }`
+is a valid frame. That looks permissive until you ask what it would cost: the engine never
+reads more of a file than the file, and `readContextFile`'s 2 MiB per-file ceiling and
+2000-line / 200 KiB inline cap already bound that, so an absurd `end` is exactly as
+expensive as attaching the file with no range at all. There is no resource argument for a
+boundary refusal, and there *is* an argument against one: a select-to-end, or a file edited
+since the selection was taken, produces an over-long range routinely, and failing the turn
+over an ordinary editor gesture would be a worse trade than clamping and saying so.
+
+**A `start` past the end is refused, and that asymmetry is deliberate.** An over-long `end`
+has an obvious honest answer (the rest of the file, reported as clamped). An over-long
+`start` does not: the only thing to clamp to would be the file's tail, which is a
+*different selection* than the one the client named. Substituting one silently is the exact
+failure a range exists to prevent, so it is a `ContextRefusedError` — fatal, like every
+other attachment refusal, since the client named those lines.
+
+**The old-engine probe grew a second question and no second round trip.**
+`ProtocolClient.prompt` already probed `resolveContext` once per session, because
+`attachments` is a new field on an old verb and an engine that drops it answers `ok` after
+spending the turn. `range` is that same hazard one level down and strictly worse: an engine
+with `resolveContext` but no notion of ranges drops the field and sends the model the
+*whole file*, which is not a smaller version of what was asked for — it is a different
+prompt at a cost the user did not choose. The fix is that the existing probe now carries a
+range, and `ContextResolution.range` echoes it back. The echo is a statement about the
+parameter and not about the path, which is why it is answered for a directory (the probe
+queries `"."`) and for a path outside the workspace: `resolveContext` stats and never
+reads, so it cannot say whether a range *fits*, and inventing an answer would make the
+field mean two things.
+
 ## The wire's scope wall is enforced three times, and that is not redundancy
 
 RFC 0005 §1.2 is one sentence — "Nothing persists to disk from a remote client"

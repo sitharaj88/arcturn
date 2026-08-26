@@ -175,11 +175,24 @@ export function createContextResolver(options: ContextResolverOptions = {}): Con
           attachment.kind === "image"
             ? verdict.relativePath
             : `${verdict.relativePath} (attached file)`;
-        const content = await readContextFile(verdict.realPath, heading);
+        // The range goes to the same reader, so an excerpt inherits the same
+        // caps and the same truncation marker a whole file gets — RFC 0005 §3
+        // asks for one reader, and a second one that sliced would be a second
+        // set of numbers to drift.
+        const range = attachment.kind === "file" ? attachment.range : undefined;
+        const content = await readContextFile(verdict.realPath, heading, range);
 
         if (content.kind === "notAFile") {
           throw new ContextRefusedError(
             `Attachment ${JSON.stringify(attachment.path)} is not a file.`,
+          );
+        }
+        if (content.kind === "rangeRefused") {
+          // Fatal, like every other attachment refusal: the client named those
+          // lines, and injecting the whole file instead — or nothing — would be
+          // the silent substitution a range exists to prevent.
+          throw new ContextRefusedError(
+            `Attachment ${JSON.stringify(attachment.path)} ${content.reason}.`,
           );
         }
         if (content.kind === "tooLarge") {
@@ -229,6 +242,14 @@ export function createContextResolver(options: ContextResolverOptions = {}): Con
       // way a mention does.
       const raw = request.query.startsWith("@") ? request.query.slice(1) : request.query;
       const verdict = await confineToWorkspace(request.cwd, raw === "" ? "." : raw);
+      // Echoed on every answer a range was asked about, whatever the path turns
+      // out to be. It is a capability signal and nothing more — "this engine
+      // understood the parameter" — which is exactly what a client needs before
+      // it trusts a ranged attachment not to arrive as a whole file. It says
+      // nothing about whether the range *fits*: this verb stats and never
+      // reads, and a file's line count cannot be known without reading it. See
+      // `ContextResolution.range`.
+      const echo = request.range === undefined ? {} : { range: request.range };
 
       if (verdict.outcome === "outside") {
         // No stat, deliberately: answering "does this exist" for a path the
@@ -236,6 +257,7 @@ export function createContextResolver(options: ContextResolverOptions = {}): Con
         // filesystem oracle for exactly the paths confinement exists to hide.
         return {
           query: request.query,
+          ...echo,
           path: verdict.path,
           relativePath: "",
           inWorkspace: false,
@@ -248,6 +270,7 @@ export function createContextResolver(options: ContextResolverOptions = {}): Con
       if (verdict.outcome === "missing") {
         return {
           query: request.query,
+          ...echo,
           path: verdict.path,
           relativePath: verdict.relativePath,
           inWorkspace: true,
@@ -264,6 +287,7 @@ export function createContextResolver(options: ContextResolverOptions = {}): Con
       } catch {
         return {
           query: request.query,
+          ...echo,
           path: verdict.path,
           relativePath: verdict.relativePath,
           inWorkspace: true,
@@ -277,6 +301,7 @@ export function createContextResolver(options: ContextResolverOptions = {}): Con
       if (info.isDirectory()) {
         return {
           query: request.query,
+          ...echo,
           path: verdict.path,
           relativePath: verdict.relativePath,
           inWorkspace: true,
@@ -289,6 +314,7 @@ export function createContextResolver(options: ContextResolverOptions = {}): Con
       if (!info.isFile()) {
         return {
           query: request.query,
+          ...echo,
           path: verdict.path,
           relativePath: verdict.relativePath,
           inWorkspace: true,
@@ -303,6 +329,7 @@ export function createContextResolver(options: ContextResolverOptions = {}): Con
         IMAGE_MIME_TYPES[extname(verdict.realPath).toLowerCase()] === undefined ? "file" : "image";
       return {
         query: request.query,
+        ...echo,
         path: verdict.path,
         relativePath: verdict.relativePath,
         inWorkspace: true,

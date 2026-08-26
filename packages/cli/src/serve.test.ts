@@ -7,7 +7,7 @@ import { createClient, registerModel, unregisterModel } from "@arcturn/ai";
 import { Agent, JsonlSessionStore } from "@arcturn/core";
 import { createProtocolClient, type ProtocolClient } from "@arcturn/protocol";
 import { ArcturnServer, SessionHost } from "@arcturn/server";
-import type { AgentEvent, ModelSpec, SessionHistory } from "@arcturn/types";
+import type { AgentEvent, ContextResolution, ModelSpec, SessionHistory } from "@arcturn/types";
 import { afterEach, describe, expect, it } from "vitest";
 import { WebSocket } from "ws";
 import { formatModelCatalog } from "./runtime.js";
@@ -924,6 +924,319 @@ describe("RFC 0005 §1.1 — context and attachments on the wire", () => {
       client.close();
       unregisterModel(spec.id);
       await provider.close();
+    }
+  });
+});
+
+/**
+ * A file whose every line names itself, so "which lines reached the model" is a
+ * direct substring read of the provider's request body rather than an
+ * inference from its length.
+ *
+ * Zero-padded deliberately: `LINE_5_` is not a substring of `LINE_15_`, but a
+ * reader should not have to work that out to trust the assertion.
+ */
+function numberedLines(count: number): string {
+  const lines: string[] = [];
+  for (let i = 1; i <= count; i++) lines.push(`LINE_${String(i).padStart(3, "0")}_SENTINEL`);
+  return `${lines.join("\n")}\n`;
+}
+
+/** The sentinel `numberedLines` puts on line `n`. */
+function sentinel(n: number): string {
+  return `LINE_${String(n).padStart(3, "0")}_SENTINEL`;
+}
+
+describe("ranged file attachments — a selection, not the whole file", () => {
+  it("sends ONLY the selected lines to the provider", async () => {
+    const provider = await stubProvider();
+    const spec = stubSpec("stub-range/model", provider.baseUrl);
+    registerModel(spec);
+
+    const runtime = await fakeRuntime({
+      llm: createClient({ env: {}, retry: false }),
+      model: spec,
+    });
+    await writeFile(join(runtime.cwd, "big.ts"), numberedLines(60), "utf8");
+
+    const { client, sessionId } = await connectedClient(runtime);
+    try {
+      await client.prompt(sessionId, "explain this", [
+        { kind: "file", path: "big.ts", range: { start: 12, end: 14 } },
+      ]);
+
+      expect(provider.requests).toHaveLength(1);
+      const sent = provider.requests[0] ?? "";
+      // The whole point, and the assertion the mention bug taught us to write:
+      // a test that only checked the prompt was accepted would have passed
+      // while all sixty lines went to the model.
+      expect(sent).toContain(sentinel(12));
+      expect(sent).toContain(sentinel(13));
+      expect(sent).toContain(sentinel(14));
+      expect(sent).not.toContain(sentinel(11));
+      expect(sent).not.toContain(sentinel(15));
+      expect(sent).not.toContain(sentinel(60));
+      // And the model is told it is looking at an excerpt, so it does not
+      // answer as though it had seen the file.
+      expect(sent).toContain("excerpt, lines 12-14 of 60");
+    } finally {
+      client.close();
+      unregisterModel(spec.id);
+      await provider.close();
+    }
+  });
+
+  it("clamps a range that runs past the end of the file, and REPORTS the clamp", async () => {
+    const provider = await stubProvider();
+    const spec = stubSpec("stub-clamp/model", provider.baseUrl);
+    registerModel(spec);
+
+    const runtime = await fakeRuntime({
+      llm: createClient({ env: {}, retry: false }),
+      model: spec,
+    });
+    await writeFile(join(runtime.cwd, "big.ts"), numberedLines(60), "utf8");
+
+    const { client, sessionId } = await connectedClient(runtime);
+    try {
+      await client.prompt(sessionId, "explain the tail", [
+        { kind: "file", path: "big.ts", range: { start: 58, end: 10_000_000 } },
+      ]);
+
+      const sent = provider.requests[0] ?? "";
+      expect(sent).toContain(sentinel(58));
+      expect(sent).toContain(sentinel(60));
+      expect(sent).not.toContain(sentinel(57));
+      expect(sent).toContain("excerpt, lines 58-60 of 60");
+      expect(sent).toContain("clamped");
+      expect(sent).toContain("10000000");
+    } finally {
+      client.close();
+      unregisterModel(spec.id);
+      await provider.close();
+    }
+  });
+
+  it("refuses a start past the end of the file rather than sending an empty block", async () => {
+    const provider = await stubProvider();
+    const spec = stubSpec("stub-past/model", provider.baseUrl);
+    registerModel(spec);
+
+    const runtime = await fakeRuntime({
+      llm: createClient({ env: {}, retry: false }),
+      model: spec,
+    });
+    await writeFile(join(runtime.cwd, "big.ts"), numberedLines(60), "utf8");
+
+    const { client, sessionId } = await connectedClient(runtime);
+    try {
+      await expect(
+        client.prompt(sessionId, "explain this", [
+          { kind: "file", path: "big.ts", range: { start: 900, end: 950 } },
+        ]),
+      ).rejects.toMatchObject({
+        code: "invalidRequest",
+        message: expect.stringContaining("60 lines"),
+      });
+      expect(provider.requests).toHaveLength(0);
+    } finally {
+      client.close();
+      unregisterModel(spec.id);
+      await provider.close();
+    }
+  });
+
+  it("still confines a RANGED attachment: nothing outside the workspace is read", async () => {
+    const provider = await stubProvider();
+    const spec = stubSpec("stub-rangeesc/model", provider.baseUrl);
+    registerModel(spec);
+
+    const runtime = await fakeRuntime({
+      llm: createClient({ env: {}, retry: false }),
+      model: spec,
+    });
+    const outside = await mkdtemp(join(tmpdir(), "arcturn-outside-"));
+    await writeFile(
+      join(outside, "secrets.txt"),
+      numberedLines(60).replace(/LINE/g, "OUT"),
+      "utf8",
+    );
+
+    const { client, sessionId } = await connectedClient(runtime);
+    try {
+      await expect(
+        client.prompt(sessionId, "look at this", [
+          {
+            kind: "file",
+            path: join(outside, "secrets.txt"),
+            range: { start: 12, end: 14 },
+          },
+        ]),
+      ).rejects.toMatchObject({ code: "invalidRequest" });
+      expect(provider.requests).toHaveLength(0);
+    } finally {
+      client.close();
+      unregisterModel(spec.id);
+      await provider.close();
+    }
+  });
+
+  it("charges the budget for the excerpt, not for the file it came from", async () => {
+    const provider = await stubProvider();
+    const spec = stubSpec("stub-rangebudget/model", provider.baseUrl);
+    registerModel(spec);
+
+    const runtime = await fakeRuntime({
+      llm: createClient({ env: {}, retry: false }),
+      model: spec,
+    });
+    // 60 lines is well past a 512-byte budget; three of them are not.
+    await writeFile(join(runtime.cwd, "big.ts"), numberedLines(60), "utf8");
+
+    const { client, sessionId } = await connectedClient(runtime, { maxAttachmentBytes: 512 });
+    try {
+      await expect(
+        client.prompt(sessionId, "whole thing", [{ kind: "file", path: "big.ts" }]),
+      ).rejects.toMatchObject({ message: expect.stringContaining("attachment budget") });
+      expect(provider.requests).toHaveLength(0);
+
+      await client.prompt(sessionId, "just the selection", [
+        { kind: "file", path: "big.ts", range: { start: 12, end: 14 } },
+      ]);
+      expect(provider.requests).toHaveLength(1);
+      expect(provider.requests[0]).toContain(sentinel(13));
+    } finally {
+      client.close();
+      unregisterModel(spec.id);
+      await provider.close();
+    }
+  });
+
+  it("rejects a nonsense range on the wire, before anything is read", async () => {
+    const provider = await stubProvider();
+    const spec = stubSpec("stub-badrange/model", provider.baseUrl);
+    registerModel(spec);
+
+    const runtime = await fakeRuntime({
+      llm: createClient({ env: {}, retry: false }),
+      model: spec,
+    });
+    await writeFile(join(runtime.cwd, "big.ts"), numberedLines(60), "utf8");
+
+    const { client, sessionId } = await connectedClient(runtime);
+    try {
+      const cases: Array<[{ start: number; end: number }, RegExp]> = [
+        [{ start: 0, end: 4 }, /at least 1/],
+        [{ start: 14, end: 12 }, /must not be before/],
+        [{ start: 1.5, end: 4 }, /whole number/],
+      ];
+      for (const [range, reason] of cases) {
+        await expect(
+          client.prompt(sessionId, "explain this", [{ kind: "file", path: "big.ts", range }]),
+        ).rejects.toMatchObject({
+          code: "invalidRequest",
+          message: expect.stringMatching(reason),
+        });
+      }
+      expect(provider.requests).toHaveLength(0);
+    } finally {
+      client.close();
+      unregisterModel(spec.id);
+      await provider.close();
+    }
+  });
+
+  it("refuses a line range on an image, which has no lines", async () => {
+    const provider = await stubProvider();
+    const spec = visionSpec("stub-rangeimg/model", provider.baseUrl);
+    registerModel(spec);
+
+    const runtime = await fakeRuntime({
+      llm: createClient({ env: {}, retry: false }),
+      model: spec,
+    });
+    await writeFile(join(runtime.cwd, "shot.png"), Buffer.from(TINY_PNG_BASE64, "base64"));
+
+    const { client, sessionId } = await connectedClient(runtime);
+    try {
+      await expect(
+        client.prompt(sessionId, "what is this?", [
+          { kind: "file", path: "shot.png", range: { start: 1, end: 2 } },
+        ]),
+      ).rejects.toMatchObject({ code: "invalidRequest" });
+      expect(provider.requests).toHaveLength(0);
+    } finally {
+      client.close();
+      unregisterModel(spec.id);
+      await provider.close();
+    }
+  });
+
+  it("expands an @path:12-14 MENTION to the same excerpt, not the whole file", async () => {
+    const provider = await stubProvider();
+    const spec = stubSpec("stub-mentionrange/model", provider.baseUrl);
+    registerModel(spec);
+
+    const runtime = await fakeRuntime({
+      llm: createClient({ env: {}, retry: false }),
+      model: spec,
+    });
+    await writeFile(join(runtime.cwd, "big.ts"), numberedLines(60), "utf8");
+
+    const { client, sessionId } = await connectedClient(runtime);
+    try {
+      await client.prompt(sessionId, "what does @big.ts:12-14 do?");
+
+      const sent = provider.requests[0] ?? "";
+      expect(sent).toContain(sentinel(12));
+      expect(sent).toContain(sentinel(14));
+      expect(sent).not.toContain(sentinel(11));
+      expect(sent).not.toContain(sentinel(15));
+      expect(sent).toContain("excerpt, lines 12-14 of 60");
+    } finally {
+      client.close();
+      unregisterModel(spec.id);
+      await provider.close();
+    }
+  });
+
+  it("refuses a ranged attachment locally when the engine cannot honour ranges", async () => {
+    const runtime = await fakeRuntime();
+    await writeFile(join(runtime.cwd, "big.ts"), numberedLines(60), "utf8");
+
+    // An engine with `resolveContext` but no notion of a range: exactly the
+    // shape of an arcturn built before this feature, which would drop the
+    // field, send all sixty lines and answer `ok`.
+    const sessionHost = createServeHost(runtime);
+    // A Proxy rather than a subclass or a spread: `SessionHost` carries private
+    // fields, so the only way to get "the real host, minus one field on one
+    // answer" is to delegate every other member to it untouched.
+    const rangeBlind = new Proxy(sessionHost, {
+      get(target, property, receiver) {
+        if (property === "resolveContext") {
+          return async (sessionId: string, query: string): Promise<ContextResolution> => {
+            const { range: _dropped, ...rest } = await target.resolveContext(sessionId, query);
+            return rest;
+          };
+        }
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === "function" ? (value as () => unknown).bind(target) : value;
+      },
+    });
+    const server = new ArcturnServer({ sessionHost: rangeBlind });
+    servers.push(server);
+    const port = await server.start({ host: "127.0.0.1", port: 0 });
+    const client = createProtocolClient(new WebSocket(`ws://127.0.0.1:${port}`));
+    try {
+      const header = await client.createSession({ cwd: runtime.cwd });
+      await client.openSession(header.sessionId);
+      await expect(
+        client.prompt(header.sessionId, "look", [
+          { kind: "file", path: "big.ts", range: { start: 12, end: 14 } },
+        ]),
+      ).rejects.toMatchObject({ code: "invalidRequest" });
+    } finally {
+      client.close();
     }
   });
 });

@@ -120,8 +120,8 @@ export function narrowCandidates(
 
 /**
  * JavaScript source defining the picker's pure functions:
- * `formatBytes`, `contextMeta`, `contextScore`, `rankContext`, `triggerAt`,
- * `applyTrigger`.
+ * `formatBytes`, `contextMeta`, `ambientMeta`, `ambientTitle`, `contextScore`,
+ * `rankContext`, `triggerAt`, `applyTrigger`.
  */
 export const CONTEXT_SOURCE = String.raw`
 /**
@@ -155,6 +155,49 @@ function contextMeta(item) {
   var size = formatBytes(item.bytes);
   if (item.kind === "image") return size === "" ? "image" : "image · " + size;
   return size;
+}
+
+/**
+ * The second line of the *ambient* chip: what will actually be sent.
+ *
+ * This exists because of one gap, and it exists to say so out loud. The
+ * engine's attachment shape is '{ kind: "file", path }' — there is nowhere on
+ * The wire carries the range now: 'PromptAttachment' has a 'range' field and
+ * 'expandMentions' reads one off a mention, so a label naming 'auth.ts:12-40'
+ * describes what is actually sent.
+ *
+ * This line used to read 'whole file' beside the label, because the range was
+ * named and not sent. That word was the thing designed to change when the wire
+ * learned to carry a range, and the label was designed not to — so this is
+ * that change, and the label is untouched. What is left is the size, which is
+ * the file's, not the excerpt's: the engine slices after it stats
+ *
+ * A refused chip reports the engine's refusal instead, exactly as an '@' chip
+ * does: 'what will be sent' for a file the engine will not read is nothing,
+ * and the reason is the only useful sentence left.
+ */
+function ambientMeta(item) {
+  if (item.ok !== true) return contextMeta(item);
+  if (!item.selection) return contextMeta(item);
+  var lines = item.selection.endLine - item.selection.startLine + 1;
+  var count = lines === 1 ? "1 line" : String(lines) + " lines";
+  var size = formatBytes(item.bytes);
+  return size === "" ? count : count + " of " + size;
+}
+
+/**
+ * The ambient chip's hover: the same two facts, and the reason for the odd one.
+ *
+ * The sentence is only added when a selection is on screen and the file is one
+ * the engine will read — the two conditions under which 'whole file' is
+ * surprising. Over a refusal it would be noise stacked on top of the thing the
+ * user actually needs to read.
+ */
+function ambientTitle(item) {
+  var meta = ambientMeta(item);
+  var head = item.label + (meta === "" ? "" : "\n" + meta);
+  if (item.ok !== true || !item.selection) return head;
+  return head + "\nThis engine's attachments carry a path and no line range, so the whole file is sent.";
 }
 
 /**

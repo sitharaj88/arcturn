@@ -11,6 +11,7 @@ import {
   validateClientRequest,
   validateCompactionSummary,
   validateContextResolution,
+  validateLineRange,
   validateMcpStatus,
   validateModelCatalog,
   validateOrgMemoryEntry,
@@ -567,6 +568,148 @@ describe("RFC 0005 §1.1 — prompt attachments and resolveContext", () => {
       expect(
         validatePromptAttachment({ kind: "file", path: "a".repeat(MAX_CONTEXT_QUERY_LENGTH + 1) }),
       ).toMatchObject({ ok: false });
+    });
+
+    it("carries a line range through on a file, 1-based and inclusive", () => {
+      const result = validatePromptAttachment({
+        kind: "file",
+        path: "src/auth.ts",
+        range: { start: 12, end: 40 },
+      });
+      expect(result).toEqual({
+        ok: true,
+        value: { kind: "file", path: "src/auth.ts", range: { start: 12, end: 40 } },
+      });
+    });
+
+    it("accepts a one-line range as start === end", () => {
+      expect(
+        validatePromptAttachment({ kind: "file", path: "a.ts", range: { start: 7, end: 7 } }),
+      ).toMatchObject({ ok: true });
+    });
+
+    it("does NOT bound an end that runs past any plausible file", () => {
+      // Clamped at read time, not refused here: a select-to-end produces one
+      // routinely, and the engine never reads more of a file than the file.
+      expect(
+        validatePromptAttachment({
+          kind: "file",
+          path: "a.ts",
+          range: { start: 1, end: 10_000_000 },
+        }),
+      ).toMatchObject({ ok: true });
+    });
+
+    it("refuses a range that cannot mean anything", () => {
+      for (const range of [
+        { start: 0, end: 4 },
+        { start: -3, end: 4 },
+        { start: 14, end: 12 },
+        { start: 1.5, end: 4 },
+        { start: 1, end: Number.NaN },
+        { start: 1, end: Number.POSITIVE_INFINITY },
+        { start: "1", end: 4 },
+        [1, 4],
+      ]) {
+        expect(validatePromptAttachment({ kind: "file", path: "a.ts", range })).toMatchObject({
+          ok: false,
+        });
+      }
+    });
+
+    it("refuses a range on an image, by path or inline — an image has no lines", () => {
+      // Refused rather than dropped: a dropped range is the whole file
+      // arriving while the client believes it sent a selection.
+      expect(
+        validatePromptAttachment({ kind: "image", path: "a.png", range: { start: 1, end: 2 } }),
+      ).toMatchObject({ ok: false });
+      expect(
+        validatePromptAttachment({
+          kind: "image",
+          data: "AAAA",
+          mimeType: "image/png",
+          range: { start: 1, end: 2 },
+        }),
+      ).toMatchObject({ ok: false });
+    });
+  });
+
+  describe("validateLineRange", () => {
+    it("accepts a whole-number range with both ends inclusive", () => {
+      expect(validateLineRange({ start: 12, end: 40 })).toEqual({
+        ok: true,
+        value: { start: 12, end: 40 },
+      });
+    });
+
+    it("copies out only the two fields it defines", () => {
+      expect(validateLineRange({ start: 1, end: 2, mode: "bytes" })).toEqual({
+        ok: true,
+        value: { start: 1, end: 2 },
+      });
+    });
+
+    it("names the 1-based convention in its refusal, because an off-by-one is invisible", () => {
+      const result = validateLineRange({ start: 0, end: 4 });
+      expect(result).toMatchObject({ ok: false });
+      if (!result.ok) expect(result.error).toMatch(/1-based/);
+    });
+  });
+
+  describe("resolveContext line ranges", () => {
+    it("carries a range through the request", () => {
+      const result = validateClientRequest({
+        id: "1",
+        method: "resolveContext",
+        params: { sessionId: "s", query: "a.ts", range: { start: 1, end: 4 } },
+      });
+      expect(result).toMatchObject({
+        ok: true,
+        request: { params: { range: { start: 1, end: 4 } } },
+      });
+    });
+
+    it("keeps an absent range absent, which is what makes the echo a signal", () => {
+      const result = validateClientRequest({
+        id: "1",
+        method: "resolveContext",
+        params: { sessionId: "s", query: "a.ts" },
+      });
+      expect(result.ok).toBe(true);
+      if (result.ok) expect("range" in result.request.params).toBe(false);
+    });
+
+    it("refuses a nonsense range on the request", () => {
+      expect(
+        validateClientRequest({
+          id: "1",
+          method: "resolveContext",
+          params: { sessionId: "s", query: "a.ts", range: { start: 4, end: 1 } },
+        }),
+      ).toMatchObject({ ok: false });
+    });
+
+    it("carries the echo through the result, and drops nothing else in", () => {
+      const resolution = {
+        query: "a.ts",
+        path: "/repo/a.ts",
+        relativePath: "a.ts",
+        inWorkspace: true,
+        exists: true,
+        bytes: 10,
+        kind: "file",
+        range: { start: 1, end: 4 },
+      };
+      expect(validateContextResolution(resolution)).toMatchObject({
+        ok: true,
+        value: { range: { start: 1, end: 4 } },
+      });
+      expect(
+        validateContextResolution({ ...resolution, range: { start: 4, end: 1 } }),
+      ).toMatchObject({ ok: false });
+      const plain = validateContextResolution({ ...resolution, range: undefined });
+      expect(plain.ok).toBe(true);
+      if (plain.ok) expect("range" in plain.value).toBe(false);
     });
   });
 
