@@ -27,6 +27,15 @@
  * that completes what you are typing must not cover what you are typing.
  * Moving that element out of `#dock` would leave it positioned against
  * `#root` and silently put it back on top of the composer.
+ *
+ * `#permission` is load-bearing for a different reason, and it is a security
+ * one. It is the region a permission request is rendered into, and it is a
+ * sibling of the composer inside `#dock` — *not* a child of `#transcript`. The
+ * transcript is where assistant prose, tool arguments and tool results are
+ * appended; the dock is written only by the panel's own chrome. Keeping the
+ * two apart is what makes an in-panel permission card safe to offer at all:
+ * the worst a model can do is write a sentence that says "click Allow below",
+ * and it lands in a region that has no buttons in it. See RFC 0005 §2.
  */
 
 import { randomBytes } from "node:crypto";
@@ -188,10 +197,48 @@ export function renderSidebarHtml(options: SidebarHtmlOptions): string {
       </div>
     </section>
 
-    <div id="permission" class="permission hidden" role="status" aria-live="polite">
-      <span id="permission-icon"></span>
-      <span id="permission-text"></span>
-    </div>
+    <!--
+      The permission surface. One region, two states, and it is inside #dock
+      rather than in #turns on purpose (RFC 0005 section 2): the transcript is
+      where model output lands, and a control that grants a tool must never
+      share a container with text a model wrote. Nothing in this page ever
+      appends to #permission except the permission renderer.
+
+      The STRIP is what is left of the modal-only world - the one line that
+      says a request is outstanding on the path that still raises a native
+      dialog. The CARD is the request itself, and every field in it is filled
+      by textContent from the host's validated payload.
+    -->
+    <section id="permission" class="permission hidden" aria-label="Permission request">
+      <div id="permission-strip" class="permission-strip hidden" role="status" aria-live="polite">
+        <span id="permission-icon"></span>
+        <span id="permission-text"></span>
+      </div>
+      <div id="permission-ask" class="permission-ask hidden" role="group"
+        aria-label="Arcturn is asking for permission">
+        <div class="permission-head">
+          <span id="permission-ask-icon"></span>
+          <span class="permission-title">Arcturn is asking for permission</span>
+        </div>
+        <!--
+          The live region is the DESCRIPTION, not the heading. The heading never
+          changes, so a live region on it would never fire; the description is
+          what carries the new request, and it is written while the card is
+          already un-hidden. Assertive because a run is blocked on it.
+        -->
+        <p id="permission-desc" class="permission-desc" aria-live="assertive"></p>
+        <div class="permission-facts">
+          <span class="permission-key">Tool</span>
+          <span id="permission-tool" class="permission-value"></span>
+          <span class="permission-key">On</span>
+          <span id="permission-subject" class="permission-value"></span>
+        </div>
+        <pre id="permission-args" class="permission-args hidden"></pre>
+        <p id="permission-origin" class="permission-origin hidden"></p>
+        <p id="permission-more" class="permission-more hidden" role="status" aria-live="polite"></p>
+        <div id="permission-actions" class="permission-actions"></div>
+      </div>
+    </section>
 
     <section id="dryrun" class="dryrun hidden" aria-label="Pending dry-run changes">
       <div class="dryrun-head" role="status" aria-live="polite">

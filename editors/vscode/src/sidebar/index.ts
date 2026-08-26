@@ -4,7 +4,7 @@
  *
  * Builder A calls {@link activateSidebar} exactly once, gated on
  * `arcturn.serve.enabled`. Everything below it — the `arcturn serve` child, the
- * protocol client, the chat webview, the permission modals, the cost status
+ * protocol client, the chat webview, the permission surface, the cost status
  * bar, the model and session pickers — is Builder B's, and none of it runs
  * until the user opens the `arcturn.sidebar` view or invokes one of the
  * commands registered here. That is RFC 0004 §3's activation budget: "no
@@ -45,12 +45,7 @@ import { type ChatViewModel, toViewModel } from "./chat-state.js";
 import { createCoalescer } from "./coalesce.js";
 import { type ConnectionActionId, type ConnectionReport, reportText } from "./connection-card.js";
 import { costBreakdown, costLabel } from "./cost.js";
-import {
-  answerFromChoice,
-  confirmsSessionDeletion,
-  describeSessionDeletion,
-  permissionChoices,
-} from "./dialog.js";
+import { confirmsSessionDeletion, describeSessionDeletion, permissionChoices } from "./dialog.js";
 import {
   confirmsDiscard,
   DRY_RUN_SCHEME,
@@ -62,7 +57,7 @@ import {
   toDryRunView,
 } from "./dry-run.js";
 import { createEngineSession, type EngineSession } from "./engine-session.js";
-import { describePermissionRequest } from "./permission-queue.js";
+import { PermissionSurface } from "./permission-surface.js";
 import { escapeCodicons, modelPickItems } from "./picker.js";
 import {
   type CheckpointRow,
@@ -278,6 +273,13 @@ export function activateSidebar(
         case "requestPermission":
           void publishPermission();
           return;
+        case "permissionDecision":
+          // The page names a button on a request; `PermissionSurface` decides
+          // what that means, through the same `answerFromChoice` the native
+          // modal's answer goes through, and drops it if it does not name the
+          // request currently on the card.
+          permissions.answer(message.requestId, message.choice);
+          return;
         case "setPermissionMode":
           void applyPermissionMode(message.mode);
           return;
@@ -348,8 +350,36 @@ export function activateSidebar(
           return;
       }
     },
+    onVisibility: (visible) => permissions.setVisible(visible),
     onDiagnostic: log,
   });
+
+  /**
+   * Where a permission request gets asked.
+   *
+   * RFC 0005 §2 used to say "native modals" and this is what replaced it: the
+   * card goes in the panel's dock — a region the transcript never writes into
+   * — and a native modal is kept as the strict fallback for a panel that
+   * cannot be brought into view. `permission-surface.ts` holds the whole
+   * argument, including why one live surface per request is not negotiable.
+   *
+   * Declared after `provider` and referenced from inside its handlers: both
+   * closures run long after this line, and each genuinely needs the other.
+   */
+  const permissions = new PermissionSurface({
+    reveal: () => provider.reveal(),
+    postCard: (card) => provider.postPermissionAsk(card),
+    askModal: (described) =>
+      Promise.resolve(
+        vscode.window.showWarningMessage(
+          described.message,
+          { modal: true, detail: described.detail },
+          ...permissionChoices(described),
+        ),
+      ),
+    onDiagnostic: log,
+  });
+  disposables.push({ dispose: () => permissions.dispose() });
 
   // Coalesced so a token-by-token stream repaints at frame rate, not per delta.
   const states = createCoalescer((state: ChatViewModel) => provider.postState(state));
@@ -2147,6 +2177,12 @@ export function activateSidebar(
       host: {
         onChat: (state) => {
           states.push(state);
+          // The activity-bar badge, from the ENGINE's count — requests raised
+          // minus decisions seen — not from what the surface happens to be
+          // showing. A user who hid the panel between requests is still told
+          // the agent is waiting on them, in the one piece of chrome that is
+          // on screen in every layout.
+          provider.postBadge(state.pendingPermissions);
           // A turn that just ended is when a dry run's shadow tree changed.
           // Without this the review card would only ever appear on a page
           // load, which is the same as asking the user to remember to look —
@@ -2163,6 +2199,11 @@ export function activateSidebar(
         },
         onConnection: (status, detail, report) => {
           provider.postConnection(status, report);
+          // A dropped connection disposes the controller, which denies every
+          // outstanding request — so nothing is waiting on the user any more
+          // and the badge must not go on saying otherwise. The card itself
+          // came down with those denials, through `onPermissionDecision`.
+          if (status !== "ready") provider.postBadge(0);
           if (status === "ready") {
             // A new connection is a new server: its credentials, and therefore
             // which models are usable, may not be the ones the last catalog
@@ -2222,15 +2263,12 @@ export function activateSidebar(
           if (status === "ready") statusBar.show();
           else statusBar.hide();
         },
-        askPermission: async (request, args) => {
-          const described = describePermissionRequest(request, args);
-          const choice = await vscode.window.showWarningMessage(
-            described.message,
-            { modal: true, detail: described.detail },
-            ...permissionChoices(described),
-          );
-          return answerFromChoice(choice, described);
-        },
+        askPermission: (request, args) => permissions.ask(request, args),
+        // Every decision, whoever produced it — including the denials a
+        // disposed queue sends on a session switch or a dropped connection.
+        // It is what takes the card down at the moment the request stops being
+        // answerable, so a disposal can never leave a live Allow on screen.
+        onPermissionDecision: (decision) => permissions.settle(decision.requestId),
         onDiagnostic: log,
       },
     });

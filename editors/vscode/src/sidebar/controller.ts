@@ -28,6 +28,7 @@ import type {
   ContextResolution,
   DiscardChangesResult,
   PendingChanges,
+  PermissionDecision,
   PermissionMode,
   PermissionRequest,
   PermissionState,
@@ -59,16 +60,30 @@ export interface ControllerHost {
   /** The session's spend changed. */
   onCost: (cost: CostState) => void;
   /**
-   * Show a permission dialog.
+   * Ask a person about one permission request.
+   *
+   * Where the question is asked — the panel's dock, or a native modal when the
+   * panel cannot be seen — is the embedder's decision, not this controller's.
    *
    * @param request - The engine's request, unmodified.
    * @param args - The tool's arguments from `toolStart`, when the controller
-   *   has seen them. Passed through verbatim for the dialog to render.
+   *   has seen them. Passed through verbatim for the prompt to render.
    */
   askPermission: (
     request: PermissionRequest,
     args: Record<string, unknown> | undefined,
   ) => Promise<PermissionAnswer>;
+  /**
+   * A permission decision is going on the wire, whoever produced it.
+   *
+   * The embedder needs this because it may be *showing* the request: an
+   * in-panel card has to come down at the moment the request stops being
+   * answerable, and one of the ways that happens — the denials
+   * `PermissionQueue.dispose` sends when a session is switched, a connection
+   * drops, or the sidebar is disposed — never passes through
+   * {@link ControllerHost.askPermission} at all.
+   */
+  onPermissionDecision?: (decision: PermissionDecision) => void;
   /**
    * A `notice` arrived on this session's stream.
    *
@@ -287,6 +302,9 @@ export function createSessionController(options: SessionControllerOptions): Sess
 
   const permissions = new PermissionQueue({
     ask: (request) => host.askPermission(request, toolArgs.get(request.toolCallId)),
+    // Forwarded, never interpreted. The queue has already decided by the time
+    // this fires; the embedder's only job is to stop offering to answer.
+    onDecision: (decision) => host.onPermissionDecision?.(decision),
     // The scope is named only when there is a rule to scope. RFC 0005 §1.2
     // gives the verb an optional `scope` so "allow once" and "allow for this
     // session" are distinguishable *at the moment of asking* rather than

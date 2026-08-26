@@ -9,6 +9,7 @@ import {
 } from "../serve/engine.js";
 import { CONNECTION_ACTIONS } from "./connection-card.js";
 import {
+  MAX_CHOICE_LENGTH,
   MAX_COPY_LENGTH,
   MAX_IMAGE_DATA_LENGTH,
   MAX_MODEL_ID_LENGTH,
@@ -526,6 +527,65 @@ describe("the dry-run review messages", () => {
   it("bounds the selection so one frame cannot ask for unbounded work", () => {
     const many = Array.from({ length: MAX_CHANGE_SELECTION + 1 }, (_, i) => `f${String(i)}.ts`);
     expect(parseWebviewMessage({ type: "applyChanges", paths: many })).toBeUndefined();
+  });
+});
+
+describe("the permission card's boundary — the message that grants a tool", () => {
+  it("takes an answer and rebuilds both fields", () => {
+    expect(
+      parseWebviewMessage({
+        type: "permissionDecision",
+        requestId: "perm-1",
+        choice: "Allow",
+        behavior: "allow",
+        persistRule: { tool: "*", action: "allow", scope: "user" },
+      }),
+    ).toEqual({ type: "permissionDecision", requestId: "perm-1", choice: "Allow" });
+  });
+
+  it("carries a label, never a decision", () => {
+    // The page names a button. What that button *means* is decided on the host
+    // by `answerFromChoice`, which is also what the modal's answer goes
+    // through — so a page cannot ask for a behaviour, only for a label, and it
+    // cannot ask for a rule at all.
+    const parsed = parseWebviewMessage({
+      type: "permissionDecision",
+      requestId: "perm-1",
+      choice: "Allow",
+    });
+    expect(Object.keys(parsed ?? {}).sort()).toEqual(["choice", "requestId", "type"]);
+  });
+
+  it("passes a label it has never heard of straight through, to be denied", () => {
+    // Refusing it here would drop the message and leave the request hanging.
+    // It is carried to `answerFromChoice`, which denies everything that is not
+    // an explicit allow — the rule that makes the round trip safe.
+    expect(
+      parseWebviewMessage({ type: "permissionDecision", requestId: "perm-1", choice: "Sure" }),
+    ).toEqual({ type: "permissionDecision", requestId: "perm-1", choice: "Sure" });
+  });
+
+  it("refuses an unusable id or label rather than answering for nothing", () => {
+    for (const bad of [
+      { type: "permissionDecision", requestId: "", choice: "Allow" },
+      { type: "permissionDecision", requestId: "perm-1", choice: "" },
+      { type: "permissionDecision", requestId: 7, choice: "Allow" },
+      { type: "permissionDecision", requestId: "perm-1" },
+      { type: "permissionDecision", requestId: "perm\n1", choice: "Allow" },
+      { type: "permissionDecision", requestId: "perm-1", choice: "Allow\u0007" },
+      {
+        type: "permissionDecision",
+        requestId: "x".repeat(MAX_SESSION_ID_LENGTH + 1),
+        choice: "Allow",
+      },
+      {
+        type: "permissionDecision",
+        requestId: "perm-1",
+        choice: "x".repeat(MAX_CHOICE_LENGTH + 1),
+      },
+    ]) {
+      expect(parseWebviewMessage(bad)).toBeUndefined();
+    }
   });
 });
 

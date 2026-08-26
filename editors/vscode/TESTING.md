@@ -51,6 +51,33 @@ about appearance**; see "does not cover" below. It is deliberately strict
 (`appendChild(undefined)` throws, as a browser would) so that a passing test is
 a statement about the script and not about the stub.
 
+### The permission card, and where each half is proved
+
+RFC 0005 §2.1 moved permission prompts off native modals and into a reserved
+region of the dock. Nothing about the *decision* moved with them, and the split
+is what makes both halves testable with no window and no DOM:
+
+| Half | Lives in | Driven by |
+| --- | --- | --- |
+| What each button means | `dialog.ts` | `dialog.test.ts` |
+| What the card says, and which buttons it gets | `permission-surface.ts` (`permissionCard`) | `permission-surface.test.ts` |
+| Which surface a request gets, and what happens when the panel goes away | `permission-surface.ts` (`PermissionSurface`) | `permission-surface.test.ts` |
+| That order is kept and nothing is left unanswered | `permission-queue.ts` | `permission-queue.test.ts`, `permission-surface.test.ts` |
+| That a disposal denies what is on screen | `permission-queue.ts` + `controller.ts` | `controller.test.ts` |
+| That the page cannot express a decision, only a label | `webview-messages.ts` | `webview-messages.test.ts` |
+| That the card renders in the dock and not in the transcript | `webview-html.ts` | `webview-html.test.ts`, `webview-render.test.ts` |
+| That focus lands on Deny and the card cannot be answered twice | `webview-client.ts` | `webview-render.test.ts` |
+| That hiding the view really destroys the page | the editor | `test/integration/07-sidebar-visibility` |
+
+The two claims worth naming, because they are safety properties rather than
+presentation: **the page sends a label, never a decision** — `answerFromChoice`
+denies anything that is not one of two known allow labels, and the rule behind
+"allow for this session" is re-derived on the host from the engine's own
+request, so a page pressing that label on a request with no suggested rule gets
+a plain allow. And **the card is never rendered into the message flow** — it
+lives in `#dock`, which nothing but the panel's chrome writes into, while
+`#turns` is the only place transcript content is appended.
+
 ### The destructive controls, and where each half is proved
 
 Four controls on this surface cannot be undone: deleting a session, discarding
@@ -163,7 +190,7 @@ the terminal.
 
 ## What integration covers
 
-34 tests across two launches.
+37 tests across two launches.
 
 **Launch 1 — `default`** (workspace with `arcturn.serve.enabled: true`)
 
@@ -229,6 +256,27 @@ the terminal.
   with the `output:` scheme in `vscode.workspace.textDocuments`. The **card**
   and the **notification** on that same path are not observable at all (see
   "does not cover" below) and are covered by unit tests instead.
+
+- **The panel when it is not on screen** (`07-sidebar-visibility`) — the one
+  editor fact RFC 0005 §2.1's in-panel permission card depends on:
+  `retainContextWhenHidden` is off, so hiding the view **destroys its page**,
+  and a permission card drawn on it goes with it. That is why the surface
+  escalates a pending request to a native modal when the view reports itself
+  hidden rather than leaving a run blocked on a control nobody can answer.
+
+  A webview's DOM is unreadable from another extension, so the observation is
+  one layer down: a destroyed page reloads on reveal, announces itself with
+  `ready`, and the host answers a `ready` by starting the engine — which the
+  stand-in engine records. It takes **two** hide/reveal cycles to make the
+  claim, and that is not padding: flipping `retainContextWhenHidden` to `true`
+  leaves the first cycle green (the workbench resolves the view once more
+  either way) and turns the second red. Measured, not assumed.
+
+  What this file does *not* do is drive a permission request — the stand-in
+  engine never serves, so there is no session and no `permissionRequest` event.
+  The routing itself (reveal, fall back to a modal, escalate on hide, one live
+  surface per request) is driven in `src/sidebar/permission-surface.test.ts`
+  with the host functions injected.
 
 **Launch 2 — `serve-disabled`** (workspace with `arcturn.serve.enabled: false`)
 

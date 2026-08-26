@@ -66,6 +66,7 @@ import {
   type ConnectionActionId,
 } from "./connection-card.js";
 import type { DryRunView } from "./dry-run.js";
+import type { PermissionCard } from "./permission-surface.js";
 import { escapeCodicons } from "./picker.js";
 import type { RewindView } from "./rewind.js";
 import type { CommandOption } from "./webview-commands.js";
@@ -102,6 +103,17 @@ export const MAX_COPY_LENGTH = 100_000;
  * rather than a length assertion about a format this extension does not own.
  */
 export const MAX_SESSION_ID_LENGTH = 200;
+/**
+ * Ceiling on a permission button's label.
+ *
+ * The page echoes back the label it was given, and the labels are this
+ * extension's own three constants (`dialog.ts`) — the longest is 23
+ * characters. 120 is generous room for a label a future request could carry
+ * while keeping the field bounded: it reaches `answerFromChoice`, which
+ * compares it against those constants and denies anything else, and it reaches
+ * nothing else at all.
+ */
+export const MAX_CHOICE_LENGTH = 120;
 /**
  * Ceiling on the base64 of one pasted image.
  *
@@ -443,6 +455,22 @@ export type HostMessage =
        */
       note?: string;
     }
+  /**
+   * The permission request the panel should ask about, or nothing.
+   *
+   * The message that moved permissions off a native modal and into the dock
+   * (RFC 0005 §2, amended). Everything in `request` was projected from the
+   * engine's own `permissionRequest` by `permissionCard`, so the card renders
+   * the engine's words and never transcript text; the card is drawn into
+   * `#permission`, which lives in `#dock` and is a region the transcript never
+   * writes into.
+   *
+   * An absent `request` **withdraws** whatever card is up — the request was
+   * answered, escalated to a modal because the panel went out of view, or
+   * denied by a disposal. The host is the only thing that puts a card up and
+   * the only thing that takes one down.
+   */
+  | { type: "permissionAsk"; request?: PermissionCard }
   /** What a `/` could invoke here, projected field by field. */
   | { type: "commands"; status: CommandListStatus; commands: CommandOption[] }
   /**
@@ -559,6 +587,22 @@ export type WebviewMessage =
   | { type: "browseForFiles" }
   /** Ask for the session's permission mode and tool set. */
   | { type: "requestPermission" }
+  /**
+   * Answer the permission card: which button was pressed, on which request.
+   *
+   * The page names a **label**, not a decision. What the label means is
+   * `answerFromChoice`'s call — the same function the native modal's answer
+   * goes through — and it denies everything that is not one of the two allow
+   * labels, so a page cannot express "allow" by inventing a word. It cannot
+   * express a rule at all: "allow for this session" persists the rule the
+   * *engine* attached to the request, re-derived on the host, and a request
+   * with no suggested rule allows once no matter which label comes back.
+   *
+   * `requestId` is the engine's own id, echoed from the card. The host drops
+   * an answer that does not name the request it is currently showing, so a
+   * reloaded page holding a stale card cannot answer for a live request.
+   */
+  | { type: "permissionDecision"; requestId: string; choice: string }
   /** Ask the session to run under a different mode from the next turn. */
   | { type: "setPermissionMode"; mode: PermissionMode }
   /** Ask for the `/` menu's contents. */
@@ -809,6 +853,24 @@ export function parseWebviewMessage(value: unknown): WebviewMessage | undefined 
       // No payload read at all, deliberately: whatever else the page put on
       // this message is dropped, so the only thing it can express is "off".
       return { type: "disableActiveEditorContext" };
+    case "permissionDecision": {
+      // Two rebuilt strings and nothing else: whatever else the page put on
+      // this message — a behavior, a rule, a scope — is dropped here rather
+      // than trusted downstream. The id gets `openSession`'s shape rules
+      // because it reaches the Output channel; the label is bounded and
+      // control-free for the same reason, and is then handed to
+      // `answerFromChoice` rather than checked against a list, because a label
+      // this extension does not recognise must DENY rather than vanish.
+      const rawId = value.requestId;
+      const rawChoice = value.choice;
+      if (typeof rawId !== "string" || typeof rawChoice !== "string") return undefined;
+      const requestId = rawId.trim();
+      if (requestId === "" || requestId.length > MAX_SESSION_ID_LENGTH) return undefined;
+      if (hasControlCharacter(requestId)) return undefined;
+      if (rawChoice === "" || rawChoice.length > MAX_CHOICE_LENGTH) return undefined;
+      if (hasControlCharacter(rawChoice)) return undefined;
+      return { type: "permissionDecision", requestId, choice: rawChoice };
+    }
     case "setPermissionMode": {
       // Against the engine's own four names, not a shape check: this is the
       // one message on this boundary that changes what the agent is allowed to

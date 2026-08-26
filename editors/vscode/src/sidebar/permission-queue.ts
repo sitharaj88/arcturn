@@ -1,6 +1,6 @@
 /**
- * The permission bridge: engine `permissionRequest` → a native VS Code modal →
- * `respondToPermission`.
+ * The permission bridge: engine `permissionRequest` → an answer from a person
+ * → `respondToPermission`.
  *
  * RFC 0004 §1 Stage 2 is exact about the contract: "The dialog renders what
  * the engine sent — it never re-derives or paraphrases the request." So
@@ -8,11 +8,17 @@
  * `.toolName`, `.subject` and `.origin` verbatim and adds only labels; the
  * only rule offered for persistence is the one the engine itself suggested.
  *
- * The queue exists because a run can raise several requests and a modal is
- * exclusive: they are answered one at a time, in arrival order. And because a
- * sidebar can be disposed while the engine is blocked on an answer, disposal
- * *denies* — the agent gets a decision and unblocks, rather than waiting
- * forever on a dialog nobody will ever see.
+ * *Where* the question is asked is `permission-surface.ts`'s business — the
+ * panel's dock when the panel can be seen, a native modal when it cannot (RFC
+ * 0005 §2, amended). This file does not know which, and that is the point: the
+ * queue's rules are about ordering and about never leaving the engine without
+ * an answer, and neither of those changes with the surface.
+ *
+ * The queue exists because a run can raise several requests and a person
+ * answers one question at a time: they are answered one at a time, in arrival
+ * order. And because a sidebar can be disposed while the engine is blocked on
+ * an answer, disposal *denies* — the agent gets a decision and unblocks,
+ * rather than waiting forever on a prompt nobody will ever see.
  *
  * `ask` and `respond` are injected, so none of this needs `vscode` to be
  * tested.
@@ -20,7 +26,7 @@
 
 import type { PermissionDecision, PermissionRequest, PermissionRule } from "../serve/engine.js";
 
-/** Cap on the rendered argument JSON, so a modal stays a modal. */
+/** Cap on the rendered argument JSON, so a prompt stays a prompt. */
 const MAX_DETAIL_ARGS = 2_000;
 
 /** What the user chose. */
@@ -34,11 +40,26 @@ export interface PermissionAnswer {
 
 /** Construction options for {@link PermissionQueue}. */
 export interface PermissionQueueOptions {
-  /** Show the dialog. Rejecting is treated as a denial. */
+  /** Ask a person. Rejecting is treated as a denial. */
   ask: (request: PermissionRequest) => Promise<PermissionAnswer>;
   /** Send the decision, i.e. `client.respondToPermission(sessionId, decision)`. */
   respond: (decision: PermissionDecision) => Promise<void>;
-  /** Diagnostics for a failed dialog or a failed response. */
+  /**
+   * A decision is going on the wire, whoever produced it.
+   *
+   * Called synchronously, once per request, at the moment the request stops
+   * being answerable — an answer from a person, a denial from
+   * {@link PermissionQueue.dispose}, a denial from a failed `ask`. It exists
+   * so a surface that is *showing* the request can take it down at exactly
+   * that moment rather than on its own timing: a card still offering Allow for
+   * something the engine has already been told about is a control that can no
+   * longer do what it says.
+   *
+   * Never used to decide anything. The decision has already been made by the
+   * time this runs, and throwing from it does not change it.
+   */
+  onDecision?: (decision: PermissionDecision) => void;
+  /** Diagnostics for a failed prompt or a failed response. */
   onError?: (error: unknown, request: PermissionRequest) => void;
   /** Denial message used when the sidebar is disposed with work outstanding. */
   disposedMessage?: string;
@@ -47,10 +68,10 @@ export interface PermissionQueueOptions {
 const DEFAULT_DISPOSED_MESSAGE = "Denied: the Arcturn sidebar was closed before this was answered.";
 
 /**
- * Serialises permission requests through one dialog at a time.
+ * Serialises permission requests through one prompt at a time.
  *
  * Requests are de-duplicated by `PermissionRequest.id`: the engine assigns it,
- * and a redelivered event must not raise a second modal.
+ * and a redelivered event must not raise a second prompt.
  */
 export class PermissionQueue {
   readonly #options: PermissionQueueOptions;
@@ -58,9 +79,10 @@ export class PermissionQueue {
   readonly #seen = new Set<string>();
   readonly #answered = new Set<string>();
   /**
-   * In-flight `respond` calls. Tracked separately from the dialog chain
-   * because a dialog may never settle — a modal the user leaves open, or a
-   * disposed sidebar's — while the decision it belongs to must still land.
+   * In-flight `respond` calls. Tracked separately from the prompt chain
+   * because a prompt may never settle — a modal the user leaves open, or a
+   * card on a disposed sidebar — while the decision it belongs to must still
+   * land.
    */
   readonly #sends = new Set<Promise<void>>();
   #running = false;
@@ -71,7 +93,7 @@ export class PermissionQueue {
     this.#options = options;
   }
 
-  /** Requests waiting for (or currently showing) a dialog. */
+  /** Requests waiting for (or currently showing) a prompt. */
   get size(): number {
     return this.#pending.length + (this.#inFlight === undefined ? 0 : 1);
   }
@@ -121,8 +143,12 @@ export class PermissionQueue {
    *
    * A disposed sidebar denies rather than hangs: the engine is blocked on a
    * decision it will otherwise never receive. The denials are sent
-   * immediately rather than queued behind the open dialog — that dialog may
+   * immediately rather than queued behind the open prompt — that prompt may
    * never resolve, and the engine cannot wait for it.
+   *
+   * The surface hears about each of them through
+   * {@link PermissionQueueOptions.onDecision} and takes its card down, so a
+   * disposal cannot leave a live Allow button on screen.
    */
   dispose(): void {
     if (this.#disposed) return;
@@ -156,9 +182,9 @@ export class PermissionQueue {
       answer = await this.#options.ask(request);
     } catch (error) {
       this.#options.onError?.(error, request);
-      answer = { behavior: "deny", message: "Denied: the Arcturn permission dialog failed." };
+      answer = { behavior: "deny", message: "Denied: the Arcturn permission prompt failed." };
     }
-    // A dispose() that landed while the dialog was open has already answered.
+    // A dispose() that landed while the prompt was open has already answered.
     if (this.#answered.has(request.id)) return;
     await this.#send(request, {
       requestId: request.id,
@@ -179,12 +205,20 @@ export class PermissionQueue {
 
   async #send(request: PermissionRequest, decision: PermissionDecision): Promise<void> {
     this.#answered.add(request.id);
+    // Before the await, so a surface showing this request stops offering to
+    // answer it in the same turn the answer is committed rather than one
+    // round trip later.
+    try {
+      this.#options.onDecision?.(decision);
+    } catch (error) {
+      this.#options.onError?.(error, request);
+    }
     const work = (async () => {
       try {
         await this.#options.respond(decision);
       } catch (error) {
         // A dead socket must not wedge the queue: the next request still gets
-        // its dialog, and the reconnect card explains the outage.
+        // its prompt, and the reconnect card explains the outage.
         this.#options.onError?.(error, request);
       }
     })();
@@ -196,9 +230,9 @@ export class PermissionQueue {
   }
 }
 
-/** A request rendered for a modal. Every value comes from the engine. */
+/** A request rendered for a prompt. Every value comes from the engine. */
 export interface DescribedPermission {
-  /** The modal's main text — `PermissionRequest.description`, verbatim. */
+  /** The prompt's main text — `PermissionRequest.description`, verbatim. */
   message: string;
   /** Tool name, subject, arguments and origin, labelled but never reworded. */
   detail: string;
@@ -207,16 +241,21 @@ export interface DescribedPermission {
 }
 
 /**
- * Render a request for `vscode.window.showWarningMessage`.
+ * Render a request for a prompt: `vscode.window.showWarningMessage`, and (via
+ * `permissionCard` in `permission-surface.ts`) the panel's own card.
  *
  * Unlike the quick-pick builders in `picker.ts`, engine strings here are
- * **not** run through `escapeCodicons`, and that asymmetry is deliberate. A
- * modal dialog sets its message and detail as plain text rather than through
- * VS Code's `IconLabel`, so `$(name)` is not glyph syntax on this path; adding
- * the escape would put a visible backslash in front of it and break RFC 0004
- * §1's requirement that "the dialog renders what the engine sent — it never
- * re-derives or paraphrases the request". Escaping is faithful in a field that
- * parses codicons and unfaithful in one that does not.
+ * **not** run through `escapeCodicons`, and that asymmetry is deliberate — and
+ * it survived the move off a modal-only surface unchanged. A modal dialog sets
+ * its message and detail as plain text rather than through VS Code's
+ * `IconLabel`, and the webview builds every node with `textContent` and draws
+ * its icons from an SVG table, so `$(name)` is not glyph syntax on *either*
+ * path; adding the escape would put a visible backslash in front of it and
+ * break RFC 0004 §1's requirement that "the dialog renders what the engine
+ * sent — it never re-derives or paraphrases the request". Escaping is faithful
+ * in a field that parses codicons and unfaithful in one that does not, and a
+ * card and a modal that escaped differently would be two surfaces disagreeing
+ * about what was asked.
  *
  * @param request - The engine's request.
  * @param args - The tool's arguments as the engine sent them on `toolStart`,
@@ -228,7 +267,7 @@ export function describePermissionRequest(
 ): DescribedPermission {
   const lines = [`Tool: ${request.toolName}`, request.subject];
   if (args !== undefined && Object.keys(args).length > 0) {
-    lines.push("", "Arguments:", truncateArgs(args));
+    lines.push("", "Arguments:", renderArgs(args));
   }
   if (request.origin !== undefined) lines.push("", `Requested by ${request.origin}`);
   return {
@@ -241,7 +280,18 @@ export function describePermissionRequest(
   };
 }
 
-function truncateArgs(args: Record<string, unknown>): string {
+/**
+ * The tool's arguments as one block of text, bounded.
+ *
+ * Exported because the panel's card renders the same block, and the two
+ * surfaces must not be able to disagree about what was asked. Bounded rather
+ * than summarised: everything up to the cap is the engine's own JSON, and the
+ * line that replaces the rest says how much was cut instead of paraphrasing
+ * it.
+ *
+ * @param args - The tool's arguments as the engine sent them on `toolStart`.
+ */
+export function renderArgs(args: Record<string, unknown>): string {
   let text: string;
   try {
     text = JSON.stringify(args, null, 2) ?? String(args);

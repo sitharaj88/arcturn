@@ -160,6 +160,61 @@ describe("PermissionQueue", () => {
     expect(onError).toHaveBeenCalledTimes(2);
   });
 
+  it("announces every decision it commits, before it goes on the wire", async () => {
+    // What lets the panel's card come down at the moment the request stops
+    // being answerable, rather than one round trip later.
+    const announced: PermissionDecision[] = [];
+    const h = harness(async () => ({ behavior: "allow" }), {
+      onDecision: (decision: PermissionDecision) => announced.push(decision),
+    });
+    h.queue.enqueue(request());
+    await h.queue.drain();
+    expect(announced).toEqual([{ requestId: "req-1", behavior: "allow" }]);
+  });
+
+  it("announces the denials a disposal sends, so nothing is left on screen", async () => {
+    const announced: string[] = [];
+    const h = harness(async () => new Promise<PermissionAnswer>(() => {}), {
+      onDecision: (decision: PermissionDecision) => announced.push(decision.requestId),
+    });
+    h.queue.enqueue(request({ id: "a" }));
+    h.queue.enqueue(request({ id: "b" }));
+    h.queue.dispose();
+    await h.queue.drain();
+    expect(announced).toEqual(["a", "b"]);
+  });
+
+  it("announces the denial a failed prompt produces", async () => {
+    const announced: PermissionDecision[] = [];
+    const h = harness(
+      async () => {
+        throw new Error("no window");
+      },
+      {
+        onError: () => {},
+        onDecision: (decision: PermissionDecision) => announced.push(decision),
+      },
+    );
+    h.queue.enqueue(request());
+    await h.queue.drain();
+    expect(announced.map((decision) => decision.behavior)).toEqual(["deny"]);
+  });
+
+  it("still sends the decision when the announcement throws", async () => {
+    // The decision has already been made by the time the surface is told.
+    const onError = vi.fn();
+    const h = harness(async () => ({ behavior: "allow" }), {
+      onDecision: () => {
+        throw new Error("render failed");
+      },
+      onError,
+    });
+    h.queue.enqueue(request());
+    await h.queue.drain();
+    expect(h.decisions).toEqual([{ requestId: "req-1", behavior: "allow" }]);
+    expect(onError).toHaveBeenCalledOnce();
+  });
+
   it("reports how many requests are outstanding", async () => {
     const h = harness(async () => new Promise<PermissionAnswer>(() => {}));
     expect(h.queue.size).toBe(0);
@@ -173,7 +228,7 @@ describe("PermissionQueue", () => {
 });
 
 describe("describePermissionRequest", () => {
-  it("uses the engine's own description as the modal's message", () => {
+  it("uses the engine's own description as the prompt's message", () => {
     const described = describePermissionRequest(request());
     expect(described.message).toBe("Run a shell command");
   });
@@ -197,7 +252,7 @@ describe("describePermissionRequest", () => {
     expect(describePermissionRequest(request()).detail).not.toMatch(/requested by/i);
   });
 
-  it("truncates arguments too large for a modal, and says that it did", () => {
+  it("truncates arguments too large for a prompt, and says that it did", () => {
     const described = describePermissionRequest(request(), { blob: "x".repeat(50_000) });
     expect(described.detail.length).toBeLessThan(5_000);
     expect(described.detail).toMatch(/truncated/i);

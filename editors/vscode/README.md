@@ -124,9 +124,11 @@ Honest status, because a roadmap written as a feature list is a lie:
   version check, the Arcturn terminal, `@`-mentions from selection and file,
   and the diagnostic code action are all here and tested.
 - **Stage 2 — the native sidebar: shipped.** The chat webview, permission
-  modals, live cost in the status bar, the model picker, the sessions view and
-  the reconnect path all speak the engine's WebSocket protocol — the same
-  `ProtocolClient` verbs any other client gets, and nothing beyond them.
+  requests answered inline in the panel (with a native modal as the fallback
+  when the panel cannot be brought into view), live cost in the status bar, the
+  model picker, the sessions view and the reconnect path all speak the engine's
+  WebSocket protocol — the same `ProtocolClient` verbs any other client gets,
+  and nothing beyond them.
 
 Neither stage has been through a long soak in daily use yet. The tests are
 real and the demo path in RFC 0004 §4 works; treat the mileage as young.

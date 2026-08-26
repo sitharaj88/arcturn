@@ -164,6 +164,12 @@ Two builders, disjoint ownership, one declared seam:
 
 Stage 1 demo: open folder → notification installs CLI → `Arcturn: Open` →
 select code → send with range → fix lands in TUI. Stage 2 demo: sidebar chat
-streams a tool call, a permission modal answers it, the status bar ticks real
+streams a tool call, a permission prompt answers it, the status bar ticks real
 dollars, and killing the serve process shows a reconnect card. Both run from
 a VSIX installed into stock VS Code.
+
+(This line said "a permission modal" until RFC 0005 §2.1 moved the prompt into
+the panel's dock. The prompt is now a card in the panel, with a native modal
+kept as the fallback for a panel that cannot be brought into view; §2.1 states
+what the modal was buying and why the panel is safe against it. Nothing else in
+this section changed.)

@@ -136,6 +136,7 @@ class StubNode {
     for (const child of this.childNodes) child.parentNode = undefined;
     this.childNodes.length = 0;
     this.#text = String(value);
+    this.textWrites += 1;
   }
   addEventListener(type: string, handler: Listener): void {
     const existing = this.listeners[type];
@@ -147,7 +148,25 @@ class StubNode {
       handler({ target: this, preventDefault: () => {}, ...event });
     }
   }
-  focus(): void {}
+  /**
+   * How many times the script has focused this node.
+   *
+   * A counter rather than a flag because the permission card's rule is about
+   * *when* focus moves, not only where: a card that re-focused Deny on every
+   * repaint would drag the caret out of the composer once per token.
+   */
+  focused = 0;
+  /**
+   * How many times `textContent` has been assigned on this node.
+   *
+   * A live region re-announces every time its text is *written*, whether or
+   * not the text changed — so "does not re-announce on a repaint" is a claim
+   * about writes, and there is no other way to observe it.
+   */
+  textWrites = 0;
+  focus(): void {
+    this.focused += 1;
+  }
   scrollIntoView(): void {}
   setSelectionRange(start: number, end: number): void {
     this.selectionStart = start;
@@ -632,14 +651,242 @@ describe("thinking, todos and pending permissions", () => {
     expect(panel.byId("plan-card").classList.contains("hidden")).toBe(true);
   });
 
-  it("says a permission dialog is up, so the panel is not silent behind a modal", () => {
-    // The dialog itself stays native — that is the security property. This is
-    // only the marker that says why nothing is moving.
+  it("says a request is outstanding even when the card is not the surface", () => {
+    // The strip is what is left of the old modal-only world, and it is still
+    // the right thing to show on the one path that still raises a modal: the
+    // panel was not visible when the request arrived, so the host asked
+    // natively. Somebody who then opens the panel must be told why nothing is
+    // moving rather than find a silent, idle-looking transcript.
     panel.send(state({ pendingPermissions: 1, running: true }));
     expect(panel.byId("permission").classList.contains("hidden")).toBe(false);
+    expect(panel.byId("permission-strip").classList.contains("hidden")).toBe(false);
     expect(panel.byId("permission-text").textContent).toContain("permission");
     panel.send(state({ pendingPermissions: 0 }));
     expect(panel.byId("permission").classList.contains("hidden")).toBe(true);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+
+describe("the permission card", () => {
+  const CHOICES = [
+    { id: "deny", label: "Deny" },
+    { id: "allowSession", label: "Allow for this session" },
+    { id: "allow", label: "Allow" },
+  ];
+
+  function ask(over: Record<string, unknown> = {}): unknown {
+    return {
+      type: "permissionAsk",
+      request: {
+        id: "perm-1",
+        description: "Run rm -rf build in /repo/arcturn",
+        tool: "bash",
+        subject: "rm -rf build",
+        args: '{\n  "command": "rm -rf build"\n}',
+        choices: CHOICES,
+        ...over,
+      },
+    };
+  }
+
+  /** The buttons the card actually built, left to right. */
+  function buttons(): StubNode[] {
+    return panel.byId("permission-actions").childNodes as StubNode[];
+  }
+
+  it("shows nothing until the host says a request is up", () => {
+    expect(panel.byId("permission").classList.contains("hidden")).toBe(true);
+    expect(panel.byId("permission-ask").classList.contains("hidden")).toBe(true);
+  });
+
+  it("lives in the dock, where the transcript never writes", () => {
+    // The whole security argument for moving off a modal. A permission card
+    // rendered among the turns would sit exactly where model output lands.
+    panel.send(ask());
+    const dock = panel.byId("dock");
+    expect(dock.contains(panel.byId("permission"))).toBe(true);
+    expect(panel.byId("transcript").contains(panel.byId("permission"))).toBe(false);
+    expect(panel.byId("turns").contains(panel.byId("permission"))).toBe(false);
+  });
+
+  it("renders the engine's own words: what, which tool, on what, with which arguments", () => {
+    panel.send(ask({ origin: "@qa-functional · step 3" }));
+    expect(panel.byId("permission").classList.contains("hidden")).toBe(false);
+    expect(panel.byId("permission-ask").classList.contains("hidden")).toBe(false);
+    expect(panel.byId("permission-strip").classList.contains("hidden")).toBe(true);
+    expect(panel.byId("permission-desc").textContent).toBe("Run rm -rf build in /repo/arcturn");
+    expect(panel.byId("permission-tool").textContent).toBe("bash");
+    expect(panel.byId("permission-subject").textContent).toBe("rm -rf build");
+    expect(panel.byId("permission-args").textContent).toContain('"command": "rm -rf build"');
+    expect(panel.byId("permission-origin").classList.contains("hidden")).toBe(false);
+    expect(panel.byId("permission-origin").textContent).toContain("@qa-functional · step 3");
+  });
+
+  it("renders nothing at all for the fields the engine did not send", () => {
+    panel.send(ask({ args: undefined, origin: undefined }));
+    expect(panel.byId("permission-args").classList.contains("hidden")).toBe(true);
+    expect(panel.byId("permission-args").textContent).toBe("");
+    expect(panel.byId("permission-origin").classList.contains("hidden")).toBe(true);
+  });
+
+  it("builds exactly the buttons the host sent, deny first", () => {
+    panel.send(ask());
+    expect(buttons().map((node) => node.textContent)).toEqual([
+      "Deny",
+      "Allow for this session",
+      "Allow",
+    ]);
+  });
+
+  it("has no session button when the engine attached no rule to persist", () => {
+    // The extension never invents a rule; the button exists only when the
+    // engine already computed one. `dialog.ts` owns that rule and the card is
+    // a render of its answer, never a second opinion.
+    panel.send(ask({ choices: [CHOICES[0], CHOICES[2]] }));
+    expect(buttons().map((node) => node.textContent)).toEqual(["Deny", "Allow"]);
+  });
+
+  it("lands focus on Deny, never on Allow", () => {
+    panel.send(ask());
+    const [deny, , allow] = buttons();
+    expect(deny?.focused).toBe(1);
+    expect(allow?.focused).toBe(0);
+  });
+
+  it("is reachable and operable from the keyboard", () => {
+    panel.send(ask());
+    for (const node of buttons()) {
+      expect(node.tagName).toBe("button");
+      expect(node.type).toBe("button");
+      expect(node.getAttribute("tabindex")).toBe(null);
+      // "Deny" on its own says nothing about what is being denied. Each button
+      // points at the request, so focusing one announces the question with it.
+      expect(node.getAttribute("aria-describedby")).toBe("permission-desc permission-subject");
+    }
+    expect(panel.byId("permission-ask").getAttribute("aria-label")).toBeTruthy();
+  });
+
+  it("does not rewrite its live regions when nothing about the request changed", () => {
+    // `#permission-desc` is assertive and `#permission-more` is polite. A
+    // repaint that rewrote either would re-announce the same sentence to a
+    // screen reader once per streamed token.
+    panel.send(state({ pendingPermissions: 2, running: true }));
+    panel.send(ask());
+    const desc = panel.byId("permission-desc").textWrites;
+    const more = panel.byId("permission-more").textWrites;
+    expect(desc).toBeGreaterThan(0);
+    expect(more).toBeGreaterThan(0);
+    panel.send(state({ pendingPermissions: 2, running: true }));
+    panel.send(state({ pendingPermissions: 2, running: true }));
+    expect(panel.byId("permission-desc").textWrites).toBe(desc);
+    expect(panel.byId("permission-more").textWrites).toBe(more);
+  });
+
+  it("answers with the label that was pressed, quoting the id it was asked about", () => {
+    panel.send(ask());
+    buttons()[2]?.dispatch("click");
+    expect(panel.posted.at(-1)).toEqual({
+      type: "permissionDecision",
+      requestId: "perm-1",
+      choice: "Allow",
+    });
+  });
+
+  it("sends the session label as the engine's own words, not an id", () => {
+    panel.send(ask());
+    buttons()[1]?.dispatch("click");
+    expect(panel.posted.at(-1)).toEqual({
+      type: "permissionDecision",
+      requestId: "perm-1",
+      choice: "Allow for this session",
+    });
+  });
+
+  it("cannot be answered twice", () => {
+    panel.send(ask());
+    buttons()[0]?.dispatch("click");
+    buttons()[2]?.dispatch("click");
+    const sent = panel.posted.filter((message) => message.type === "permissionDecision");
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toEqual({ type: "permissionDecision", requestId: "perm-1", choice: "Deny" });
+  });
+
+  it("comes down when the host withdraws it", () => {
+    panel.send(ask());
+    panel.send({ type: "permissionAsk" });
+    expect(panel.byId("permission-ask").classList.contains("hidden")).toBe(true);
+    expect(panel.byId("permission").classList.contains("hidden")).toBe(true);
+  });
+
+  it("shows them one at a time, and says how many are still behind this one", () => {
+    panel.send(state({ pendingPermissions: 3, running: true }));
+    panel.send(ask());
+    expect(panel.byId("permission-more").classList.contains("hidden")).toBe(false);
+    expect(panel.byId("permission-more").textContent).toContain("2 more");
+    // Only ever one card: the queue answers in arrival order, so the second
+    // request replaces the first once the first has been answered.
+    expect(panel.byId("permission-actions").childNodes).toHaveLength(3);
+  });
+
+  it("says nothing about a queue when this is the only request", () => {
+    panel.send(state({ pendingPermissions: 1, running: true }));
+    panel.send(ask());
+    expect(panel.byId("permission-more").classList.contains("hidden")).toBe(true);
+  });
+
+  it("shows the next request in its turn, and takes its answer", () => {
+    panel.send(ask());
+    buttons()[0]?.dispatch("click");
+    panel.send({ type: "permissionAsk" });
+    panel.send(ask({ id: "perm-2", subject: "git push --force", description: "Force-push" }));
+    expect(panel.byId("permission-subject").textContent).toBe("git push --force");
+    buttons()[2]?.dispatch("click");
+    expect(panel.posted.at(-1)).toEqual({
+      type: "permissionDecision",
+      requestId: "perm-2",
+      choice: "Allow",
+    });
+  });
+
+  it("does not rebuild itself, or take focus again, when unrelated state arrives", () => {
+    panel.send(ask());
+    const before = buttons()[0];
+    panel.send(state({ pendingPermissions: 1, running: true }));
+    panel.send({ type: "cost", label: "$0.02" });
+    expect(buttons()[0]).toBe(before);
+    expect(before?.focused).toBe(1);
+  });
+
+  it("comes back from a full-panel view, which would otherwise hide the dock", () => {
+    // The same rule as the hidden-view fallback, one level down: the session
+    // history and the rewind picker hide `#dock`, so a card raised behind one
+    // would be a run blocked on something nobody can see. A permission request
+    // outranks browsing history.
+    panel.byId("sessions").dispatch("click");
+    panel.send({ type: "showSessions" });
+    expect(panel.byId("dock").classList.contains("hidden")).toBe(true);
+    panel.send(ask());
+    expect(panel.byId("sessions-view").classList.contains("hidden")).toBe(true);
+    expect(panel.byId("dock").classList.contains("hidden")).toBe(false);
+    expect(panel.byId("permission-ask").classList.contains("hidden")).toBe(false);
+  });
+
+  it("does not disturb a full-panel view when there is no card to show", () => {
+    panel.byId("sessions").dispatch("click");
+    panel.send({ type: "showSessions" });
+    panel.send({ type: "permissionAsk" });
+    expect(panel.byId("sessions-view").classList.contains("hidden")).toBe(false);
+  });
+
+  it("drops a card the host did not identify rather than showing a nameless one", () => {
+    panel.send({ type: "permissionAsk", request: { description: "trust me", choices: CHOICES } });
+    expect(panel.byId("permission-ask").classList.contains("hidden")).toBe(true);
+  });
+
+  it("drops a card with no buttons rather than showing one that cannot be answered", () => {
+    panel.send(ask({ choices: [] }));
+    expect(panel.byId("permission-ask").classList.contains("hidden")).toBe(true);
   });
 });
 

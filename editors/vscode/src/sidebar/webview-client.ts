@@ -706,11 +706,22 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
 .todo-done .box { color: var(--arc-ok); }
 .todo-inProgress .box { color: var(--vscode-textLink-foreground); }
 
-.permission {
+/*
+ * The permission surface: one region in the dock, two states.
+ *
+ * The STRIP is the old one-line marker, still shown on the one path that
+ * raises a native modal — the panel was not visible when the request arrived,
+ * so somebody who opens it afterwards is told why nothing is moving.
+ *
+ * The CARD is the request itself. It borders on the warning accent rather than
+ * the link accent the review card uses, because this is the state a run sits
+ * in until a person answers, and it is the strongest thing this panel says.
+ */
+.permission { margin-bottom: 8px; }
+.permission-strip {
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-bottom: 8px;
   padding: 6px 8px;
   border: 1px solid var(--arc-warn);
   border-radius: var(--arc-radius);
@@ -718,6 +729,82 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
   color: var(--arc-warn);
   background: var(--vscode-inputValidation-warningBackground, transparent);
 }
+.permission-ask {
+  padding: 8px 9px;
+  border: 1px solid var(--arc-warn);
+  border-radius: var(--arc-radius);
+  background: var(--arc-surface);
+  font-size: 0.9em;
+}
+.permission-head { display: flex; align-items: center; gap: 6px; color: var(--arc-warn); }
+.permission-title { flex: 1 1 auto; min-width: 0; font-weight: 600; }
+.permission-desc { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+/*
+ * Tool and subject as a two-column key/value grid rather than a sentence: at
+ * 300px the subject is the part that matters ('rm -rf build'), and a label in
+ * front of it that wraps is a label that hides it.
+ */
+.permission-facts {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 2px 8px;
+  margin-top: 6px;
+  align-items: baseline;
+}
+.permission-key { color: var(--arc-muted); font-size: 0.9em; }
+.permission-value {
+  min-width: 0;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.95em;
+  overflow-wrap: anywhere;
+}
+/*
+ * The arguments, exactly as the engine sent them and exactly as the native
+ * modal would have rendered them. Capped by height rather than by characters
+ * so nothing is hidden that the modal would have shown — a long argument
+ * scrolls inside the card instead of pushing the buttons off the panel.
+ */
+.permission-args {
+  margin: 6px 0 0;
+  max-height: 11em;
+  overflow: auto;
+  padding: 5px 6px;
+  border-radius: 4px;
+  background: var(--vscode-textCodeBlock-background, var(--arc-surface));
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.9em;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.permission-origin { margin: 6px 0 0; color: var(--arc-muted); font-size: 0.9em; }
+.permission-more { margin: 6px 0 0; color: var(--arc-warn); font-size: 0.9em; }
+.permission-actions { display: flex; gap: 5px; margin-top: 8px; }
+.permission-button {
+  flex: 1 1 auto;
+  padding: 4px 8px;
+  border: 1px solid var(--arc-border);
+  border-radius: 4px;
+  font: inherit;
+  font-size: 0.95em;
+  color: var(--vscode-foreground);
+  background: transparent;
+  cursor: pointer;
+}
+.permission-button:hover { background: var(--vscode-list-hoverBackground); }
+.permission-button:disabled { opacity: 0.5; cursor: default; }
+/*
+ * Allow is the primary and it sits last, which is the editor's own order for
+ * a confirming action. Focus lands on Deny, at the other end of the row — see
+ * renderPermissionAsk in the script for why the safe answer is the one under
+ * the keyboard.
+ */
+.permission-allow {
+  color: var(--vscode-button-foreground);
+  background: var(--vscode-button-background);
+  border-color: var(--vscode-button-background);
+}
+.permission-allow:hover { background: var(--vscode-button-hoverBackground); }
+.permission-deny:hover { color: var(--arc-err); border-color: var(--arc-err); }
 
 /*
  * The dry-run review card.
@@ -1254,7 +1341,7 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
  * Anchored to the top of the dock rather than to the bottom of the panel.
  *
  * 'bottom: 100%' inside a relatively positioned #dock puts the list directly
- * above everything the dock holds — the plan card, the permission line and the
+ * above everything the dock holds — the plan card, the permission card and the
  * composer — with no measured pixel and no inline style, so the message being
  * written stays visible while the list is up. That is the difference between
  * this and the model popover, which deliberately sits over the composer
@@ -1489,8 +1576,8 @@ const CLIENT_SOURCE = String.raw`
    */
   var KNOWN_HOST_MESSAGES = {
     state: 1, connection: 1, cost: 1, models: 1, session: 1, sessions: 1, showSessions: 1,
-    context: 1, contextCandidates: 1, permission: 1, commands: 1, dryRun: 1, rewind: 1,
-    workflows: 1
+    context: 1, contextCandidates: 1, permission: 1, permissionAsk: 1, commands: 1, dryRun: 1,
+    rewind: 1, workflows: 1
   };
 
   var SVG_NS = "http://www.w3.org/2000/svg";
@@ -1657,6 +1744,15 @@ const CLIENT_SOURCE = String.raw`
   var modelList = $("model-list");
   var planCount = $("plan-count");
   var permissionText = $("permission-text");
+  var permissionStrip = $("permission-strip");
+  var permissionAskCard = $("permission-ask");
+  var permissionDesc = $("permission-desc");
+  var permissionTool = $("permission-tool");
+  var permissionSubject = $("permission-subject");
+  var permissionArgs = $("permission-args");
+  var permissionOrigin = $("permission-origin");
+  var permissionMore = $("permission-more");
+  var permissionActions = $("permission-actions");
   var chipRow = $("chips");
   var attachButton = $("attach");
   var contextButton = $("context");
@@ -1726,6 +1822,7 @@ const CLIENT_SOURCE = String.raw`
   $("model-caret").appendChild(icon("chevronDown"));
   $("plan-chevron").appendChild(icon("chevron", "chevron"));
   $("permission-icon").appendChild(icon("warning"));
+  $("permission-ask-icon").appendChild(icon("warning"));
   $("working-mark").appendChild(icon("sparkle"));
   sendButton.appendChild(icon("send"));
   stopButton.appendChild(icon("stop"));
@@ -1743,6 +1840,22 @@ const CLIENT_SOURCE = String.raw`
   var sessions = { status: "loading", list: [], current: undefined, cwd: "" };
   var activeSessionRow = -1;
   var planOpen = true;
+  /*
+   * The permission request this panel is showing, as the HOST projected it.
+   *
+   * 'undefined' means there is no card up — either nothing is pending, or the
+   * host decided this one belongs in a native modal because the panel could
+   * not be seen. The page never decides which surface a request gets and never
+   * invents one: it renders what arrived and posts back which button was
+   * pressed.
+   *
+   * 'permissionAnsweredId' is the id of the request a button has already been
+   * pressed for. One answer per request, from this page: a second click on a
+   * card the host has not yet taken down must not send a second decision.
+   */
+  var permissionAsk = undefined;
+  var permissionAskId = undefined;
+  var permissionAnsweredId = undefined;
   /* ---- RFC 0005 §2 state ---------------------------------------------- */
   /* The host owns the attachment set; this is only ever a render of it. */
   var chips = [];
@@ -2280,12 +2393,7 @@ const CLIENT_SOURCE = String.raw`
     // screen reader re-announce the same sentence as the user types.
     var hintText = words.join(" · ");
     if (hint.textContent !== hintText) hint.textContent = hintText;
-    permission.classList.toggle("hidden", view.pendingPermissions <= 0);
-    if (view.pendingPermissions > 0) {
-      permissionText.textContent = view.pendingPermissions === 1
-        ? "Arcturn is asking for permission — answer the dialog to continue."
-        : String(view.pendingPermissions) + " permission requests are waiting on you.";
-    }
+    renderPermissionAsk();
   }
 
   function send() {
@@ -3303,6 +3411,141 @@ const CLIENT_SOURCE = String.raw`
     if (suggest.kind === "command") renderCommandMenu();
   }
 
+  /* ---- the permission card -------------------------------------------- */
+
+  /*
+   * The id of the request whose card is currently BUILT.
+   *
+   * The card is rebuilt only when the request changes, never on a repaint.
+   * Two reasons, and both are about the person answering it: rebuilding would
+   * drag focus back onto Deny every time a token streamed in, and it would
+   * replace the buttons under a cursor that was already over one.
+   */
+  var renderedPermissionId = undefined;
+
+  /*
+   * One button. The label is the HOST's — it comes from 'permissionChoices' in
+   * 'dialog.ts', which is the single place that decides which buttons a
+   * request gets — and it is what goes back on the answer. The 'id' is used
+   * here for nothing but styling and focus; the host does not trust it.
+   */
+  function permissionButton(choice) {
+    var extra = choice.id === "allow" ? " permission-allow"
+      : choice.id === "deny" ? " permission-deny" : "";
+    var node = el("button", "permission-button" + extra, choice.label);
+    node.type = "button";
+    // 'Deny' on its own names no request. Pointing each button at the
+    // description and the subject is what makes focusing one announce WHAT is
+    // being allowed or denied — which matters more here than anywhere else on
+    // this page, because focus lands on one of these the moment a card
+    // appears.
+    node.setAttribute("aria-describedby", "permission-desc permission-subject");
+    node.addEventListener("click", function () { answerPermission(choice.label); });
+    return node;
+  }
+
+  /* Write only on a change: these are live regions, and a write re-announces. */
+  function setLine(node, text) {
+    if (node.textContent !== text) node.textContent = text;
+  }
+
+  /*
+   * Press a button, once.
+   *
+   * The page sends the label and nothing else; whether that label means allow,
+   * allow-for-this-session or deny is decided on the host by 'answerFromChoice',
+   * which denies anything it does not recognise. So this function cannot grant
+   * anything the host would not have granted from the same click on a modal.
+   */
+  function answerPermission(label) {
+    var ask = permissionAsk;
+    if (ask === undefined || permissionAnsweredId === ask.id) return;
+    permissionAnsweredId = ask.id;
+    post({ type: "permissionDecision", requestId: ask.id, choice: label });
+    renderPermissionAsk();
+  }
+
+  /*
+   * Paint the permission region.
+   *
+   * Two states share it, and only one is ever up:
+   *
+   * - A CARD, when the host posted a request for this panel to answer.
+   * - The STRIP, when something is pending but no card is here — which is the
+   *   native-modal path, taken when the panel could not be seen at the moment
+   *   the engine asked. The line exists so a person who opens the panel
+   *   afterwards is not looking at a transcript that appears to have stalled
+   *   for no reason.
+   *
+   * The count behind 'N more waiting' is the ENGINE's, not a tally this page
+   * keeps: 'pendingPermissions' is requests raised minus decisions seen, folded
+   * in 'chat-state.ts' from the event stream. A page counting cards it had been
+   * sent could disagree with the queue about how much is left.
+   */
+  function renderPermissionAsk() {
+    var ask = permissionAsk;
+    var asking = ask !== undefined;
+    var waiting = view.pendingPermissions;
+    permission.classList.toggle("hidden", !asking && waiting <= 0);
+    permissionStrip.classList.toggle("hidden", asking || waiting <= 0);
+    permissionAskCard.classList.toggle("hidden", !asking);
+    if (!asking) {
+      if (renderedPermissionId !== undefined) {
+        renderedPermissionId = undefined;
+        clear(permissionActions);
+      }
+      if (waiting > 0) {
+        setLine(permissionText, waiting === 1
+          ? "Arcturn is asking for permission — answer the dialog to continue."
+          : String(waiting) + " permission requests are waiting on you.");
+      }
+      return;
+    }
+    if (renderedPermissionId !== ask.id) {
+      renderedPermissionId = ask.id;
+      // The dock is hidden while a full-panel view is up, so a card raised
+      // behind one would be a blocked run with nothing on screen to unblock
+      // it — the same failure the host's modal fallback exists to prevent,
+      // one level down. A permission request outranks browsing history, so
+      // the view is closed rather than the card being drawn where it cannot
+      // be seen. Only when a card actually ARRIVES: a withdrawal must not
+      // yank somebody out of a list they are reading.
+      if (sessionsOpen()) closeSessions(false);
+      if (rewindOpen()) closeRewind();
+      setLine(permissionDesc, ask.description);
+      permissionTool.textContent = ask.tool;
+      permissionSubject.textContent = ask.subject;
+      permissionArgs.textContent = ask.args;
+      permissionArgs.classList.toggle("hidden", ask.args === "");
+      permissionOrigin.textContent = ask.origin === "" ? "" : "Requested by " + ask.origin;
+      permissionOrigin.classList.toggle("hidden", ask.origin === "");
+      clear(permissionActions);
+      var landing = undefined;
+      for (var i = 0; i < ask.choices.length; i += 1) {
+        var node = permissionButton(ask.choices[i]);
+        permissionActions.appendChild(node);
+        if (ask.choices[i].id === "deny") landing = node;
+      }
+      // Focus the SAFE answer. A card that arrives with Allow under the
+      // keyboard grants on a reflex Enter, and the one failure mode a
+      // permission surface may not have is granting without being read.
+      if (landing === undefined) landing = permissionActions.firstChild;
+      if (landing) landing.focus();
+    }
+    var behind = waiting - 1;
+    setLine(permissionMore, behind <= 0 ? ""
+      : String(behind) + (behind === 1 ? " more request is" : " more requests are") +
+        " waiting behind this one.");
+    permissionMore.classList.toggle("hidden", behind <= 0);
+    // Disabled between the click and the host taking the card down: one answer
+    // per request, from this page.
+    var answered = permissionAnsweredId === ask.id;
+    for (var b = 0; b < permissionActions.childNodes.length; b += 1) {
+      permissionActions.childNodes[b].disabled = answered;
+    }
+  }
+
+
   /* ---- the dry-run review card ---------------------------------------- */
 
   /*
@@ -3981,6 +4224,44 @@ const CLIENT_SOURCE = String.raw`
         tools,
         typeof message.note === "string" ? message.note : ""
       );
+      return;
+    }
+    if (message.type === "permissionAsk") {
+      /*
+       * Rebuilt field by field like every other list on this boundary, and for
+       * a sharper reason than most: this is the message that puts a control on
+       * screen which can grant a tool. Nothing is forwarded, nothing is
+       * defaulted to something more permissive, and a request with no id or no
+       * buttons is DROPPED rather than rendered — a card nobody can answer
+       * would announce a blocked run and offer no way to unblock it.
+       */
+      var raw = message.request && typeof message.request === "object" ? message.request : undefined;
+      var card = undefined;
+      if (raw !== undefined && typeof raw.id === "string" && raw.id !== "") {
+        var choices = [];
+        var offered = Array.isArray(raw.choices) ? raw.choices : [];
+        for (var oc = 0; oc < offered.length; oc += 1) {
+          var choice = offered[oc];
+          if (!choice || typeof choice.label !== "string" || choice.label === "") continue;
+          choices.push({
+            id: typeof choice.id === "string" ? choice.id : "",
+            label: choice.label
+          });
+        }
+        if (choices.length > 0) {
+          card = {
+            id: raw.id,
+            description: typeof raw.description === "string" ? raw.description : "",
+            tool: typeof raw.tool === "string" ? raw.tool : "",
+            subject: typeof raw.subject === "string" ? raw.subject : "",
+            args: typeof raw.args === "string" ? raw.args : "",
+            origin: typeof raw.origin === "string" ? raw.origin : "",
+            choices: choices
+          };
+        }
+      }
+      permissionAsk = card;
+      renderPermissionAsk();
       return;
     }
     if (message.type === "dryRun") {

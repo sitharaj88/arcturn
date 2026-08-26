@@ -98,6 +98,41 @@ CLI, the SDK, or the wire protocol.
   model-invoked `skill` tool and the serve path alike, since all three share one
   expander.
 
+### Changed
+
+- **VS Code: permission requests are answered in the chat panel, not in a
+  modal in the middle of the screen.** A request now appears as a card in the
+  panel's dock — the reserved region beside the composer that already holds the
+  plan and the dry-run review card — showing the engine's own description, the
+  tool, the subject and the arguments, with Deny / Allow for this session /
+  Allow. Focus lands on **Deny**, never on Allow.
+
+  The rule it replaces (RFC 0005 §2, "permission requests stay native modals")
+  was written down as "a security decision" without ever naming the threat. The
+  threat was spoofing — model output imitating a permission card so somebody
+  clicks a forged Allow — and it does not reach this panel: the webview builds
+  every node with `createElement` and `textContent`, has no `innerHTML`
+  anywhere (there is a test asserting it), and a model therefore cannot create a
+  button. The card is rendered into a region the transcript never writes into,
+  so a permission control and model text can never share a container. RFC 0005
+  §2.1 now states all of that instead of asserting the conclusion.
+
+  Nothing about the *decision* moved. The page sends a button **label**; the
+  host runs it through the same `answerFromChoice` the modal's answer went
+  through, which denies anything it does not recognise. "Allow for this session"
+  is still offered only where the engine attached a rule, the rule persisted is
+  the engine's own scoped to `session`, and every outcome that is not an
+  explicit allow — a dismissal, a prompt that could not be shown, a disposal, a
+  session switch, a dropped connection — is still a denial.
+
+  **A modal is visible wherever you are looking and a panel is not**, so the
+  panel is revealed (without stealing focus) before each request; if it cannot
+  be brought into view the request falls back to a native modal; the activity
+  bar carries a badge while the engine is waiting; and a panel hidden with a
+  request outstanding withdraws the card and re-asks it natively, because
+  hiding the view destroys the page the card was drawn on. One live surface per
+  request, always.
+
 ### Added
 
 - **A file attachment can carry a line range, so a client can send a

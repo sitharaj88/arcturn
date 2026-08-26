@@ -1,8 +1,18 @@
 /**
- * The modal dialogs' buttons, and what each one means.
+ * The permission buttons, and what each one means.
  *
  * Split out of the `vscode` adapter so the decision — which is a security
- * decision — is testable without a window. The rules:
+ * decision — is testable without a window. That split is why the surface could
+ * move: RFC 0005 §2 originally required a native modal and this file's own doc
+ * called it "a security decision", but the security was never in the *modal* —
+ * it was in these rules. The panel's card and the native modal both call
+ * {@link permissionChoices} for their buttons and both call
+ * {@link answerFromChoice} for the answer, so there is exactly one set of
+ * rules and exactly one place they can be wrong. Where a request is asked is
+ * `permission-surface.ts`'s business; what an answer means is this file's, and
+ * neither knows the other's reasoning.
+ *
+ * The rules:
  *
  * - "Allow for this session" is offered **only** when the engine attached a
  *   `suggestedRule`. The extension never invents a rule to persist; it can
@@ -13,10 +23,19 @@
  *   with the session. A rule that outlives one is written by a person, in
  *   their own config file, and a button that implied otherwise was promising
  *   a persistence the engine refuses to perform.
+ *
+ *   The rule is re-derived here from `described` on every call, which is what
+ *   makes it hold across a webview boundary: a page that sends
+ *   {@link ALLOW_SESSION} for a request the engine attached no rule to gets a
+ *   plain allow, because the rule comes from the engine's request and never
+ *   from the message.
  * - Every outcome that is not an explicit allow is a **denial**. A dismissed
- *   modal (Escape, or VS Code's own Cancel) and an unrecognised button both
- *   deny, because the alternative — treating "no answer" as consent — is the
- *   one failure mode a permission system may not have.
+ *   modal (Escape, or VS Code's own Cancel), a card the panel could not put
+ *   up, and an unrecognised button all deny, because the alternative —
+ *   treating "no answer" as consent — is the one failure mode a permission
+ *   system may not have. The card has no dismiss affordance of its own: its
+ *   only exits are these three buttons and the host-side denials
+ *   `PermissionQueue` sends on a disposal.
  */
 
 import type { DescribedPermission, PermissionAnswer } from "./permission-queue.js";
@@ -34,7 +53,12 @@ export const ALLOW_SESSION = "Allow for this session";
 export const DENY = "Deny";
 
 /**
- * The buttons to show for one request.
+ * The buttons to show for one request, in the order a modal lists them.
+ *
+ * The panel's card reorders them (deny first, so focus lands on the safe
+ * answer and the primary sits last) but never *adds* to them: `permissionCard`
+ * asks this answer whether it holds each label rather than rebuilding the
+ * list, so a button the card offers is always a button this function returned.
  *
  * @param described - The rendered request.
  */
@@ -45,7 +69,13 @@ export function permissionChoices(described: DescribedPermission): string[] {
 /**
  * Turn the user's choice into a decision.
  *
- * @param choice - The button label, or `undefined` when the modal was dismissed.
+ * The one function both surfaces go through. A label that came off a webview
+ * message is treated exactly like one that came off `showWarningMessage`:
+ * compared against the three constants above, and denied if it is none of
+ * them. The page therefore cannot express a *decision*, only a *label*.
+ *
+ * @param choice - The button label, `undefined` when the prompt was dismissed
+ *   or could not be shown, or any string a page sent.
  * @param described - The rendered request, for its suggested rule.
  */
 export function answerFromChoice(

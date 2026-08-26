@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { connectToServe } from "../serve/connect.js";
 import type {
   AgentEvent,
+  PermissionDecision,
   PermissionRequest,
   ProtocolClient,
   SessionHistory,
@@ -23,6 +24,8 @@ interface Harness {
   costs: CostState[];
   asked: PermissionRequest[];
   askedArgs: (Record<string, unknown> | undefined)[];
+  /** Every decision the queue committed, in order, as the host was told. */
+  decided: PermissionDecision[];
   diagnostics: string[];
 }
 
@@ -37,6 +40,7 @@ async function harness(
   const costs: CostState[] = [];
   const asked: PermissionRequest[] = [];
   const askedArgs: (Record<string, unknown> | undefined)[] = [];
+  const decided: PermissionDecision[] = [];
   const diagnostics: string[] = [];
   const client = await connectToServe({
     connectUrl: `ws://127.0.0.1:1#token=${TOKEN}`,
@@ -55,10 +59,11 @@ async function harness(
         askedArgs.push(args);
         return answer(request);
       },
+      onPermissionDecision: (decision) => decided.push(decision),
       onDiagnostic: (line) => diagnostics.push(line),
     },
   });
-  return { socket, client, controller, chats, costs, asked, askedArgs, diagnostics };
+  return { socket, client, controller, chats, costs, asked, askedArgs, decided, diagnostics };
 }
 
 function emit(h: Harness, event: AgentEvent, sessionId = SESSION): void {
@@ -170,7 +175,7 @@ describe("the permission round trip", () => {
     });
   });
 
-  it("denies rather than hangs when the sidebar is disposed mid-dialog", async () => {
+  it("denies rather than hangs when the sidebar is disposed mid-prompt", async () => {
     const h = await harness(async () => new Promise<PermissionAnswer>(() => {}));
     emit(h, { type: "permissionRequest", request: permissionRequest });
     h.controller.dispose();
@@ -179,6 +184,31 @@ describe("the permission round trip", () => {
       behavior: string;
     };
     expect(decision.behavior).toBe("deny");
+  });
+
+  it("tells the host about every decision, so an on-screen card can come down", async () => {
+    const h = await harness();
+    emit(h, { type: "permissionRequest", request: permissionRequest });
+    await h.controller.permissions.drain();
+    expect(h.decided).toEqual([{ requestId: "req-1", behavior: "allow" }]);
+  });
+
+  it("tells the host about the denials a disposal sends, which never pass through the prompt", async () => {
+    // The path a card would otherwise be stranded on: the sidebar closes, the
+    // session is switched, or the connection drops — the queue answers the
+    // engine and `askPermission` never resolves at all.
+    const h = await harness(async () => new Promise<PermissionAnswer>(() => {}));
+    emit(h, { type: "permissionRequest", request: permissionRequest });
+    emit(h, {
+      type: "permissionRequest",
+      request: { ...permissionRequest, id: "req-2", toolCallId: "call-2" },
+    });
+    h.controller.dispose();
+    await h.controller.permissions.drain();
+    expect(h.decided.map((decision) => [decision.requestId, decision.behavior])).toEqual([
+      ["req-1", "deny"],
+      ["req-2", "deny"],
+    ]);
   });
 });
 

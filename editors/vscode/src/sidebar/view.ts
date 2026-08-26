@@ -19,6 +19,7 @@ import * as vscode from "vscode";
 import type { ChatViewModel } from "./chat-state.js";
 import type { ConnectionReport } from "./connection-card.js";
 import type { DryRunView } from "./dry-run.js";
+import type { PermissionCard } from "./permission-surface.js";
 import type { RewindView } from "./rewind.js";
 import type { CommandOption } from "./webview-commands.js";
 import { createNonce, renderSidebarHtml } from "./webview-html.js";
@@ -91,9 +92,38 @@ export interface SidebarViewHandlers {
   onReady: () => void;
   /** A validated message from the webview. */
   onMessage: (message: WebviewMessage) => void;
+  /**
+   * The view became visible, or stopped being visible.
+   *
+   * The one signal the permission surface cannot do without.
+   * `retainContextWhenHidden` is off, so a hidden view is a *destroyed* page:
+   * a permission card drawn on it is gone, and a run waiting on that card
+   * would block on a control nobody can see or answer. The host escalates to a
+   * native modal on `false` — see `permission-surface.ts`.
+   *
+   * A disposed view reports `false` for the same reason: it is the strongest
+   * form of "not visible" there is.
+   */
+  onVisibility?: (visible: boolean) => void;
   /** Redacted diagnostics for a message that failed validation. */
   onDiagnostic?: (line: string) => void;
 }
+
+/**
+ * How long {@link SidebarViewProvider.reveal} waits for a view it just asked
+ * to show to report itself visible.
+ *
+ * `WebviewView.show()` is a request to the workbench, not a synchronous state
+ * change: when the whole sidebar is closed the container has to open first, so
+ * `visible` can still be `false` on the next line. Waiting is what makes the
+ * answer usable — "is the panel actually up?" is the question the permission
+ * surface asks before it decides between a card and a modal, and answering it
+ * a frame too early would send every request to a modal.
+ *
+ * Short enough that a workbench which is not going to show the view does not
+ * hold a permission prompt for a perceptible time before the modal appears.
+ */
+const REVEAL_SETTLE_MS = 400;
 
 /** Registers and drives the `arcturn.sidebar` webview view. */
 export class SidebarViewProvider implements vscode.WebviewViewProvider {
@@ -117,6 +147,17 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
   #lastSession: SessionSummary | undefined;
   #lastSessions: SessionListView | undefined;
   #lastPermission: PermissionView | undefined;
+  /**
+   * The permission card currently up, replayed when the webview reloads.
+   *
+   * Remembered for the reason the review card is, and with a sharper
+   * consequence: `retainContextWhenHidden` is off, so a panel that is hidden
+   * and revealed reloads — and a card that did not come back would leave a run
+   * blocked with nothing on screen to unblock it. Cleared by
+   * {@link SidebarViewProvider.postPermissionAsk} with no argument, which is
+   * what the host sends the moment the request stops being answerable here.
+   */
+  #lastPermissionAsk: PermissionCard | undefined;
   #lastCommands: CommandListView | undefined;
   #lastDryRun: DryRunView | undefined;
   #lastRewind: RewindView | undefined;
@@ -180,9 +221,16 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
       }
       this.#handlers.onMessage(message);
     });
+    // A hidden view is a destroyed page (`retainContextWhenHidden` is off), so
+    // this is where a permission card stops being answerable. The host is told
+    // rather than guessing, and it escalates.
+    view.onDidChangeVisibility(() => {
+      this.#handlers.onVisibility?.(view.visible);
+    });
     view.onDidDispose(() => {
       this.#view = undefined;
       this.#pageReady = false;
+      this.#handlers.onVisibility?.(false);
     });
     if (!this.#resolved) {
       this.#resolved = true;
@@ -271,6 +319,51 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
     const { note: _note, ...remembered } = view;
     this.#lastPermission = remembered;
     this.#post(permissionMessage(view));
+  }
+
+  /**
+   * Push the permission request the panel should ask about — or, with no
+   * argument, take down whatever card is up.
+   *
+   * The host is the only thing that raises a card and the only thing that
+   * lowers one; the page renders what arrives and posts back which button was
+   * pressed. See `permission-surface.ts` for why that split is what keeps an
+   * in-panel prompt sound.
+   *
+   * @param card - The request, projected from the engine's own words.
+   */
+  postPermissionAsk(card?: PermissionCard): void {
+    this.#lastPermissionAsk = card;
+    this.#post(
+      card === undefined ? { type: "permissionAsk" } : { type: "permissionAsk", request: card },
+    );
+  }
+
+  /**
+   * Put a count on the view's activity-bar icon, or clear it with `0`.
+   *
+   * The third leg of the answer to "what if nobody is looking at the panel".
+   * Revealing handles the moment a request arrives and the modal handles a
+   * panel that would not come up, but a user who hides the panel *between*
+   * requests still needs to be told that the agent is waiting on them — and
+   * the activity bar is visible in every editor layout that has one, including
+   * the one where the Arcturn container is not the container in front.
+   *
+   * @param pending - Requests the engine is still waiting on.
+   */
+  postBadge(pending: number): void {
+    const view = this.#view;
+    if (view === undefined) return;
+    view.badge =
+      pending > 0
+        ? {
+            value: pending,
+            tooltip:
+              pending === 1
+                ? "Arcturn is waiting for a permission decision"
+                : `Arcturn is waiting on ${String(pending)} permission decisions`,
+          }
+        : undefined;
   }
 
   /**
@@ -373,13 +466,60 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
     this.#pendingShowSessions = true;
   }
 
-  /** Reveal the view, resolving it if it has never been opened. */
-  async reveal(): Promise<void> {
-    if (this.#view !== undefined) {
-      this.#view.show(true);
-      return;
+  /** Whether the view is on screen right now. */
+  get visible(): boolean {
+    return this.#view?.visible === true;
+  }
+
+  /**
+   * Reveal the view, resolving it if it has never been opened.
+   *
+   * @returns Whether the view is visible now. `false` is a real answer, not a
+   *   thrown one: the permission surface treats it as "ask natively instead",
+   *   and a request must never be left with no surface at all.
+   */
+  async reveal(): Promise<boolean> {
+    const existing = this.#view;
+    if (existing === undefined) {
+      // No view object at all — never opened (a palette command can start the
+      // engine without it), or removed from the container. The workbench
+      // synthesises `<id>.focus` for every registered view, and executing it is
+      // what makes VS Code call `resolveWebviewView`.
+      await vscode.commands.executeCommand(`${SidebarViewProvider.viewId}.focus`);
+    } else {
+      // `show(true)` — preserveFocus. A permission prompt should put itself
+      // where the user can see it without taking the caret out of whatever they
+      // were typing: the half of a modal's behaviour worth keeping, without the
+      // half worth losing.
+      existing.show(true);
     }
-    await vscode.commands.executeCommand(`${SidebarViewProvider.viewId}.focus`);
+    // Re-read: the focus command above is what creates it in the first branch.
+    const view = this.#view;
+    if (view === undefined) return false;
+    if (view.visible) return true;
+    return await this.#settleVisible(view);
+  }
+
+  /**
+   * Wait out the frame between asking a view to show and its saying it did.
+   *
+   * Resolves early on the first visibility change, so the common case costs a
+   * tick rather than the whole timeout, and resolves `false` when the
+   * workbench simply did not show it.
+   */
+  async #settleVisible(view: vscode.WebviewView): Promise<boolean> {
+    return await new Promise<boolean>((resolve) => {
+      let done = false;
+      const finish = (value: boolean): void => {
+        if (done) return;
+        done = true;
+        subscription.dispose();
+        clearTimeout(timer);
+        resolve(value);
+      };
+      const subscription = view.onDidChangeVisibility(() => finish(view.visible));
+      const timer = setTimeout(() => finish(view.visible), REVEAL_SETTLE_MS);
+    });
   }
 
   #connectionMessage(): HostMessage {
@@ -405,6 +545,12 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
       this.#post(contextMessage(this.#lastContext, this.#lastActiveEditor));
     }
     if (this.#lastPermission !== undefined) this.#post(permissionMessage(this.#lastPermission));
+    // Before the rest of the furniture rather than after: a reloaded page that
+    // is holding a live permission request should paint it in the first frame,
+    // not once the model list has arrived.
+    if (this.#lastPermissionAsk !== undefined) {
+      this.#post({ type: "permissionAsk", request: this.#lastPermissionAsk });
+    }
     if (this.#lastCommands !== undefined) {
       this.#post({
         type: "commands",

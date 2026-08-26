@@ -283,9 +283,19 @@ function fakeView(): {
   view: unknown;
   send(message: unknown): void;
   posted(): { type: string; [key: string]: unknown }[];
+  /** Hide or show the view the way the workbench does, firing the event. */
+  setVisible(visible: boolean): void;
+  /** How many times the host asked the view to reveal itself. */
+  shows(): number;
+  /** The activity-bar badge, as the host last set it. */
+  badge(): { value: number } | undefined;
 } {
   let receive: ((raw: unknown) => void) | undefined;
+  const visibility: (() => void)[] = [];
+  let shows = 0;
   const view = {
+    visible: true,
+    badge: undefined as { value: number } | undefined,
     webview: {
       options: {} as unknown,
       cspSource: "vscode-webview://test",
@@ -302,12 +312,25 @@ function fakeView(): {
     onDidDispose(_handler: () => void) {
       return { dispose: () => {} };
     },
-    show(_focus?: boolean) {},
+    onDidChangeVisibility(handler: () => void) {
+      visibility.push(handler);
+      return { dispose: () => {} };
+    },
+    show(_focus?: boolean) {
+      shows += 1;
+      view.visible = true;
+    },
   };
   return {
     view,
     send: (message: unknown) => receive?.(message),
     posted: () => ledger.posted,
+    setVisible: (visible: boolean) => {
+      view.visible = visible;
+      for (const handler of [...visibility]) handler();
+    },
+    shows: () => shows,
+    badge: () => view.badge,
   };
 }
 
@@ -899,6 +922,110 @@ describe("ambient awareness of the file the user is looking at", () => {
       });
     }
     expect(affected).toContain("arcturn.context.activeEditor");
+  });
+});
+
+describe("the permission card at the host seam", () => {
+  /** The provider the extension registered, with `view.ts`'s real API on it. */
+  function surface(): {
+    panel: ReturnType<typeof fakeView>;
+    provider: {
+      postPermissionAsk(card?: unknown): void;
+      postBadge(pending: number): void;
+      reveal(): Promise<boolean>;
+      readonly visible: boolean;
+    };
+  } {
+    const panel = openPanel();
+    const provider = ledger.views[0]?.provider as unknown as {
+      postPermissionAsk(card?: unknown): void;
+      postBadge(pending: number): void;
+      reveal(): Promise<boolean>;
+      readonly visible: boolean;
+    };
+    return { panel, provider };
+  }
+
+  const card = {
+    id: "perm-1",
+    description: "Run rm -rf build",
+    tool: "bash",
+    subject: "rm -rf build",
+    choices: [
+      { id: "deny", label: "Deny" },
+      { id: "allow", label: "Allow" },
+    ],
+  };
+
+  function asks(panel: ReturnType<typeof fakeView>): { request?: { id: string } }[] {
+    return panel.posted().filter((message) => message.type === "permissionAsk") as {
+      request?: { id: string };
+    }[];
+  }
+
+  it("posts the card to the page rather than raising a modal", () => {
+    const { panel, provider } = surface();
+    provider.postPermissionAsk(card);
+    expect(asks(panel).at(-1)?.request?.id).toBe("perm-1");
+    expect(ledger.messages.filter((message) => message.level === "warning")).toHaveLength(0);
+  });
+
+  it("takes the card down with an ask that names no request", () => {
+    const { panel, provider } = surface();
+    provider.postPermissionAsk(card);
+    provider.postPermissionAsk(undefined);
+    expect(asks(panel).at(-1)).toEqual({ type: "permissionAsk" });
+  });
+
+  it("replays a live card into a page that reloaded, so the run is never stranded", () => {
+    // `retainContextWhenHidden` is off: hiding the panel destroys the page. A
+    // card that did not come back would leave a blocked run with nothing on
+    // screen to unblock it.
+    const { panel, provider } = surface();
+    provider.postPermissionAsk(card);
+    ledger.posted.length = 0;
+    panel.send({ type: "ready" });
+    expect(asks(panel).at(-1)?.request?.id).toBe("perm-1");
+  });
+
+  it("does not replay a card that was already answered", () => {
+    const { panel, provider } = surface();
+    provider.postPermissionAsk(card);
+    provider.postPermissionAsk(undefined);
+    ledger.posted.length = 0;
+    panel.send({ type: "ready" });
+    expect(asks(panel)).toEqual([]);
+  });
+
+  it("says whether the view is actually visible, which is what picks the surface", async () => {
+    const { panel, provider } = surface();
+    expect(provider.visible).toBe(true);
+    expect(await provider.reveal()).toBe(true);
+    expect(panel.shows()).toBe(1);
+  });
+
+  it("badges the activity bar while the engine is waiting, and clears it after", () => {
+    const { panel, provider } = surface();
+    provider.postBadge(2);
+    expect(panel.badge()?.value).toBe(2);
+    provider.postBadge(0);
+    expect(panel.badge()).toBeUndefined();
+  });
+
+  it("routes the page's answer without an engine, and does not throw on a stale one", () => {
+    const panel = openPanel();
+    panel.send({ type: "permissionDecision", requestId: "perm-1", choice: "Allow" });
+    // Nothing is pending, so nothing is decided — and nothing blows up. The
+    // rule that a stale page cannot answer for a live request is proved in
+    // `permission-surface.test.ts`, where a request can actually be pending.
+    expect(ledger.posted.some((message) => message.type === "permissionAsk")).toBe(false);
+  });
+
+  it("drops an answer the boundary refuses before it reaches the surface", () => {
+    const panel = openPanel();
+    ledger.outputs[0]?.lines.splice(0);
+    panel.send({ type: "permissionDecision", requestId: "", choice: "Allow" });
+    expect(ledger.outputs[0]?.lines.join("\n")).toContain("unrecognised webview message");
   });
 });
 

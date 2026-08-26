@@ -139,6 +139,47 @@ describe("renderSidebarHtml", () => {
     expect(SIDEBAR_STYLE).toMatch(/\.suggest \{[^}]*bottom: 100%/s);
   });
 
+  it("reserves the permission region for the panel, outside the transcript", () => {
+    // The security property behind moving permission prompts off native
+    // modals (RFC 0005 §2, amended). `#turns` is where assistant prose, tool
+    // arguments and tool results are appended; `#permission` is in `#dock`,
+    // which nothing but the panel's own chrome writes into. A card can
+    // therefore never appear where model text appears — and the script builds
+    // every node with textContent, so a model cannot author a button anywhere.
+    const page = html();
+    const dock = page.indexOf('<div id="dock">');
+    const transcriptEnd = page.indexOf("</main>");
+    const region = page.indexOf('id="permission"');
+    expect(region).toBeGreaterThan(transcriptEnd);
+    expect(region).toBeGreaterThan(dock);
+    expect(page.indexOf('id="permission-actions"')).toBeGreaterThan(region);
+  });
+
+  it("announces the permission card as the assertive thing on the page", () => {
+    const page = html();
+    // A request blocks a run, so it is the one live region on this page that
+    // interrupts rather than waits its turn.
+    expect(page).toMatch(/id="permission-ask"[^>]*aria-label="[^"]+"/s);
+    // On the description, which changes per request — not on the heading,
+    // which never does and would therefore never announce anything.
+    expect(page).toMatch(/id="permission-desc"[^>]*aria-live="assertive"/s);
+    // The strip that covers the native-modal path stays polite: it is a
+    // status, not a question.
+    expect(page).toMatch(/id="permission-strip"[^>]*aria-live="polite"/s);
+  });
+
+  it("ships the permission card with no buttons in the markup", () => {
+    // Every button is built from the host's validated choice list, so a card
+    // can never show an Allow the host did not offer — including the "allow
+    // for this session" the engine attaches a rule for and only then.
+    const page = html();
+    const card = page.slice(
+      page.indexOf('id="permission-ask"'),
+      page.indexOf("</section>", page.indexOf('id="permission-ask"')),
+    );
+    expect(card).not.toMatch(/<button/);
+  });
+
   it("gives the chip row a list role, so what is attached is enumerable", () => {
     expect(html()).toMatch(/id="chips"[^>]*role="list"/s);
   });
