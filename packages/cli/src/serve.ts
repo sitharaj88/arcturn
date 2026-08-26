@@ -39,7 +39,7 @@
 
 import { randomBytes } from "node:crypto";
 import { calculateCostUsd } from "@arcturn/ai";
-import { Agent } from "@arcturn/core";
+import { Agent, type AgentOptions } from "@arcturn/core";
 import type { McpManager } from "@arcturn/mcp";
 import type { AgentFactoryOptions, DryRunOverlay } from "@arcturn/server";
 import { ArcturnServer, SessionHost } from "@arcturn/server";
@@ -243,6 +243,34 @@ export interface ServableRuntime {
     checkpoints?: CheckpointStore;
   }) => Agent;
   /**
+   * Optional: rebuild the agent for a session that already exists in the
+   * store — the resuming twin of `buildSessionAgent`, and what `openSession`
+   * needs. A real `ArcturnRuntime` provides it; a stub that omits it gets the
+   * generic `Agent.resume` assembly below, which resumes the same conversation
+   * with the generic tool set.
+   *
+   * Optional, but never *skipped*: a served session is always resumed, by one
+   * route or the other. Falling back to a fresh `Agent` here is precisely the
+   * bug — a reopened session that renders empty and, worse, whose model is
+   * asked to continue a conversation it was never shown.
+   */
+  resumeSessionAgent?: (options: {
+    sessionId: string;
+    cwd?: string;
+    model?: ModelSpec;
+    checkpoints?: CheckpointStore;
+    resolveModel?: (modelId: string) => ModelSpec | undefined;
+  }) => Promise<Agent>;
+  /**
+   * Whether this engine was started with an explicit `--model`.
+   *
+   * Read by the resume path only: a flag the operator typed for THIS process
+   * outranks the model id recorded in a session file, exactly as it does for
+   * `--resume` in the terminal. Absent (a stub, an embedder) it reads as "not
+   * pinned", which is what a runtime with no flag to pin is.
+   */
+  readonly modelPinned?: boolean;
+  /**
    * Optional: fork one served session's conversation to an earlier entry, for
    * the `rewindTo` verb. A real `ArcturnRuntime` provides it; a stub that omits
    * it — like one that omits `buildSessionAgent` — simply offers no rewind,
@@ -326,15 +354,84 @@ function hasHomePath(runtime: ServableRuntime): runtime is ServableRuntime & Bac
   return runtime.paths !== undefined;
 }
 
-/** Build the `Agent` backing one served session. See {@link ServableRuntime}. */
-function buildServedAgent(
+/**
+ * The agent options a runtime with no `buildSessionAgent` gets — the generic
+ * assembly, shared by the fresh and the resumed route so a stub runtime cannot
+ * end up with two different agent configurations depending on which one ran.
+ */
+function genericAgentOptions(
+  runtime: ServableRuntime,
+  opts: AgentFactoryOptions,
+  model: ModelSpec,
+): AgentOptions {
+  return {
+    llm: runtime.llm,
+    model,
+    systemPrompt: runtime.systemPrompt,
+    tools: [...runtime.tools],
+    cwd: opts.cwd,
+    sessionId: opts.sessionId,
+    sessionStore: runtime.store,
+    compaction: compactionOptionsFor(model),
+    permissions: {
+      mode: runtime.config.permissionMode,
+      rules: [...runtime.config.permissions],
+    },
+  };
+}
+
+/**
+ * Adapt {@link serveModelResolver} to what `Agent.resume` wants for the model
+ * id it finds recorded in a session file.
+ *
+ * Same resolver, same catalog, same environment as `createSession` and
+ * `setModel` — a session's *restored* model must resolve to the provider,
+ * endpoint and credential a freshly picked one would, or a restart would be a
+ * silent re-route. Only the failure mode differs: a pick a client just made is
+ * refused loudly (`setModel` answers `invalidRequest` and the session stays
+ * where it was), while an id recorded months ago that this build no longer
+ * registers — or whose provider key is no longer set — must not make the
+ * session unopenable. `undefined` leaves the session on the server's default,
+ * which is what `Agent.resume` does with it and what `--resume` does in the
+ * terminal.
+ */
+function storedModelResolver(
+  resolveModel: (modelId: string) => ModelSpec,
+): (modelId: string) => ModelSpec | undefined {
+  return (modelId) => {
+    try {
+      return resolveModel(modelId);
+    } catch {
+      return undefined;
+    }
+  };
+}
+
+/**
+ * Build — or, for a session that already exists in the store, **resume** — the
+ * `Agent` backing one served session. See {@link ServableRuntime}.
+ *
+ * `opts.resume` is set by `SessionHost.openSession` and never by
+ * `createSession`. Without the resume branch this function was the whole of
+ * the reported bug: reopening a session from the history list built a fresh,
+ * empty agent on the same session id, so the panel replayed nothing (the live
+ * agent's `leafEntryId` was `null`, which `sessionHistory` correctly reads as
+ * an empty branch) *and* the model was asked to continue a conversation it had
+ * never been shown. One call fixes both, because both read the same branch.
+ */
+async function buildServedAgent(
   runtime: ServableRuntime,
   opts: AgentFactoryOptions,
   maxCostUsd: number | undefined,
   resolveModel: (modelId: string) => ModelSpec,
   rewind: ServeRewind | undefined,
-): Agent {
-  const model = opts.model === undefined ? runtime.model : resolveModel(opts.model);
+): Promise<Agent> {
+  // The model a client explicitly asked for, if any. Kept separate from the
+  // fallback below because the resume path has to be able to tell "nobody
+  // named a model" from "somebody named this one": only in the first case may
+  // the model recorded in the session file win.
+  const requested = opts.model === undefined ? undefined : resolveModel(opts.model);
+  const model = requested ?? runtime.model;
   // A real ArcturnRuntime builds a properly isolated agent — its own checkpoint
   // store keyed by this session, so one served session's /rewind never
   // touches another's files. The structural fallback below keeps this
@@ -345,33 +442,64 @@ function buildServedAgent(
   // the manifest was written and nothing could read it back — which is exactly
   // why `/rewind` was unreachable from here. Same store, one owner.
   const checkpoints = rewind?.storeFor(opts.sessionId, opts.cwd ?? runtime.cwd);
-  const agent = runtime.buildSessionAgent
-    ? runtime.buildSessionAgent({
-        sessionId: opts.sessionId,
-        ...(opts.cwd === undefined ? {} : { cwd: opts.cwd }),
-        model,
-        ...(checkpoints === undefined ? {} : { checkpoints }),
-      })
-    : new Agent({
-        llm: runtime.llm,
-        model,
-        systemPrompt: runtime.systemPrompt,
-        tools: [...runtime.tools],
-        cwd: opts.cwd,
-        sessionId: opts.sessionId,
-        sessionStore: runtime.store,
-        compaction: compactionOptionsFor(model),
-        permissions: {
-          mode: runtime.config.permissionMode,
-          rules: [...runtime.config.permissions],
-        },
-      });
+  const agent = await (opts.resume === true
+    ? resumeServedAgent(runtime, opts, requested, resolveModel, checkpoints)
+    : runtime.buildSessionAgent
+      ? runtime.buildSessionAgent({
+          sessionId: opts.sessionId,
+          ...(opts.cwd === undefined ? {} : { cwd: opts.cwd }),
+          model,
+          ...(checkpoints === undefined ? {} : { checkpoints }),
+        })
+      : new Agent(genericAgentOptions(runtime, opts, model)));
   if (maxCostUsd !== undefined) attachCostGuard(agent, maxCostUsd);
   // Every turn this agent runs opens a checkpoint and records where in the
   // conversation it began — the half the terminal gets from `ArcturnRuntime`'s
   // own `#onEvent` and a served session had no equivalent of.
   rewind?.track(opts.sessionId, agent);
   return agent;
+}
+
+/**
+ * The resume half of {@link buildServedAgent}: one stored session, rebuilt.
+ *
+ * @param requested - A model the client named on this call, or `undefined`.
+ *   When it named one, that wins and the stored id is not consulted at all;
+ *   so does a `--model` this process was started with (`runtime.modelPinned`),
+ *   for the reason `--resume` gives it precedence in the terminal.
+ */
+function resumeServedAgent(
+  runtime: ServableRuntime,
+  opts: AgentFactoryOptions,
+  requested: ModelSpec | undefined,
+  resolveModel: (modelId: string) => ModelSpec,
+  checkpoints: CheckpointStore | undefined,
+): Promise<Agent> {
+  const restore =
+    requested !== undefined || runtime.modelPinned === true
+      ? undefined
+      : storedModelResolver(resolveModel);
+  if (runtime.resumeSessionAgent) {
+    return runtime.resumeSessionAgent({
+      sessionId: opts.sessionId,
+      ...(opts.cwd === undefined ? {} : { cwd: opts.cwd }),
+      ...(requested === undefined ? {} : { model: requested }),
+      ...(checkpoints === undefined ? {} : { checkpoints }),
+      ...(restore === undefined ? {} : { resolveModel: restore }),
+    });
+  }
+  // The generic fallback (a stub runtime, an embedder with no
+  // `resumeSessionAgent`). It resumes the same conversation, but its
+  // compaction budget is computed here for the model this server booted on
+  // rather than for the one `Agent.resume` may restore from the file — a real
+  // `ArcturnRuntime` reads the stored model *before* construction precisely to
+  // avoid that, and a host that cares should provide `resumeSessionAgent`.
+  return Agent.resume({
+    ...genericAgentOptions(runtime, opts, requested ?? runtime.model),
+    sessionStore: runtime.store,
+    sessionId: opts.sessionId,
+    ...(restore === undefined ? {} : { resolveModel: restore }),
+  });
 }
 
 /**

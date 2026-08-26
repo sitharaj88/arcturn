@@ -528,10 +528,10 @@ optional fields were added, both additive/backward-compatible:
   wire contract on the way out, so a host cannot leak a field the contract
   does not define — a credential value being the one that matters.
 
-## `agentFactory` alone must know how to resume a session
+## `agentFactory` alone must know how to resume a session — and is now *told* when to
 
 `SessionHost` has no `AgentOptions` (llm, system prompt, tools, ...) of its
-own — only `agentFactory: (opts: { sessionId; cwd; model? }) => Agent`. So
+own — only `agentFactory: (opts) => Agent | Promise<Agent>`. So
 `SessionHost.openSession` for a session that isn't currently live in this
 process (but is known to `sessionStore`) calls the *same* `agentFactory` with
 the existing `sessionId`/`cwd`, trusting the factory to decide whether to
@@ -540,14 +540,43 @@ factory closure is the composition root and is the only thing with access to
 full `AgentOptions`, including which `SessionStore` instance to resume from).
 `SessionHost` itself never calls `Agent.resume` or inspects session entries —
 it only tracks liveness, header bookkeeping (when it has its own
-`sessionStore` reference), and event fan-out. This means a composition root
-that wants transparent resume-after-restart must build its `agentFactory` to
-check the store itself; a factory that just does `new Agent(...)` on every
-call will silently start a fresh, empty conversation for a previously-existing
-`sessionId` rather than resuming it. Documented rather than solved in this
-package because solving it would mean `SessionHost` reaching into `Agent`
-construction concerns it isn't given (no LLM client, no system prompt, no
-tools) — that's the factory's job by design.
+`sessionStore` reference), and event fan-out. Solving it *here* would mean
+`SessionHost` reaching into `Agent` construction concerns it isn't given (no
+LLM client, no system prompt, no tools); that's the factory's job by design.
+
+Two things changed once the documented contract was actually exercised, and
+both were the difference between "the factory may resume" and "the factory
+*can*":
+
+1. **The return type.** It was a bare `Agent`. Rebuilding a stored branch
+   means reading the session file, which is asynchronous, so the only thing a
+   synchronous factory could do with an existing session id was start it over.
+   `arcturn serve` did exactly that for as long as this note claimed
+   otherwise: every re-attach was a blank chat, and the model was asked to
+   continue a conversation it had never been shown. A promise is allowed now,
+   and `createSession`/`openSession` await it.
+2. **`AgentFactoryOptions.resume`.** A factory cannot tell the two calls apart
+   by looking at the store: a brand-new session and a session whose file has
+   no entries yet read identically, and probing races the `create` that is
+   about to happen (`createSession` builds the agent *before* writing the
+   header, so a failed build leaves no orphan session). This host knows which
+   verb it is serving, so it says so. Ignoring the flag is still allowed and
+   is exactly the old behaviour.
+
+`openSession` also dedupes concurrent opens (`#opening`). Attaching is no
+longer a `Map.get` away from done, so two clients opening one session in the
+same tick would otherwise each get an agent — two live agents over one session
+file, one of them unreachable but still appending. An in-flight open counts as
+live; the second caller waits for the first caller's agent. A *failed* open is
+forgotten rather than remembered, so the next attempt is tried rather than
+replayed.
+
+Re-attaching to a session that **is** already live returns its header and
+rebuilds nothing. That is not an optimization: the live agent may be mid-turn,
+holding steering messages, a pending permission ask and a conversation not yet
+appended to the store. Re-resuming from disk would drop all of it, and the
+*second* client — a second editor window opening the same session — would be
+the one that caused it, invisibly, for the first.
 
 ## `SessionHost.prompt()` resolves only once the run completes
 

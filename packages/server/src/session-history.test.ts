@@ -220,3 +220,63 @@ describe("buildSessionHistory", () => {
     expect(history.events).toHaveLength(3);
   });
 });
+
+describe("buildSessionHistory: the three things a leaf can say", () => {
+  // Three answers, not two, and every pair of them has been conflated at least
+  // once in this repo — twice with a visible bug:
+  //
+  // - `undefined` — "I hold no live agent for this session", so the file's own
+  //   newest entry is the branch. This is `SessionHost.sessionHistory` reading
+  //   a session that is not live in this process.
+  // - an id — "the live agent is on this branch tip". `rewindTo` forks by
+  //   resuming at an older entry and appending nothing, so until that agent's
+  //   next turn the newest entry in the file is the tip of the branch the fork
+  //   walked away from; replaying that would hand back the pre-rewind
+  //   conversation and call it the transcript.
+  // - `null` — "the live agent is on an EMPTY branch", which `rewindTo` also
+  //   creates: rewinding past the very first message forks to before the root
+  //   (`forkSessionAgent({ leafId: null })`), and the agent that comes back
+  //   genuinely remembers nothing. Falling back to the stored tip *here* would
+  //   replay a conversation that agent will never continue — the same lie as
+  //   the fork case, told in the other direction.
+  //
+  // The case that looks like a fourth — a session re-attached in a fresh
+  // process, whose agent has also appended nothing — is not one, and reading
+  // it as "null means I do not have a leaf" is the fix that must NOT be made
+  // here: `arcturn serve` resumes such a session through `Agent.resume`, which
+  // sets `parentEntryId` to the stored tip, so its live agent's leaf is a real
+  // id like any other. The leaf is authoritative *because* the agent is
+  // resumed. `packages/cli/src/serve.test.ts` pins that end to end, over a
+  // real socket and a real store.
+  const branch = chain(
+    userEntry("FIRST-TURN"),
+    assistantEntry("answered"),
+    userEntry("SECOND-TURN"),
+  );
+
+  it("replays the whole stored branch when the caller holds no live agent", () => {
+    const history = buildSessionHistory("s1", branch);
+    const replayed = JSON.stringify(history.events);
+    expect(replayed).toContain("FIRST-TURN");
+    expect(replayed).toContain("answered");
+    expect(replayed).toContain("SECOND-TURN");
+  });
+
+  it("replays the caller's branch, not the file's, when it names one", () => {
+    const first = branch[0];
+    if (first === undefined) throw new Error("expected a first entry");
+    const history = buildSessionHistory("s1", branch, {}, first.id);
+    const replayed = JSON.stringify(history.events);
+    // Presence as well as absence: an empty transcript satisfies "the
+    // abandoned branch is gone" too, which is how a fork that replayed
+    // nothing at all passed for a fork that replayed the right thing.
+    expect(replayed).toContain("FIRST-TURN");
+    expect(replayed).not.toContain("answered");
+    expect(replayed).not.toContain("SECOND-TURN");
+  });
+
+  it("replays nothing for a branch the caller says is empty", () => {
+    const history = buildSessionHistory("s1", branch, {}, null);
+    expect(history.events).toEqual([]);
+  });
+});

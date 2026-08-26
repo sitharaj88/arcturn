@@ -48,11 +48,16 @@ and why, and how it was confirmed to work once the dependency is present.
   separately-tested assembly step. `ServableRuntime` is the minimal slice of
   `ArcturnRuntime` this needs (`llm`, `model`, `cwd`, `env`, `store`,
   `systemPrompt`, `tools`, `config.{permissions,permissionMode}`,
-  `dispose()`); a real `ArcturnRuntime` satisfies it structurally with no
-  changes to `runtime.ts`. Its `agentFactory` builds a fresh `Agent` per
-  served session from those pieces plus `runtime.ts`'s own exported
-  `resolveModelSpec` (per-session `--model` override) and
-  `compactionOptionsFor`.
+  `dispose()`); a real `ArcturnRuntime` satisfies it structurally. Its
+  `agentFactory` builds a fresh `Agent` per *new* served session from those
+  pieces plus `runtime.ts`'s own exported `resolveModelSpec` (per-session
+  `--model` override) and `compactionOptionsFor` — and **resumes** one for a
+  session `openSession` re-attaches to, through
+  `ArcturnRuntime.resumeSessionAgent` (`Agent.resume`, the same resumer
+  `--continue`/`--resume`/`/sessions` use). Resuming is what makes the agent
+  hold the stored conversation, `leafEntryId` authoritative for
+  `sessionHistory`, and the session's recorded model the one that answers; an
+  explicit `--model` on the serve process still outranks the recorded one.
 - `resolveServeToken(host, token?)` / `generateServeToken()` /
   `isLoopbackHost(host)` — the token/security policy, pure functions:
   - No `token` → always auto-generate one (`32` hex chars via

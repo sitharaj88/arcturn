@@ -23,6 +23,7 @@ import {
 } from "./serve.js";
 import { loadSkills, type Skill } from "./skills.js";
 import { fakeLLM } from "./test-helpers/fake-llm.js";
+import { buildTestRuntime, makeScratch } from "./test-helpers/scratch.js";
 
 const TEST_MODEL: ModelSpec = {
   id: "test/model",
@@ -1712,6 +1713,401 @@ describe("RFC 0005 §1.3 — a leading /name on the served prompt path", () => {
       client.close();
       unregisterModel(spec.id);
       await provider.close();
+    }
+  });
+});
+
+/**
+ * One `arcturn serve` process over a given session-store directory.
+ *
+ * The directory is the parameter because that is the only thing that survives
+ * a restart: stop one of these, start another over the same `dir`, and you
+ * have reproduced "close VS Code, open it again" exactly — a new
+ * `ArcturnRuntime`, a new `SessionHost`, a new `Agent` map, and the same files
+ * on disk.
+ */
+async function servedProcess(
+  dir: string,
+  overrides: Partial<ServableRuntime> = {},
+): Promise<{ port: number; stop: () => Promise<void> }> {
+  const runtime = await fakeRuntime({
+    cwd: dir,
+    store: new JsonlSessionStore({ dir }),
+    ...overrides,
+  });
+  const sessionHost = createServeHost(runtime);
+  const server = new ArcturnServer({ sessionHost });
+  // Registered for the afterEach sweep as well as stopped explicitly below;
+  // `ArcturnServer.stop` is idempotent, and a test that throws mid-restart must
+  // not leave a listener behind.
+  servers.push(server);
+  const port = await server.start({ host: "127.0.0.1", port: 0 });
+  return { port, stop: () => server.stop() };
+}
+
+/** A scratch directory that plays the part of `~/.arcturn/sessions`. */
+function restartDir(): Promise<string> {
+  return mkdtemp(join(tmpdir(), "arcturn-serve-restart-"));
+}
+
+describe("reopening a session in a fresh process — the VS Code restart", () => {
+  it("replays the conversation the panel was showing before the restart", async () => {
+    const dir = await restartDir();
+
+    const first = await servedProcess(dir, {
+      llm: fakeLLM([{ text: "the answer from before the restart" }]),
+    });
+    const before = connect(first.port);
+    let sessionId: string;
+    try {
+      const header = await before.createSession({ cwd: dir });
+      sessionId = header.sessionId;
+      await before.openSession(sessionId);
+      await before.prompt(sessionId, "RESTART-MARKER");
+    } finally {
+      before.close();
+    }
+    await first.stop();
+
+    // A different process: nothing of the first one survives but the files.
+    const second = await servedProcess(dir, { llm: fakeLLM([{ text: "unused" }]) });
+    const after = connect(second.port);
+    try {
+      const listed = await after.listSessions();
+      expect(listed.map((header) => header.sessionId)).toContain(sessionId);
+
+      await after.openSession(sessionId);
+      const history = (await after.sessionHistory(sessionId)) as SessionHistory;
+      // The reported symptom, inverted: "everything is gone — it is like a
+      // plain chat" was `promptTexts` coming back `[]` here.
+      expect(promptTexts(history)).toEqual(["RESTART-MARKER"]);
+      expect(assistantTexts(history)).toEqual(["the answer from before the restart"]);
+    } finally {
+      after.close();
+      await second.stop();
+    }
+  });
+
+  it("puts the earlier turn in the request the provider actually receives", async () => {
+    // The half that matters more. A transcript restored on screen while the
+    // model answers as though it had never seen it is worse than an empty
+    // panel: the user can see the context and the agent cannot. So the
+    // assertion is on the bytes the provider was sent, not on the call
+    // succeeding and not on what came back.
+    const provider = await stubProvider();
+    const spec = stubSpec("stub-restart/model", provider.baseUrl);
+    registerModel(spec);
+    const dir = await restartDir();
+    try {
+      const first = await servedProcess(dir, {
+        llm: createClient({ env: {}, retry: false }),
+        model: spec,
+      });
+      const before = connect(first.port);
+      let sessionId: string;
+      try {
+        const header = await before.createSession({ cwd: dir });
+        sessionId = header.sessionId;
+        await before.openSession(sessionId);
+        await before.prompt(sessionId, "REMEMBER-THIS-SENTENCE");
+      } finally {
+        before.close();
+      }
+      await first.stop();
+      expect(provider.requests).toHaveLength(1);
+
+      const second = await servedProcess(dir, {
+        llm: createClient({ env: {}, retry: false }),
+        model: spec,
+      });
+      const after = connect(second.port);
+      try {
+        await after.openSession(sessionId);
+        await after.prompt(sessionId, "and what did I say before?");
+      } finally {
+        after.close();
+        await second.stop();
+      }
+
+      expect(provider.requests).toHaveLength(2);
+      const resumed = provider.requests[1] ?? "";
+      expect(resumed).toContain("REMEMBER-THIS-SENTENCE");
+      expect(resumed).toContain("and what did I say before?");
+    } finally {
+      unregisterModel(spec.id);
+      await provider.close();
+    }
+  });
+
+  it("agrees with the panel: the replayed transcript and the model's context are one conversation", async () => {
+    const provider = await stubProvider();
+    const spec = stubSpec("stub-agreement/model", provider.baseUrl);
+    registerModel(spec);
+    const dir = await restartDir();
+    try {
+      const first = await servedProcess(dir, {
+        llm: createClient({ env: {}, retry: false }),
+        model: spec,
+      });
+      const before = connect(first.port);
+      let sessionId: string;
+      try {
+        const header = await before.createSession({ cwd: dir });
+        sessionId = header.sessionId;
+        await before.openSession(sessionId);
+        await before.prompt(sessionId, "TURN-ONE");
+        await before.prompt(sessionId, "TURN-TWO");
+      } finally {
+        before.close();
+      }
+      await first.stop();
+
+      const second = await servedProcess(dir, {
+        llm: createClient({ env: {}, retry: false }),
+        model: spec,
+      });
+      const after = connect(second.port);
+      try {
+        await after.openSession(sessionId);
+        const history = (await after.sessionHistory(sessionId)) as SessionHistory;
+        await after.prompt(sessionId, "TURN-THREE");
+
+        // Same two prompts, in the same order, in both places. This is the
+        // property worth having: a transcript that is right on screen and
+        // wrong in the request is the failure mode that fixing only the replay
+        // would have produced.
+        expect(promptTexts(history)).toEqual(["TURN-ONE", "TURN-TWO"]);
+        const sent = provider.requests.at(-1) ?? "";
+        expect(sent.indexOf("TURN-ONE")).toBeGreaterThan(-1);
+        expect(sent.indexOf("TURN-TWO")).toBeGreaterThan(sent.indexOf("TURN-ONE"));
+        expect(sent.indexOf("TURN-THREE")).toBeGreaterThan(sent.indexOf("TURN-TWO"));
+      } finally {
+        after.close();
+        await second.stop();
+      }
+    } finally {
+      unregisterModel(spec.id);
+      await provider.close();
+    }
+  });
+});
+
+describe("a restart restores the session's model — and an explicit one still wins", () => {
+  /**
+   * Drive one session to the point where its file records a `/model` switch,
+   * then hand back the id so a second process can re-open it.
+   */
+  async function sessionSwitchedTo(
+    dir: string,
+    defaultSpec: ModelSpec,
+    switchTo: ModelSpec,
+  ): Promise<string> {
+    const first = await servedProcess(dir, {
+      llm: createClient({ env: {}, retry: false }),
+      model: defaultSpec,
+    });
+    const client = connect(first.port);
+    try {
+      const header = await client.createSession({ cwd: dir });
+      await client.openSession(header.sessionId);
+      await client.setModel(header.sessionId, switchTo.id);
+      await client.prompt(header.sessionId, "before the restart");
+      return header.sessionId;
+    } finally {
+      client.close();
+      await first.stop();
+    }
+  }
+
+  it("sends the next turn to the model the session was left on, not the server default", async () => {
+    const home = await stubProvider();
+    const elsewhere = await stubProvider();
+    const homeSpec = stubSpec("stub-home/model", home.baseUrl);
+    const elsewhereSpec = stubSpec("stub-elsewhere/model", elsewhere.baseUrl);
+    registerModel(homeSpec);
+    registerModel(elsewhereSpec);
+    const dir = await restartDir();
+    try {
+      const sessionId = await sessionSwitchedTo(dir, homeSpec, elsewhereSpec);
+      expect(elsewhere.requests).toHaveLength(1);
+      expect(home.requests).toHaveLength(0);
+
+      // Restarted on the *default* model, exactly as `arcturn serve` comes up.
+      const second = await servedProcess(dir, {
+        llm: createClient({ env: {}, retry: false }),
+        model: homeSpec,
+      });
+      const client = connect(second.port);
+      try {
+        await client.openSession(sessionId);
+        await client.prompt(sessionId, "after the restart");
+      } finally {
+        client.close();
+        await second.stop();
+      }
+
+      // Which host got the bytes, not which id came back: the id was already
+      // right while the routing was wrong, which is the whole reason this
+      // suite reads the provider rather than the response.
+      expect(elsewhere.requests).toHaveLength(2);
+      expect(home.requests).toHaveLength(0);
+    } finally {
+      unregisterModel(homeSpec.id);
+      unregisterModel(elsewhereSpec.id);
+      await home.close();
+      await elsewhere.close();
+    }
+  });
+
+  it("lets a --model this process was started with outrank the stored one", async () => {
+    const home = await stubProvider();
+    const elsewhere = await stubProvider();
+    const homeSpec = stubSpec("stub-home/model", home.baseUrl);
+    const elsewhereSpec = stubSpec("stub-elsewhere/model", elsewhere.baseUrl);
+    registerModel(homeSpec);
+    registerModel(elsewhereSpec);
+    const dir = await restartDir();
+    try {
+      const sessionId = await sessionSwitchedTo(dir, homeSpec, elsewhereSpec);
+
+      // `arcturn serve --model stub-home/model`: a flag typed for THIS
+      // invocation, which is what `runtime.modelPinned` records.
+      const second = await servedProcess(dir, {
+        llm: createClient({ env: {}, retry: false }),
+        model: homeSpec,
+        modelPinned: true,
+      });
+      const client = connect(second.port);
+      try {
+        await client.openSession(sessionId);
+        await client.prompt(sessionId, "after the restart");
+      } finally {
+        client.close();
+        await second.stop();
+      }
+
+      expect(home.requests).toHaveLength(1);
+      expect(elsewhere.requests).toHaveLength(1);
+      // ...and the conversation still came with it. A pin changes which
+      // provider answers, never what it is answering about.
+      expect(home.requests[0] ?? "").toContain("before the restart");
+    } finally {
+      unregisterModel(homeSpec.id);
+      unregisterModel(elsewhereSpec.id);
+      await home.close();
+      await elsewhere.close();
+    }
+  });
+});
+
+describe("the resume path a real ArcturnRuntime takes — one $ARCTURN_HOME, two serve processes", () => {
+  // Everything above this point drives a `fakeRuntime`, which has no
+  // `resumeSessionAgent` and therefore exercises `serve.ts`'s generic
+  // `Agent.resume` fallback. This one drives the real thing: `buildRuntime`,
+  // its own per-session checkpoint store, its wrapped tool set, and
+  // `ArcturnRuntime.resumeSessionAgent`. Two runtimes over one scratch `home`
+  // is one machine's `~/.arcturn` seen by two processes.
+  it("hands the resumed agent the stored conversation, not a blank one", async () => {
+    const scratch = await makeScratch();
+
+    const before = fakeLLM([{ text: "answered before the restart" }]);
+    const firstRuntime = await buildTestRuntime(scratch, [], { llm: before });
+    const firstServer = new ArcturnServer({ sessionHost: createServeHost(firstRuntime) });
+    servers.push(firstServer);
+    const firstPort = await firstServer.start({ host: "127.0.0.1", port: 0 });
+    let sessionId: string;
+    const firstClient = connect(firstPort);
+    try {
+      const header = await firstClient.createSession({ cwd: firstRuntime.cwd });
+      sessionId = header.sessionId;
+      await firstClient.openSession(sessionId);
+      await firstClient.prompt(sessionId, "REAL-RUNTIME-MARKER");
+    } finally {
+      firstClient.close();
+      await firstServer.stop();
+      await firstRuntime.dispose();
+    }
+
+    const after = fakeLLM([{ text: "answered after the restart" }]);
+    const secondRuntime = await buildTestRuntime(scratch, [], { llm: after });
+    const secondServer = new ArcturnServer({ sessionHost: createServeHost(secondRuntime) });
+    servers.push(secondServer);
+    const secondPort = await secondServer.start({ host: "127.0.0.1", port: 0 });
+    const secondClient = connect(secondPort);
+    let history: SessionHistory;
+    try {
+      await secondClient.openSession(sessionId);
+      history = (await secondClient.sessionHistory(sessionId)) as SessionHistory;
+      await secondClient.prompt(sessionId, "and what did I say before?");
+    } finally {
+      secondClient.close();
+      await secondServer.stop();
+      await secondRuntime.dispose();
+    }
+
+    // The panel...
+    expect(promptTexts(history)).toEqual(["REAL-RUNTIME-MARKER"]);
+    expect(assistantTexts(history)).toEqual(["answered before the restart"]);
+    // ...and the request the model was actually handed. Same conversation.
+    const sent = JSON.stringify(after.requests.at(-1)?.messages ?? []);
+    expect(sent).toContain("REAL-RUNTIME-MARKER");
+    expect(sent).toContain("answered before the restart");
+    expect(sent).toContain("and what did I say before?");
+  });
+
+  it("puts the session's recorded model on the request the resumed agent makes", async () => {
+    const scratch = await makeScratch();
+    // Never called — `fakeLLM` answers whatever spec it is handed — but it has
+    // to be in the catalog for `setModel` to accept the id and for the resume
+    // to resolve it back.
+    const elsewhereSpec = stubSpec("stub-elsewhere/model", "http://127.0.0.1:1/v1");
+    registerModel(elsewhereSpec);
+    try {
+      const before = fakeLLM([{ text: "on the switched model" }]);
+      const firstRuntime = await buildTestRuntime(scratch, [], { llm: before });
+      const firstServer = new ArcturnServer({ sessionHost: createServeHost(firstRuntime) });
+      servers.push(firstServer);
+      const firstPort = await firstServer.start({ host: "127.0.0.1", port: 0 });
+      let sessionId: string;
+      const firstClient = connect(firstPort);
+      try {
+        const header = await firstClient.createSession({ cwd: firstRuntime.cwd });
+        sessionId = header.sessionId;
+        await firstClient.openSession(sessionId);
+        await firstClient.setModel(sessionId, elsewhereSpec.id);
+        await firstClient.prompt(sessionId, "before the restart");
+      } finally {
+        firstClient.close();
+        await firstServer.stop();
+        await firstRuntime.dispose();
+      }
+      expect(before.requests.at(-1)?.model.id).toBe(elsewhereSpec.id);
+
+      const after = fakeLLM([{ text: "still on it" }]);
+      const secondRuntime = await buildTestRuntime(scratch, [], { llm: after });
+      expect(secondRuntime.model.id).not.toBe(elsewhereSpec.id);
+      const secondServer = new ArcturnServer({ sessionHost: createServeHost(secondRuntime) });
+      servers.push(secondServer);
+      const secondPort = await secondServer.start({ host: "127.0.0.1", port: 0 });
+      const secondClient = connect(secondPort);
+      try {
+        await secondClient.openSession(sessionId);
+        await secondClient.prompt(sessionId, "after the restart");
+      } finally {
+        secondClient.close();
+        await secondServer.stop();
+        await secondRuntime.dispose();
+      }
+
+      // The spec on the request, not the id in a response: a `ModelSpec` is
+      // the provider, endpoint and credential the turn actually used, and the
+      // engine came up on a different one.
+      expect(after.requests.at(-1)?.model.id).toBe(elsewhereSpec.id);
+      // The compaction budget travels with it — the agent was constructed for
+      // the model that answers, not for the one the server booted on.
+      expect(after.requests.at(-1)?.model.contextWindow).toBe(elsewhereSpec.contextWindow);
+    } finally {
+      unregisterModel(elsewhereSpec.id);
     }
   });
 });

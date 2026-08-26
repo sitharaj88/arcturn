@@ -464,6 +464,25 @@ export interface ArcturnRuntimeInit {
   onPermissionAsk?: PermissionPrompt;
 }
 
+/**
+ * What {@link ArcturnRuntime.buildSessionAgent} and
+ * {@link ArcturnRuntime.resumeSessionAgent} both take: one session other than
+ * this runtime's own, as `arcturn serve` and `arcturn acp` host several at once.
+ *
+ * Named (rather than written inline twice) because the two methods must agree
+ * field for field — see `#sessionAgentOptions`.
+ */
+export interface SessionAgentSpec {
+  sessionId: string;
+  cwd?: string;
+  model?: ModelSpec;
+  onPermissionAsk?: PermissionPrompt;
+  maxTurns?: number;
+  origin?: string;
+  fixedToolset?: boolean;
+  checkpoints?: CheckpointStore;
+}
+
 /** The assembled agent plus everything the UI and commands need. */
 export class ArcturnRuntime {
   /** The live agent. Replaced by {@link ArcturnRuntime.startNewSession} and friends. */
@@ -863,16 +882,47 @@ export class ArcturnRuntime {
    */
   async #adoptStoredModel(sessionId: string): Promise<void> {
     if (this.modelPinned) return;
+    const spec = await this.#storedSessionModel(sessionId, (id) => getModel(id) ?? undefined);
+    if (spec !== undefined && spec.id !== this.model.id) this.model = spec;
+  }
+
+  /**
+   * The model a stored session was last switched to, resolved to a spec.
+   *
+   * The read half of {@link ArcturnRuntime.#adoptStoredModel}, factored out
+   * because {@link ArcturnRuntime.resumeSessionAgent} needs the same answer and
+   * cannot use the same *action*: the terminal has one agent and can assign the
+   * model to the runtime, while `arcturn serve` hosts many sessions off one
+   * `runtime.model` and must carry each session's model on its own agent.
+   *
+   * Needed *before* the agent is constructed, not after: `Agent.resume` applies
+   * the stored model to the agent it returns, but an agent's compaction budget
+   * is fixed at construction from its model's context window. Letting resume
+   * swap the model afterwards leaves the session compacting to one model's
+   * budget while talking to another — three things disagreeing about one
+   * session, which is what this read exists to prevent.
+   *
+   * @param sessionId - Session to read.
+   * @param resolve - How an id becomes a spec; `undefined` for an id this
+   *   build no longer registers, or one whose provider key is unset.
+   * @returns The spec, or `undefined` when the session records no model, names
+   *   one that will not resolve, or cannot be read at all. Never throws: an
+   *   unreadable session is `Agent.resume`'s problem to report, and it reports
+   *   it better than a half-finished model swap.
+   */
+  async #storedSessionModel(
+    sessionId: string,
+    resolve: (modelId: string) => ModelSpec | undefined,
+  ): Promise<ModelSpec | undefined> {
     try {
       const entries = await this.store.entries(sessionId);
       const leafId = latestEntryId(entries);
-      if (leafId === null) return;
+      if (leafId === null) return undefined;
       const stored = materializeBranch(pathToLeaf(entries, leafId)).model;
-      if (stored === undefined || stored === this.model.id) return;
-      const spec = getModel(stored);
-      if (spec) this.model = spec;
+      if (stored === undefined) return undefined;
+      return resolve(stored);
     } catch {
-      // Unreadable session: leave the model alone and let `resume` speak.
+      return undefined;
     }
   }
 
@@ -1296,16 +1346,72 @@ export class ArcturnRuntime {
    *   half and the reading half are one object rather than two rooted at the
    *   same directory.
    */
-  buildSessionAgent(options: {
-    sessionId: string;
-    cwd?: string;
-    model?: ModelSpec;
-    onPermissionAsk?: PermissionPrompt;
-    maxTurns?: number;
-    origin?: string;
-    fixedToolset?: boolean;
-    checkpoints?: CheckpointStore;
-  }): Agent {
+  buildSessionAgent(options: SessionAgentSpec): Agent {
+    return this.#adoptSessionAgent(
+      options.sessionId,
+      new Agent(this.#sessionAgentOptions(options)),
+    );
+  }
+
+  /**
+   * Rebuild the agent for a session **that already exists on disk** — the
+   * resuming twin of {@link ArcturnRuntime.buildSessionAgent}, and what
+   * `arcturn serve`'s `openSession` calls.
+   *
+   * Same isolation as its twin (its own checkpoint store, its own permission
+   * requester, its own audit log) and the same `Agent.resume` the terminal's
+   * `--continue`/`--resume`/`/sessions` route through — one resumer, not a
+   * second one. Without it, re-attaching to a stored session built a *fresh*
+   * `Agent` on the same session id: the panel showed an empty transcript and,
+   * worse, the model was asked to continue a conversation it had never been
+   * shown. Both halves are this one call.
+   *
+   * @param options - Everything {@link ArcturnRuntime.buildSessionAgent} takes,
+   *   plus `resolveModel`.
+   * @param options.resolveModel - How the model id recorded in the session file
+   *   becomes a spec. Supply the *same* resolver the host uses for its other
+   *   model routes (`arcturn serve` passes the one behind `createSession` and
+   *   `setModel`), so a session's restored model resolves to the same provider,
+   *   endpoint and credential a freshly picked one would. Returning `undefined`
+   *   — an id this build no longer registers, or one whose key is unset —
+   *   leaves the session on the host's default rather than failing the attach.
+   *
+   *   Ignored when the caller names a `model` of its own, and when this runtime
+   *   was started with an explicit `--model` ({@link ArcturnRuntime.modelPinned}):
+   *   a flag typed for THIS invocation outranks a choice recorded in a file,
+   *   exactly as it does for `--resume`.
+   */
+  async resumeSessionAgent(
+    options: SessionAgentSpec & { resolveModel?: (modelId: string) => ModelSpec | undefined },
+  ): Promise<Agent> {
+    const { resolveModel, ...spec } = options;
+    const restore = spec.model !== undefined || this.modelPinned ? undefined : resolveModel;
+    const stored =
+      restore === undefined ? undefined : await this.#storedSessionModel(spec.sessionId, restore);
+    const agent = await Agent.resume({
+      // The stored model goes in through the *options*, not only through
+      // `resolveModel`, so the compaction budget derived here is the budget of
+      // the model that will actually answer. See `#storedSessionModel`.
+      ...this.#sessionAgentOptions(stored === undefined ? spec : { ...spec, model: stored }),
+      sessionStore: this.store,
+      sessionId: spec.sessionId,
+      ...(restore === undefined ? {} : { resolveModel: restore }),
+    });
+    return this.#adoptSessionAgent(spec.sessionId, agent);
+  }
+
+  /**
+   * The full {@link AgentOptions} for one non-runtime session agent, shared by
+   * {@link ArcturnRuntime.buildSessionAgent} and
+   * {@link ArcturnRuntime.resumeSessionAgent}.
+   *
+   * One assembly rather than two: a resumed session that got a *different*
+   * tool set, permission mode or checkpoint store from a freshly built one
+   * would be a second, quieter agent configuration that only appears after a
+   * restart — the hardest kind to notice and the kind this repo has already
+   * been bitten by.
+   */
+  #sessionAgentOptions(options: SessionAgentSpec): AgentOptions {
     const checkpoints =
       options.checkpoints ??
       createCheckpointStore(join(this.paths.home, "checkpoints", options.sessionId), {
@@ -1320,7 +1426,7 @@ export class ArcturnRuntime {
       },
       checkpoints,
     );
-    const agent = new Agent({
+    return {
       ...base,
       ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
       ...(options.model === undefined
@@ -1334,12 +1440,16 @@ export class ArcturnRuntime {
             ),
           }
         : {}),
-    });
+    };
+  }
+
+  /** Finish a session agent: the audit trail, for both construction routes. */
+  #adoptSessionAgent(sessionId: string, agent: Agent): Agent {
     // Served sessions are driven by a remote client, so their tool calls are
     // exactly the ones an operator most needs in the trail. `subscribe` only
     // sees this runtime's own agent, so the observer is attached directly.
     if (this.#openAudit) {
-      const log = this.#openAudit(options.sessionId);
+      const log = this.#openAudit(sessionId);
       agent.subscribe(auditObserver(log));
     }
     return agent;

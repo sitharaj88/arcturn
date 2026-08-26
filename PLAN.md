@@ -313,19 +313,37 @@ process-wide mutation racing every other hosted session — so it is recorded
 rather than half-fixed.
 
 
-**Narrowed (2026-08-26).** The core resolver now exists:
+**Closed (2026-08-27).** The core resolver exists:
 `Agent.resume` takes an optional `resolveModel(id)` and applies `state.model`
 through it, and `ArcturnRuntime.resumeSession` passes the catalog plus adopts
 the model onto the runtime itself (so the compaction budget and the cost
 readout agree with the provider that answers). An explicit `--model` still
-wins — `runtime.modelPinned`. `--continue`, `--resume` and `/sessions` are
-all fixed. What remains is **`arcturn serve` only**: `openSession` builds its
-agent through `buildSessionAgent`, not `Agent.resume`, so a re-attached served
-session is still a silent model change. The fix is to route the same
-`#adoptStoredModel` read into the session-agent path — but a served runtime
-hosts many sessions off one `runtime.model`, so it cannot simply assign to it
-the way the single-session terminal does; the model has to travel on the
-session agent instead. Recorded rather than half-fixed for that reason.
+wins — `runtime.modelPinned`. `--continue`, `--resume` and `/sessions` were
+fixed first; **`arcturn serve` now is too**.
+
+The serve half turned out not to be a model bug with a transcript bug beside
+it. `openSession` built its agent through `buildSessionAgent` and never
+resumed at all, so re-attaching to a stored session in a fresh process gave a
+blank agent on the same session id: the panel replayed nothing (the live
+agent's `leafEntryId` was `null`, which `sessionHistory` reads — correctly —
+as an empty branch) *and* the model was asked to continue a conversation it
+had never been shown, with the wrong model. One `Agent.resume` fixes all
+three, because all three read the same branch.
+
+What made it unfixable before was a type, not a design: `agentFactory`
+returned a bare `Agent`, and the only thing a synchronous factory can do with
+an existing session id is start it over. `SessionHostOptions.agentFactory` now
+returns `Agent | Promise<Agent>` and `AgentFactoryOptions` carries `resume`,
+set by `openSession` and never by `createSession` (whose store record does not
+exist yet when the factory runs). `ArcturnRuntime.resumeSessionAgent` is the
+resuming twin of `buildSessionAgent` — same shared option assembly, so a
+resumed session cannot drift into a quieter configuration than a fresh one —
+and it takes the resolver `createSession`/`setModel` already use. The model
+travels on the session agent, as this entry predicted it would have to: a
+served runtime hosts many sessions off one `runtime.model` and cannot assign
+to it the way the single-session terminal does. `#adoptStoredModel`'s read is
+shared rather than duplicated (`#storedSessionModel`), and it runs *before*
+construction so the compaction budget belongs to the model that answers.
 
 Two hazards in `/rewind`'s coverage, characterised while writing the
 round-trip suite and deliberately not fixed:

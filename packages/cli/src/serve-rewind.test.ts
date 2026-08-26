@@ -196,8 +196,14 @@ describe("rewindTo — the files actually move", () => {
     const before = await harness.client.sessionHistory(harness.sessionId);
     expect(JSON.stringify(before?.events)).toContain("create a new file");
 
+    // The SECOND turn — so the first one is kept, and the replay has something
+    // it must still contain. Rewinding to the first turn instead leaves an
+    // empty branch, and an empty transcript satisfies "the abandoned turn is
+    // gone" whether or not anything was replayed at all: this test asserted
+    // only absences for exactly that reason and passed while the fork replayed
+    // nothing. Absence without presence is not a transcript assertion.
     const list = await harness.client.listCheckpoints(harness.sessionId);
-    const target = list?.checkpoints[1];
+    const target = list?.checkpoints[0];
     if (target === undefined) throw new Error("expected two checkpoints");
     await harness.client.rewindTo(harness.sessionId, target.id, target.confirmation);
 
@@ -207,14 +213,50 @@ describe("rewindTo — the files actually move", () => {
     // which is what makes a rewind non-destructive.
     const after = await harness.client.sessionHistory(harness.sessionId);
     const replayed = JSON.stringify(after?.events);
+    expect(replayed).toContain("change the existing file");
+    expect(replayed).toContain("changed it");
     expect(replayed).not.toContain("create a new file");
-    expect(replayed).not.toContain("change the existing file");
+    expect(replayed).not.toContain("created it");
 
     // Every attached connection is told, not just the one that asked.
     const notice = harness.events.find(
       (event) => event.type === "notice" && /rewound to an earlier turn/i.test(event.text),
     );
     expect(notice).toBeDefined();
+  });
+
+  it("replays an empty transcript when the fork goes back past the first message", async () => {
+    const scratch = await makeScratch();
+    await writeFile(join(scratch.cwd, "existing.ts"), "original\n", "utf8");
+    const harness = await serve(scratch, twoTurnScript(scratch.cwd));
+
+    await harness.client.prompt(harness.sessionId, "change the existing file");
+    await harness.client.prompt(harness.sessionId, "create a new file");
+
+    // Rewinding to the FIRST turn forks to before the root, and the agent that
+    // comes back genuinely remembers nothing — `leafEntryId` is `null` and it
+    // means an empty branch, not "I do not have a leaf". That distinction is
+    // load-bearing: reading `null` as "fall back to the newest entry in the
+    // file" would replay the whole abandoned conversation here, and it is the
+    // tempting way to make a session re-attached in a fresh process replay.
+    // The right fix for that one is to resume the agent (see `serve.test.ts`),
+    // which gives it a real leaf and leaves this case alone.
+    const list = await harness.client.listCheckpoints(harness.sessionId);
+    const target = list?.checkpoints[1];
+    if (target === undefined) throw new Error("expected two checkpoints");
+    await harness.client.rewindTo(harness.sessionId, target.id, target.confirmation);
+
+    const after = await harness.client.sessionHistory(harness.sessionId);
+    expect(after?.events).toEqual([]);
+
+    // Empty because the branch is empty, not because the replay gave up: the
+    // very next turn appears in it, alone.
+    await harness.client.prompt(harness.sessionId, "starting over");
+    const restarted = await harness.client.sessionHistory(harness.sessionId);
+    const replayed = JSON.stringify(restarted?.events);
+    expect(replayed).toContain("starting over");
+    expect(replayed).not.toContain("change the existing file");
+    expect(replayed).not.toContain("create a new file");
   });
 
   it("keeps running turns after the fork, so the next rewind is still possible", async () => {

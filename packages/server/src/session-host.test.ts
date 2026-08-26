@@ -688,3 +688,122 @@ describe("SessionHost.deleteSession", () => {
     expect(() => host.abort(header.sessionId)).toThrow(SessionHostError);
   });
 });
+
+describe("openSession: build once, resume once, rebuild never", () => {
+  /**
+   * A host whose factory records every call and can be made slow, so "how many
+   * agents were built for this session" is a direct read rather than an
+   * inference from behaviour.
+   */
+  function recordingHost(store: MemorySessionStore, delayMs = 0) {
+    const calls: Array<{ sessionId: string; resume: boolean | undefined }> = [];
+    const host = new SessionHost({
+      agentFactory: async (opts) => {
+        calls.push({ sessionId: opts.sessionId, resume: opts.resume });
+        if (delayMs > 0) await new Promise((done) => setTimeout(done, delayMs));
+        return new Agent({
+          llm: createScriptedLLM([textTurn("hi"), textTurn("hi again")]),
+          model: TEST_MODEL,
+          systemPrompt: "test",
+          cwd: opts.cwd,
+          sessionId: opts.sessionId,
+          sessionStore: store,
+        });
+      },
+      sessionStore: store,
+      defaultCwd: "/tmp/arcturn-test",
+    });
+    return { host, calls };
+  }
+
+  it("asks for a resume when re-attaching, and never when creating", async () => {
+    const store = new MemorySessionStore();
+    const first = recordingHost(store);
+    const created = await first.host.createSession({});
+    // A brand-new session cannot be resumed: its store record does not exist
+    // yet when the factory runs.
+    expect(first.calls).toEqual([{ sessionId: created.sessionId, resume: undefined }]);
+
+    // A second process over the same store: the only thing that can rebuild
+    // the conversation is the factory, so the host has to say that it must.
+    const second = recordingHost(store);
+    await second.host.openSession(created.sessionId);
+    expect(second.calls).toEqual([{ sessionId: created.sessionId, resume: true }]);
+  });
+
+  it("returns the live session untouched rather than rebuilding it", async () => {
+    const store = new MemorySessionStore();
+    const { host, calls } = recordingHost(store);
+    const created = await host.createSession({});
+
+    // Subscribed to the agent this host is holding *now*. A rebuild would
+    // register a new live session with a new observer set, and this listener
+    // would go on watching an orphan.
+    const events: AgentEvent[] = [];
+    host.observe(created.sessionId, (event) => events.push(event));
+
+    const reopened = await host.openSession(created.sessionId);
+    expect(reopened).toEqual(created);
+    expect(calls).toHaveLength(1);
+
+    await host.prompt(created.sessionId, "still there?");
+    expect(events.map((event) => event.type)).toContain("runEnd");
+  });
+
+  it("hands two simultaneous attaches the same agent, not one each", async () => {
+    const store = new MemorySessionStore();
+    const created = await recordingHost(store).host.createSession({});
+
+    // Resuming reads and materializes a whole stored branch, so "already live"
+    // has to include "being built right now" — otherwise two clients opening
+    // the same session in the same tick each get an agent, both appending to
+    // one session file, and only one of them is reachable.
+    const { host, calls } = recordingHost(store, 20);
+    const [a, b] = await Promise.all([
+      host.openSession(created.sessionId),
+      host.openSession(created.sessionId),
+    ]);
+    expect(a).toEqual(b);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("builds nothing at all for an id the store has never seen", async () => {
+    const store = new MemorySessionStore();
+    const { host, calls } = recordingHost(store);
+    await expect(host.openSession("sess_never_created")).rejects.toMatchObject({
+      code: "sessionNotFound",
+    });
+    // Not merely an error in the response: minting an empty session under an
+    // id nobody created would hand a client a live, writable session whose
+    // name it invented.
+    expect(calls).toEqual([]);
+    await expect(host.listSessions()).resolves.toEqual([]);
+  });
+
+  it("forgets a failed open, so the next attempt is tried rather than replayed", async () => {
+    const store = new MemorySessionStore();
+    const created = await recordingHost(store).host.createSession({});
+    let fail = true;
+    const host = new SessionHost({
+      agentFactory: (opts) => {
+        if (fail) throw new Error("resume blew up");
+        return new Agent({
+          llm: createScriptedLLM([textTurn("hi")]),
+          model: TEST_MODEL,
+          systemPrompt: "test",
+          cwd: opts.cwd,
+          sessionId: opts.sessionId,
+          sessionStore: store,
+        });
+      },
+      sessionStore: store,
+      defaultCwd: "/tmp/arcturn-test",
+    });
+
+    await expect(host.openSession(created.sessionId)).rejects.toThrow(/resume blew up/);
+    fail = false;
+    await expect(host.openSession(created.sessionId)).resolves.toMatchObject({
+      sessionId: created.sessionId,
+    });
+  });
+});

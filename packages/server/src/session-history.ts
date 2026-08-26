@@ -219,9 +219,22 @@ export function capSessionEvents(
  * @param entries - Every entry of the session, in append order.
  * @param limits - Cap overrides; see {@link SessionHistoryLimits}.
  * @param leafId - Branch tip to replay to; see {@link projectSessionEvents}.
- *   Pass a live agent's `leafEntryId` so a session forked by `rewindTo` — which
- *   appends nothing — replays the branch it is now on rather than the one it
- *   left.
+ *   Three distinct answers, and conflating any pair of them is a bug:
+ *   `undefined` means "no live agent here", so the file's newest entry wins;
+ *   an id means "the live agent is on this tip", which is how a session forked
+ *   by `rewindTo` — which appends nothing — replays the branch it is now on
+ *   rather than the one it left; `null` means "the live agent is on an *empty*
+ *   branch", which `rewindTo` also creates when it forks past the very first
+ *   message, and which must replay nothing rather than falling back to the
+ *   stored tip.
+ *
+ *   A session re-attached in a fresh process is deliberately not a fourth
+ *   case. Its agent has appended nothing either, but `arcturn serve` resumes
+ *   it through `Agent.resume`, which sets `parentEntryId` to the stored tip —
+ *   so its leaf is a real id and this function never has to guess which kind
+ *   of empty a `null` is. Reading `null` as "I do not have one" here would fix
+ *   an unresumed attach by breaking the fork-to-root case; the fix belongs in
+ *   the composition root that builds the agent, not in the projection.
  */
 export function buildSessionHistory(
   sessionId: string,

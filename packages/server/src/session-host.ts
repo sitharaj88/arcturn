@@ -120,6 +120,27 @@ export interface AgentFactoryOptions {
   sessionId: string;
   cwd: string;
   model?: string;
+  /**
+   * Whether this session **already exists** in the shared store and its
+   * conversation must be rebuilt (`Agent.resume`), rather than started empty.
+   *
+   * `true` only from {@link SessionHost.openSession}, and only for a session
+   * this process is not already holding live;
+   * {@link SessionHost.createSession} never sets it, because the store record
+   * does not exist yet when the factory runs (the header is written *after*
+   * the agent is built, so a failed build leaves no orphan session behind).
+   *
+   * A flag rather than "let the factory look" because the factory cannot tell
+   * the two apart from the store: a brand-new session and a session whose file
+   * has no entries yet read identically, and probing would race the very
+   * `create` call that is about to happen. This host knows which verb it is
+   * serving; it says so.
+   *
+   * Ignoring it is allowed and is exactly the pre-existing behaviour — a fresh,
+   * empty `Agent` on a session id with hours of conversation behind it, which
+   * is the bug the flag exists to let a factory avoid.
+   */
+  resume?: boolean;
 }
 
 /** Construction options for {@link SessionHost}. */
@@ -131,8 +152,17 @@ export interface SessionHostOptions {
    * `sessionStore` is shared between the factory and this host, resuming a
    * previously-created session is the factory's responsibility (e.g. via
    * `Agent.resume`) — `SessionHost` only tracks liveness and fans out events.
+   * {@link AgentFactoryOptions.resume} is how this host tells the factory
+   * which of the two it is being asked for.
+   *
+   * May return a promise, and must be able to: rebuilding a stored branch
+   * means reading the session file, which is asynchronous. The documented
+   * contract above ("the factory resumes") was not *reachable* while this
+   * returned a bare `Agent` — the only thing a synchronous factory can do with
+   * an existing session id is start it over — which is why `arcturn serve`
+   * silently re-opened every session as a blank chat.
    */
-  agentFactory: (opts: AgentFactoryOptions) => Agent;
+  agentFactory: (opts: AgentFactoryOptions) => Agent | Promise<Agent>;
   /**
    * Backing store used to persist and list session headers. Optional: without
    * one, `SessionHost` only knows about sessions created or opened during the
@@ -590,7 +620,7 @@ interface LiveSession {
 
 /** Manages live agent sessions and fans out their events to observers. */
 export class SessionHost {
-  readonly #agentFactory: (opts: AgentFactoryOptions) => Agent;
+  readonly #agentFactory: (opts: AgentFactoryOptions) => Agent | Promise<Agent>;
   readonly #sessionStore: SessionStore | undefined;
   readonly #defaultCwd: string;
   readonly #cwdRoot: string;
@@ -625,6 +655,23 @@ export class SessionHost {
    */
   readonly #workflowRuns = new Map<string, Set<AbortController>>();
   readonly #sessions = new Map<string, LiveSession>();
+  /**
+   * `openSession` calls that have not finished building their agent yet, by
+   * session id.
+   *
+   * Attaching is no longer a `Map.get` away from done: resuming a session
+   * reads and materializes its whole stored branch, so two clients opening the
+   * same session id at the same moment would both miss `#sessions`, both build
+   * an agent, and both register one — two live agents over one session file,
+   * one of them unreachable but still appending, and every observer attached
+   * to whichever won the map. Sharing the in-flight promise makes the second
+   * caller wait for the first caller's agent, which is the same answer it
+   * would have got a millisecond later.
+   *
+   * The entry is removed when the open settles, so a failed open is retried
+   * rather than remembered.
+   */
+  readonly #opening = new Map<string, Promise<SessionHeader>>();
 
   constructor(options: SessionHostOptions) {
     this.#agentFactory = options.agentFactory;
@@ -788,6 +835,14 @@ export class SessionHost {
     // and appends nothing, so until the next turn the newest entry is the tip
     // of the branch the fork walked away from. Replaying that would hand a
     // client the pre-rewind conversation and call it the transcript.
+    //
+    // This is only sound because a live agent's leaf is *authoritative*, which
+    // in turn is only true because `openSession` resumes: a re-attached agent
+    // that had been rebuilt empty reports `leafEntryId === null`, and `null` is
+    // a real answer here (`rewindTo` past the first message forks to an empty
+    // branch), not a missing one. Teaching this call to second-guess a `null`
+    // would trade a rewind bug for a restart bug; resuming removes both,
+    // because the agent and this replay then read the same branch.
     const live = this.#sessions.get(sessionId);
     const history = buildSessionHistory(
       sessionId,
@@ -890,7 +945,7 @@ export class SessionHost {
     this.#checkSessionCapacity();
     const cwd = this.#resolveSessionCwd(params.cwd);
     const sessionId = createSessionId();
-    const agent = this.#agentFactory({
+    const agent = await this.#agentFactory({
       sessionId,
       cwd,
       ...(params.model === undefined ? {} : { model: params.model }),
@@ -905,8 +960,28 @@ export class SessionHost {
   }
 
   /**
-   * Re-attach to an existing session, creating its live agent via
+   * Re-attach to an existing session, resuming its live agent via
    * `agentFactory` if it is not already running in this process.
+   *
+   * ## Already live in this process
+   *
+   * The existing header is returned and **nothing is rebuilt**. That is not an
+   * optimization: the live agent may be mid-turn, holding steering messages, a
+   * pending permission ask, an in-flight tool call, and a conversation that has
+   * not been appended to the store yet. Re-resuming it from disk would drop all
+   * of that on the floor, and the second client — a second VS Code window
+   * opening the same session — would be the one that caused it, invisibly, for
+   * the first. Two clients on one session share one agent; that is what makes
+   * `observe` a fan-out rather than a race. An in-flight open counts as live
+   * for this purpose (see `#opening`), so two simultaneous attaches also end up
+   * on one agent rather than two.
+   *
+   * ## Not in the store
+   *
+   * `sessionNotFound`, and no agent is built. Minting an empty session under an
+   * id nobody created would hand a client a working, writable session whose
+   * name it invented — the store, not this host, is what decides that a session
+   * exists, and a typo'd id must fail rather than quietly become real.
    *
    * @throws {SessionHostError} with code `sessionNotFound` when the session
    *   is neither live nor known to `sessionStore`.
@@ -914,6 +989,18 @@ export class SessionHost {
   async openSession(sessionId: string): Promise<SessionHeader> {
     const existing = this.#sessions.get(sessionId);
     if (existing) return existing.header;
+    const inFlight = this.#opening.get(sessionId);
+    if (inFlight) return inFlight;
+
+    const opening = this.#openSession(sessionId).finally(() => {
+      this.#opening.delete(sessionId);
+    });
+    this.#opening.set(sessionId, opening);
+    return opening;
+  }
+
+  /** {@link SessionHost.openSession}'s body, run at most once per session id. */
+  async #openSession(sessionId: string): Promise<SessionHeader> {
     this.#checkSessionCapacity();
 
     if (!this.#sessionStore) {
@@ -926,7 +1013,12 @@ export class SessionHost {
       throw new SessionHostError("sessionNotFound", `Session ${sessionId} does not exist`);
     }
 
-    const agent = this.#agentFactory({ sessionId, cwd: header.cwd });
+    // `resume: true` is the whole fix for "reopening an old session gives a
+    // plain chat". The factory is the only thing that can rebuild the
+    // conversation — it is the composition root and holds the full
+    // `AgentOptions` this host is deliberately not given — so this says which
+    // of the two agents it is being asked for and lets it answer.
+    const agent = await this.#agentFactory({ sessionId, cwd: header.cwd, resume: true });
     this.#register(header, agent);
     return header;
   }
