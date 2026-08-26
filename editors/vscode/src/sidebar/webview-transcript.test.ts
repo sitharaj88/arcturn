@@ -10,7 +10,7 @@ import type { ChatBlock, ToolBlock, ToolStatus } from "./chat-state.js";
 import { type ToolIcon, TRANSCRIPT_SOURCE, type Turn } from "./webview-transcript.js";
 
 const api = new Function(
-  `${TRANSCRIPT_SOURCE}\nreturn { groupTurns, toolSummary, toolStatusLabel, toolIcon, showWorking, toolGroup };`,
+  `${TRANSCRIPT_SOURCE}\nreturn { groupTurns, toolSummary, toolStatusLabel, toolIcon, showWorking, toolGroup, toolDiff, formatElapsed };`,
 )() as {
   groupTurns: (blocks: readonly ChatBlock[]) => Turn[];
   toolSummary: (argsText: string) => string;
@@ -18,6 +18,16 @@ const api = new Function(
   toolIcon: (name: string) => ToolIcon;
   showWorking: (blocks: readonly ChatBlock[], running: boolean) => boolean;
   toolGroup: (before: string, after: string) => string;
+  toolDiff: (
+    argsText: string,
+    complete: boolean,
+  ) => {
+    label: string;
+    lines: { sign: string; text: string }[];
+    hidden: number;
+    rest: string;
+  } | null;
+  formatElapsed: (ms: number) => string;
 };
 
 function user(id: string): ChatBlock {
@@ -203,5 +213,107 @@ describe("toolGroup", () => {
     expect(api.toolGroup("text", "tool")).toBe("first");
     expect(api.toolGroup("tool", "tool")).toBe("mid");
     expect(api.toolGroup("tool", "text")).toBe("last");
+  });
+});
+
+describe("toolDiff", () => {
+  const edit = (extra: Record<string, unknown> = {}) =>
+    JSON.stringify({ path: "a.ts", oldText: "one\ntwo", newText: "one\nTWO", ...extra });
+
+  it("draws an edit as removed lines above added ones", () => {
+    // The whole point: JSON.stringify puts both versions on one line with the
+    // newlines as backslash-n, and that is what a reader was being shown.
+    const change = api.toolDiff(edit(), true);
+    expect(change?.label).toBe("Change");
+    expect(change?.lines).toEqual([
+      { sign: "-", text: "one" },
+      { sign: "-", text: "two" },
+      { sign: "+", text: "one" },
+      { sign: "+", text: "TWO" },
+    ]);
+  });
+
+  it("keeps every argument the diff did not consume", () => {
+    // An edit reviewed with replaceAll hidden is worse than the raw JSON was:
+    // one is hard to read, the other is missing the thing that changes what
+    // the call does.
+    const change = api.toolDiff(edit({ replaceAll: true }), true);
+    expect(JSON.parse(change?.rest ?? "{}")).toEqual({ path: "a.ts", replaceAll: true });
+  });
+
+  it("refuses to draw a change out of arguments that are still arriving", () => {
+    // Half a newText is a change nobody is making. Mid-stream the fragment
+    // does not parse anyway, but the flag is what makes the refusal true even
+    // for a prefix that happens to be valid JSON on its own.
+    const partial = '{"path":"a.ts","oldText":"one","newText":"on';
+    expect(api.toolDiff(partial, true)).toBeNull();
+    expect(api.toolDiff(edit(), false)).toBeNull();
+  });
+
+  it("returns nothing for a tool whose arguments are not a change", () => {
+    expect(api.toolDiff(JSON.stringify({ command: "ls -la" }), true)).toBeNull();
+    expect(api.toolDiff("not json", true)).toBeNull();
+    expect(api.toolDiff(JSON.stringify(["a", "b"]), true)).toBeNull();
+    // A no-op edit is not a diff: two identical sides would draw every line
+    // as both removed and added.
+    expect(
+      api.toolDiff(JSON.stringify({ path: "a.ts", oldText: "x", newText: "x" }), true),
+    ).toBeNull();
+  });
+
+  it("draws a lone body of text unsigned, because there is nothing to contrast it with", () => {
+    // Green means "added, as against that red". With one side it is only
+    // decoration, and on an unrecognised MCP tool it would be a claim the
+    // panel has no basis for.
+    const written = api.toolDiff(JSON.stringify({ path: "new.ts", content: "a\nb\n" }), true);
+    expect(written?.label).toBe("Content");
+    expect(written?.lines).toEqual([
+      { sign: "", text: "a" },
+      { sign: "", text: "b" },
+    ]);
+  });
+
+  it("caps the lines it draws and says how many it left out", () => {
+    // Stopping at 400 lines in silence reads as a complete change that is
+    // exactly 400 lines long.
+    const body = Array.from({ length: 450 }, (_, i) => `line ${i}`).join("\n");
+    const written = api.toolDiff(JSON.stringify({ path: "big.ts", content: body }), true);
+    expect(written?.lines).toHaveLength(400);
+    expect(written?.hidden).toBe(50);
+  });
+
+  it("reads the spellings other engines and MCP servers use", () => {
+    // The panel renders whatever engine it is pointed at, not only its own
+    // tools, and old_string/new_string is the other common spelling.
+    const change = api.toolDiff(
+      JSON.stringify({ file_path: "a.ts", old_string: "x", new_string: "y" }),
+      true,
+    );
+    expect(change?.lines).toEqual([
+      { sign: "-", text: "x" },
+      { sign: "+", text: "y" },
+    ]);
+  });
+});
+
+describe("formatElapsed", () => {
+  it("uses the coarsest unit that still says something", () => {
+    expect(api.formatElapsed(0)).toBe("0ms");
+    expect(api.formatElapsed(940)).toBe("940ms");
+    expect(api.formatElapsed(4_200)).toBe("4.2s");
+    expect(api.formatElapsed(42_000)).toBe("42s");
+    expect(api.formatElapsed(94_523)).toBe("1m 35s");
+    expect(api.formatElapsed(3_600_000)).toBe("1h 0m");
+  });
+
+  it("carries instead of printing a sixtieth second", () => {
+    // 119.6s rounds to 60 seconds past the first minute, which is 2m 0s.
+    expect(api.formatElapsed(119_600)).toBe("2m 0s");
+  });
+
+  it("says nothing rather than printing a placeholder time", () => {
+    expect(api.formatElapsed(Number.NaN)).toBe("");
+    expect(api.formatElapsed(-1)).toBe("");
+    expect(api.formatElapsed(Number.POSITIVE_INFINITY)).toBe("");
   });
 });

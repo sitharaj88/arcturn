@@ -284,24 +284,116 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
   padding: 4px 0 12px;
   outline-offset: -2px;
 }
-.turn { position: relative; padding: 8px 12px; }
-.turn + .turn { border-top: 1px solid var(--arc-border); }
-.turn + .turn { border-top-color: color-mix(in srgb, var(--arc-border) 60%, transparent); }
-.turn-user { background: var(--arc-surface); }
-.turn-head {
+/*
+ * Who spoke is carried by shape, not by a caption.
+ *
+ * This replaced a YOU / ARCTURN header on every single turn, for two reasons.
+ * A caption above every message is chrome the eye has to step over on the way
+ * to the content, twice per exchange, forever. And in a 380px sidebar the
+ * answer needs the full width: code, diffs and tool rows all lose more to a
+ * label column than the label was ever worth. The name is not gone, it moved
+ * to aria-label on the section, where a screen reader still announces it and
+ * a sighted reader is not charged for it.
+ */
+.turn { position: relative; padding: 2px 12px; }
+.turn-user { padding-top: 14px; }
+.turn-assistant { padding-bottom: 16px; }
+.turn-user .turn-body {
+  padding: 8px 10px;
+  border: 1px solid var(--arc-border);
+  border-radius: 10px;
+  background: var(--arc-surface);
+}
+.turn-body > * + * { margin-top: 6px; }
+/*
+ * The answer, set apart from the working.
+ *
+ * Narration, six tool cards and the conclusion all sat on the same 6px, so
+ * the eye had nothing to aim at and re-read the tool stack looking for the
+ * point. This is rhythm rather than decoration: no new colour, no new weight,
+ * just the gap that says the run finished and this is what came of it.
+ */
+.turn-assistant .turn-body > .text-block:last-child:not(:first-child) { margin-top: 12px; }
+
+/*
+ * The end of a turn, said once and left there.
+ *
+ * The hairline sweep underneath is a moment; this is the record. The time is
+ * only ever the time this panel watched pass: a turn replayed out of session
+ * history was never observed running here, so it says "Done" and stops rather
+ * than inventing a number that would look exactly as authoritative.
+ */
+.turn-foot {
   display: flex;
   align-items: center;
-  gap: 6px;
-  margin-bottom: 4px;
-  font-size: 0.8em;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  gap: 2px;
+  margin-top: 10px;
+  font-size: 0.85em;
   color: var(--arc-muted);
 }
-.turn-user .turn-head { color: var(--vscode-foreground); }
-.turn-assistant .avatar { color: var(--arc-brand); }
-.turn-body > * + * { margin-top: 6px; }
+.turn-time { flex: none; }
+.turn-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  color: var(--arc-muted);
+  font-size: inherit;
+  opacity: 0;
+  transition: opacity 120ms ease, color 120ms ease;
+}
+.turn:hover .turn-copy, .turn-copy:focus-visible { opacity: 1; }
+.turn-copy:hover {
+  color: var(--vscode-foreground);
+  background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
+}
+.turn-copy svg { width: 13px; height: 13px; }
+
+/*
+ * An edit, as the change it makes.
+ *
+ * Removed above added, tinted out of the theme's own pass and fail colours so
+ * it survives a light editor, and with the sign kept in the gutter as well as
+ * the tint so it still reads when the colour does not — on a colour-blind
+ * reader, in high contrast, or in a screenshot.
+ */
+.diff {
+  margin: 0;
+  max-height: 22em;
+  overflow: auto;
+  border-radius: 4px;
+  background: var(--arc-code-bg);
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.86em;
+  line-height: 1.5;
+}
+/* A blank line in a diff is a line: it keeps its row rather than collapsing. */
+.diff-line { display: flex; align-items: baseline; min-height: 1.5em; }
+.diff-sign {
+  flex: none;
+  width: 1.3em;
+  padding-left: 5px;
+  color: var(--arc-muted);
+  user-select: none;
+}
+.diff-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding-right: 6px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.diff-del { background: color-mix(in srgb, var(--arc-err) 14%, transparent); }
+.diff-del .diff-sign { color: var(--arc-err); }
+.diff-add { background: color-mix(in srgb, var(--arc-ok) 14%, transparent); }
+.diff-add .diff-sign { color: var(--arc-ok); }
+.diff-more {
+  display: block;
+  padding: 4px 8px 5px;
+  color: var(--arc-muted);
+  font-style: italic;
+}
 .block-user { white-space: pre-wrap; overflow-wrap: anywhere; }
 
 /* markdown */
@@ -338,9 +430,14 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
  */
 .md code.inline {
   padding: 0.05em 0.35em;
-  border: 1px solid color-mix(in srgb, var(--arc-border) 60%, transparent);
+  border: 1px solid color-mix(in srgb, var(--arc-border) 45%, transparent);
   border-radius: 3px;
-  background: var(--arc-code-bg);
+  /*
+   * Half-strength fill. At full strength this is a solid dark slab inside a
+   * sentence, and a file path mentioned in passing ends up drawn heavier than
+   * the send button — a phrase should not outrank a control.
+   */
+  background: color-mix(in srgb, var(--arc-code-bg) 55%, transparent);
   font-family: var(--vscode-editor-font-family);
   font-size: 0.92em;
   overflow-wrap: anywhere;
@@ -2035,6 +2132,18 @@ const CLIENT_SOURCE = String.raw`
   var hydrated = false;
   var wasRunning = false;
   var lastAssistantTurn = null;
+  // When this panel saw the current turn start, or 0 for a turn it never saw
+  // start — a session reopened from history is already finished when it
+  // arrives, and the footer says so instead of timing the reload.
+  var runStartedAt = 0;
+  // Whether this panel has ever seen the engine idle.
+  //
+  // Until it has, a turn that is running is a turn that started before the
+  // panel was looking. Timing it from the moment of attach would put a number
+  // on the screen that reads exactly like a measurement and is off by however
+  // long the turn had already been going — the one case where saying nothing
+  // is more informative than saying something.
+  var seenIdle = false;
 
   /* ---- header, cost, session ----------------------------------------- */
 
@@ -2049,8 +2158,11 @@ const CLIENT_SOURCE = String.raw`
     if (sessionId !== shownSessionId) hydrated = false;
     shownSessionId = sessionId;
     sessionTitle.textContent = title && title !== "" ? title : "Arcturn";
+    // The folder, not the id. A ULID is the first thing a reader's eye lands
+    // on under the title and the last thing it can use — what they actually
+    // want to confirm is which workspace this session is touching. The id is
+    // still one hover away, on the title attribute below.
     var sub = [];
-    if (sessionId) sub.push(sessionId.length > 12 ? sessionId.slice(0, 8) : sessionId);
     if (cwd) sub.push(cwd.replace(/\\/g, "/").split("/").filter(Boolean).pop() || cwd);
     sessionSub.textContent = sub.join(" · ");
     sessionSub.title = [title || "", sessionId || "", cwd || ""].filter(Boolean).join("\n");
@@ -2229,6 +2341,26 @@ const CLIENT_SOURCE = String.raw`
     return { el: wrap, head: head, iconSlot: iconSlot, name: name, summary: summary, badge: badge, body: body };
   }
 
+  function buildDiff(lines, hidden) {
+    var wrap = el("div", "diff");
+    for (var i = 0; i < lines.length; i += 1) {
+      var sign = lines[i].sign;
+      var kind = sign === "-" ? " diff-del" : sign === "+" ? " diff-add" : "";
+      var row = el("div", "diff-line" + kind);
+      row.appendChild(el("span", "diff-sign", sign));
+      row.appendChild(el("span", "diff-text", lines[i].text));
+      wrap.appendChild(row);
+    }
+    // Said, not silently dropped: a card that stops at 400 lines without
+    // saying so reads as a complete change that happens to be 400 lines long.
+    if (hidden > 0) {
+      wrap.appendChild(
+        el("span", "diff-more", hidden + (hidden === 1 ? " more line" : " more lines") + " not shown")
+      );
+    }
+    return wrap;
+  }
+
   function labelledPre(into, label, value) {
     if (!value) return;
     into.appendChild(el("span", "tool-label", label));
@@ -2296,15 +2428,36 @@ const CLIENT_SOURCE = String.raw`
       entry.summary.textContent = toolSummary(block.argsText);
       clear(entry.badge);
       if (block.status === "running") entry.badge.appendChild(icon("spinner"));
-      entry.badge.appendChild(
-        el("span", settled ? "tool-status arc-pop" : "tool-status", toolStatusLabel(block.status))
-      );
+      // A tool that worked says so with a mark, not a word. In a turn that ran
+      // six greps, six green DONEs are the loudest thing on the screen and the
+      // least informative — success is the expected case and does not need
+      // announcing six times. Every other state keeps its word, because those
+      // are the ones a reader has to act on. The mark is aria-hidden, so the
+      // word goes to a screen reader either way.
+      if (block.status === "ok") {
+        entry.badge.appendChild(icon("check", settled ? "arc-pop" : ""));
+        entry.badge.appendChild(el("span", "sr-only", toolStatusLabel(block.status)));
+      } else {
+        entry.badge.appendChild(
+          el("span", settled ? "tool-status arc-pop" : "tool-status", toolStatusLabel(block.status))
+        );
+      }
       entry.head.title = block.name + (entry.summary.textContent ? " — " + entry.summary.textContent : "");
       entry.body.className = "tool-body" + (opening(prev, block) ? " arc-reveal" : "");
       entry.body.classList.toggle("hidden", block.collapsed);
       if (!block.collapsed) {
         clear(entry.body);
-        labelledPre(entry.body, "Arguments", block.argsText);
+        var change = toolDiff(block.argsText, block.argsComplete);
+        if (change === null) {
+          labelledPre(entry.body, "Arguments", block.argsText);
+        } else {
+          entry.body.appendChild(el("span", "tool-label", change.label));
+          entry.body.appendChild(buildDiff(change.lines, change.hidden));
+          // Whatever the diff did not consume still shows: an edit reviewed
+          // with replaceAll hidden from the reader is a worse card than the
+          // raw JSON was.
+          labelledPre(entry.body, "Other arguments", change.rest);
+        }
         labelledPre(entry.body, "Output", block.progress);
         labelledPre(entry.body, "Result", block.result);
       }
@@ -2333,17 +2486,14 @@ const CLIENT_SOURCE = String.raw`
   }
 
   var TURN_LABEL = { user: "You", assistant: "Arcturn", notice: "" };
-  var TURN_ICON = { user: "", assistant: "sparkle", notice: "" };
 
   function createTurn(role, entering) {
     var wrap = el("section", "turn turn-" + role + (entering ? " arc-enter" : ""));
     var body = el("div", "turn-body");
-    if (TURN_LABEL[role]) {
-      var head = el("div", "turn-head");
-      if (TURN_ICON[role]) head.appendChild(icon(TURN_ICON[role], "avatar"));
-      head.appendChild(el("span", "", TURN_LABEL[role]));
-      wrap.appendChild(head);
-    }
+    // The speaker is drawn as shape and announced as a name: a sighted reader
+    // gets the card, a screen reader gets the label, and neither one pays for
+    // the other's affordance.
+    if (TURN_LABEL[role]) wrap.setAttribute("aria-label", TURN_LABEL[role]);
     wrap.appendChild(body);
     return { el: wrap, body: body, blocks: new Map() };
   }
@@ -3435,15 +3585,59 @@ const CLIENT_SOURCE = String.raw`
       renderChip();
     }
     renderTranscript(view.blocks);
+    if (seenIdle && !wasRunning && view.running) runStartedAt = Date.now();
+    if (!view.running) seenIdle = true;
     // Once, on the transition — a panel that has been sitting finished for
     // ten minutes must not flash every time the host repaints it.
     if (wasRunning && !view.running && lastAssistantTurn !== null) {
       lastAssistantTurn.el.classList.add("turn-settled");
+      finishTurn(lastAssistantTurn, view.blocks);
     }
     wasRunning = view.running;
     renderPlan(view.plan, view.todos);
     syncComposer();
     if (stick) transcript.scrollTop = transcript.scrollHeight;
+  }
+
+  /** Everything the assistant said in the last turn, as plain text to copy. */
+  function lastAnswerText(blocks) {
+    var parts = [];
+    for (var i = blocks.length - 1; i >= 0; i -= 1) {
+      if (blocks[i].kind === "user") break;
+      if (blocks[i].kind === "text") parts.unshift(blocks[i].text || "");
+    }
+    return parts.join("\n\n").trim();
+  }
+
+  /**
+   * Close off a finished turn: how long it took, and a way to take it with you.
+   *
+   * Written once on the running-to-finished transition and then left alone, so
+   * it is a record rather than a thing that repaints. The elapsed time is the
+   * time this panel measured between those two edges — never a stored one and
+   * never a guess, which is why a turn that arrived already finished gets the
+   * word without a number.
+   */
+  function finishTurn(entry, blocks) {
+    if (entry.foot !== undefined && entry.foot.parentNode === entry.el) {
+      entry.el.removeChild(entry.foot);
+    }
+    var foot = el("div", "turn-foot");
+    var elapsed = runStartedAt === 0 ? "" : formatElapsed(Date.now() - runStartedAt);
+    foot.appendChild(el("span", "turn-time", elapsed === "" ? "Done" : "Done in " + elapsed));
+    var answer = lastAnswerText(blocks);
+    if (answer !== "") {
+      var copy = button("turn-copy", "Copy response");
+      copy.appendChild(icon("copy"));
+      copy.appendChild(el("span", "", "Copy"));
+      copy.addEventListener("click", function () {
+        post({ type: "copy", text: answer });
+      });
+      foot.appendChild(copy);
+    }
+    entry.foot = foot;
+    entry.el.appendChild(foot);
+    runStartedAt = 0;
   }
 
   function renderEngineOutput(text) {

@@ -483,12 +483,19 @@ describe("rendering an assistant turn", () => {
     );
   });
 
-  it("labels the two sides of the conversation", () => {
+  it("names the two sides of the conversation without captioning them", () => {
+    // The speaker is drawn as shape and announced as a name. The half that is
+    // easy to lose is the announcement: dropping the visible YOU / ARCTURN
+    // headers is only an improvement if the name survives for a reader who
+    // cannot see the card, so both halves are asserted here — the label is
+    // present, and it is not also printed above every message.
     const turns = panel.byId("turns").childNodes as StubNode[];
     expect(turns[0]?.className).toContain("turn-user");
-    expect(turns[0]?.textContent).toContain("You");
+    expect(turns[0]?.attributes["aria-label"]).toBe("You");
+    expect(turns[0]?.textContent).not.toContain("You");
     expect(turns[1]?.className).toContain("turn-assistant");
-    expect(turns[1]?.textContent).toContain("Arcturn");
+    expect(turns[1]?.attributes["aria-label"]).toBe("Arcturn");
+    expect(turns[1]?.textContent).not.toContain("Arcturn");
   });
 
   it("renders markdown as elements", () => {
@@ -1335,7 +1342,12 @@ describe("the header", () => {
     });
     panel.send({ type: "cost", label: "$0.42+" });
     expect(panel.byId("session-title").textContent).toBe("Rebuild the sidebar");
-    expect(panel.byId("session-sub").textContent).toBe("01JABCDE · arcturn");
+    // The folder, not the id: a ULID is the first thing under the title and
+    // the last thing a reader can act on, and the workspace is what they came
+    // to confirm. It is dropped from the line, not from the panel — the id
+    // stays reachable on hover, which is the claim that makes the cut safe.
+    expect(panel.byId("session-sub").textContent).toBe("arcturn");
+    expect(panel.byId("session-sub").title).toContain("01JABCDEFGHJKMNPQRS");
     expect(panel.byId("cost").textContent).toBe("$0.42+");
   });
 
@@ -1451,18 +1463,90 @@ describe("motion, as state rather than decoration", () => {
   });
 
   it("pops a tool badge when its status settles, and not when it arrives settled", () => {
+    // Success is drawn as a mark and failure as a word, so the pop has two
+    // carriers and the test follows the badge rather than either one of them.
+    const badge = () =>
+      panel
+        .byId("turns")
+        .all("tool")
+        .at(-1)
+        ?.find((node) => node.classList.contains("tool-badge"));
     panel.send(state({ blocks: [toolBlock({ status: "ok" })] }));
-    const settledOnArrival = panel
-      .byId("turns")
-      .find((node) => node.classList.contains("tool-status"));
-    expect(settledOnArrival?.className).not.toContain("arc-pop");
+    const onArrival = badge()
+      ?.walk()
+      .map((node) => node.className)
+      .join(" ");
+    expect(onArrival).not.toContain("arc-pop");
 
     panel.send(state({ blocks: [toolBlock({ id: "tool:k2", status: "running" })] }));
     panel.send(state({ blocks: [toolBlock({ id: "tool:k2", status: "error" })] }));
-    const card = panel.byId("turns").all("tool").at(-1);
-    expect(card?.find((node) => node.classList.contains("tool-status"))?.className).toContain(
+    expect(badge()?.find((node) => node.classList.contains("tool-status"))?.className).toContain(
       "arc-pop",
     );
+
+    panel.send(state({ blocks: [toolBlock({ id: "tool:k3", status: "running" })] }));
+    panel.send(state({ blocks: [toolBlock({ id: "tool:k3", status: "ok" })] }));
+    const marks = badge()?.walk() ?? [];
+    expect(marks.some((node) => node.className.includes("arc-pop"))).toBe(true);
+    // And the word a screen reader needs is still there behind the mark.
+    expect(badge()?.textContent).toContain("Done");
+  });
+
+  it("draws an expanded edit as a diff, not as the JSON that requested it", () => {
+    // What a reader saw before this: both versions of the code on one line
+    // with every newline as a literal backslash-n. For a coding agent the
+    // change is the thing they opened the card for.
+    panel.send(
+      state({
+        blocks: [
+          toolBlock({
+            name: "edit",
+            collapsed: false,
+            argsText: JSON.stringify({
+              path: "src/retry.ts",
+              oldText: "for (let i = 0; i < times - 1; i += 1) {",
+              newText: "for (let i = 0; i < times; i += 1) {",
+              replaceAll: false,
+            }),
+          }),
+        ],
+      }),
+    );
+    const body = panel.byId("turns").find((node) => node.classList.contains("tool-body"));
+    const rows = (body?.walk() ?? []).filter((node) => node.classList.contains("diff-line"));
+    expect(rows).toHaveLength(2);
+    expect(rows[0]?.className).toContain("diff-del");
+    expect(rows[0]?.textContent).toBe("-for (let i = 0; i < times - 1; i += 1) {");
+    expect(rows[1]?.className).toContain("diff-add");
+    expect(rows[1]?.textContent).toBe("+for (let i = 0; i < times; i += 1) {");
+    // The sign is in the gutter as well as the tint, so the change still
+    // reads with the colour gone — high contrast, colour-blind, screenshot.
+    expect((body?.walk() ?? []).filter((node) => node.classList.contains("diff-sign")).length).toBe(
+      2,
+    );
+    // And nothing was swallowed on the way: replaceAll changes what the call
+    // does, and a reviewer who cannot see it is reviewing the wrong edit.
+    expect(body?.textContent).toContain('"replaceAll":false');
+  });
+
+  it("falls back to the raw arguments while an edit is still arriving", () => {
+    // Half a newText is a change nobody is making, so the card shows the
+    // fragment it actually has rather than a diff of a partial file.
+    panel.send(
+      state({
+        blocks: [
+          toolBlock({
+            name: "edit",
+            collapsed: false,
+            argsComplete: false,
+            argsText: '{"path":"a.ts","oldText":"one","newText":"on',
+          }),
+        ],
+      }),
+    );
+    const body = panel.byId("turns").find((node) => node.classList.contains("tool-body"));
+    expect((body?.walk() ?? []).filter((node) => node.classList.contains("diff-line"))).toEqual([]);
+    expect(body?.textContent).toContain('"oldText":"one"');
   });
 
   it("reveals a tool body the host has just expanded", () => {
@@ -1506,6 +1590,102 @@ describe("motion, as state rather than decoration", () => {
       }),
     );
     expect(turn.className).toContain("turn-settled");
+  });
+});
+
+describe("closing off a finished turn", () => {
+  const exchange = (running: boolean, answer = "All seven tests pass.") =>
+    state({
+      running,
+      blocks: [
+        { kind: "user", id: "u1", text: "fix it" },
+        { kind: "text", id: "t1", text: answer },
+      ],
+    });
+  const foot = () => panel.byId("turns").find((node) => node.classList.contains("turn-foot"));
+  const time = () => foot()?.find((node) => node.classList.contains("turn-time"))?.textContent;
+
+  it("times a turn it watched start and finish", () => {
+    panel.send(state({ running: false }));
+    panel.send(exchange(true));
+    panel.send(exchange(false));
+    // The number is whatever the clock gave, but it has to be a number: the
+    // footer's whole claim is that this panel measured this turn.
+    expect(time()).toMatch(/Done in \d/);
+  });
+
+  it("adds nothing to a transcript that was never running", () => {
+    // A session reopened from history arrives already finished. There was no
+    // turn to close off, so there is no footer.
+    panel.send(exchange(false));
+    expect(foot()).toBeUndefined();
+  });
+
+  it("says done without a number when it attached to a turn already in flight", () => {
+    // The first state this panel ever sees is a running one, so the turn
+    // started before it was looking. Timing from the moment of attach would
+    // print a number that reads exactly like a measurement and is short by
+    // however long the turn had already been going.
+    panel.send(exchange(true));
+    panel.send(exchange(false));
+    expect(time()).toBe("Done");
+
+    // And the next turn, whose start it did see, is timed.
+    panel.send(exchange(true, "Second answer."));
+    panel.send(exchange(false, "Second answer."));
+    expect(time()).toMatch(/Done in \d/);
+  });
+
+  it("hands back the answer, and only the answer", () => {
+    // Not the prompt, not the thinking, not the tool output — the thing the
+    // reader would have selected by hand.
+    panel.send(state({ running: false }));
+    panel.send(
+      state({
+        running: true,
+        blocks: [
+          { kind: "user", id: "u1", text: "fix it" },
+          { kind: "thinking", id: "th1", text: "off by one", collapsed: true },
+          toolBlock({ status: "ok", result: "1 replacement" }),
+          { kind: "text", id: "t1", text: "Fixed." },
+          { kind: "text", id: "t2", text: "All seven tests pass." },
+        ],
+      }),
+    );
+    panel.send(
+      state({
+        running: false,
+        blocks: [
+          { kind: "user", id: "u1", text: "fix it" },
+          { kind: "thinking", id: "th1", text: "off by one", collapsed: true },
+          toolBlock({ status: "ok", result: "1 replacement" }),
+          { kind: "text", id: "t1", text: "Fixed." },
+          { kind: "text", id: "t2", text: "All seven tests pass." },
+        ],
+      }),
+    );
+    const copy = foot()?.find((node) => node.classList.contains("turn-copy"));
+    copy?.dispatch("click");
+    expect(panel.posted.at(-1)).toEqual({
+      type: "copy",
+      text: "Fixed.\n\nAll seven tests pass.",
+    });
+  });
+
+  it("writes the footer once, not on every repaint that follows", () => {
+    // The host repaints a finished panel for reasons of its own — a cost
+    // update, a model announcement. A footer that accumulated would turn one
+    // finished turn into a column of them.
+    panel.send(state({ running: false }));
+    panel.send(exchange(true));
+    panel.send(exchange(false));
+    panel.send(exchange(false));
+    panel.send(exchange(false));
+    const feet = panel
+      .byId("turns")
+      .walk()
+      .filter((node) => node.classList.contains("turn-foot"));
+    expect(feet).toHaveLength(1);
   });
 });
 
