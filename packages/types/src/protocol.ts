@@ -925,6 +925,49 @@ export type ClientRequest =
  * reader, one set of rules, and the read still happens where the permission
  * engine can see it. A range is accepted for `kind: "file"` only: an image has
  * no lines, so a range on one is refused rather than ignored.
+ *
+ * ### Why naming a file is its own kind, and not a flag on `file`
+ *
+ * Not every file a client knows about is a file the user asked a question
+ * about. An editor panel knows which file is *open* — the VS Code sidebar's
+ * ambient chip is exactly that — and that is worth telling a model, because
+ * "explain this function" only means something if the model knows which file
+ * is on screen. It is emphatically **not** worth 22,000 tokens a turn, which
+ * is what `packages/protocol/src/client.ts` (2,161 lines) costs when it is
+ * injected whole, on every turn, whether or not the question is about it.
+ * The agent has a `read` tool; a path is enough for it to decide.
+ *
+ * So {@link PromptAttachment} has a third kind, `fileReference`, which names a
+ * path and sends none of its bytes. It is spelled as a **distinct kind** rather
+ * than as `{ kind: "file", mode: "reference" }` for three reasons, in
+ * increasing order of importance:
+ *
+ * 1. **It is a different object, not a `file` with a switch.** A reference has
+ *    no bytes, so it cannot be truncated, cannot be an image, and cannot carry
+ *    a `LineRange` — a selection *is* the request for an excerpt, and
+ *    "reference the file, but only lines 12–40 of it" means nothing. A `mode`
+ *    field would make that contradiction representable and leave the validator
+ *    to talk clients out of it; a distinct kind makes it unspellable.
+ * 2. **The two are billed differently**, and a reader should be able to see
+ *    which one is in front of it without reading a second field.
+ * 3. **The absent-field default points the wrong way.** This is the one that
+ *    decides it. An engine that predates a `mode` field validates the
+ *    attachment, drops the field it does not know, and injects the **whole
+ *    file** — silently, every turn, at the user's expense: the precise bug
+ *    this kind exists to remove, reintroduced by the fallback. An engine that
+ *    predates a *kind* cannot make that mistake: its validator already refuses
+ *    anything outside `"file" | "image"`, so the frame is rejected before a
+ *    turn is spent and the client is told why. The safe outcome is a property
+ *    of the spelling rather than of a client remembering to probe — see
+ *    {@link ContextResolution.attachmentKinds} for the probe that turns that
+ *    refusal into a good message rather than a wire-enum complaint.
+ *
+ * The engine still owns the path. A reference is confined by
+ * {@link ContextResolution}'s own gate exactly as an attachment is, and refused
+ * fatally when it escapes the workspace or names something that is not a file
+ * — a client never reads a file to build one (RFC 0005 §3), and a client that
+ * could name an unconfined path in the prompt would have moved the disclosure
+ * it could not move the read.
  */
 export type PromptAttachment =
   /**
@@ -935,10 +978,36 @@ export type PromptAttachment =
    * the client — is the one that slices.
    */
   | { kind: "file"; path: string; range?: LineRange }
+  /**
+   * A workspace file **named, not read**: the model is told the path exists and
+   * is in play, and nothing else. No bytes are read and none are injected.
+   *
+   * For context a client knows about but the user did not ask for — the file
+   * open in the editor being the case this was built for. The model decides
+   * whether it matters and reaches for its `read` tool if it does, which is a
+   * turn's worth of tokens spent on purpose instead of every turn's worth
+   * spent on spec.
+   *
+   * Deliberately carries no `range`: a client that knows which lines are
+   * selected knows what the user meant, and should send
+   * `{ kind: "file", path, range }` — the excerpt is small, precise, and
+   * unambiguously the thing they pointed at. See {@link PromptAttachment}
+   * above for why this is a kind rather than a flag.
+   */
+  | { kind: "fileReference"; path: string }
   /** A workspace image, read by the engine and sent as a vision block. */
   | { kind: "image"; path: string }
   /** An image with no path — a paste, a drop from outside the filesystem. */
   | { kind: "image"; data: string; mimeType: string };
+
+/**
+ * The `kind` discriminant of a {@link PromptAttachment}, as a value.
+ *
+ * Exists so {@link ContextResolution.attachmentKinds} can state which of them
+ * an engine actually honours, in the engine's own vocabulary rather than in a
+ * parallel set of booleans that would have to be kept in step with this union.
+ */
+export type PromptAttachmentKind = PromptAttachment["kind"];
 
 /**
  * A span of lines inside a text file — one editor selection, on the wire.
@@ -1059,6 +1128,29 @@ export interface ContextResolution {
    * prompt time, in the injected block (clamped and reported) or in a refusal.
    */
   range?: LineRange;
+  /**
+   * Which {@link PromptAttachment} kinds this engine can actually honour.
+   *
+   * A statement about the *engine*, not about the path in the query, and the
+   * only field here that is: it rides on `resolveContext` because that verb is
+   * already the one a client calls before it attaches anything, and a
+   * capability handshake of its own would be a second round trip to learn one
+   * fact.
+   *
+   * **Absent means "this engine predates the field"**, which a client must read
+   * as `["file", "image"]` — the two kinds that shipped with `attachments` —
+   * and never as "no kinds at all". That is what makes it usable as a probe:
+   * `ProtocolClient.prompt` refuses a `fileReference` locally when
+   * `"fileReference"` is not listed, rather than letting the engine reject the
+   * frame with a complaint about a wire enum.
+   *
+   * It says what the engine will *accept*, not what it will permit for a given
+   * path: a listed kind is still confined, still budgeted, and still refusable
+   * at prompt time. And a client must not read it as licence to silently swap
+   * one kind for another — a `fileReference` an engine cannot take is a prompt
+   * that gets refused, not one that quietly ships the whole file instead.
+   */
+  attachmentKinds?: readonly PromptAttachmentKind[];
 }
 
 /**

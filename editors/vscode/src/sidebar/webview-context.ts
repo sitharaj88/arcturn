@@ -160,17 +160,26 @@ function contextMeta(item) {
 /**
  * The second line of the *ambient* chip: what will actually be sent.
  *
- * This exists because of one gap, and it exists to say so out loud. The
- * engine's attachment shape is '{ kind: "file", path }' — there is nowhere on
- * The wire carries the range now: 'PromptAttachment' has a 'range' field and
- * 'expandMentions' reads one off a mention, so a label naming 'auth.ts:12-40'
- * describes what is actually sent.
+ * The chip's whole design principle is that it says what will happen, so this
+ * line moves whenever the wire does — and it has now moved twice.
  *
- * This line used to read 'whole file' beside the label, because the range was
- * named and not sent. That word was the thing designed to change when the wire
- * learned to carry a range, and the label was designed not to — so this is
- * that change, and the label is untouched. What is left is the size, which is
- * the file's, not the excerpt's: the engine slices after it stats
+ * **With a selection: the excerpt.** 'PromptAttachment' carries a 'range' and
+ * 'expandMentions' reads one, so '29 lines of 4.2 KB' describes exactly what
+ * goes. The size is the file's, not the excerpt's: the engine stats before it
+ * slices, and that number is the engine's.
+ *
+ * **Without one: the path, and not the file.** This used to be a bare byte
+ * count, which was true and is now a lie — an open file with nothing selected
+ * travels as 'kind: "fileReference"', which names the path and sends none of
+ * the bytes. A '4.2 KB' next to a file whose 4.2 KB is *not* being sent is the
+ * exact shape of claim this surface exists to prevent, so the number goes and
+ * the sentence takes its place. What the model gets is one line naming the
+ * path; what it does about it is reach for its 'read' tool, once, if the
+ * question turns out to need the file.
+ *
+ * An ambient **image** still travels as bytes ('read' does not answer "is this
+ * screenshot relevant"), so it keeps the '@' chip's own wording rather than
+ * borrowing a promise that is not being made about it.
  *
  * A refused chip reports the engine's refusal instead, exactly as an '@' chip
  * does: 'what will be sent' for a file the engine will not read is nothing,
@@ -178,7 +187,8 @@ function contextMeta(item) {
  */
 function ambientMeta(item) {
   if (item.ok !== true) return contextMeta(item);
-  if (!item.selection) return contextMeta(item);
+  if (item.kind === "image") return contextMeta(item);
+  if (!item.selection) return "path only, contents not sent";
   var lines = item.selection.endLine - item.selection.startLine + 1;
   var count = lines === 1 ? "1 line" : String(lines) + " lines";
   var size = formatBytes(item.bytes);
@@ -188,16 +198,30 @@ function ambientMeta(item) {
 /**
  * The ambient chip's hover: the same two facts, and the reason for the odd one.
  *
- * The sentence is only added when a selection is on screen and the file is one
- * the engine will read — the two conditions under which 'whole file' is
- * surprising. Over a refusal it would be noise stacked on top of the thing the
- * user actually needs to read.
+ * The condition here **inverted** when the wire learned both of its lessons,
+ * and the inversion is the point. It used to fire on a selection, because a
+ * selection was the surprising case: the lines were named and the whole file
+ * went. Now a selection is the *unsurprising* case — the excerpt is exactly
+ * what is sent, and the meta line already says so.
+ *
+ * What needs explaining is the other one. A person who has a file open and
+ * reads 'path only, contents not sent' is owed the rest of it: the model is
+ * told the file is there, it reads the file itself if the question needs it,
+ * and the reason for the arrangement is the number that is *not* being spent
+ * on every message. So the size survives here, on the hover, as the thing
+ * being saved rather than as the thing being sent.
+ *
+ * Nothing is added over a refusal, or over an image: there the meta line is
+ * already the sentence the user needs, and this would be noise stacked on top.
  */
 function ambientTitle(item) {
   var meta = ambientMeta(item);
   var head = item.label + (meta === "" ? "" : "\n" + meta);
-  if (item.ok !== true || !item.selection) return head;
-  return head + "\nThis engine's attachments carry a path and no line range, so the whole file is sent.";
+  if (item.ok !== true || item.kind === "image" || item.selection) return head;
+  var size = formatBytes(item.bytes);
+  return head +
+    "\nArcturn is told this file is open and reads it itself if your question needs it. Its contents are not added to every message" +
+    (size === "" ? "." : " — that would be " + size + " a turn.");
 }
 
 /**

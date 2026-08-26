@@ -379,31 +379,64 @@ or that a window whose workspace root differs from the session's `cwd`
 (multi-root, or a session opened elsewhere) does not report every open file as
 outside the workspace.
 
-One more, and it is the load-bearing one: **that `pendingAttachments` actually
-puts the ambient file on the wire.** The decision it rests on is pure and
-covered (`ambientIsRedundant` — the ambient chip stands down when an `@` chip
-already names the same file, so one file is one attachment), and the chip that
-must match it is covered against the stub DOM. The four lines of glue between
-them run inside `activateSidebar`'s closure and are reached only by a `send`
-through a live controller, which is the same gap `pendingAttachments` already
-had for pasted-image bytes. Also unobserved for the same reason: that a late
-`resolveContext` answer is discarded when the caret has moved on
+One more, and it **used to be** the load-bearing gap: *that `pendingAttachments`
+actually puts the ambient file on the wire, in the right shape.* The four lines
+that decided it ran inside `activateSidebar`'s closure and were reached only by
+a `send` through a live controller — and that is exactly where the cost bug
+below lived, unobserved, for a whole release. That decision is now
+`ambientAttachment` in `active-editor.ts`: pure, exported, and driven directly
+by `active-editor.test.ts` for all four states (no selection → a
+`fileReference`; a selection → `{ kind: "file", range }`; an image → unchanged;
+a refused chip → nothing). What remains inside the closure is one call and one
+`push`. Still unobserved for the original reason: that a late `resolveContext`
+answer is discarded when the caret has moved on
 (`sameAmbient(tracker.current(), editor)` in `refreshAmbient`) — the comparison
-is unit-tested, the guard around it is not.
+is unit-tested, the guard around it is not. And `pendingAttachments` still has
+its older gap for pasted-image bytes.
 
-**A gap, recorded rather than hidden: a selection does not reach the engine as
-a range.** `PromptAttachment` is `{ kind: "file"; path }` — there is nowhere on
-it to put lines, and `expandMentions` does not read a range off a mention
-either (a `@file.ts:12-40` token is confined as the literal path
-`file.ts:12-40`, found missing, and silently skipped). So the ambient chip
-names the lines the user highlighted and says `whole file` next to them, and
-`ambientTitle` spells out why on hover. Three tests pin that wording
-(`webview-context.test.ts`), which is what will fail first if somebody teaches
-the wire to carry a range and forgets the chip. Closing the gap properly is
-engine work: a `range` on `PromptAttachment`, validated in
-`packages/protocol/src/validate.ts`, honoured in `packages/cli/src/context.ts`.
-Worth noting because it is the same gap on the terminal path — `Send Selection`
-types `@file.ts:12-34`, and the engine drops it.
+**A gap that was closed, and the bill it ran up first.** Two of them, in fact,
+and they are worth reading together because the second was created by the fix
+for the first.
+
+1. *A selection did not reach the engine as a range.* `PromptAttachment` was
+   `{ kind: "file"; path }` with nowhere to put lines, so the chip named the
+   lines the user highlighted and sent the whole file. Closed: `range` on the
+   wire, validated in `packages/protocol/src/validate.ts`, honoured by the one
+   reader in `packages/cli/src/mentions.ts`.
+2. *An open file with **no** selection was also sent whole* — attached as
+   `{ kind: "file", path }` on every turn, whether or not the question touched
+   it, for a file the user had merely left open. Measured on this repo at
+   `zai-api/glm-5.2` input rates: `packages/protocol/src/client.ts` (2,161
+   lines) ≈ 22,600 tokens/turn, $0.63 over twenty turns;
+   `packages/cli/src/workflow.ts` (7,251 lines) ≈ 81,200 tokens/turn, $2.27.
+   Every observable thing about those prompts succeeded, which is why nothing
+   caught it. Closed: `kind: "fileReference"` on the wire — a path, one line in
+   front of the model, and none of the bytes.
+
+The wording that pinned the first gap has been repointed rather than deleted,
+and the assertions **inverted**, which is the shape to keep: `ambientMeta` for
+a chip with no selection now reads `path only, contents not sent` and is
+asserted *not* to contain a byte count, and `ambientTitle` now adds its
+explanatory sentence when there is **no** selection rather than when there is
+one — because a selection is now the unsurprising case. Those live in
+`webview-context.test.ts` and `webview-render.test.ts`, and they are what will
+fail first if somebody teaches the wire something new and forgets the chip.
+
+**Unobserved, and worth naming:** that `refreshAmbient` shows no chip at all
+against an engine whose `attachmentKinds` omit `fileReference` (the rule
+`announceNoContext` already applies one generation earlier — a chip whose file
+could never be sent is worse than none). The decision is pure and covered
+(`engineKnowsReferences`, including that an *absent* field must not be read as
+"this engine supports nothing"); the `if` that acts on it lives in the same
+closure as the rest of `refreshAmbient` and needs a live engine.
+
+**The regression test for the cost bug is not in this suite**, deliberately,
+because the panel cannot observe what it costs. It is
+`packages/cli/src/context-reference-wire.test.ts`: a real `ArcturnServer`, a
+real `ProtocolClient` and a stub provider, asserting on the exact `LLMRequest`
+body that a sentinel from *inside* the file is absent while the path is
+present. A test that asserted the prompt merely succeeded would have been green
+throughout the bug.
 
 **Needs a real engine, for the composer's four new surfaces.** RFC 0005 §2
 landed the `@` picker, the `/` menu, the mode chip and the capability line. The

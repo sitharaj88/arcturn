@@ -12,6 +12,55 @@ CLI, the SDK, or the wire protocol.
 
 ### Fixed
 
+- **The file you merely had *open* was injected in full, on every turn.** The
+  VS Code panel's ambient chip attached the active editor as
+  `{ kind: "file", path }`, and the engine read it whole — so every message you
+  sent carried the entire file whether or not the question touched it, for a
+  file you never asked for. Measured on this repo at `zai-api/glm-5.2` input
+  rates: `packages/protocol/src/client.ts` (2,161 lines) cost about 22,600
+  tokens a turn, $0.63 over twenty turns; `packages/cli/src/workflow.ts` (7,251
+  lines) about 81,200 a turn, $2.27. Nothing caught it because nothing about it
+  failed: the prompt resolved, the run completed, and only the bill said
+  otherwise.
+
+  An open file with **nothing selected** now travels as a *reference* — the new
+  `kind: "fileReference"`, which names the path and sends none of the bytes.
+  What the model sees is one line: `src/session.ts (referenced file — the client
+  named this path as relevant context; its contents were not read and are not
+  included here. Use the read tool to open it if this turn needs it.)`. No
+  fenced block and no `(attached file)` heading, because those are what a block
+  *with* content looks like. The agent has a `read` tool, so it pays for the
+  file on the turns where it matters instead of all of them.
+
+  **A selection is unchanged, and so is `@`.** Highlighted lines still travel as
+  `{ kind: "file", range }` and arrive as the excerpt: the user pointed at
+  something, and the excerpt is small, precise and unambiguously it. An explicit
+  `@` attachment still carries contents at any size — quietly downgrading a file
+  somebody asked for is the same dishonesty pointed the other way. "Too big"
+  keeps the answers it already had, all of which report themselves: truncation
+  with a marker at 2000 lines / 200 KiB, a refusal with both numbers at the
+  2 MiB per-file ceiling, and a refusal naming the attachment that did not fit
+  at the 1 MiB total budget.
+
+  **The chip says what will happen**, which is its whole design principle, so
+  its wording moved with the wire: with a selection it still reads
+  `29 lines of 4.2 KB`; without one it read `4.2 KB` and now reads `path only,
+  contents not sent`, with the hover explaining that Arcturn reads the file
+  itself if the question needs it — and naming the size as what is *not* being
+  spent per turn.
+
+  **The degradation was designed to fail the safe way.** Had this been
+  `{ kind: "file", mode: "reference" }`, an older engine would drop the unknown
+  field and inject the whole file — the exact bug, silently, at the user's
+  expense. As a *kind*, an older engine's own validator refuses the frame and no
+  turn is spent. `resolveContext` additionally reports `attachmentKinds`, so
+  `ProtocolClient.prompt` refuses locally with a sentence a person can act on
+  rather than a complaint about a wire enum, and the panel shows no chip at all
+  — the rule it already applied to an engine with no `resolveContext`, since a
+  chip whose file could never be sent is worse than none. The refusal is
+  per-kind: plain attachments, ranges and `@` mentions keep working against that
+  engine. What nothing does is fall back to sending the file.
+
 - **A dry-run permission prompt named a file you have never heard of.** The
   overlay rewrites a tool's `path` to the shadow copy before the tool runs, and
   `write` builds its own permission ask from the path it was handed — so under

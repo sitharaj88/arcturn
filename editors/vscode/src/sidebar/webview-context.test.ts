@@ -284,8 +284,19 @@ describe("what the ambient chip says will happen", () => {
     ok: true,
   };
 
-  it("reads like any other chip when the whole file is what is meant", () => {
-    expect(api.ambientMeta(looking)).toBe("4.2 KB");
+  it("says the path travels and the file does not, where a size used to sit", () => {
+    // The size was true when an open file was attached whole. It now travels
+    // as `kind: "fileReference"` — a path, and none of the bytes — so "4.2 KB"
+    // next to a file whose 4.2 KB is not being sent is precisely the claim
+    // this row exists to not make.
+    expect(api.ambientMeta(looking)).toBe("path only, contents not sent");
+    expect(api.ambientMeta(looking)).not.toContain("KB");
+  });
+
+  it("keeps the '@' chip's wording for an ambient image, which does travel whole", () => {
+    // `read` does not answer "is this screenshot relevant", so an image is
+    // still sent — and must not borrow a promise nobody is making about it.
+    expect(api.ambientMeta({ ...looking, kind: "image" })).toBe("image · 4.2 KB");
   });
 
   it("counts the selected lines, because that is what now goes", () => {
@@ -317,23 +328,30 @@ describe("what the ambient chip says will happen", () => {
     ).toBe("escapes the workspace");
   });
 
-  it("explains itself on hover, and only bothers to when a selection is showing", () => {
+  it("explains itself on hover, and now only bothers to when NOTHING is selected", () => {
+    // The condition inverted, and that is the point. A selection used to be
+    // the surprising case ("we name the lines and send the file"); it is now
+    // the plain one. The open file with nothing selected is what needs saying.
     const plain = api.ambientTitle(looking);
     expect(plain).toContain("src/auth.ts");
-    expect(plain).not.toContain("line range");
+    expect(plain).toContain("read");
+    // Naming the size on the hover is honest here in a way it is not on the
+    // meta line: it is what is *not* spent, per turn.
+    expect(plain).toContain("4.2 KB a turn");
+    expect(plain).not.toContain("whole file");
+
     const ranged = api.ambientTitle({ ...looking, selection: { startLine: 12, endLine: 40 } });
-    expect(ranged).toContain("line range");
-    expect(ranged).toContain("whole file");
+    expect(ranged).toBe("src/auth.ts\n29 lines of 4.2 KB");
+    expect(ranged).not.toContain("whole file");
   });
 
-  it("says nothing about ranges over a chip the engine already refused", () => {
+  it("says nothing extra over a chip the engine already refused", () => {
     const refused = api.ambientTitle({
       ...looking,
       ok: false,
+      bytes: 0,
       reason: "escapes the workspace",
-      selection: { startLine: 1, endLine: 2 },
     });
-    expect(refused).toContain("escapes the workspace");
-    expect(refused).not.toContain("line range");
+    expect(refused).toBe("src/auth.ts\nescapes the workspace");
   });
 });

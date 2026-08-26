@@ -40,6 +40,8 @@
  * a triple-click selected.
  */
 
+import type { ContextKind, PromptAttachment, PromptAttachmentKind } from "@arcturn/types";
+
 import { type MentionRange, rangeFromSelection, type SelectionLike } from "../mentions.js";
 
 /**
@@ -160,6 +162,74 @@ export function sameAmbient(a: AmbientEditor | undefined, b: AmbientEditor | und
 export function ambientIsRedundant(path: string, attached: readonly string[]): boolean {
   if (path === "") return false;
   return attached.includes(path);
+}
+
+/**
+ * What the ambient chip becomes on the wire — a path, an excerpt, or a name.
+ *
+ * Three spellings, and the distinction between them is the one this whole
+ * surface turns on: **a selection is a request; an open file is not.**
+ *
+ * - **Lines highlighted** → `{ kind: "file", range }`. The user pointed at
+ *   something. The excerpt is small, precise, and unambiguously what they
+ *   meant. `ActiveEditorItem.selection` is already 1-based and inclusive —
+ *   `rangeFromSelection` converts from VS Code's 0-based lines at the one
+ *   place that reads an editor — which is exactly what `LineRange` documents,
+ *   so the numbers cross the wire unchanged.
+ * - **Nothing selected** → `{ kind: "fileReference" }`. The model is told the
+ *   path and none of the bytes. Sending it as `{ kind: "file" }` — which is
+ *   what this did when the chip shipped — cost about 22,600 tokens a turn for
+ *   `packages/protocol/src/client.ts` and about 81,200 for `workflow.ts`, on
+ *   *every* turn, for a file the user never asked about and merely had open.
+ *   The agent has a `read` tool: a path is enough for it to decide, and it
+ *   pays for the file only on the turns where the answer is yes.
+ * - **An image** → `{ kind: "image" }`, unchanged. "Read this if it matters"
+ *   is not an instruction the `read` tool can act on for a `.png`, and the
+ *   case is barely reachable anyway: the tracker only ever sees
+ *   `window.activeTextEditor`.
+ *
+ * Pure, and exported, because it is the load-bearing four lines of the whole
+ * ambient feature and it used to live inside `activateSidebar`'s closure where
+ * only a live engine could reach it.
+ *
+ * @param item - The ambient chip as the panel is rendering it. A chip the
+ *   engine refused is not attachable and answers `undefined` — the row shows
+ *   the refusal, and the engine is not asked to refuse it twice.
+ */
+export function ambientAttachment(item: {
+  readonly path: string;
+  readonly kind: ContextKind;
+  readonly ok: boolean;
+  readonly selection?: { startLine: number; endLine: number };
+}): PromptAttachment | undefined {
+  if (!item.ok) return undefined;
+  if (item.kind === "image") return { kind: "image", path: item.path };
+  if (item.selection === undefined) return { kind: "fileReference", path: item.path };
+  return {
+    kind: "file",
+    path: item.path,
+    range: { start: item.selection.startLine, end: item.selection.endLine },
+  };
+}
+
+/**
+ * Whether this engine can be told a file is open without being sent it.
+ *
+ * Read off any `resolveContext` answer, because `attachmentKinds` is a
+ * statement about the *engine* and not about the path that was queried — the
+ * panel already makes a `resolveContext` round trip per settled observation, so
+ * this costs nothing extra.
+ *
+ * **Absent means an engine older than the field**, which is an engine older
+ * than the kind — never "this engine supports no kinds at all", which would
+ * also condemn the `@` attachments that work perfectly well on it.
+ *
+ * @param resolution - Any answer this connection has had from the engine.
+ */
+export function engineKnowsReferences(resolution: {
+  readonly attachmentKinds?: readonly PromptAttachmentKind[];
+}): boolean {
+  return resolution.attachmentKinds?.includes("fileReference") ?? false;
 }
 
 /** What {@link createAmbientTracker} needs. Timers are injected so a test needs no clock. */

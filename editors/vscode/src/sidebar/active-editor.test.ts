@@ -11,9 +11,11 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   AMBIENT_DEBOUNCE_MS,
+  ambientAttachment,
   ambientIsRedundant,
   ambientLabel,
   createAmbientTracker,
+  engineKnowsReferences,
   isAmbientScheme,
   sameAmbient,
   toAmbientEditor,
@@ -267,5 +269,67 @@ describe("the ambient chip next to the chips somebody attached on purpose", () =
     // that is what has to match or the same file would be attached twice.
     expect(ambientIsRedundant("src/auth.ts", ["src/auth.ts:12-40"])).toBe(false);
     expect(ambientIsRedundant("", ["src/auth.ts"])).toBe(false);
+  });
+});
+
+describe("what the file you are looking at becomes on the wire", () => {
+  const looking = { path: "src/auth.ts", kind: "file" as const, ok: true };
+
+  it("names an open file rather than sending it", () => {
+    // THE fix. `{ kind: "file", path }` here is what put the whole of
+    // `packages/protocol/src/client.ts` — 2,161 lines, ~22,600 tokens — in
+    // front of the model on every single turn, for a file the user had merely
+    // left open. A reference names the path and sends none of the bytes; the
+    // agent reaches for `read` on the turns where it turns out to matter.
+    expect(ambientAttachment(looking)).toEqual({
+      kind: "fileReference",
+      path: "src/auth.ts",
+    });
+    // Stated as its own assertion because this is the regression: any shape
+    // carrying `kind: "file"` without a range is the bug coming back.
+    expect(ambientAttachment(looking)).not.toMatchObject({ kind: "file" });
+  });
+
+  it("sends the excerpt when the user actually pointed at something", () => {
+    // A selection is a request, and the request is small and precise. The
+    // numbers cross unchanged: `ActiveEditorItem.selection` is already 1-based
+    // and inclusive, which is what `LineRange` documents.
+    expect(ambientAttachment({ ...looking, selection: { startLine: 12, endLine: 40 } })).toEqual({
+      kind: "file",
+      path: "src/auth.ts",
+      range: { start: 12, end: 40 },
+    });
+  });
+
+  it("leaves an image alone, because `read` cannot answer for a .png", () => {
+    expect(ambientAttachment({ ...looking, kind: "image", path: "shot.png" })).toEqual({
+      kind: "image",
+      path: "shot.png",
+    });
+  });
+
+  it("attaches nothing the engine already said it would refuse", () => {
+    // The chip still *shows* it, with the reason. Sending it would fail the
+    // whole turn and take the user's typed text with it.
+    expect(ambientAttachment({ ...looking, ok: false })).toBeUndefined();
+    expect(
+      ambientAttachment({ ...looking, ok: false, selection: { startLine: 1, endLine: 2 } }),
+    ).toBeUndefined();
+  });
+});
+
+describe("whether the engine can be told a file is open at all", () => {
+  it("believes an engine that says so", () => {
+    expect(engineKnowsReferences({ attachmentKinds: ["file", "fileReference", "image"] })).toBe(
+      true,
+    );
+  });
+
+  it("does NOT read an absent field as an engine that supports nothing", () => {
+    // Absent means older than the field, which is older than the kind. Read as
+    // "no kinds at all" it would also condemn the `@` attachments that work
+    // perfectly well on that engine.
+    expect(engineKnowsReferences({})).toBe(false);
+    expect(engineKnowsReferences({ attachmentKinds: ["file", "image"] })).toBe(false);
   });
 });

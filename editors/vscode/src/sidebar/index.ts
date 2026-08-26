@@ -34,8 +34,10 @@ import { generateToken } from "../serve/token.js";
 import { forgetFailedUserEnvironment, resolveUserEnvironment } from "../user-env.js";
 import {
   type AmbientEditor,
+  ambientAttachment,
   ambientIsRedundant,
   createAmbientTracker,
+  engineKnowsReferences,
   sameAmbient,
   type TextEditorLike,
 } from "./active-editor.js";
@@ -423,6 +425,34 @@ export function activateSidebar(
   }
 
   /**
+   * The same announcement, one engine-generation later: `resolveContext` is
+   * there, `kind: "fileReference"` is not.
+   *
+   * Kept separate from {@link announceNoContext} because the two are different
+   * sentences and only one of them is true at a time. An engine without
+   * `resolveContext` cannot attach *anything*; this one attaches everything it
+   * always could and simply cannot be told a file is merely open — which is a
+   * loss confined to the ambient chip, and the message says so rather than
+   * telling somebody their `@` mentions are broken when they are not.
+   *
+   * Announced once, with `announceNoContext`'s flag lifetime and for a sharper
+   * version of its reason: this one is reached from `refreshAmbient`, which
+   * runs on every settled caret movement, so without the latch a scroll
+   * through a file would be a toast storm.
+   */
+  let announcedNoReferences = false;
+  function announceNoReferences(): void {
+    log("sidebar: this arcturn engine cannot be told which file is open");
+    if (announcedNoReferences) return;
+    announcedNoReferences = true;
+    void vscode.window.showWarningMessage(
+      "This Arcturn engine is too old to be told which file you have open, so the panel is " +
+        "not showing it — sending the whole file every message instead is not a trade it will " +
+        "make for you. Upgrade the CLI, or use @ to attach the file when you want it.",
+    );
+  }
+
+  /**
    * The chip the *editor* put there, as the engine last resolved it.
    *
    * Held apart from `attached` on purpose, and the separation is the feature.
@@ -750,6 +780,23 @@ export function activateSidebar(
       dropChip();
       return;
     }
+    if (!engineKnowsReferences(resolution)) {
+      // The same rule one engine-generation later, and it is the *existing*
+      // rule rather than a new one: a chip whose file could never be sent is
+      // worse than none. An open file with no selection travels as
+      // `kind: "fileReference"`, which this engine's validator will refuse —
+      // so the chip would be a promise the send cannot keep.
+      //
+      // The alternative this deliberately does not take is falling back to
+      // `{ kind: "file" }`. That is the bug: ~22,600 tokens a turn for
+      // `packages/protocol/src/client.ts`, ~81,200 for `workflow.ts`, for a
+      // file nobody asked for. Sending everything because the engine is old is
+      // not an acceptable substitute for sending a path, and `@` is still
+      // right there for anybody who does want the file.
+      announceNoReferences();
+      dropChip();
+      return;
+    }
     // A late answer must not overwrite a newer one. Compared whole rather than
     // by path: two resolves for the same file with different selections can be
     // in flight at once, and the slower one landing last would put a range on
@@ -851,26 +898,14 @@ export function activateSidebar(
     // sentence is most likely about. Only when it is on screen: `visibleAmbient`
     // is what the chip row rendered, so nothing can be attached here that was
     // not visible before send — and nothing visible is silently left off.
+    // Which of the three spellings an open file takes — an excerpt, a name, or
+    // an image — is `ambientAttachment`'s decision, and it is exported so it
+    // can be driven without a live engine. It is the load-bearing choice in
+    // this whole feature: getting it wrong is what put ~22k tokens of
+    // `client.ts` (~81k of `workflow.ts`) in front of the model on every turn.
     const ambient = visibleAmbient();
-    if (ambient?.ok === true) {
-      // The selection travels as a range now that `PromptAttachment` has
-      // somewhere to put one. `ActiveEditorItem.selection` is already 1-based
-      // and inclusive — `rangeFromSelection` converts from VS Code's 0-based
-      // lines at the one place that reads an editor — which is the convention
-      // `LineRange` documents, so the numbers cross unchanged. An image has no
-      // range: the engine refuses one rather than ignoring it.
-      const range =
-        ambient.selection === undefined
-          ? undefined
-          : { start: ambient.selection.startLine, end: ambient.selection.endLine };
-      items.push(
-        ambient.kind === "image"
-          ? { kind: "image", path: ambient.path }
-          : range === undefined
-            ? { kind: "file", path: ambient.path }
-            : { kind: "file", path: ambient.path, range },
-      );
-    }
+    const ambientAttached = ambient === undefined ? undefined : ambientAttachment(ambient);
+    if (ambientAttached !== undefined) items.push(ambientAttached);
     for (const item of attached.values()) {
       if (!item.ok) continue;
       const bytes = pasted.get(item.id);

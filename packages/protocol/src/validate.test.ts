@@ -617,6 +617,38 @@ describe("RFC 0005 §1.1 — prompt attachments and resolveContext", () => {
       }
     });
 
+    it("carries a fileReference through as a path and nothing else", () => {
+      expect(validatePromptAttachment({ kind: "fileReference", path: "src/auth.ts" })).toEqual({
+        ok: true,
+        value: { kind: "fileReference", path: "src/auth.ts" },
+      });
+    });
+
+    it("refuses inline data on a fileReference — there is nothing to carry", () => {
+      expect(
+        validatePromptAttachment({ kind: "fileReference", data: "AAAA", mimeType: "image/png" }),
+      ).toMatchObject({ ok: false });
+    });
+
+    it("refuses a range on a fileReference, and says to send the excerpt instead", () => {
+      // Refused rather than dropped, and refused rather than honoured: a
+      // client that knows which lines are selected knows what the user meant,
+      // and `{ kind: "file", range }` is how that is said.
+      const result = validatePromptAttachment({
+        kind: "fileReference",
+        path: "a.ts",
+        range: { start: 12, end: 40 },
+      });
+      expect(result).toMatchObject({ ok: false });
+      if (!result.ok) expect(result.error).toMatch(/kind "file" with that range/);
+    });
+
+    it("names all three kinds when it refuses an unknown one", () => {
+      const result = validatePromptAttachment({ kind: "directory", path: "src" });
+      expect(result).toMatchObject({ ok: false });
+      if (!result.ok) expect(result.error).toContain('"file" | "fileReference" | "image"');
+    });
+
     it("refuses a range on an image, by path or inline — an image has no lines", () => {
       // Refused rather than dropped: a dropped range is the whole file
       // arriving while the client believes it sent a selection.
@@ -834,6 +866,36 @@ describe("RFC 0005 §1.1 — prompt attachments and resolveContext", () => {
 
     it("refuses an unknown kind", () => {
       expect(validateContextResolution({ ...good, kind: "socket" })).toMatchObject({ ok: false });
+    });
+
+    it("carries attachmentKinds through, and leaves it off when the engine said nothing", () => {
+      expect(
+        validateContextResolution({
+          ...good,
+          attachmentKinds: ["file", "fileReference", "image"],
+        }),
+      ).toMatchObject({
+        ok: true,
+        value: { attachmentKinds: ["file", "fileReference", "image"] },
+      });
+      // Absent is how an engine older than the field answers, and a client
+      // reads that as "the two kinds that shipped" — so the field must not
+      // materialise as an empty array on its own.
+      const plain = validateContextResolution(good);
+      expect(plain.ok).toBe(true);
+      if (plain.ok) expect("attachmentKinds" in plain.value).toBe(false);
+    });
+
+    it("refuses an attachmentKinds entry this contract does not define", () => {
+      // Refused rather than filtered: silently dropping an entry would let a
+      // newer engine advertise a kind a client then never sends, which is the
+      // quiet degradation the field exists to make impossible.
+      expect(
+        validateContextResolution({ ...good, attachmentKinds: ["file", "video"] }),
+      ).toMatchObject({ ok: false });
+      expect(validateContextResolution({ ...good, attachmentKinds: "file" })).toMatchObject({
+        ok: false,
+      });
     });
   });
 });

@@ -366,8 +366,9 @@ remote user is told rather than left wondering.
     "sessionId": "sess_abc",
     "text": "what changed here?",
     "attachments": [
-      { "kind": "file",  "path": "src/auth.ts" },
-      { "kind": "image", "path": "docs/screenshot.png" },
+      { "kind": "file",          "path": "src/auth.ts" },
+      { "kind": "fileReference", "path": "src/session.ts" },
+      { "kind": "image",         "path": "docs/screenshot.png" },
       { "kind": "image", "data": "iVBORw0KGgo…", "mimeType": "image/png" }
     ]
 } }
@@ -375,7 +376,8 @@ remote user is told rather than left wondering.
 
 A `file` becomes a context block headed with its path and the word `(attached file)`, so
 the model can tell attached context from the user's own words. An `image` becomes a vision
-block.
+block. A `fileReference` becomes one line naming the path and nothing else — see
+[Naming a file without sending it](#naming-a-file-without-sending-it).
 
 #### A selection, not the whole file
 
@@ -428,6 +430,79 @@ inventing an intent nobody expressed.
 
 An excerpt is charged against the total budget for **what was actually read**, so attaching
 three lines of a 300 KiB file costs three lines.
+
+#### Naming a file without sending it
+
+Not every file a client knows about is a file the user asked a question about. An editor
+panel knows which file is **open** — the VS Code sidebar's ambient chip is exactly that —
+and that is worth telling a model, because "explain this function" only means something if
+the model knows which file is on screen.
+
+It is not worth the file. Attaching `packages/protocol/src/client.ts` (2,161 lines) as
+contents costs about 22,600 input tokens *per turn*; `packages/cli/src/workflow.ts` (7,251
+lines) costs about 81,200. At `zai-api/glm-5.2` input rates that is $0.63 and $2.27 over
+twenty turns, spent on a file the user never asked about, on every turn, whether or not the
+question touches it. The agent has a `read` tool. A path is enough for it to decide, and it
+pays for the file only on the turns where the answer is yes.
+
+So there is a third kind:
+
+```json
+{ "kind": "fileReference", "path": "src/session.ts" }
+```
+
+The engine confines the path exactly as it confines an attachment, stats it, and injects
+**one line**:
+
+```text
+src/session.ts (referenced file — the client named this path as relevant context; its
+contents were not read and are not included here. Use the read tool to open it if this turn
+needs it.)
+```
+
+No fenced block, no `(attached file)` heading, no trailing colon — those three are what a
+context block *with* content looks like, and a reference that borrowed any of them would be
+a reference the model answers from.
+
+**The engine still owns it.** A reference is a path, never bytes, and a client still never
+reads a file (RFC 0005 §3). It goes through the same workspace confinement, and the refusal
+is fatal on the same terms: outside the workspace, or not a regular file, refuses the
+prompt. It is stat'ed for one reason — telling a model that `src/session.ts` is in play
+when nothing is there sends it to spend a `read` on nothing and then reason about the
+absence. It is charged against the total attachment budget for the line it actually
+produces, which is about 190 bytes rather than the file's 80 KiB.
+
+**Why a kind and not `{ "kind": "file", "mode": "reference" }`.** Three reasons, the third
+of which decides it:
+
+1. It is a different object, not a `file` with a switch. A reference has no bytes, so it
+   cannot be truncated, cannot be an image, and cannot carry a `range` — a selection *is*
+   the request for an excerpt, and "reference the file, but only lines 12–40" means
+   nothing. A `mode` field makes that contradiction representable; a kind makes it
+   unspellable. (A `range` on a `fileReference` is refused on the wire, with a message
+   saying to send `kind: "file"` with that range instead.)
+2. The two are billed differently, and a reader should see which one it has without
+   consulting a second field.
+3. **The absent-field default points the wrong way.** An engine that predates a `mode`
+   field validates the attachment, drops the field it does not know, and injects the
+   **whole file** — silently, every turn, at the user's expense: precisely the bug the
+   kind exists to remove, reintroduced by its own fallback. An engine that predates a
+   *kind* cannot make that mistake: its validator already refuses anything outside
+   `"file" | "image"`, so the frame is rejected and no turn is spent. See
+   [`resolveContext`](#resolvecontext).
+
+**A selection is still a selection.** A client that knows which lines are highlighted knows
+what the user meant and should send `{ "kind": "file", "path", "range" }`: the excerpt is
+small, precise, and unambiguously the thing they pointed at. A reference is for the file
+they merely have open.
+
+**An explicit attachment is never downgraded to a reference, however large it is.** The
+user asked for that file; quietly handing the model a path instead is the same species of
+dishonesty pointed the other way, and it would make one `@src/big.ts` mean two different
+things on two different days as the file grew. The honest mechanism for "too big" already
+exists and already reports itself: the 2000-line / 200 KiB inline cap truncates with a
+marker, the 2 MiB per-file ceiling refuses with both numbers, and the 1 MiB total budget
+refuses naming the attachment that did not fit.
 
 The `:12-34` suffix on a mention means exactly the same thing, read by the same reader:
 `@src/auth.ts:12-34` (and `@src/auth.ts:12` for one line, and `@"my notes.md":12-34` for a
@@ -513,6 +588,25 @@ ranged attachment not to arrive as a whole file. It does **not** say the range f
 verb stats and never reads, and a file's line count cannot be known without reading it.
 Whether the range fits is answered at prompt time, in the injected block or in a refusal.
 
+Every answer also carries `attachmentKinds`, which is a statement about the **engine**
+rather than about the path in the query:
+
+```json
+{ "kind": "response", "id": "12", "result": {
+    "query": "src/auth.ts", "path": "/repo/src/auth.ts", "relativePath": "src/auth.ts",
+    "inWorkspace": true, "exists": true, "bytes": 4300, "kind": "file",
+    "attachmentKinds": ["file", "fileReference", "image"] } }
+```
+
+It rides on `resolveContext` because that verb is already the one a client calls before it
+attaches anything, and a capability handshake of its own would be a second round trip to
+learn one fact. **Absent means "this engine predates the field"**, which a client reads as
+`["file", "image"]` — the two kinds that shipped with `attachments` — and never as "no
+kinds at all". It says what the engine will *accept*, not what it will permit for a given
+path: a listed kind is still confined, still budgeted, and still refusable at prompt time.
+And it is not licence to swap one kind for another — a `fileReference` an engine cannot
+take is a prompt that gets refused, not one that quietly ships the whole file instead.
+
 `resolveContext` is **optional and additive**, on the same terms as `listModels`:
 `ProtocolClient.resolveContext()` translates an older server's `invalidRequest` into
 `undefined`, which is safe because the verb only reads — `undefined` costs a caller a
@@ -530,9 +624,41 @@ A `file` attachment's `range` is the same argument one level down, and it degrad
 an engine that has `resolveContext` but predates ranges validates the attachment, drops the
 field, and sends the model the **whole file** while answering `ok` — a client asking about
 lines 12–40 of an 800-line file would be billed for all 800 and told nothing. The one probe
-answers both questions: it carries a range, and the echo above is how an engine that
+answers all three questions: it carries a range, and the echo above is how an engine that
 understands ranges says so. A ranged attachment to an engine that does not is rejected
 locally, with nothing sent, and no extra round trip is spent finding out.
+
+`kind: "fileReference"` is the third, and it is the one case where the **spelling** does
+the work rather than the probe. Had it been `{ "kind": "file", "mode": "reference" }`, an
+older engine would drop the unknown field and inject the whole file — which is the
+81,200-token outcome the kind exists to prevent, arriving silently because the engine is
+old. As a *kind*, an older engine's own validator refuses it: `PromptAttachment.kind must
+be one of "file" | "image"`, the frame is rejected, and no turn is spent. The bad fallback
+is not merely avoided, it is unreachable. The client still refuses locally when
+`attachmentKinds` omits the kind, for two smaller reasons: the message ("this arcturn
+engine is older than file references… Upgrade the engine, or turn off the client's
+open-file context") is one a person can act on where a wire-enum complaint reads like a
+client bug, and it saves the round trip.
+
+**Why refuse rather than quietly drop the reference and send anyway.** Dropping it would
+narrow rather than widen — the model told less, never more; the user billed less, never
+more — which is the test `permissionDecision`'s `scope` passes when it degrades silently.
+It is refused anyway, for two reasons. A client that attached a reference has a surface
+that *said so*: the VS Code chip's whole design principle is that the row above the
+composer is the truth about what the next message carries, and a silently-dropped reference
+makes that row a lie — the same failure class as the mention bug that started all of this.
+And it is the third instance of one rule at one seam (attachments, ranges, references),
+where a third different answer is how a seam stops having a rule.
+
+The cost is bounded, and the two halves fit together rather than fighting: the refusal is
+per-*kind*, so plain attachments and ranges keep working against that engine, and a client
+that can *see* the engine is too old should not offer the affordance in the first place.
+The VS Code panel does exactly that — it reads `attachmentKinds` off the round trip it
+already makes, shows **no** ambient chip, and says so once per connection. That is not a
+new rule either; it is the one that already governs an engine with no `resolveContext` at
+all: a chip whose file could never be sent is worse than none. What neither layer will do
+is fall back to `{ "kind": "file" }`, which would be 81,200 tokens the user did not ask for
+because their engine is old.
 
 ## Permissions
 
@@ -1724,8 +1850,11 @@ Adding an *optional* verb is not such a change, and `listModels`, `sessionHistor
 `runWorkflow`, `workflowStatus` and `resumeWorkflow` did not bump it — nor did
 `prompt`'s optional
 `attachments` field (or a `file` attachment's optional `range`), `resolveContext`'s
-optional `range`, or `permissionDecision`'s optional `scope`, all of which an older server
-validates and drops. An older
+optional `range` and `attachmentKinds`, or `permissionDecision`'s optional `scope`, all of
+which an older server validates and drops. Nor did `attachments`' third *kind*,
+`fileReference` — an older server refuses the frame outright, which is a rejection a newer
+client handles and, for this one, the only acceptable outcome: dropping the unknown kind
+back to `file` would mean the engine injecting a whole file the user never asked for. An older
 server rejects the new verb with an ordinary `invalidRequest` response the newer client
 handles, and an older client simply never sends it — both halves keep working.
 

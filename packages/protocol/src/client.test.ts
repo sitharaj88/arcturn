@@ -1721,3 +1721,98 @@ describe("ProtocolClient — org memory", () => {
     expect(isUnsupportedMethodError(await promise.catch((e: unknown) => e))).toBe(true);
   });
 });
+
+describe("ProtocolClient.prompt — a file named rather than sent", () => {
+  /** A `resolveContext` answer, with whatever capability fields are under test. */
+  function probeAnswer(extra: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      query: ".",
+      path: "/repo",
+      relativePath: ".",
+      inWorkspace: true,
+      exists: true,
+      bytes: 0,
+      kind: "directory",
+      reason: "a directory cannot be attached; name a file inside it",
+      ...extra,
+    };
+  }
+
+  it("sends a fileReference to an engine that advertises the kind", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const sent = client.prompt("s1", "explain this function", [
+      { kind: "fileReference", path: "src/auth.ts" },
+    ]);
+    await flush();
+    // Frame 0 is the probe, not the prompt: an old engine must never be handed
+    // the attachment at all.
+    expect(socket.frame(0).method).toBe("resolveContext");
+    socket.respondOk(
+      0,
+      probeAnswer({
+        range: { start: 1, end: 1 },
+        attachmentKinds: ["file", "fileReference", "image"],
+      }),
+    );
+    await flush();
+    expect(socket.frame(1).params).toEqual({
+      sessionId: "s1",
+      text: "explain this function",
+      attachments: [{ kind: "fileReference", path: "src/auth.ts" }],
+    });
+    socket.respondOk(1, {});
+    await expect(sent).resolves.toBeUndefined();
+  });
+
+  it("REFUSES locally against an engine whose attachmentKinds omit the kind", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const sent = client.prompt("s1", "explain this function", [
+      { kind: "fileReference", path: "src/auth.ts" },
+    ]);
+    await flush();
+    socket.respondOk(0, probeAnswer({ range: { start: 1, end: 1 }, attachmentKinds: ["file"] }));
+
+    const error = await rejection(sent);
+    expect(error.code).toBe(ErrorCode.invalidRequest);
+    expect(error.message).toMatch(/older than file references/);
+    expect(error.message).toMatch(/Nothing was sent/);
+    // The assertion that matters: the prompt frame never existed. The whole
+    // point of the kind is that an engine which cannot honour it never gets
+    // the chance to fall back to the file's contents.
+    expect(socket.frames().filter((frame) => frame.method === "prompt")).toEqual([]);
+  });
+
+  it("REFUSES locally against an engine that predates the field entirely", async () => {
+    // Absent `attachmentKinds` is an engine older than the field, which is an
+    // engine older than the kind. Read as "no kinds at all" it would also
+    // block plain `file` attachments; read as "the two that shipped" it blocks
+    // exactly this one.
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const sent = client.prompt("s1", "hi", [{ kind: "fileReference", path: "src/auth.ts" }]);
+    await flush();
+    socket.respondOk(0, probeAnswer({ range: { start: 1, end: 1 } }));
+    expect((await rejection(sent)).message).toMatch(/older than file references/);
+    expect(socket.frames().filter((frame) => frame.method === "prompt")).toEqual([]);
+  });
+
+  it("keeps sending plain file attachments to that same engine", async () => {
+    // The refusal is per-kind, not per-engine: an engine that predates
+    // references still honours everything it always did.
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+
+    const sent = client.prompt("s1", "summarise", [{ kind: "file", path: "notes.md" }]);
+    await flush();
+    socket.respondOk(0, probeAnswer({ range: { start: 1, end: 1 } }));
+    await flush();
+    expect(socket.frame(1).method).toBe("prompt");
+    socket.respondOk(1, {});
+    await expect(sent).resolves.toBeUndefined();
+  });
+});

@@ -44,7 +44,7 @@ import {
   type ResolvedImage,
   type ResolvedPrompt,
 } from "@arcturn/server";
-import type { ContextKind, ContextResolution } from "@arcturn/types";
+import type { ContextKind, ContextResolution, PromptAttachmentKind } from "@arcturn/types";
 import {
   confineToWorkspace,
   expandMentions,
@@ -93,6 +93,45 @@ function base64Bytes(data: string): number {
   const padding = data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0;
   return Math.max(0, Math.floor((data.length * 3) / 4) - padding);
 }
+
+/**
+ * The one line a `fileReference` puts in front of the model.
+ *
+ * Three things it has to do, and one it has to avoid:
+ *
+ * - **Name the path**, in the workspace-relative spelling every other surface
+ *   uses, so the model can hand it straight to `read`.
+ * - **Say the contents are not here**, in words, because a bare path next to a
+ *   prompt is exactly what a model reads as "and here is the file".
+ * - **Say what to do about it** — the agent has a `read` tool, and the whole
+ *   trade is "one turn's read when it matters, instead of every turn's
+ *   injection on spec".
+ * - And **not look like a context block.** No fenced body, no `(attached
+ *   file)` heading, no trailing colon: those three are what
+ *   {@link readContextFile} emits for content that *is* present, and a
+ *   reference that borrowed any of them would be a reference the model
+ *   answers from.
+ *
+ * @param relativePath - The confined, workspace-relative path.
+ */
+function referenceLine(relativePath: string): string {
+  return (
+    `\n\n${relativePath} (referenced file — the client named this path as relevant context; ` +
+    "its contents were not read and are not included here. Use the read tool to open it if " +
+    "this turn needs it.)"
+  );
+}
+
+/**
+ * The {@link PromptAttachment} kinds this resolver honours, advertised on every
+ * `resolveContext` answer.
+ *
+ * Written out here rather than derived from the type, because the honest
+ * answer is "what the code below actually implements" and a derived list would
+ * claim support for a kind the moment somebody added it to the union and
+ * before anybody taught `buildPrompt` what to do with it.
+ */
+const ATTACHMENT_KINDS: readonly PromptAttachmentKind[] = ["file", "fileReference", "image"];
 
 /** The message a client is refused with when its attachments do not fit. */
 function budgetMessage(what: string, bytes: number, limit: number): string {
@@ -169,6 +208,42 @@ export function createContextResolver(options: ContextResolverOptions = {}): Con
           throw new ContextRefusedError(
             `Attachment ${JSON.stringify(attachment.path)} ${verdict.reason}.`,
           );
+        }
+
+        if (attachment.kind === "fileReference") {
+          // A reference is read *about*, never read. Everything above still
+          // ran — confinement, and fatally — because a client that could name
+          // an unconfined path in the prompt would have moved the disclosure
+          // even though it could not move the read.
+          //
+          // It is still stat'ed, for one reason: a line telling the model that
+          // `src/auth.ts` is in play, when nothing is there, sends it to spend
+          // a `read` on nothing and then reason about the absence. The stat is
+          // the whole cost, and `confineToWorkspace` has already made one.
+          let isFile: boolean;
+          try {
+            isFile = (await stat(verdict.realPath)).isFile();
+          } catch {
+            isFile = false;
+          }
+          if (!isFile) {
+            throw new ContextRefusedError(
+              `Attachment ${JSON.stringify(attachment.path)} is not a file.`,
+            );
+          }
+          const line = referenceLine(verdict.relativePath);
+          // Charged like everything else, from what the model actually sees:
+          // about 190 bytes, against the 80 KB the same file costs as an
+          // attachment. That gap is the entire point — but a client sending
+          // ten thousand references is still sending a prompt, and the budget
+          // is the one place that is decided.
+          const bytes = Buffer.byteLength(line, "utf8");
+          spent += bytes;
+          if (spent > maxBytes) {
+            throw new ContextRefusedError(budgetMessage(verdict.relativePath, bytes, maxBytes));
+          }
+          appended.push(line);
+          continue;
         }
 
         const heading =
@@ -250,6 +325,15 @@ export function createContextResolver(options: ContextResolverOptions = {}): Con
       // reads, and a file's line count cannot be known without reading it. See
       // `ContextResolution.range`.
       const echo = request.range === undefined ? {} : { range: request.range };
+      // Stated on *every* answer, unconditionally, because it is a fact about
+      // this engine rather than about the query — and because a client asks
+      // this question exactly once, on a probe it has to be able to make
+      // against any path. An engine that predates the field omits it, which a
+      // client reads as the two kinds that shipped with `attachments`; see
+      // `ContextResolution.attachmentKinds`.
+      const kinds: Pick<ContextResolution, "attachmentKinds"> = {
+        attachmentKinds: ATTACHMENT_KINDS,
+      };
 
       if (verdict.outcome === "outside") {
         // No stat, deliberately: answering "does this exist" for a path the
@@ -258,6 +342,7 @@ export function createContextResolver(options: ContextResolverOptions = {}): Con
         return {
           query: request.query,
           ...echo,
+          ...kinds,
           path: verdict.path,
           relativePath: "",
           inWorkspace: false,
@@ -271,6 +356,7 @@ export function createContextResolver(options: ContextResolverOptions = {}): Con
         return {
           query: request.query,
           ...echo,
+          ...kinds,
           path: verdict.path,
           relativePath: verdict.relativePath,
           inWorkspace: true,
@@ -288,6 +374,7 @@ export function createContextResolver(options: ContextResolverOptions = {}): Con
         return {
           query: request.query,
           ...echo,
+          ...kinds,
           path: verdict.path,
           relativePath: verdict.relativePath,
           inWorkspace: true,
@@ -302,6 +389,7 @@ export function createContextResolver(options: ContextResolverOptions = {}): Con
         return {
           query: request.query,
           ...echo,
+          ...kinds,
           path: verdict.path,
           relativePath: verdict.relativePath,
           inWorkspace: true,
@@ -315,6 +403,7 @@ export function createContextResolver(options: ContextResolverOptions = {}): Con
         return {
           query: request.query,
           ...echo,
+          ...kinds,
           path: verdict.path,
           relativePath: verdict.relativePath,
           inWorkspace: true,
@@ -330,6 +419,7 @@ export function createContextResolver(options: ContextResolverOptions = {}): Con
       return {
         query: request.query,
         ...echo,
+        ...kinds,
         path: verdict.path,
         relativePath: verdict.relativePath,
         inWorkspace: true,

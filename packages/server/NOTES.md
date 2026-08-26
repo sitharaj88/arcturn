@@ -351,6 +351,69 @@ queries `"."`) and for a path outside the workspace: `resolveContext` stats and 
 reads, so it cannot say whether a range *fits*, and inventing an answer would make the
 field mean two things.
 
+## A file *named* rather than sent, and why it is a kind and not a flag
+
+The VS Code panel's ambient chip attached the file you had open as `{ kind: "file", path }`,
+so the engine read it whole and every turn carried it — 2,161 lines of
+`packages/protocol/src/client.ts` is about 22,600 input tokens a turn; 7,251 lines of
+`packages/cli/src/workflow.ts` is about 81,200 — for a file nobody asked about. Three
+things were wrong with that at once, and only the third is usually noticed: the agent
+already has a `read` tool, so this paid to duplicate something it could fetch; the cost
+recurred whether or not the question touched the file; and the user never asked for it.
+
+The fix is a third `PromptAttachment` kind, `fileReference`, which names the path and sends
+none of the bytes. What the model gets is one line — no fenced body, no `(attached file)`
+heading, no trailing colon, because those three are what a block *with* content looks like
+and a reference that borrowed one would be a reference the model answers from.
+
+**It is a kind rather than `{ kind: "file", mode: "reference" }`, and the deciding reason
+is the fallback.** An engine that predates a `mode` field validates the attachment, drops
+the field it does not know, and injects the whole file — silently, every turn, at the
+user's expense. That is not a degraded version of the feature; it is the exact bug the
+feature exists to remove, reintroduced by its own fallback, and it is unacceptable however
+loudly it is documented. An engine that predates a *kind* cannot make that mistake:
+`validatePromptAttachment` already refuses anything outside its enum, so the frame is
+rejected and no turn is spent. **The safe outcome is a property of the spelling, not of a
+client remembering to probe** — which is the one structural improvement this has over the
+`range` case, where the probe *is* the only thing standing between the user and the bill.
+Two smaller reasons agree: a reference is a different object (no bytes, so no truncation,
+no image branch, and no `LineRange` — "reference the file, but only lines 12–40" means
+nothing), and the two are billed differently, which a reader should see without consulting
+a second field.
+
+**`ContextResolution.attachmentKinds` is the probe, and it buys the message, not the
+safety.** The client refuses a `fileReference` locally when the kind is not advertised,
+because "this arcturn engine is older than file references… Upgrade the engine, or turn off
+the client's open-file context" is a sentence a person can act on where `PromptAttachment.kind
+must be one of "file" | "image"` reads like a client bug. Absent `attachmentKinds` means an
+engine older than the field, which a client reads as the two kinds that shipped — never as
+"no kinds at all", which would also block the attachments that do work.
+
+**Why refuse rather than quietly drop the reference and send the prompt anyway.** Dropping
+narrows rather than widens — the model told less, the user billed less — which is the test
+`permissionDecision`'s `scope` passes when it degrades silently. It is refused anyway for
+two reasons. The panel that attached it *said so on screen*: the chip row above the
+composer is the whole truth about what the next message carries, and a silently-dropped
+reference makes that row a lie, which is the same failure class as the mention bug that
+started all of this. And it is now one rule three times at one seam — attachments, ranges,
+references — where a third different answer is how a seam stops having a rule.
+
+The refusal is per-kind, so plain attachments and ranges keep working against that engine.
+And the layer above it does not sit and wait to be refused: the panel reads
+`attachmentKinds` off the `resolveContext` round trip it already makes per settled caret
+and shows **no** ambient chip at all, announcing why once per connection. That is the rule
+`refreshAmbient` already applied to an engine with no `resolveContext` — "a chip whose file
+could never be sent is worse than none" — extended one engine-generation, not a fourth
+answer bolted on. The one thing neither layer will do is fall back to `{ kind: "file" }`.
+
+**An explicit attachment is never downgraded, at any size.** A `@`-attached 2 MB file is a
+file somebody asked for, and handing the model a path instead would be the same dishonesty
+pointed the other way — plus it would make one `@src/big.ts` mean two different things on
+two different days as the file grew. The existing ceilings still bind and still report
+themselves: truncation with a marker at 2000 lines / 200 KiB, refusal with both numbers at
+the 2 MiB per-file ceiling, and refusal naming the attachment that did not fit at
+`PROMPT_ATTACHMENT_MAX_BYTES`.
+
 ## The wire's scope wall is enforced three times, and that is not redundancy
 
 RFC 0005 §1.2 is one sentence — "Nothing persists to disk from a remote client"

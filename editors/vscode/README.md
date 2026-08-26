@@ -64,23 +64,45 @@ what that costs.
 ### The file you have open
 
 The panel watches which file is in front of you and shows it as a chip above
-the composer — dashed border, an eye, and its real size — so "explain this
-function" is a sentence you can just type. Select something and the chip names
-the lines: `src/auth.ts:12-40`.
+the composer — dashed border, an eye — so "explain this function" is a sentence
+you can just type. Select something and the chip names the lines:
+`src/auth.ts:12-40`.
 
 It is deliberately not the same chip as the ones you add with `@`. Those stay
 where you put them; this one follows your caret, and a row where the two looked
-identical would be a row that lies about which of its entries is stable. When
-you have lines selected the chip names them and counts them — `src/auth.ts:12-40
-· 29 lines of 4.2 KB` — and those are the lines the engine reads. The size is
-the file's, because that is what the engine measured before it sliced.
+identical would be a row that lies about which of its entries is stable.
+
+**A selection is an ask; an open file is not**, and the chip now says which one
+you have:
+
+| what the chip says | what goes with your message |
+|---|---|
+| `src/auth.ts:12-40 · 29 lines of 4.2 KB` | those 29 lines, as an excerpt. The size is the file's, because that is what the engine measured before it sliced. |
+| `src/auth.ts · path only, contents not sent` | one line naming the path. Arcturn reads the file itself, with its `read` tool, if your question turns out to need it. |
+| `src/auth.ts · escapes the workspace` | nothing, and the engine's own sentence about why. |
+
+The middle row used to read `4.2 KB`, and used to mean it: an open file was
+attached whole. That was the wrong trade. `packages/protocol/src/client.ts` is
+2,161 lines — about 22,600 input tokens, every single message, whether or not
+you asked about it; `packages/cli/src/workflow.ts` is 7,251 lines, about 81,200.
+Arcturn has a `read` tool and a path is enough for it to decide, so it now pays
+for the file on the turns where the answer is yes instead of on all of them.
+Hover the chip and it tells you exactly that, and what it is saving.
+
+If you *want* the whole file in the message, that is what `@` is for — an
+explicit attachment is never downgraded, however large it is.
 
 The usual rules hold. The extension never reads the file — the engine does,
-from the path, where the permission engine can see the read happen. The byte
-count on the chip is the engine's answer to `resolveContext`, not a `stat` the
-panel did. A file outside the workspace shows the engine's refusal instead of
-being quietly dropped. And nothing is attached that you cannot see before you
-press send.
+from the path, where the permission engine can see the read happen. Every number
+on the chip is the engine's answer to `resolveContext`, not a `stat` the panel
+did. A file outside the workspace shows the engine's refusal instead of being
+quietly dropped. And nothing is attached that you cannot see before you press
+send.
+
+Against an **older engine** that does not know how to be told a file is open,
+there is simply no chip, and a one-off warning says why. It will not fall back
+to sending you the whole file every message because your CLI is out of date;
+`@` is still there when you want the file. Upgrade the CLI to get the chip back.
 
 Three ways to turn it off, because some people will not want their editor
 watched: the setting, `Arcturn: Toggle Active File Context` in the palette, and

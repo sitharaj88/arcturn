@@ -61,6 +61,12 @@ import type {
  *    ceiling, because a client should not have to know which of them it is
  *    paying.
  *
+ * A `fileReference` is charged too, for the ~190-byte line it produces rather
+ * than for the file it names. That is the entire point of the kind — the same
+ * open file costs about 22,600 tokens a turn as an attachment and one line as
+ * a reference — but a client sending ten thousand references is still sending
+ * a prompt, and this is the one place that is decided.
+ *
  * Not a per-attachment cap: ten files of 200 KiB is the same load as one of
  * 2 MiB, and a per-item limit that sums to anything is not a limit.
  */
@@ -148,7 +154,10 @@ export interface ContextResolver {
    *   outside the workspace, missing, not a file, over
    *   {@link PROMPT_ATTACHMENT_MAX_BYTES}, an image type this engine cannot
    *   send, or a `range` whose `start` is past the end of the file. Nothing is
-   *   appended to the session and no turn is spent.
+   *   appended to the session and no turn is spent. A `fileReference` is held
+   *   to the same rules on the two that can still apply to it — confinement,
+   *   and being a regular file — because a reference the model is told about
+   *   is a path the model will try to `read`.
    */
   buildPrompt(request: PromptContextRequest): Promise<ResolvedPrompt>;
   /**

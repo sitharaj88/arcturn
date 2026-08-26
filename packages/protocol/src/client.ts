@@ -345,6 +345,15 @@ export interface ProtocolClient {
    * {@link ContextResolution.range}. A ranged attachment to an engine that
    * does not is rejected locally, with nothing sent.
    *
+   * A `fileReference` is the third of these, and it degrades in the *opposite*
+   * direction — which is why it is spelled as a kind and not as a flag on
+   * `file`. An engine that predates the kind refuses the frame itself
+   * (`PromptAttachment.kind must be one of …`), so the failure mode is a
+   * refused prompt rather than the whole file arriving at the user's expense.
+   * The same probe reads {@link ContextResolution.attachmentKinds} and refuses
+   * locally anyway, for the message and for the round trip — not because the
+   * wire needs saving from itself here.
+   *
    * @param sessionId - Session to run in.
    * @param text - The prompt as typed, mentions left in place.
    * @param attachments - Optional context, named by path (or, for a pasted
@@ -988,6 +997,23 @@ export function createProtocolClient(
   return new ProtocolClientImpl(socket, options);
 }
 
+/**
+ * What one `resolveContext` probe establishes about an engine's age.
+ *
+ * Three booleans rather than a version number, because each was added at a
+ * different time and a client that refuses on "too old" refuses prompts an
+ * engine could have run. Each is read only where a silent drop would cost the
+ * user something: see {@link ProtocolClient.prompt}.
+ */
+interface ContextSupport {
+  /** `attachments` is honoured at all — the engine has `resolveContext`. */
+  attachments: boolean;
+  /** A `file` attachment's `range` is honoured, rather than dropped for the whole file. */
+  ranges: boolean;
+  /** `kind: "fileReference"` is honoured, rather than rejected as an unknown kind. */
+  references: boolean;
+}
+
 class ProtocolClientImpl implements ProtocolClient {
   readonly #socket: WebSocketLike;
   readonly #token: string | undefined;
@@ -1003,7 +1029,7 @@ class ProtocolClientImpl implements ProtocolClient {
   #closeCalled = false;
   #handshake: Promise<void> | undefined;
   /** Memoized answer to "does this engine know RFC 0005's context verbs?". */
-  #contextSupport: Promise<{ attachments: boolean; ranges: boolean }> | undefined;
+  #contextSupport: Promise<ContextSupport> | undefined;
 
   constructor(socket: WebSocketLike, options: ProtocolClientOptions) {
     this.#socket = socket;
@@ -1089,6 +1115,22 @@ class ProtocolClientImpl implements ProtocolClient {
           { method: "prompt" },
         );
       }
+      // And once more for `fileReference`. Unlike the two above, this refusal
+      // is not what stands between the user and a surprise bill — the kind is
+      // spelled as a kind precisely so an engine that does not know it rejects
+      // the frame itself rather than falling back to the whole file. What this
+      // buys is the *message*: a person told "your engine is older than open-
+      // file references" can act, where `PromptAttachment.kind must be one of
+      // …` reads like a client bug. It also saves the round trip.
+      if (!support.references && attachments.some((item) => item.kind === "fileReference")) {
+        throw new ProtocolClientError(
+          ErrorCode.invalidRequest,
+          "This arcturn engine is older than file references, so it cannot be told which file " +
+            "is open without being sent the whole thing. Nothing was sent. Upgrade the engine, " +
+            "or turn off the client's open-file context.",
+          { method: "prompt" },
+        );
+      }
       await this.#call("prompt", { sessionId, text, attachments: [...attachments] });
       return;
     }
@@ -1096,8 +1138,8 @@ class ProtocolClientImpl implements ProtocolClient {
   }
 
   /**
-   * Whether this engine implements RFC 0005's context verbs — and its line
-   * ranges — cached per client.
+   * Whether this engine implements RFC 0005's context verbs — its line ranges,
+   * and its file references — cached per client.
    *
    * The probe is a real `resolveContext` for `"."` — the session's own working
    * directory, which every session has and which nothing can be attached from
@@ -1105,23 +1147,29 @@ class ProtocolClientImpl implements ProtocolClient {
    * because the engine behind one socket does not change mid-connection, and a
    * probe per prompt would double the round trips of every attachment send.
    *
-   * **One probe answers both questions.** It carries a `range`, which an engine
-   * that understands ranges echoes back and one that does not silently drops —
-   * so `ranges` costs no extra round trip, and the range on a *directory* is
-   * harmless because the echo is a statement about the parameter, not about
-   * the path.
+   * **One probe answers all three questions.** It carries a `range`, which an
+   * engine that understands ranges echoes back and one that does not silently
+   * drops — so `ranges` costs no extra round trip, and the range on a
+   * *directory* is harmless because the echo is a statement about the
+   * parameter, not about the path. `references` reads
+   * {@link ContextResolution.attachmentKinds} off the same answer, which is a
+   * statement about the engine and so is equally indifferent to the path.
    *
    * A probe that fails for any reason *other* than an unknown method resolves
    * to full support: the verb is evidently there, and a transient fault on the
    * probe must not be reported to the caller as "your engine is too old".
    */
-  #supportsContext(sessionId: string): Promise<{ attachments: boolean; ranges: boolean }> {
+  #supportsContext(sessionId: string): Promise<ContextSupport> {
     this.#contextSupport ??= this.resolveContext(sessionId, ".", { start: 1, end: 1 })
       .then((resolution) => ({
         attachments: resolution !== undefined,
         ranges: resolution?.range !== undefined,
+        // Absent `attachmentKinds` is an engine that predates the field, which
+        // is an engine that predates the kind — never "this engine supports no
+        // kinds at all". See `ContextResolution.attachmentKinds`.
+        references: resolution?.attachmentKinds?.includes("fileReference") ?? false,
       }))
-      .catch(() => ({ attachments: true, ranges: true }));
+      .catch(() => ({ attachments: true, ranges: true, references: true }));
     return this.#contextSupport;
   }
 

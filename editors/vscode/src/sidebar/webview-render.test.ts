@@ -1680,11 +1680,19 @@ describe("the ambient chip — the file the user is looking at", () => {
     expect(chips[2]?.classList.contains("chip-ambient")).toBe(false);
   });
 
-  it("shows the file and its real size when nothing is selected", () => {
+  it("names the file and says its contents are NOT sent, when nothing is selected", () => {
+    // The size used to be here, and was true while an open file was attached
+    // whole. It travels as `kind: "fileReference"` now — a path and none of
+    // the bytes — so the chip must not put a weight next to something that is
+    // not being weighed.
     panel.send({ type: "context", items: [], active: ambient });
     const chip = panel.byId("chips").all("context-chip")[0];
     expect(chip?.textContent).toContain("src/auth.ts");
-    expect(chip?.textContent).toContain("4.2 KB");
+    expect(chip?.textContent).toContain("path only, contents not sent");
+    expect(chip?.textContent).not.toContain("4.2 KB");
+    // The hover carries the rest: what happens instead, and what it saves.
+    expect(chip?.title).toContain("read");
+    expect(chip?.title).toContain("4.2 KB a turn");
   });
 
   it("shows the selected lines, and counts them, because that is what goes", () => {
@@ -1697,7 +1705,10 @@ describe("the ambient chip — the file the user is looking at", () => {
     expect(chip?.textContent).toContain("src/auth.ts:12-40");
     expect(chip?.textContent).toContain("29 lines");
     expect(chip?.textContent).not.toContain("whole file");
-    expect(chip?.title).toContain("line range");
+    // Nothing extra on the hover: the excerpt is exactly what is sent, so
+    // there is nothing surprising left to explain. This assertion inverted
+    // when the wire learned to carry a range.
+    expect(chip?.title).toBe("src/auth.ts:12-40\n29 lines of 4.2 KB");
   });
 
   it("shows the engine's refusal for a file outside the workspace", () => {

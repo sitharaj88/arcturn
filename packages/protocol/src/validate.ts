@@ -47,6 +47,7 @@ import type {
   PermissionScope,
   PermissionState,
   PromptAttachment,
+  PromptAttachmentKind,
   RewindFailure,
   RewindResult,
   ServerMessage,
@@ -1037,6 +1038,16 @@ const IMAGE_MIME_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"] 
 const CONTEXT_KINDS = ["file", "image", "directory", "missing", "other"] as const;
 
 /**
+ * Every {@link PromptAttachment} kind this contract knows.
+ *
+ * One list, read by both the attachment validator and
+ * {@link ContextResolution.attachmentKinds}: the set an engine advertises and
+ * the set it accepts have to be the same set, and two literals would let them
+ * stop being.
+ */
+const PROMPT_ATTACHMENT_KINDS = ["file", "fileReference", "image"] as const;
+
+/**
  * Validate one {@link PromptAttachment}.
  *
  * The three branches are checked by *shape*, not by trusting `kind` alone, and
@@ -1087,8 +1098,10 @@ export function validateLineRange(value: unknown): ValidationResult<LineRange> {
 export function validatePromptAttachment(value: unknown): ValidationResult<PromptAttachment> {
   if (!isRecord(value)) return fail("PromptAttachment must be an object");
   const kind = value.kind;
-  if (kind !== "file" && kind !== "image") {
-    return fail('PromptAttachment.kind must be one of "file" | "image"');
+  if (kind !== "file" && kind !== "fileReference" && kind !== "image") {
+    return fail(
+      `PromptAttachment.kind must be one of ${PROMPT_ATTACHMENT_KINDS.map((k) => `"${k}"`).join(" | ")}`,
+    );
   }
   const hasPath = value.path !== undefined;
   const hasData = value.data !== undefined;
@@ -1103,11 +1116,20 @@ export function validatePromptAttachment(value: unknown): ValidationResult<Promp
         `PromptAttachment.path must be at most ${String(MAX_CONTEXT_QUERY_LENGTH)} characters`,
       );
     }
-    // A line range is a `file` idea only. An image has no lines, so a range on
-    // one cannot be honoured — and this validator is where it is *refused*
-    // rather than dropped, because a dropped range is the whole file arriving
-    // while the client believes it sent a selection.
+    // A line range is a `file` idea only. An image has no lines, and a
+    // `fileReference` has no text — so a range on either cannot be honoured,
+    // and this validator is where it is *refused* rather than dropped, because
+    // a dropped range is the whole file arriving while the client believes it
+    // sent a selection.
     if (value.range !== undefined) {
+      if (kind === "fileReference") {
+        return fail(
+          'PromptAttachment.range is not accepted for kind "fileReference" — a reference names ' +
+            "a file and sends none of it, so there is nothing for a range to narrow. A client " +
+            'that knows which lines are selected should send kind "file" with that range: the ' +
+            "excerpt is what the user pointed at",
+        );
+      }
       if (kind !== "file") {
         return fail(
           'PromptAttachment.range is accepted for kind "file" only — an image has no lines',
@@ -1118,7 +1140,11 @@ export function validatePromptAttachment(value: unknown): ValidationResult<Promp
       return { ok: true, value: { kind: "file", path: value.path, range: range.value } };
     }
     const attachment: PromptAttachment =
-      kind === "file" ? { kind: "file", path: value.path } : { kind: "image", path: value.path };
+      kind === "file"
+        ? { kind: "file", path: value.path }
+        : kind === "fileReference"
+          ? { kind: "fileReference", path: value.path }
+          : { kind: "image", path: value.path };
     return { ok: true, value: attachment };
   }
   if (value.range !== undefined) {
@@ -1191,6 +1217,25 @@ export function validateContextResolution(value: unknown): ValidationResult<Cont
     if (!parsed.ok) return fail(`ContextResolution.range invalid: ${parsed.error}`);
     range = parsed.value;
   }
+  // Copied out one entry at a time, and refused rather than filtered when an
+  // entry is not a kind this contract knows. A silently-dropped entry would
+  // let a newer engine advertise a kind a client then never sends, which is
+  // the quiet degradation this field exists to make impossible.
+  let attachmentKinds: PromptAttachmentKind[] | undefined;
+  if (value.attachmentKinds !== undefined) {
+    if (!Array.isArray(value.attachmentKinds)) {
+      return fail("ContextResolution.attachmentKinds must be an array when present");
+    }
+    attachmentKinds = [];
+    for (const entry of value.attachmentKinds) {
+      if (!isString(entry) || !(PROMPT_ATTACHMENT_KINDS as readonly string[]).includes(entry)) {
+        return fail(
+          `ContextResolution.attachmentKinds must contain only ${PROMPT_ATTACHMENT_KINDS.join(" | ")}`,
+        );
+      }
+      attachmentKinds.push(entry as PromptAttachmentKind);
+    }
+  }
   return {
     ok: true,
     value: {
@@ -1203,6 +1248,7 @@ export function validateContextResolution(value: unknown): ValidationResult<Cont
       kind: value.kind as ContextKind,
       ...(value.reason === undefined ? {} : { reason: value.reason }),
       ...(range === undefined ? {} : { range }),
+      ...(attachmentKinds === undefined ? {} : { attachmentKinds }),
     },
   };
 }
