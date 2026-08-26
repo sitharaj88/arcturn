@@ -284,13 +284,16 @@ describe("what the ambient chip says will happen", () => {
     ok: true,
   };
 
-  it("says the path travels and the file does not, where a size used to sit", () => {
-    // The size was true when an open file was attached whole. It now travels
-    // as `kind: "fileReference"` — a path, and none of the bytes — so "4.2 KB"
-    // next to a file whose 4.2 KB is not being sent is precisely the claim
-    // this row exists to not make.
-    expect(api.ambientMeta(looking)).toBe("path only, contents not sent");
-    expect(api.ambientMeta(looking)).not.toContain("KB");
+  it("says nothing at all where a size used to sit", () => {
+    // The size was true when an open file was attached whole, and became a lie
+    // once it travelled as `kind: "fileReference"`. The replacement — a
+    // sentence explaining that the contents are not sent — fixed the lie and
+    // added a disclaimer to every caret move. The other two states carry
+    // measurements a reader can act on; naming a file has no such number, so
+    // this one carries none, and the chip is just the filename. The reasoning
+    // lives on the hover, which `ambientTitle` still supplies.
+    expect(api.ambientMeta(looking)).toBe("");
+    expect(api.ambientTitle(looking)).toContain("reads it itself");
   });
 
   it("keeps the '@' chip's wording for an ambient image, which does travel whole", () => {

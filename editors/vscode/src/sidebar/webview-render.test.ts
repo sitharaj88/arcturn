@@ -1680,15 +1680,16 @@ describe("the ambient chip — the file the user is looking at", () => {
     expect(chips[2]?.classList.contains("chip-ambient")).toBe(false);
   });
 
-  it("names the file and says its contents are NOT sent, when nothing is selected", () => {
-    // The size used to be here, and was true while an open file was attached
-    // whole. It travels as `kind: "fileReference"` now — a path and none of
-    // the bytes — so the chip must not put a weight next to something that is
-    // not being weighed.
+  it("is just the filename when nothing is selected", () => {
+    // A size was here while an open file was attached whole, and became false
+    // once it travelled as `kind: "fileReference"`. A sentence saying so
+    // replaced it, which traded a wrong number for a disclaimer repeated on
+    // every caret move. Naming a file costs nothing worth reporting, so the
+    // row reports nothing: the filename is the whole of what is happening.
     panel.send({ type: "context", items: [], active: ambient });
     const chip = panel.byId("chips").all("context-chip")[0];
     expect(chip?.textContent).toContain("src/auth.ts");
-    expect(chip?.textContent).toContain("path only, contents not sent");
+    expect(chip?.textContent).not.toContain("contents not sent");
     expect(chip?.textContent).not.toContain("4.2 KB");
     // The hover carries the rest: what happens instead, and what it saves.
     expect(chip?.title).toContain("read");

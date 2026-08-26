@@ -78,11 +78,14 @@ you have:
 | what the chip says | what goes with your message |
 |---|---|
 | `src/auth.ts:12-40 · 29 lines of 4.2 KB` | those 29 lines, as an excerpt. The size is the file's, because that is what the engine measured before it sliced. |
-| `src/auth.ts · path only, contents not sent` | one line naming the path. Arcturn reads the file itself, with its `read` tool, if your question turns out to need it. |
+| `src/auth.ts` | one line naming the path. Arcturn reads the file itself, with its `read` tool, if your question turns out to need it. |
 | `src/auth.ts · escapes the workspace` | nothing, and the engine's own sentence about why. |
 
 The middle row used to read `4.2 KB`, and used to mean it: an open file was
-attached whole. That was the wrong trade. `packages/protocol/src/client.ts` is
+attached whole. That was the wrong trade. (It then read `path only, contents
+not sent` for a while, which was true and still wrong: a disclaimer about
+transport, on screen every time the caret moved. The other two rows carry
+numbers you can act on; naming a file has none, so that row carries nothing.) `packages/protocol/src/client.ts` is
 2,161 lines — about 22,600 input tokens, every single message, whether or not
 you asked about it; `packages/cli/src/workflow.ts` is 7,251 lines, about 81,200.
 Arcturn has a `read` tool and a path is enough for it to decide, so it now pays

@@ -168,14 +168,17 @@ function contextMeta(item) {
  * goes. The size is the file's, not the excerpt's: the engine stats before it
  * slices, and that number is the engine's.
  *
- * **Without one: the path, and not the file.** This used to be a bare byte
- * count, which was true and is now a lie — an open file with nothing selected
- * travels as 'kind: "fileReference"', which names the path and sends none of
- * the bytes. A '4.2 KB' next to a file whose 4.2 KB is *not* being sent is the
- * exact shape of claim this surface exists to prevent, so the number goes and
- * the sentence takes its place. What the model gets is one line naming the
- * path; what it does about it is reach for its 'read' tool, once, if the
- * question turns out to need the file.
+ * **Without one: nothing.** This carried a byte count once, which became a lie
+ * when an open file started travelling as 'kind: "fileReference"' — a number
+ * beside bytes that are not sent is the shape of claim this surface exists to
+ * prevent. Replacing it with 'path only, contents not sent' fixed the lie and
+ * introduced a different fault: a disclaimer, on screen every time the caret
+ * moves, explaining a transport decision nobody asked about. The other two
+ * lines are measurements a reader can act on — what an attachment costs, how
+ * much of a file an excerpt covers. There is no such number here, because
+ * naming a file has no cost worth reporting. So the line is empty and the chip
+ * is just the filename, which is the whole of what is happening. The
+ * explanation stays on the hover, for whoever wonders.
  *
  * An ambient **image** still travels as bytes ('read' does not answer "is this
  * screenshot relevant"), so it keeps the '@' chip's own wording rather than
@@ -188,7 +191,7 @@ function contextMeta(item) {
 function ambientMeta(item) {
   if (item.ok !== true) return contextMeta(item);
   if (item.kind === "image") return contextMeta(item);
-  if (!item.selection) return "path only, contents not sent";
+  if (!item.selection) return "";
   var lines = item.selection.endLine - item.selection.startLine + 1;
   var count = lines === 1 ? "1 line" : String(lines) + " lines";
   var size = formatBytes(item.bytes);
