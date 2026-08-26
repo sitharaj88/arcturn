@@ -124,6 +124,48 @@ export const SIDEBAR_STYLE = `
   --arc-ok: var(--vscode-charts-green, var(--vscode-testing-iconPassed, currentColor));
   --arc-warn: var(--vscode-editorWarning-foreground, var(--vscode-charts-yellow, currentColor));
   --arc-err: var(--vscode-editorError-foreground, var(--vscode-charts-red, currentColor));
+  /*
+   * The brand. Arcturn is named for an orange giant, and the site's accent is
+   * that amber — but a fixed colour cannot be right on every backdrop, so it
+   * is a token with a light-theme value rather than one constant. These are
+   * the site's own accent tokens, lifted from globals.css unchanged, plus the
+   * on-accent colour that keeps the send arrow legible against them. The
+   * values live in the declarations below and are not repeated here: a colour
+   * written twice is a colour that will disagree with itself.
+   *
+   * It is used only where identity belongs — the mark, the assistant's avatar,
+   * the composer's focus ring, the send button. Links stay the theme's link
+   * colour and a running tool stays the theme's blue: those are the editor's
+   * vocabulary, and repainting them would be branding something that is not
+   * ours to brand.
+   */
+  --arc-brand: #f2af48;
+  --arc-brand-hover: #fad185;
+  --arc-brand-on: #241a0a;
+}
+
+/*
+ * VS Code stamps the workbench theme kind on the body, which is the only way
+ * a webview can tell light from dark without guessing: the same amber that
+ * reads as warm on a dark editor is a pale smear on a white one, so light
+ * takes the site's darker accent and puts white on it.
+ */
+body.vscode-light {
+  --arc-brand: #8a5216;
+  --arc-brand-hover: #6f410f;
+  --arc-brand-on: #ffffff;
+}
+
+/*
+ * High contrast is not a palette to decorate. Both HC themes hand the border
+ * and focus colours back to the theme, because a user in high contrast chose
+ * those colours over anyone's brand — and the forced-colors rule below does the same
+ * for the button.
+ */
+body.vscode-high-contrast, body.vscode-high-contrast-light {
+  --arc-brand: var(--vscode-focusBorder, currentColor);
+  --arc-brand-hover: var(--vscode-focusBorder, currentColor);
+  --arc-brand-on: var(--vscode-button-foreground, currentColor);
 }
 * { box-sizing: border-box; }
 html, body { height: 100%; }
@@ -152,7 +194,7 @@ svg { flex: none; display: block; }
   border-bottom: 1px solid var(--arc-border);
   background: var(--vscode-sideBarSectionHeader-background, transparent);
 }
-.brand { display: flex; color: var(--vscode-textLink-foreground); }
+.brand { display: flex; color: var(--arc-brand); }
 .session { display: flex; flex-direction: column; min-width: 0; flex: 1 1 auto; }
 .session-title {
   font-weight: 600;
@@ -258,7 +300,7 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
   color: var(--arc-muted);
 }
 .turn-user .turn-head { color: var(--vscode-foreground); }
-.turn-assistant .avatar { color: var(--vscode-textLink-foreground); }
+.turn-assistant .avatar { color: var(--arc-brand); }
 .turn-body > * + * { margin-top: 6px; }
 .block-user { white-space: pre-wrap; overflow-wrap: anywhere; }
 
@@ -1012,8 +1054,25 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
   border-radius: var(--arc-radius);
   background: var(--vscode-input-background);
 }
-.composer:focus-within { border-color: var(--vscode-focusBorder); }
-.composer.dropping { border-color: var(--vscode-focusBorder); }
+/*
+ * The composer wears the brand when it has the caret, and a second ring so the
+ * highlight is visible without relying on hue alone — a 1px colour change is
+ * not a focus indicator for anyone who cannot separate amber from grey.
+ */
+.composer:focus-within {
+  border-color: var(--arc-brand);
+  box-shadow: 0 0 0 1px var(--arc-brand);
+}
+.composer.dropping {
+  border-color: var(--arc-brand);
+  box-shadow: 0 0 0 1px var(--arc-brand);
+}
+@media (forced-colors: active) {
+  .composer:focus-within, .composer.dropping {
+    border-color: Highlight;
+    box-shadow: 0 0 0 1px Highlight;
+  }
+}
 
 /* ---- context chips --------------------------------------------------- */
 
@@ -1238,11 +1297,18 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
   padding: 0;
   border: none;
   border-radius: 4px;
-  color: var(--vscode-button-foreground);
-  background: var(--vscode-button-background);
+  color: var(--arc-brand-on);
+  background: var(--arc-brand);
   cursor: pointer;
 }
-.send:hover { background: var(--vscode-button-hoverBackground); }
+.send:hover { background: var(--arc-brand-hover); }
+/*
+ * Forced colours ignore a background anyway; naming the system pair keeps the
+ * arrow readable instead of leaving it to whatever the UA picks.
+ */
+@media (forced-colors: active) {
+  .send { color: ButtonText; background: ButtonFace; border: 1px solid ButtonBorder; }
+}
 .send:disabled { opacity: 0.4; cursor: default; }
 .send.stop { color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground); }
 .send.stop:hover { background: var(--vscode-button-secondaryHoverBackground); }

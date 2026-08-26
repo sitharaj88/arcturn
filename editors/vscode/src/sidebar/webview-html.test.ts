@@ -264,15 +264,33 @@ describe("the client script", () => {
     expect(SIDEBAR_SCRIPT).not.toContain("cssText");
   });
 
-  it("uses only vs code theme tokens for colour, so every theme is covered", () => {
-    // Any literal colour is a theme this panel gets wrong. Shadows are the one
-    // exception: there is no --vscode-* token for one, and a translucent black
-    // reads correctly over both a light and a dark widget background.
-    const colours = SIDEBAR_STYLE.match(/#[0-9a-fA-F]{3,8}\b|\brgba?\(|\bhsla?\(/g) ?? [];
-    const shadows = SIDEBAR_STYLE.match(/box-shadow:[^;]*/g) ?? [];
-    const inShadows = shadows.join(" ").match(/\brgba?\(/g) ?? [];
+  it("keeps every literal colour inside the brand tokens, so every theme is covered", () => {
+    // The rule this started as — no literal colour anywhere — was right about
+    // the hazard and wrong about the exception, because the panel does have
+    // one colour of its own. So the rule is now: a literal may exist only in a
+    // `--arc-brand*` declaration, which is defined once, given a light-theme
+    // value, and handed back to the theme under high contrast. A literal
+    // anywhere else is still a theme this panel gets wrong, and still fails.
+    // Shadows keep their old exemption: no --vscode-* token exists for one.
+    const literal = /#[0-9a-fA-F]{3,8}\b|\brgba?\(|\bhsla?\(/g;
+    const colours = SIDEBAR_STYLE.match(literal) ?? [];
+    const inShadows =
+      (SIDEBAR_STYLE.match(/box-shadow:[^;]*/g) ?? []).join(" ").match(literal) ?? [];
     const inFallbacks = SIDEBAR_STYLE.match(/--arc-border:[^;]*rgba?\(/g) ?? [];
-    expect(colours.length).toBe(inShadows.length + inFallbacks.length);
+    const inBrand =
+      (SIDEBAR_STYLE.match(/--arc-brand[a-z-]*:[^;]*/g) ?? []).join(" ").match(literal) ?? [];
+    expect(colours.length).toBe(inShadows.length + inFallbacks.length + inBrand.length);
+  });
+
+  it("gives the brand a light value and hands it back under high contrast", () => {
+    // A single amber cannot be right on both a white and a black editor, and
+    // in high contrast the user has already chosen their colours over ours.
+    expect(SIDEBAR_STYLE).toMatch(/body\.vscode-light\s*\{[^}]*--arc-brand:/s);
+    expect(SIDEBAR_STYLE).toMatch(
+      /body\.vscode-high-contrast[^{]*\{[^}]*--arc-brand: var\(--vscode-focusBorder/s,
+    );
+    // And the send button stops painting itself when the OS forces colours.
+    expect(SIDEBAR_STYLE).toMatch(/forced-colors: active\)\s*\{\s*\.send \{[^}]*ButtonFace/s);
   });
 
   it("turns every animation off under prefers-reduced-motion", () => {
