@@ -341,8 +341,13 @@ describe("the client script", () => {
     // "Claude Sonne…" still names a model and the full id is one click away;
     // "Accept edi…" names nothing, and the mode is a four-way choice about what
     // the agent may do to somebody's files.
-    expect(SIDEBAR_STYLE).toMatch(/#model \{[^}]*flex: 1 1 auto/s);
+    // The shrink *order* is what this test is about, and it is the ratio that
+    // sets it: the model chip gives ground at the normal rate, the mode chip at
+    // a fifteenth of it. Neither may grow — a chip that grows stretches into a
+    // pill across a wide panel, which is what the spacer is for.
+    expect(SIDEBAR_STYLE).toMatch(/#model \{[^}]*flex: 0 1 auto/s);
     expect(SIDEBAR_STYLE).toMatch(/#mode \{[^}]*flex-shrink: 0\.15/s);
+    expect(SIDEBAR_STYLE).toMatch(/\.composer-gap \{ flex: 1 1 auto; \}/);
     // And neither is ever removed at a narrow width.
     expect(SIDEBAR_STYLE).not.toMatch(/@media \(max-width: 380px\)[^}]*#(model|mode)/s);
   });

@@ -1282,7 +1282,15 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
  * a bar that dropped the mode chip at a narrow width would hide the control
  * most worth checking exactly when there is least room to check it.
  */
-#model { flex: 1 1 auto; min-width: 3em; }
+/*
+ * Shrink first, never grow. Growing was how this chip used to absorb the row's
+ * leftover width, back when there was nothing else to absorb it — and it left
+ * a pill stretched across half a wide sidebar with its label alone at the far
+ * left. The spacer owns the leftover now. The shrink order it was really for
+ * survives: this gives ground at the normal rate and the mode chip at a
+ * fifteenth of it, so a narrow panel eats the model id and keeps the mode.
+ */
+#model { flex: 0 1 auto; min-width: 3em; }
 #mode { flex: 0 1 auto; flex-shrink: 0.15; min-width: 3em; }
 #mode.mode-yolo { color: var(--arc-warn); border-color: var(--arc-warn); }
 #mode.mode-plan { color: var(--vscode-textLink-foreground); }
@@ -1309,7 +1317,20 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
 @media (forced-colors: active) {
   .send { color: ButtonText; background: ButtonFace; border: 1px solid ButtonBorder; }
 }
-.send:disabled { opacity: 0.4; cursor: default; }
+/*
+ * Disabled is a different button, not a faded one. Forty per cent of a brand
+ * colour is a smear on a light theme and takes the arrow with it — and since
+ * the button is disabled whenever the box is empty, that smear is what the
+ * composer looks like at rest. So it drops the accent entirely and wears the
+ * editor's own disabled vocabulary, which reads as deliberate.
+ */
+.send:disabled {
+  color: var(--vscode-disabledForeground, var(--arc-muted));
+  background: transparent;
+  border: 1px solid var(--arc-border);
+  cursor: default;
+}
+.send:disabled:hover { background: transparent; }
 .send.stop { color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground); }
 .send.stop:hover { background: var(--vscode-button-secondaryHoverBackground); }
 
