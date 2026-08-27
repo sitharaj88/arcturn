@@ -521,6 +521,65 @@ describe("rendering an assistant turn", () => {
   });
 });
 
+describe("tables", () => {
+  function render(text: string): StubNode {
+    panel.send(state({ blocks: [{ kind: "text", id: "t1", text }] }));
+    return panel.byId("turns");
+  }
+
+  const grid = "| Pillar | Count |\n|:---|---:|\n| Permission engine | 4 |\n| Checkpoints | 12 |";
+
+  it("builds a real table, not a paragraph full of pipes", () => {
+    // What this replaced: no table support at all, so every GFM table a model
+    // wrote reached the reader as its own source, pipes and dashes included.
+    const turns = render(grid);
+    const tags = turns.walk().map((node) => node.tagName);
+    expect(tags).toContain("table");
+    expect(tags).toContain("thead");
+    expect(tags).toContain("tbody");
+    const headings = turns.walk().filter((node) => node.tagName === "th");
+    expect(headings.map((node) => node.textContent)).toEqual(["Pillar", "Count"]);
+    const cells = turns.walk().filter((node) => node.tagName === "td");
+    expect(cells.map((node) => node.textContent)).toEqual([
+      "Permission engine",
+      "4",
+      "Checkpoints",
+      "12",
+    ]);
+  });
+
+  it("carries the alignment down every cell of its column", () => {
+    // The delimiter row aligns a column, not just its heading, and it is set
+    // as a class because this panel never writes an inline style.
+    const turns = render(grid);
+    const second = turns
+      .walk()
+      .filter((node) => node.tagName === "th" || node.tagName === "td")
+      .filter((_, index) => index % 2 === 1);
+    expect(second.every((node) => node.className === "md-right")).toBe(true);
+    const first = turns
+      .walk()
+      .filter((node) => node.tagName === "th" || node.tagName === "td")
+      .filter((_, index) => index % 2 === 0);
+    expect(first.every((node) => node.className === "")).toBe(true);
+  });
+
+  it("puts the table in a scroller, so a wide one never widens the panel", () => {
+    // A table that pushes the transcript sideways takes every other message
+    // with it. The overflow belongs to the table alone.
+    const wrapper = render(grid).find((node) => node.classList.contains("md-table"));
+    expect(wrapper?.childNodes[0]?.tagName).toBe("table");
+  });
+
+  it("renders a cell as markdown and never as markup", () => {
+    const turns = render("| a |\n| - |\n| **b** and <img src=x onerror=alert(1)> |");
+    const cell = turns.walk().find((node) => node.tagName === "td");
+    expect(cell?.walk().map((node) => node.tagName)).toContain("strong");
+    expect(turns.walk().map((node) => node.tagName)).not.toContain("img");
+    expect(cell?.textContent).toContain("<img src=x onerror=alert(1)>");
+  });
+});
+
 describe("what model output cannot do to the panel", () => {
   function render(text: string): StubNode {
     panel.send(state({ blocks: [{ kind: "text", id: "t1", text }] }));

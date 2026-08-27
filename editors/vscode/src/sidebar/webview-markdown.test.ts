@@ -216,6 +216,101 @@ describe("parseMarkdown: links", () => {
   });
 });
 
+describe("parseMarkdown: tables", () => {
+  const table = (text: string) => {
+    const block = parseMarkdown(text)[0];
+    if (block?.t !== "table") throw new Error(`not a table: ${block?.t}`);
+    return block;
+  };
+
+  it("reads a header, a delimiter and a body", () => {
+    const built = table("| a | b |\n| - | - |\n| 1 | 2 |\n| 3 | 4 |");
+    expect(built.head.map(words)).toEqual(["a", "b"]);
+    expect(built.rows.map((row) => row.map(words))).toEqual([
+      ["1", "2"],
+      ["3", "4"],
+    ]);
+  });
+
+  it("takes the alignment the delimiter row asks for", () => {
+    expect(table("| a | b | c | d |\n|:-|-:|:-:|-|\n| 1 | 2 | 3 | 4 |").align).toEqual([
+      "left",
+      "right",
+      "center",
+      "",
+    ]);
+  });
+
+  it("reads a table whose rows have no outer pipes", () => {
+    // The frame is optional in GFM and models leave it off about half the time.
+    const built = table("a | b\n--|--\n1 | 2");
+    expect(built.head.map(words)).toEqual(["a", "b"]);
+    expect(built.rows.map((row) => row.map(words))).toEqual([["1", "2"]]);
+  });
+
+  it("keeps cells as markdown, not as flat text", () => {
+    const built = table("| a |\n| - |\n| **b** `c` |");
+    expect(built.rows[0]?.[0]?.map((node) => node.t)).toEqual(["strong", "text", "code"]);
+  });
+
+  it("carries an escaped pipe through as data", () => {
+    // The escape belongs to the inline pass, which is the only place in this
+    // file that resolves one — so what the cell holds is still the escape.
+    const built = table("| a | b |\n| - | - |\n| x \\| y | z |");
+    expect(built.rows[0]?.map(words)).toEqual(["x | y", "z"]);
+  });
+
+  it("squares a ragged row against the header", () => {
+    // A short row is what a table looks like while it is still arriving, and
+    // a long one is a model miscounting. Neither should drop a row.
+    const built = table("| a | b | c |\n| - | - | - |\n| 1 |\n| 1 | 2 | 3 | 4 |");
+    expect(built.rows.map((row) => row.map(words))).toEqual([
+      ["1", "", ""],
+      ["1", "2", "3"],
+    ]);
+  });
+
+  it("stops the table at a blank line and at the next block", () => {
+    const blocks = parseMarkdown("| a |\n| - |\n| 1 |\n\nafter");
+    expect(blocks[0]?.t).toBe("table");
+    expect(words(blocks[1])).toBe("after");
+
+    const heading = parseMarkdown("| a |\n| - |\n| 1 |\n# next");
+    expect(heading[0]?.t).toBe("table");
+    expect(heading[1]?.t).toBe("h");
+  });
+});
+
+describe("parseMarkdown: what is not a table", () => {
+  it("leaves prose that merely contains pipes alone", () => {
+    // Pipes are ordinary punctuation in a sentence about shells, and the
+    // delimiter row is the only thing that makes a table a table.
+    expect(parseMarkdown("run ls | wc -l to count them")[0]?.t).toBe("p");
+    expect(parseMarkdown("a | b\nc | d")[0]?.t).toBe("p");
+  });
+
+  it("does not let a line ending in a pipe capture the rule under it", () => {
+    // Without the guard that the delimiter row carries a pipe of its own,
+    // this reads as a one-column table and the horizontal rule disappears.
+    const blocks = parseMarkdown("ends with a pipe |\n---");
+    expect(blocks[0]?.t).toBe("p");
+    expect(blocks[1]?.t).toBe("hr");
+  });
+
+  it("refuses a delimiter row that does not match the header's width", () => {
+    // GFM's rule, and a good one: a mismatch is a coincidence, not a table.
+    expect(parseMarkdown("| a | b | c |\n| - | - |\n| 1 | 2 | 3 |")[0]?.t).toBe("p");
+  });
+
+  it("waits for the delimiter row rather than half-drawing a table", () => {
+    // Mid-stream the header has arrived and the delimiter has not. A table
+    // that appeared column by column would rebuild itself on every delta.
+    expect(parseMarkdown("| a | b |")[0]?.t).toBe("p");
+    expect(parseMarkdown("| a | b |\n| -")[0]?.t).toBe("p");
+    expect(parseMarkdown("| a | b |\n| - | - |")[0]?.t).toBe("table");
+  });
+});
+
 describe("parseMarkdown: what it refuses to do", () => {
   it("never passes raw html through — a tag is characters, not markup", () => {
     expect(parseMarkdown("<img src=x onerror=alert(1)>")[0]).toEqual({
@@ -226,7 +321,7 @@ describe("parseMarkdown: what it refuses to do", () => {
   });
 
   it("emits only the node kinds the renderer knows", () => {
-    const known = new Set(["p", "h", "code", "quote", "list", "hr"]);
+    const known = new Set(["p", "h", "code", "quote", "list", "table", "hr"]);
     const inline = new Set(["text", "code", "strong", "em", "del", "link", "br"]);
     const walkInline = (nodes: unknown): void => {
       for (const node of nodes as Record<string, unknown>[]) {
@@ -239,12 +334,15 @@ describe("parseMarkdown: what it refuses to do", () => {
         expect(known).toContain(block.t);
         if (block.t === "quote") walk(block.c);
         else if (block.t === "list") for (const item of block.items) walk(item.c);
-        else if (block.t !== "code" && block.t !== "hr") walkInline(block.c);
+        else if (block.t === "table") {
+          for (const cell of block.head) walkInline(cell);
+          for (const row of block.rows) for (const cell of row) walkInline(cell);
+        } else if (block.t !== "code" && block.t !== "hr") walkInline(block.c);
       }
     };
     walk(
       parseMarkdown(
-        "# h\n\ntext **b** [l](https://x.example) `c`\n\n> q\n\n- a\n  1. b\n\n```js\nx\n```\n\n---",
+        "# h\n\ntext **b** [l](https://x.example) `c`\n\n> q\n\n- a\n  1. b\n\n| a | *b* |\n| - | --: |\n| 1 | 2 |\n\n```js\nx\n```\n\n---",
       ),
     );
   });

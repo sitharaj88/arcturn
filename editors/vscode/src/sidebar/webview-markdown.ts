@@ -52,6 +52,14 @@ export type MarkdownInline =
   | { t: "link"; href: string; c: MarkdownInline[] }
   | { t: "br" };
 
+/**
+ * A column's alignment, or `""` when the delimiter row asked for none.
+ *
+ * Empty rather than a name like "default", because the renderer's question is
+ * "is there an alignment to set" and an empty string answers it directly.
+ */
+export type MarkdownAlign = "" | "left" | "center" | "right";
+
 /** One item of a `list` block. `checked` is `null` unless it is a task item. */
 export interface MarkdownItem {
   checked: boolean | null;
@@ -69,6 +77,7 @@ export type MarkdownBlock =
   | { t: "code"; lang: string; file?: string; v: string; open: boolean }
   | { t: "quote"; c: MarkdownBlock[] }
   | { t: "list"; ordered: boolean; start: number; items: MarkdownItem[] }
+  | { t: "table"; align: MarkdownAlign[]; head: MarkdownInline[][]; rows: MarkdownInline[][][] }
   | { t: "hr" };
 
 /** JavaScript source defining `parseMarkdown(text) -> MarkdownBlock[]`. */
@@ -455,6 +464,97 @@ function mdIsFenceClose(line, marker) {
   return true;
 }
 
+/**
+ * One row of a table, split on the pipes that are actually separators.
+ *
+ * A leading and a trailing pipe are the table's own frame, not empty cells at
+ * each end, so they come off first. Inside, a backslash-escaped pipe is data
+ * and is carried through with its backslash intact — the inline pass owns
+ * every escape in this file, and a second place that resolved them would be a
+ * second place to get them wrong.
+ */
+function mdTableCells(line) {
+  var text = line.trim();
+  if (text.charAt(0) === "|") text = text.slice(1);
+  if (text.length > 0 && text.charAt(text.length - 1) === "|" && text.charAt(text.length - 2) !== "\\") {
+    text = text.slice(0, -1);
+  }
+  var cells = [];
+  var buffer = "";
+  for (var i = 0; i < text.length; i += 1) {
+    var ch = text.charAt(i);
+    if (ch === "\\" && text.charAt(i + 1) === "|") {
+      buffer += "\\|";
+      i += 1;
+      continue;
+    }
+    if (ch === "|") {
+      cells.push(buffer.trim());
+      buffer = "";
+      continue;
+    }
+    buffer += ch;
+  }
+  cells.push(buffer.trim());
+  return cells;
+}
+
+/**
+ * The alignments a delimiter row asks for, or null if it is not one.
+ *
+ * This is the whole test for whether a line of pipes is a table: the row of
+ * dashes underneath. Prose is full of pipes and none of it is followed by
+ * one of these.
+ */
+function mdTableAlign(cells) {
+  var align = [];
+  for (var i = 0; i < cells.length; i += 1) {
+    var cell = cells[i];
+    if (!/^:?-+:?$/.test(cell)) return null;
+    var left = cell.charAt(0) === ":";
+    var right = cell.charAt(cell.length - 1) === ":";
+    align.push(left && right ? "center" : right ? "right" : left ? "left" : "");
+  }
+  return align;
+}
+
+/**
+ * A GitHub-flavoured table starting at 'from', or null.
+ *
+ * Two guards keep prose out. The delimiter row has to carry a pipe of its
+ * own, which is what stops a paragraph that happens to end in a pipe from
+ * capturing the horizontal rule under it. And its cell count has to match the
+ * header's, as GFM requires — a mismatch is a coincidence, not a table.
+ *
+ * Body rows are padded and truncated to the header's width, because a ragged
+ * row is the common shape of a table a model is still writing, and dropping
+ * the row entirely would make the transcript flicker as it arrives.
+ */
+function mdTableAt(lines, from, depth) {
+  if (from + 1 >= lines.length) return null;
+  if (lines[from].indexOf("|") === -1) return null;
+  if (lines[from + 1].indexOf("|") === -1) return null;
+  var head = mdTableCells(lines[from]);
+  var align = mdTableAlign(mdTableCells(lines[from + 1]));
+  if (align === null || align.length !== head.length) return null;
+
+  var rows = [];
+  var i = from + 2;
+  while (i < lines.length && lines[i].trim() !== "" && !mdStartsBlock(lines[i])) {
+    var cells = mdTableCells(lines[i]);
+    var row = [];
+    for (var c = 0; c < head.length; c += 1) {
+      row.push(mdInline(c < cells.length ? cells[c] : "", depth + 1));
+    }
+    rows.push(row);
+    i += 1;
+  }
+
+  var headInline = [];
+  for (var h = 0; h < head.length; h += 1) headInline.push(mdInline(head[h], depth + 1));
+  return { block: { t: "table", align: align, head: headInline, rows: rows }, next: i };
+}
+
 function mdStartsBlock(line) {
   return (
     MD_FENCE.test(line) ||
@@ -616,6 +716,13 @@ function mdBlocks(lines, depth) {
         items: mdListItems(collected.lines, baseIndent, depth)
       });
       i = collected.next;
+      continue;
+    }
+
+    var table = mdTableAt(lines, i, depth);
+    if (table !== null) {
+      blocks.push(table.block);
+      i = table.next;
       continue;
     }
 

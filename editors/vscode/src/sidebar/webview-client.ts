@@ -397,7 +397,44 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
 .block-user { white-space: pre-wrap; overflow-wrap: anywhere; }
 
 /* markdown */
-.md :where(p, ul, ol, blockquote, pre, h1, h2, h3, h4, h5, h6, hr) { margin: 0; }
+.md :where(p, ul, ol, blockquote, pre, h1, h2, h3, h4, h5, h6, hr, table) { margin: 0; }
+
+/*
+ * A table, in a column narrower than most tables were written for.
+ *
+ * Cells wrap and the table fills the width, rather than the table keeping its
+ * natural width and the panel scrolling. A model writes two or three columns
+ * of prose, and that fits 380px by wrapping — made to scroll instead, half of
+ * every row would sit off-screen with nothing to say it was there. The
+ * scroller is kept for the case wrapping cannot save: many columns, or a cell
+ * holding one long unbreakable token.
+ */
+.md-table { overflow-x: auto; }
+.md table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.95em;
+  line-height: 1.45;
+}
+.md th, .md td {
+  padding: 4px 8px;
+  border: 1px solid var(--arc-border);
+  text-align: left;
+  vertical-align: top;
+  /*
+   * break-word, not anywhere. A cell's minimum width is its longest word, and
+   * the column layout is free to squeeze a column down to that minimum — so
+   * under 'anywhere' the minimum is one character and a narrow first column
+   * gets shredded into Permissi / on engine. This breaks a word only when the
+   * word alone cannot fit, which is what the scroller is really for.
+   */
+  overflow-wrap: break-word;
+}
+.md th { background: var(--arc-surface); font-weight: 600; }
+/* Banding, so the eye can hold a row across a width it has to travel. */
+.md tbody tr:nth-child(even) { background: color-mix(in srgb, var(--arc-surface) 45%, transparent); }
+.md .md-center { text-align: center; }
+.md .md-right { text-align: right; }
 .md > * + * { margin-top: 8px; }
 .md li > * + *, .md blockquote > * + * { margin-top: 5px; }
 .md h1, .md h2, .md h3, .md h4, .md h5, .md h6 {
@@ -2264,6 +2301,13 @@ const CLIENT_SOURCE = String.raw`
     return wrap;
   }
 
+  /* Alignment as a class, because the panel never writes an inline style. */
+  function alignClass(align) {
+    if (align === "center") return "md-center";
+    if (align === "right") return "md-right";
+    return "";
+  }
+
   function renderBlocksInto(blocks, into) {
     for (var i = 0; i < blocks.length; i += 1) {
       var block = blocks[i];
@@ -2279,6 +2323,36 @@ const CLIENT_SOURCE = String.raw`
       if (block.t === "code") { into.appendChild(codeBlock(block)); continue; }
       if (block.t === "hr") { into.appendChild(el("hr")); continue; }
       if (block.t === "quote") { var quote = el("blockquote"); renderBlocksInto(block.c || [], quote); into.appendChild(quote); continue; }
+      if (block.t === "table") {
+        var scroller = el("div", "md-table");
+        var grid = el("table");
+        var columns = block.align || [];
+        var headCells = block.head || [];
+        var headRow = el("tr");
+        for (var hc = 0; hc < headCells.length; hc += 1) {
+          var th = el("th", alignClass(columns[hc]));
+          renderInline(headCells[hc] || [], th);
+          headRow.appendChild(th);
+        }
+        var thead = el("thead");
+        thead.appendChild(headRow);
+        grid.appendChild(thead);
+        var tbody = el("tbody");
+        var bodyRows = block.rows || [];
+        for (var br = 0; br < bodyRows.length; br += 1) {
+          var tr = el("tr");
+          for (var bc = 0; bc < bodyRows[br].length; bc += 1) {
+            var td = el("td", alignClass(columns[bc]));
+            renderInline(bodyRows[br][bc] || [], td);
+            tr.appendChild(td);
+          }
+          tbody.appendChild(tr);
+        }
+        grid.appendChild(tbody);
+        scroller.appendChild(grid);
+        into.appendChild(scroller);
+        continue;
+      }
       if (block.t === "list") {
         var list = el(block.ordered ? "ol" : "ul");
         if (block.ordered && block.start !== 1) list.setAttribute("start", String(block.start));
