@@ -35,9 +35,7 @@ import { makeScratch, type Scratch, writeFileAt } from "./test-helpers/scratch.j
 import { worktreeConfinementRules } from "./workflow.js";
 
 /** The shipped enterprise kit, loaded through the real agent loader. */
-const KIT_AGENTS = fileURLToPath(
-  new URL("../../../examples/enterprise-org/agents", import.meta.url),
-);
+const KIT_AGENTS = fileURLToPath(new URL("../../../kits/enterprise-org/agents", import.meta.url));
 
 const cleanups: (() => Promise<void>)[] = [];
 

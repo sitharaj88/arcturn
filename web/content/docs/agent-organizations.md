@@ -18,7 +18,7 @@ the reviewer reads the diff from a fresh context, and it runs on a lane that
 report you read.
 
 A complete, runnable org — eleven roles and six pipelines — ships in
-[`examples/enterprise-org/`](https://github.com/sitharaj88/arcturn/tree/main/examples/enterprise-org),
+[`kits/enterprise-org/`](https://github.com/sitharaj88/arcturn/tree/main/kits/enterprise-org),
 along with an honest account of which guarantees are enforced by the engine and which are
 still convention.
 

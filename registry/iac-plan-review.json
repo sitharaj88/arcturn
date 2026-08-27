@@ -1,7 +1,7 @@
 {
   "name": "iac-plan-review",
   "kinds": ["org-kit", "agents", "workflows", "skills"],
-  "source": "sitharaj88/arcturn/examples/iac-plan-review",
+  "source": "sitharaj88/arcturn/kits/iac-plan-review",
   "description": "One role, one pipeline and two skills for infrastructure change review that refuses to review a plan it did not produce, and treats the plan itself as code execution because on this domain's facts it is.",
   "maintainer": {
     "name": "Sitharaj Seenivasan",

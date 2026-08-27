@@ -1,7 +1,7 @@
 {
   "name": "plan-pressure-tests",
   "kinds": ["skills"],
-  "source": "sitharaj88/arcturn/examples/plan-pressure-tests",
+  "source": "sitharaj88/arcturn/kits/plan-pressure-tests",
   "description": "Four reader skills that pressure-test a plan somebody already wrote — its assumptions, its feasibility against your tree, its claims and its cut order — each refusing the judgment it cannot ground.",
   "maintainer": {
     "name": "Sitharaj Seenivasan",

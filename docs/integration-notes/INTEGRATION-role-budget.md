@@ -6,7 +6,7 @@ BUDGETS. `packages/cli/src/workflow.ts` now reads and enforces
 aborted mid-step, and an optional workflow-level `budgetUsd:` backstops the
 whole run (RFC 0001 §3.2/§7.4/§8.4). None of that required touching
 `agents.ts`, on purpose: this task's file ownership was scoped to
-`workflow.ts`, the `examples/enterprise-org/agents/*.md` role files (docs
+`workflow.ts`, the `kits/enterprise-org/agents/*.md` role files (docs
 only) and `workflow.test.ts`, so the loader gained the field only as a
 **type** (a `declare module "./agents.js"` augmentation inside `workflow.ts`
 — see that file's doc comment right above it), not as parsed, populated
@@ -194,7 +194,7 @@ return {
   to `workflow.ts`'s `runWorkflow`/`createRuntimeRunStep`/
   `createRuntimeWriteLane`; once `loadCandidate` populates `.budget`, it
   arrives at the enforcement code with no further plumbing.
-- `examples/enterprise-org/agents/*.md` — already carry real `budget:`
+- `kits/enterprise-org/agents/*.md` — already carry real `budget:`
   values (they always did; the field was decorative, not absent) and this
   task's own pass added an explanatory comment under each one. Nothing there
   needs to change for this diff to take effect.
@@ -208,7 +208,7 @@ npx vitest run packages/cli/src/workflow.test.ts       # 215 tests, must stay gr
 node --input-type=module -e '
 import { loadAgentDefs } from "./packages/cli/dist/agents.js";
 const warnings = [];
-const defs = await loadAgentDefs(["./examples/enterprise-org/agents"], warnings);
+const defs = await loadAgentDefs(["./kits/enterprise-org/agents"], warnings);
 console.log(warnings.length, "warnings");
 for (const d of defs) console.log(d.name, d.budget);
 '

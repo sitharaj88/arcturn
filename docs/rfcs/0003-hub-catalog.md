@@ -180,7 +180,7 @@ Effort tiers: **S** = pure markdown skills, no reference assets, one afternoon.
 pipeline. **L** = five roles plus two pipelines, or anything needing a real
 external toolchain to validate against.
 
-Every pack ships as `examples/<pack-name>/` with an `arcturn.json` manifest
+Every pack ships as `kits/<pack-name>/` with an `arcturn.json` manifest
 declaring `provides`, and is listed by `registry/<pack-name>.json` whose
 disclosure block is derived, never typed.
 
@@ -409,7 +409,7 @@ skills with `$SKILL_DIR` reference assets** (nothing in the tree demonstrates
 this today); and an org kit whose gate is a mid-pipeline `ORG-ASK` rather than
 a pipeline boundary.
 
-**`examples/plan-pressure-tests/`**
+**`kits/plan-pressure-tests/`**
 
 ```
 arcturn.json
@@ -421,7 +421,7 @@ skills/scope-cut.md
 ```
 plus `registry/plan-pressure-tests.json`.
 
-**`examples/mobile-ground-truth/`**
+**`kits/mobile-ground-truth/`**
 
 ```
 arcturn.json
@@ -438,7 +438,7 @@ only — no scripts inside the skill folders, so `executable: false` stays
 literally true and the extensions gate is never approached, let alone routed
 around.
 
-**`examples/design-review-org/`**
+**`kits/design-review-org/`**
 
 ```
 arcturn.json
@@ -458,7 +458,7 @@ fails up front under plan mode before a token is spent), and the note that
 these five role names are chosen not to collide with `enterprise-org`'s eleven
 so both kits install side by side.
 
-**One wave-1 side task, found while calibrating:** `examples/enterprise-org/`
+**One wave-1 side task, found while calibrating:** `kits/enterprise-org/`
 has no `arcturn.json`, so its detection falls back to convention while its
 registry entry is fully specified. Add the manifest in the same wave that
 introduces the manifest requirement, or the requirement is advice rather than
@@ -825,7 +825,7 @@ what `registry/README.md` says curation is.
   suite re-derives every agent's lane from the engine's own `WRITE_TOOLS` and
   `EXEC_TOOLS` literals, counts stages from the numbered lines, and reads
   `budgetUsd` out of the frontmatter. **A lane typed by hand fails the suite.**
-- `arcturn inspect ./examples/<pack> --json` is diffed against
+- `arcturn inspect ./kits/<pack> --json` is diffed against
   `registry/<pack>.json`. They must agree on every role, lane, tool list, stage
   count, budget, skill name and the `executable` boolean. The page a person
   reads and the install they run cannot describe two different packages.

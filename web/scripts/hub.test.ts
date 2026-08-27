@@ -6,7 +6,7 @@
  * Those are claims about files that live somewhere else, and a claim nobody
  * checks rots the first time the underlying file is edited. Every first-party
  * entry points into *this* repository, so the claim is checkable here: this
- * suite derives the same facts from `examples/**` and from the engine's own
+ * suite derives the same facts from `kits/**` and from the engine's own
  * lane law in `packages/cli/src/workflow.ts`, and fails when an entry drifts.
  *
  * Nothing below hard-codes a lane or a stage count. The tool sets are parsed
@@ -174,7 +174,7 @@ describe("the registry of record", () => {
     expect(entry).toBeDefined();
     expect(installCommand(entry!)).toBe(`arcturn add ${entry!.source}`);
     expect(sourceUrl(entry!)).toBe(
-      "https://github.com/sitharaj88/arcturn/tree/HEAD/examples/enterprise-org",
+      "https://github.com/sitharaj88/arcturn/tree/HEAD/kits/enterprise-org",
     );
   });
 });

@@ -1,7 +1,7 @@
 {
   "name": "enterprise-org",
   "kinds": ["org-kit", "agents", "workflows"],
-  "source": "sitharaj88/arcturn/examples/enterprise-org",
+  "source": "sitharaj88/arcturn/kits/enterprise-org",
   "description": "Eleven agent roles and six pipelines that carry a change from charter to merge gate, with the reviewers on lanes that structurally cannot land a patch.",
   "maintainer": {
     "name": "Sitharaj Seenivasan",

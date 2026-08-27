@@ -4,7 +4,7 @@
  * `commands.ts`, and the seams they share with `runtime.ts` / `scouts.ts`).
  *
  * Every test in this file is a **finding**: it asserts the property the RFC,
- * the shipped `examples/enterprise-org` kit, or the code's own doc comments
+ * the shipped `kits/enterprise-org` kit, or the code's own doc comments
  * promise, and it fails against the code as landed. Assertions are written to
  * be fix-agnostic wherever more than one repair is defensible — they pin the
  * *promise*, not a particular implementation of it.
@@ -177,9 +177,7 @@ async function fakeLane(
 // --------------------------------------------------------------- finding 1
 
 describe("finding: `bash` puts the kit's read-only reviewers on the write lane", () => {
-  const kitAgents = fileURLToPath(
-    new URL("../../../examples/enterprise-org/agents", import.meta.url),
-  );
+  const kitAgents = fileURLToPath(new URL("../../../kits/enterprise-org/agents", import.meta.url));
 
   it("replays a shipped `writes: none` reviewer's worktree into the user's checkout", async () => {
     const warnings: string[] = [];

@@ -1,7 +1,7 @@
 {
   "name": "cloud-posture-review",
   "kinds": ["org-kit", "agents", "workflows", "skills"],
-  "source": "sitharaj88/arcturn/examples/cloud-posture-review",
+  "source": "sitharaj88/arcturn/kits/cloud-posture-review",
   "description": "Two roles, one pipeline and one skill for read-only cloud posture and IAM review, where a check that could not run is NOT-CHECKED with its reason rather than a PASS.",
   "maintainer": {
     "name": "Sitharaj Seenivasan",

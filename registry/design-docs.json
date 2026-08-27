@@ -1,7 +1,7 @@
 {
   "name": "design-docs",
   "kinds": ["skills"],
-  "source": "sitharaj88/arcturn/examples/design-docs",
+  "source": "sitharaj88/arcturn/kits/design-docs",
   "description": "Four commands for the writing a repository asks for before code — an ADR, an architecture map, a fitness function and a high-level design — each refusing to assert what the tree does not show.",
   "maintainer": {
     "name": "Sitharaj Seenivasan",

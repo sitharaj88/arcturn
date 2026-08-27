@@ -142,6 +142,6 @@ prompt asks it not to — because no role has a step with that authority. They e
 evidence packet, and the merge gate is you reading it.
 
 Eleven roles and six pipelines, runnable today, in
-[`examples/enterprise-org/`](https://github.com/sitharaj88/arcturn/tree/main/examples/enterprise-org).
+[`kits/enterprise-org/`](https://github.com/sitharaj88/arcturn/tree/main/kits/enterprise-org).
 Copy them into `.arcturn/`, run `/workflow bug-fix` against a real bug, and read what comes
 back. The [agent organizations](/docs/agent-organizations) page has the rest.

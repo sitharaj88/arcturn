@@ -12,10 +12,10 @@ A package is that same content with a name, a version, a resolvable source, and 
 install that records exactly what it did.
 
 ```bash
-arcturn add sitharaj88/arcturn/examples/starter-skills
+arcturn add sitharaj88/arcturn/kits/starter-skills
 ```
 
-That clones the repo, uses `examples/starter-skills` as the package root, writes the
+That clones the repo, uses `kits/starter-skills` as the package root, writes the
 resolved commit to `.arcturn-install.json`, and links three markdown files into
 `~/.arcturn/skills/`. `/commit-message`, `/pr-description` and `/release-notes` work in
 the next session. Nothing else happened — and the rest of this page is mostly about how
@@ -100,7 +100,7 @@ rather than failing the install.
 
 | Shape | Example | Notes |
 |---|---|---|
-| GitHub shorthand | `sitharaj88/arcturn` | `owner/repo[/subdir][@ref]` — `sitharaj88/arcturn/examples/starter-skills@v0.1.0` |
+| GitHub shorthand | `sitharaj88/arcturn` | `owner/repo[/subdir][@ref]` — `sitharaj88/arcturn/kits/starter-skills@v0.1.0` |
 | Git URL | `https://github.com/you/pack.git` | Anything `git clone` accepts; `#ref` or `@ref` to pin |
 | Local path | `./my-pack`, `/abs/path` | Copied, not linked. A path that is itself a repo still gets its commit recorded |
 
@@ -230,9 +230,9 @@ package exactly as an install would — same resolver, same commit pinning — l
 nothing, and prints what installing it *would* add.
 
 ```
-$ arcturn inspect sitharaj88/arcturn/examples/enterprise-org
+$ arcturn inspect sitharaj88/arcturn/kits/enterprise-org
 
-enterprise-org — github: sitharaj88/arcturn/examples/enterprise-org @ main
+enterprise-org — github: sitharaj88/arcturn/kits/enterprise-org @ main
 staged at 4f1c2ab · nothing linked, nothing written outside the staging directory
 
 AGENTS (11)
@@ -267,12 +267,12 @@ EXTENSIONS (0)
   No executable code. This package links markdown only.
 
 Nothing was installed. To install:
-  arcturn add sitharaj88/arcturn/examples/enterprise-org
+  arcturn add sitharaj88/arcturn/kits/enterprise-org
 ```
 
 *The transcript above is illustrative — the field set is the specified disclosure block
 (lanes, tools, budgets, stage counts, role dependencies, executable files), and the
-values are the real ones from the kit in `examples/enterprise-org`. Exact column
+values are the real ones from the kit in `kits/enterprise-org`. Exact column
 formatting will differ.*
 
 Read that output as three claims you are being asked to check:

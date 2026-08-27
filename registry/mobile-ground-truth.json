@@ -1,7 +1,7 @@
 {
   "name": "mobile-ground-truth",
   "kinds": ["skills"],
-  "source": "sitharaj88/arcturn/examples/mobile-ground-truth",
+  "source": "sitharaj88/arcturn/kits/mobile-ground-truth",
   "description": "Four mobile commands that answer from the tree and the toolchain rather than from memory: API availability, crash triage, upgrade impact, privacy declarations.",
   "maintainer": {
     "name": "Sitharaj Seenivasan",

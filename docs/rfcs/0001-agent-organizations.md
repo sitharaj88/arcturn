@@ -702,7 +702,7 @@ defaulted to the read lane — an undeclared list is an authority grant nobody w
 > reviewer gap above, among seven other findings, within days, and this three-lane version — plus
 > seeded worktrees and the engine-authoritative patch trailer, both new in the same pass — is the
 > fix. `roleLane` now returns `"read" | "exec" | "write"`, and `createRuntimeRunStep` /
-> `createRuntimeWriteLane` dispatch all three. `examples/enterprise-org/` and `/docs/workflows`
+> `createRuntimeWriteLane` dispatch all three. `kits/enterprise-org/` and `/docs/workflows`
 > (website) were reconciled to this table in the same pass; see §12's status note for what is,
 > and is not, covered by "shipped."
 
@@ -1037,7 +1037,7 @@ pipelines: `feature`, `bugfix`. Shipped gates: `tests-green`, `plan-disjoint`, `
 > review of the two-lane slice found a `bash`-only reviewer landing on the write lane among eight
 > verified findings — §7.1's status note has the detail. `agents.ts` also gained `maxTurns:`
 > frontmatter, enforced as a real per-role turn ceiling clamped to the session's own budget in
-> both worktree lanes. `examples/enterprise-org/` now ships ten role files and six
+> both worktree lanes. `kits/enterprise-org/` now ships ten role files and six
 > `@role`-dispatching pipelines built on this slice, in place of the `feature`/`bugfix` pair and
 > `org/`-package gates sketched above, and `/docs/workflows` (website) documents it. None of the
 > v1 acceptance criteria below are met by this slice — there is no `arcturn org run`, no ledger,

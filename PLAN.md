@@ -190,7 +190,7 @@ patch replayed in, so a reviewer reads what the pipeline produced rather than
 untouched HEAD; before that, reviewers were verifying code that did not contain
 the change. Confinement is enforced by permission rules where deny beats `yolo`,
 not by prompt. A runnable ten-role, six-pipeline kit ships in
-`examples/enterprise-org/`, and RFC 0001 records the design.
+`kits/enterprise-org/`, and RFC 0001 records the design.
 
 **Reliability layer (2026-08-22 → 08-23).** Every step's outcome is written to a
 durable journal before the run advances, which makes `/workflow status` and

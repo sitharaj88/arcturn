@@ -1,7 +1,7 @@
 {
   "name": "test-integrity",
   "kinds": ["org-kit", "agents", "workflows", "skills"],
-  "source": "sitharaj88/arcturn/examples/test-integrity",
+  "source": "sitharaj88/arcturn/kits/test-integrity",
   "description": "Find the tests that cannot fail. The oracle breaks the behaviour and watches whether the test notices; the only role that can write cannot run anything, so no stage verifies its own work.",
   "maintainer": {
     "name": "Sitharaj Seenivasan",

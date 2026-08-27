@@ -6,9 +6,9 @@ import { describe, expect, it } from "vitest";
 import { loadAgentDefs, parseAgentFrontmatter } from "./agents.js";
 import { BUILT_IN_TOOL_NAMES } from "./runtime.js";
 
-/** `<repo root>/examples/enterprise-org/agents` — the real org-kit role files. */
+/** `<repo root>/kits/enterprise-org/agents` — the real org-kit role files. */
 const ENTERPRISE_ORG_AGENTS_ROOT = fileURLToPath(
-  new URL("../../../examples/enterprise-org/agents", import.meta.url),
+  new URL("../../../kits/enterprise-org/agents", import.meta.url),
 );
 
 /** Build a temp directory populated with the given relative files. */

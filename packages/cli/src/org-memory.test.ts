@@ -130,9 +130,7 @@ async function fakeLane(text = "report"): Promise<
   };
 }
 
-const KIT_AGENTS = fileURLToPath(
-  new URL("../../../examples/enterprise-org/agents", import.meta.url),
-);
+const KIT_AGENTS = fileURLToPath(new URL("../../../kits/enterprise-org/agents", import.meta.url));
 
 /** Resolves a role's own `model:` for the worktree lanes. */
 const resolveModel = (id: string) => ({ id, provider: "anthropic", model: id }) as never;

@@ -1,7 +1,7 @@
 {
   "name": "design-review-org",
   "kinds": ["org-kit", "agents", "workflows"],
-  "source": "sitharaj88/arcturn/examples/design-review-org",
+  "source": "sitharaj88/arcturn/kits/design-review-org",
   "description": "Five roles and two pipelines that review a design before the code exists, where the document's author holds no shell and the human gate is a pause the engine enforces mid-pipeline.",
   "maintainer": {
     "name": "Sitharaj Seenivasan",

@@ -122,7 +122,7 @@ where it stopped. Per-run `budgetUsd:` and per-step `stepTimeoutMs:` ceilings bo
 two things that actually run away.
 
 A runnable ten-role, six-pipeline enterprise kit ships in
-[`examples/enterprise-org/`](examples/enterprise-org/), documented alongside an honest
+[`kits/enterprise-org/`](kits/enterprise-org/), documented alongside an honest
 account of what is enforced and what is still convention.
 
 ### 🔌 MCP, both directions

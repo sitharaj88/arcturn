@@ -173,7 +173,7 @@ individual contributor that their personal skill was overridden.
 
 - [Packages](/docs/packages) — how a skill travels to another machine: a folder of these
   files, installed with `arcturn add`, the commit pinned and the install recorded.
-  `arcturn add sitharaj88/arcturn/examples/starter-skills` installs three worked ones
+  `arcturn add sitharaj88/arcturn/kits/starter-skills` installs three worked ones
 - [Model-invoked skills](/docs/skill-tool) — the same library handed to the model as a
   tool, why `description:` is load-bearing there, and how project-root skills are treated
 - [Workflows](/docs/workflows) — the sibling feature for a scripted multi-step pipeline,

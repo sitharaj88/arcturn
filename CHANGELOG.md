@@ -918,7 +918,7 @@ untouched.
 - **`arcturn new skill|agent|workflow`** scaffolds an asset file that
   round-trips through the real parsers, so the frontmatter is right on the
   first save.
-- **A curated pack catalog** ships in the repository under `examples/` and is
+- **A curated pack catalog** ships in the repository under `kits/` and is
   published at arcturn.dev/hub — seven packs, thirty-two assets, each built
   around a refusal that was watched firing against real fixtures before it
   shipped.
@@ -1050,7 +1050,7 @@ the CLI does, an embedder can do through `@arcturn/core` and `@arcturn/ai`.
 - **Bounded runs.** `stepTimeoutMs:` caps a single step, `budgetUsd:` caps a
   whole run's cumulative spend, and a role's `maxTurns:` is enforced as a hard
   ceiling clamped to the session's own.
-- **A runnable enterprise kit** in `examples/enterprise-org/` — ten roles and six
+- **A runnable enterprise kit** in `kits/enterprise-org/` — ten roles and six
   pipelines that parse cleanly through the real parsers, documented alongside an
   honest account of what is enforced and what is still convention.
 

@@ -1,7 +1,7 @@
 {
   "name": "complexity-guard",
   "kinds": ["org-kit", "agents", "workflows", "skills"],
-  "source": "sitharaj88/arcturn/examples/complexity-guard",
+  "source": "sitharaj88/arcturn/kits/complexity-guard",
   "description": "Three roles, one pipeline and one skill for growth-rate review and measurement-disciplined optimization, where the role that states the number is never the role that wrote the code.",
   "maintainer": {
     "name": "Sitharaj Seenivasan",

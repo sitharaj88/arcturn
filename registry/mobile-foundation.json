@@ -1,12 +1,7 @@
 {
   "name": "mobile-foundation",
-  "kinds": [
-    "org-kit",
-    "agents",
-    "workflows",
-    "skills"
-  ],
-  "source": "sitharaj88/arcturn/examples/mobile-foundation",
+  "kinds": ["org-kit", "agents", "workflows", "skills"],
+  "source": "sitharaj88/arcturn/kits/mobile-foundation",
   "description": "Stand a mobile project up and keep it honest: toolchain from real doctor output, an architecture baseline proposed against the tree that exists, and an accessibility audit that runs what is runnable and names what it did not establish.",
   "maintainer": {
     "name": "Sitharaj Seenivasan",
@@ -17,48 +12,22 @@
       {
         "name": "a11y-auditor",
         "lane": "exec",
-        "tools": [
-          "read",
-          "grep",
-          "glob",
-          "ls",
-          "bash",
-          "search_code"
-        ]
+        "tools": ["read", "grep", "glob", "ls", "bash", "search_code"]
       },
       {
         "name": "baseline-author",
         "lane": "write",
-        "tools": [
-          "read",
-          "grep",
-          "glob",
-          "ls",
-          "search_code",
-          "write"
-        ]
+        "tools": ["read", "grep", "glob", "ls", "search_code", "write"]
       },
       {
         "name": "stack-surveyor",
         "lane": "read",
-        "tools": [
-          "read",
-          "grep",
-          "glob",
-          "ls",
-          "search_code"
-        ]
+        "tools": ["read", "grep", "glob", "ls", "search_code"]
       },
       {
         "name": "toolchain-doctor",
         "lane": "exec",
-        "tools": [
-          "read",
-          "grep",
-          "glob",
-          "ls",
-          "bash"
-        ]
+        "tools": ["read", "grep", "glob", "ls", "bash"]
       }
     ],
     "workflows": [
