@@ -1,0 +1,54 @@
+{
+  "name": "test-integrity",
+  "kinds": ["org-kit", "agents", "workflows", "skills"],
+  "source": "sitharaj88/arcturn/examples/test-integrity",
+  "description": "Find the tests that cannot fail. The oracle breaks the behaviour and watches whether the test notices; the only role that can write cannot run anything, so no stage verifies its own work.",
+  "maintainer": {
+    "name": "Sitharaj Seenivasan",
+    "url": "https://sitharaj.in"
+  },
+  "disclosure": {
+    "agents": [
+      {
+        "name": "assertion-critic",
+        "lane": "read",
+        "tools": ["read", "grep", "glob", "ls", "search_code"]
+      },
+      {
+        "name": "flake-detective",
+        "lane": "exec",
+        "tools": ["read", "grep", "glob", "ls", "bash"]
+      },
+      {
+        "name": "mutation-oracle",
+        "lane": "exec",
+        "tools": ["read", "grep", "glob", "ls", "bash"]
+      },
+      {
+        "name": "test-author",
+        "lane": "write",
+        "tools": ["read", "grep", "glob", "ls", "search_code", "write", "edit"]
+      }
+    ],
+    "workflows": [{ "name": "test-audit", "stages": 4, "budgetUsd": 30 }],
+    "skills": [
+      {
+        "name": "coverage-truth",
+        "line": "Report what a coverage number actually measures here, the exclusion list nobody reads, and which files are high-coverage and low-assurance."
+      },
+      {
+        "name": "flake-hunt",
+        "line": "Find tests whose result depends on order, timing, seed or shared state, established across runs and with the mechanism named rather than called flaky."
+      },
+      {
+        "name": "mutation-probe",
+        "line": "Prove whether a test can fail by breaking the behaviour it covers and watching whether it notices. PROVEN, BLIND or NO-ORACLE, never covered."
+      },
+      {
+        "name": "vacuous-check",
+        "line": "Read tests for assertions that cannot fail and rank them for a mutation run, as suspicions with a path:line rather than verdicts."
+      }
+    ],
+    "executable": false
+  }
+}
