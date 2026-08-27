@@ -10,7 +10,36 @@ CLI, the SDK, or the wire protocol.
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-08-27
+
 ### Fixed
+
+- **Reopening a session from history gave you an empty panel and an agent with
+  no memory of it.** Picking an earlier conversation out of the history list
+  listed the session, drew its title, and then showed nothing — and the half
+  that did not announce itself was worse: the agent behind it had been built
+  fresh, so the next thing you said was answered with no knowledge of anything
+  above it. Two probes, one replaying the transcript and one capturing the
+  outgoing request to a stub provider, put numbers on both halves: three events
+  replayed in-process and zero after a restart, and the model's request
+  containing the earlier turn before and not after.
+
+  The cause was a type rather than a policy. `serve` built every session
+  through a synchronous agent factory, and rebuilding a stored branch means
+  reading the session file — which is asynchronous. A synchronous factory can
+  only ever start a conversation over, so the note in the code promising that
+  the factory resumed described something that was never reachable from it.
+
+  The factory may now return a promise and is told whether it is opening or
+  creating. Opening a session that is **already live** rebuilds nothing: that
+  agent may be mid-turn, holding steering text, a pending permission ask, or
+  messages not yet written, and re-resuming from disk would discard all of it
+  on behalf of whoever attached second. Opens in flight share one promise, so
+  two attaches in the same tick cannot leave two agents appending to one file.
+  The stored model is read **before** the agent is built, because an agent
+  fixes its compaction budget from the model's context window at construction
+  — adopting a model afterwards would compact to one model's budget while
+  talking to another.
 
 - **The file you merely had *open* was injected in full, on every turn.** The
   VS Code panel's ambient chip attached the active editor as
@@ -100,6 +129,35 @@ CLI, the SDK, or the wire protocol.
 
 ### Changed
 
+- **VS Code: the transcript says who spoke by shape, and says when it
+  finished.** Every message carried a `YOU` or `ARCTURN` caption in uppercase,
+  above both halves of every exchange — chrome the eye stepped over on the way
+  to the content, twice per exchange, and in a 380px sidebar a label column the
+  answer could not spare. Your prompt now sits in a card and the answer runs
+  full width; the name moved to `aria-label` on the turn, so a screen reader
+  still announces it and a sighted reader is not charged for it.
+
+  An expanded `edit` showed the JSON that requested it — both versions of the
+  code on one line with every newline as a literal `\n`. It is now drawn as a
+  diff: removed lines above added ones, tinted from the theme's own pass and
+  fail colours and **signed in the gutter as well as the tint**, so it still
+  reads in high contrast, to a colour-blind reader, and in a screenshot. Only
+  complete arguments are drawn — half a `newText` is a change nobody is making
+  — and every key the diff did not consume is still shown, because an edit
+  reviewed with `replaceAll` hidden is worse than the raw JSON was.
+
+  A finished turn closes off with how long it took and a button to copy the
+  answer. The time is only ever the interval this panel measured between the
+  two edges it saw: a turn replayed from history gets no footer at all, and a
+  turn that was **already in flight when the panel attached** says "Done"
+  without a number rather than timing the moment of attach.
+
+  Smaller: a green `Done` on every tool became a mark, so a run of six greps
+  stops shouting while every state a reader has to act on keeps its word;
+  inline code dropped to a half-strength fill, so a path mentioned in passing
+  stops outranking the send button; and the session ULID gave up the header
+  line to the folder the session is working in.
+
 - **VS Code: permission requests are answered in the chat panel, not in a
   modal in the middle of the screen.** A request now appears as a card in the
   panel's dock — the reserved region beside the composer that already holds the
@@ -134,6 +192,27 @@ CLI, the SDK, or the wire protocol.
   request, always.
 
 ### Added
+
+- **VS Code: the panel can read a markdown table.** The panel parses its own
+  markdown — it has to, because the CSP forbids `innerHTML` and every node is
+  built by hand — and that parser knew paragraphs, headings, code, quotes,
+  lists and rules. It did not know tables, so a GFM table fell through to the
+  paragraph branch and reached you as its own source: rows of pipes, a line of
+  dashes and the cell text run together. The terminal has rendered tables all
+  along, so the same answer was readable in one surface and not the other.
+
+  Alignment comes from the delimiter row and is carried down every cell of its
+  column as a class, since this panel never writes an inline style. Cells are
+  parsed as inline markdown, so bold, links and code spans inside them work and
+  a tag inside one is still characters.
+
+  Three guards keep prose out, because a pipe is ordinary punctuation. The
+  delimiter row must carry a pipe of its own — without that, a sentence ending
+  in a pipe swallows the horizontal rule beneath it. Its cell count must match
+  the header's, as GFM requires. And nothing is drawn until the delimiter row
+  has arrived, so a table streaming in does not rebuild itself column by column
+  on every delta. A ragged body row is padded or truncated to the header rather
+  than dropped, which is the same shape seen mid-stream.
 
 - **A file attachment can carry a line range, so a client can send a
   *selection*.** A panel that knows the user has lines 12–40 highlighted had no
@@ -1040,7 +1119,8 @@ servers unspawnable because npm ships them as `.cmd` shims. All fixed, with the
 matrix as referee. Shell resolution, path handling and case sensitivity are
 resolved per platform at runtime.
 
-[Unreleased]: https://github.com/sitharaj88/arcturn/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/sitharaj88/arcturn/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/sitharaj88/arcturn/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/sitharaj88/arcturn/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/sitharaj88/arcturn/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/sitharaj88/arcturn/releases/tag/v0.1.0
