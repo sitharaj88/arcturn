@@ -18,8 +18,15 @@ export const CLI_PACKAGE = "arcturn";
  *
  * Bump it only when the extension actually starts depending on something the
  * older engine cannot do; every bump nags every user who is behind it.
+ *
+ * 0.4.0, because the panel now speaks verbs no earlier engine answers: session
+ * replay and delete, setPermissionMode, editor context, the slash commands,
+ * rewind and the workflow and background-agent listings. Against 0.3.0 the
+ * panel still opens — the nag is a warning, never a block — but its history
+ * comes back empty, the permission chip cannot change anything and the command
+ * menu is bare. Better to say so once than to let it read as breakage.
  */
-export const MIN_ENGINE_VERSION = "0.2.0";
+export const MIN_ENGINE_VERSION = "0.4.0";
 
 /**
  * Executable names to probe, in order, for a platform.

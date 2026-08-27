@@ -18,7 +18,7 @@ import { readFileSync } from "node:fs";
 import * as vscode from "vscode";
 
 /** `publisher.name` from the manifest — the id VS Code files the extension under. */
-export const EXTENSION_ID = "sitharaj88.arcturn-vscode";
+export const EXTENSION_ID = "arcturn.arcturn-vscode";
 
 /** The terminal name `terminal.ts` chooses for a single-root workspace. */
 export const SINGLE_ROOT_TERMINAL_NAME = "Arcturn";

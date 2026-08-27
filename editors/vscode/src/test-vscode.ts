@@ -295,7 +295,7 @@ export function createFakeVscode(): Record<string, unknown> {
           // there, it is a function, and calling it is fatal.
           return () => {
             throw new Error(
-              "Extension 'sitharaj88.arcturn-vscode' CANNOT use API proposal: terminalShellIntegration.",
+              "Extension 'arcturn.arcturn-vscode' CANNOT use API proposal: terminalShellIntegration.",
             );
           };
         }

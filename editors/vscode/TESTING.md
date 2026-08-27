@@ -195,7 +195,7 @@ the terminal.
 **Launch 1 — `default`** (workspace with `arcturn.serve.enabled: true`)
 
 - **Activation** (`01-activation`) — the extension is registered under
-  `sitharaj88.arcturn-vscode`; `activationEvents` is `[]`; it is *inactive*
+  `arcturn.arcturn-vscode`; `activationEvents` is `[]`; it is *inactive*
   until a contributed command is invoked, and active afterwards. Then the
   RFC 0004 §3 activation-cost rule, observed rather than argued: after
   activation the stand-in engine has been executed **zero** times and no
@@ -297,7 +297,7 @@ shell-integration API with `typeof window.onDidEndTerminalShellExecution ===
 it throws:
 
 ```
-Extension 'sitharaj88.arcturn-vscode' CANNOT use API proposal: terminalShellIntegration.
+Extension 'arcturn.arcturn-vscode' CANNOT use API proposal: terminalShellIntegration.
 Its package.json#enabledApiProposals-property declares: [] but NOT terminalShellIntegration.
 ```
 

@@ -128,6 +128,18 @@ describe("isOutdated", () => {
   it("ships a minimum that is a real version string", () => {
     expect(parseVersionOutput(MIN_ENGINE_VERSION)).toBe(MIN_ENGINE_VERSION);
   });
+
+  it("treats the engine before the panel's verbs as outdated", () => {
+    // Not a restatement of the constant — the claim is about a specific
+    // engine. 0.3.0 answers none of session replay, deleteSession,
+    // setPermissionMode, editor context or the slash commands, so a panel
+    // driving it comes up with empty history and a bare command menu. That is
+    // the case the one-time upgrade notice exists for, and lowering the
+    // minimum back under 0.4.0 to quiet the nag would take the notice away
+    // from exactly the users who need it.
+    expect(isOutdated("0.3.0", MIN_ENGINE_VERSION)).toBe(true);
+    expect(isOutdated("0.4.0", MIN_ENGINE_VERSION)).toBe(false);
+  });
 });
 
 describe("installCommand", () => {
