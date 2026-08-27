@@ -1,0 +1,20 @@
+{
+  "name": "mobile-foundation",
+  "description": "Four roles, two pipelines and four commands for standing a mobile project up and keeping it honest: environment, architecture baseline, accessibility and the release gate. Only one role can write, and the accessibility audit structurally cannot apply a label.",
+  "version": "0.1.0",
+  "provides": {
+    "agents": [
+      "agents/a11y-auditor.md",
+      "agents/baseline-author.md",
+      "agents/stack-surveyor.md",
+      "agents/toolchain-doctor.md"
+    ],
+    "workflows": ["workflows/a11y-audit.md", "workflows/mobile-baseline.md"],
+    "skills": [
+      "skills/a11y-sweep",
+      "skills/arch-baseline.md",
+      "skills/env-doctor.md",
+      "skills/release-gate.md"
+    ]
+  }
+}

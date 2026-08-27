@@ -1,0 +1,96 @@
+{
+  "name": "mobile-foundation",
+  "kinds": [
+    "org-kit",
+    "agents",
+    "workflows",
+    "skills"
+  ],
+  "source": "sitharaj88/arcturn/examples/mobile-foundation",
+  "description": "Stand a mobile project up and keep it honest: toolchain from real doctor output, an architecture baseline proposed against the tree that exists, and an accessibility audit that runs what is runnable and names what it did not establish.",
+  "maintainer": {
+    "name": "Sitharaj Seenivasan",
+    "url": "https://sitharaj.in"
+  },
+  "disclosure": {
+    "agents": [
+      {
+        "name": "a11y-auditor",
+        "lane": "exec",
+        "tools": [
+          "read",
+          "grep",
+          "glob",
+          "ls",
+          "bash",
+          "search_code"
+        ]
+      },
+      {
+        "name": "baseline-author",
+        "lane": "write",
+        "tools": [
+          "read",
+          "grep",
+          "glob",
+          "ls",
+          "search_code",
+          "write"
+        ]
+      },
+      {
+        "name": "stack-surveyor",
+        "lane": "read",
+        "tools": [
+          "read",
+          "grep",
+          "glob",
+          "ls",
+          "search_code"
+        ]
+      },
+      {
+        "name": "toolchain-doctor",
+        "lane": "exec",
+        "tools": [
+          "read",
+          "grep",
+          "glob",
+          "ls",
+          "bash"
+        ]
+      }
+    ],
+    "workflows": [
+      {
+        "name": "a11y-audit",
+        "stages": 2,
+        "budgetUsd": 12
+      },
+      {
+        "name": "mobile-baseline",
+        "stages": 4,
+        "budgetUsd": 25
+      }
+    ],
+    "skills": [
+      {
+        "name": "a11y-sweep",
+        "line": "Audit mobile accessibility by running the checks this stack has and naming what source cannot decide. Emits no score and no conformance verdict."
+      },
+      {
+        "name": "arch-baseline",
+        "line": "Map the architecture this repository actually has, then propose a baseline against it with the cost of each proposal named."
+      },
+      {
+        "name": "env-doctor",
+        "line": "Report whether this machine can build this repository, from real commands with real exit codes, against the versions the repo pins."
+      },
+      {
+        "name": "release-gate",
+        "line": "Check what a store will actually reject, from the manifests in this tree, never asserting that a build is signed, compliant or ready."
+      }
+    ],
+    "executable": false
+  }
+}
