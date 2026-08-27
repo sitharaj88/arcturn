@@ -194,7 +194,7 @@ describe("createGitStatusTracker (real git)", () => {
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   });
 
   it("reports a clean status on a freshly initialized real repository", async () => {

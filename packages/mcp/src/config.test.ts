@@ -13,7 +13,7 @@ describe("loadMcpConfig", () => {
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
     for (const key of Object.keys(process.env)) {
       if (!(key in originalEnv)) delete process.env[key];
     }

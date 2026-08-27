@@ -683,7 +683,8 @@ const hasGit = await gitAvailable();
 const tempDirs: string[] = [];
 
 afterEach(async () => {
-  for (const dir of tempDirs.splice(0)) await rm(dir, { recursive: true, force: true });
+  for (const dir of tempDirs.splice(0))
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
 });
 
 describe.skipIf(!hasGit)("createWorktree against real git", () => {

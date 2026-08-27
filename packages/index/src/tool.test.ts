@@ -37,7 +37,11 @@ const indexRoots: string[] = [];
 afterEach(async () => {
   await repo?.cleanup();
   repo = null;
-  await Promise.all(indexRoots.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  await Promise.all(
+    indexRoots
+      .splice(0)
+      .map((dir) => rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 })),
+  );
 });
 
 async function setup(overrides: Record<string, unknown> = {}) {

@@ -166,7 +166,7 @@ describe("memory tool", () => {
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   });
 
   it("writes a note, then lists and deletes it (round trip)", async () => {

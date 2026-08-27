@@ -383,7 +383,7 @@ describe.runIf(hasRealSandboxExec)("resolveSandboxInvocation (real sandbox-exec)
       expect(exitCode).not.toBe(0);
       expect(existsSync(outsidePath)).toBe(false);
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
     }
   });
 
@@ -409,7 +409,7 @@ describe.runIf(hasRealSandboxExec)("resolveSandboxInvocation (real sandbox-exec)
       expect(exitCode).toBe(0);
       expect((await readFile(insidePath, "utf8")).trim()).toBe("yes");
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
     }
   });
 });

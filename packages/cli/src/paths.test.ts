@@ -104,8 +104,8 @@ describe("session bucket migration", () => {
 
     const paths = resolveArcturnPaths({ cwd, home, env: {} });
     expect(paths.sessions).toBe(legacy);
-    await rm(home, { recursive: true, force: true });
-    await rm(cwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+    await rm(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   });
 
   it("uses the folded bucket for a project with no history", async () => {
@@ -113,8 +113,8 @@ describe("session bucket migration", () => {
     const cwd = await mkdtemp(join(tmpdir(), "Arcturn-Fresh-"));
     const paths = resolveArcturnPaths({ cwd, home, env: {} });
     expect(paths.sessions).toBe(join(home, "sessions", cwdHash(cwd)));
-    await rm(home, { recursive: true, force: true });
-    await rm(cwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+    await rm(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   });
 
   it("prefers the folded bucket when both exist", async () => {
@@ -126,7 +126,7 @@ describe("session bucket migration", () => {
     });
     const paths = resolveArcturnPaths({ cwd, home, env: {} });
     expect(paths.sessions).toBe(join(home, "sessions", cwdHash(cwd)));
-    await rm(home, { recursive: true, force: true });
-    await rm(cwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+    await rm(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   });
 });

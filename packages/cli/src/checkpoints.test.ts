@@ -51,7 +51,7 @@ describe("checkpoints", () => {
   });
 
   afterEach(async () => {
-    await rm(root, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   });
 
   it("round-trips a snapshot and restore of a modified file", async () => {

@@ -111,7 +111,7 @@ describe("writeReport / readReport", () => {
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   });
 
   it("round-trips a suite result through JSON", async () => {

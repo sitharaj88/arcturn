@@ -33,7 +33,7 @@ describe("verify command shell resolution", () => {
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   });
 
   /**

@@ -56,7 +56,8 @@ const TEST_MODEL: ModelSpec = {
 const scratch: string[] = [];
 
 afterEach(async () => {
-  for (const dir of scratch.splice(0)) await rm(dir, { recursive: true, force: true });
+  for (const dir of scratch.splice(0))
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
 });
 
 async function scratchDir(prefix = "arcturn-team-"): Promise<string> {

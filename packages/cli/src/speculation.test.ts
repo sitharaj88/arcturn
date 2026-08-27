@@ -95,7 +95,7 @@ describe("speculation", () => {
   });
 
   afterEach(async () => {
-    await rm(root, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   });
 
   describe("rule 1: nothing lands without an explicit approval", () => {

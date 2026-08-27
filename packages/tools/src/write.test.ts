@@ -13,7 +13,7 @@ describe("write tool", () => {
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   });
 
   it("creates a new file, making parent directories as needed", async () => {
@@ -76,7 +76,7 @@ describe("write tool — bytes on disk", () => {
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   });
 
   it("writes the content verbatim, CRLF and a missing trailing newline included", async () => {

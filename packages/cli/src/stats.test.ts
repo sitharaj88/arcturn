@@ -171,7 +171,7 @@ describe("discoverProjectDirs", () => {
   });
 
   afterEach(async () => {
-    await rm(root, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   });
 
   it("lists only directories, ignoring files", async () => {
@@ -203,7 +203,7 @@ describe("collectStats", () => {
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   });
 
   it("aggregates several sessions across two models, hand-checked", async () => {
@@ -453,7 +453,7 @@ describe("collectStats", () => {
       expect(all.sessionCount).toBe(2);
       expect(all.sessions.map((s) => s.sessionId).sort()).toEqual(["a1", "b1"]);
     } finally {
-      await rm(root, { recursive: true, force: true });
+      await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
     }
   });
 
@@ -618,7 +618,7 @@ describe("renderStatsText", () => {
       expect(text).toContain("bash");
       expect(text).toContain("Insights");
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
     }
   });
 });
@@ -656,7 +656,7 @@ describe("formatStatsJson", () => {
         cacheWriteTokens: expect.any(Number),
       });
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
     }
   });
 });
@@ -702,7 +702,7 @@ describe("runStatsCommand", () => {
   });
 
   afterEach(async () => {
-    await rm(home, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   });
 
   it("prints a text report and exits 0", async () => {
@@ -798,7 +798,7 @@ describe("createStatsCommands", () => {
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   });
 
   function runtimeWithSessions(sessions: string): ArcturnRuntime {

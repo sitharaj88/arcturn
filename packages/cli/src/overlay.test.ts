@@ -97,7 +97,7 @@ describe("overlay", () => {
   });
 
   afterEach(async () => {
-    await rm(root, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   });
 
   describe("redirect", () => {

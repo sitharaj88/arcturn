@@ -48,7 +48,7 @@ describe("read tool", () => {
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   });
 
   it("reads a whole small file in cat -n style", async () => {
@@ -163,7 +163,7 @@ describe("read tool — auto-outline", () => {
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   });
 
   it("returns a structural outline with no body for a large file", async () => {
@@ -354,7 +354,7 @@ describe("read tool — what comes back for a file that is not text", () => {
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   });
 
   it("refuses a binary file instead of returning its bytes as mojibake", async () => {
@@ -463,7 +463,7 @@ describe("read tool — a huge file is paged, not swallowed", () => {
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   });
 
   /** Write `bytes` worth of numbered log lines without holding them in memory. */

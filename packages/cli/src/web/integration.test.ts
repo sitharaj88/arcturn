@@ -93,7 +93,7 @@ async function startServer(options: {
   const port = await server.start({ host: "127.0.0.1", port: 0 });
   cleanups.push(async () => {
     await server.stop();
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   });
   return { url: `ws://127.0.0.1:${port}`, port };
 }
@@ -416,7 +416,7 @@ describe("origin gating (the wiring runServe performs)", () => {
     const port = await server.start({ host: "127.0.0.1", port: 0 });
     cleanups.push(async () => {
       await server.stop();
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
     });
     const url = `ws://127.0.0.1:${port}`;
 

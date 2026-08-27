@@ -24,7 +24,7 @@ describe("glob tool", () => {
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   });
 
   it("finds files matching a glob pattern", async () => {
@@ -101,7 +101,7 @@ describe("glob tool — a no-files answer must mean it looked", () => {
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   });
 
   it("errors on a base path that does not exist instead of reporting no files", async () => {

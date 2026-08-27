@@ -620,7 +620,7 @@ describe("repo map over a real indexed repository", () => {
     const dir = await createTempIndexDir();
     cleanups.push(async () => {
       await repo.cleanup();
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
     });
 
     const store = await CodeIndexStore.open(dir, repo.root);

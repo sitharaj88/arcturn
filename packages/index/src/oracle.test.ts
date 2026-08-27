@@ -618,7 +618,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await repo?.cleanup();
-  if (indexDir) await rm(indexDir, { recursive: true, force: true });
+  if (indexDir) await rm(indexDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
 });
 
 /** Every indexed definition, as `file:line:kind:qualifiedName`. */

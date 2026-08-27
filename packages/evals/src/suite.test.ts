@@ -11,7 +11,9 @@ const cleanupDirs: string[] = [];
 
 afterEach(async () => {
   for (const dir of cleanupDirs.splice(0)) {
-    await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 }).catch(
+      () => undefined,
+    );
   }
 });
 

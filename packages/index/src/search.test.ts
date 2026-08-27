@@ -97,7 +97,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await repo.cleanup();
-  await rm(indexDir, { recursive: true, force: true });
+  await rm(indexDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
 });
 
 describe("searchIndex — precision", () => {
@@ -316,7 +316,7 @@ describe("searchIndex — the optional embedding signal", () => {
       expect(delay).toBeDefined();
       expect(delay?.signals.vector).toBeGreaterThan(0);
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
     }
   });
 });

@@ -774,7 +774,9 @@ describe("createWorkflowCommands", () => {
   // written stops rather than continuing unrecorded. The old fixture pointed at
   // a path that never existed on any machine.
   const commandHome = mkdtempSync(join(tmpdir(), "arcturn-workflow-cmd-"));
-  afterAll(() => rmSync(commandHome, { recursive: true, force: true }));
+  afterAll(() =>
+    rmSync(commandHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 }),
+  );
   const runtime = {
     paths: { home: commandHome, project: join(commandHome, "proj") },
     createSubagent: () =>
@@ -916,7 +918,7 @@ describe("createWorkflowCommands", () => {
     expect(detail).toContain("@architect");
     expect(detail).toContain("patch applied");
 
-    await rm(home, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   });
 
   it("reports a clear error for /workflow status on an unknown run id", async () => {
@@ -933,7 +935,7 @@ describe("createWorkflowCommands", () => {
       level: "error",
       text: /No run journal for "does-not-exist"/,
     });
-    await rm(home, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   });
 
   it("runs a named workflow with the trailing args as {{input}}", async () => {
@@ -1015,7 +1017,7 @@ describe("createWorkflowCommands", () => {
     expect(finished.pending).toBeUndefined();
     expect(finished.completed.get("1")?.text).toBe("use postgres");
 
-    await rm(home, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   });
 });
 
@@ -1023,8 +1025,16 @@ describe("createWorkflowCommands", () => {
 
 const scratch: string[] = [];
 
+// Removals retry, because on Windows a recursive delete is racing the OS.
+// A handle the run has already closed can still be held briefly by the
+// filesystem, and rmdir then fails with ENOTEMPTY on a directory whose
+// contents are on their way out. Node retries exactly this family — EBUSY,
+// EMFILE, ENFILE, ENOTEMPTY, EPERM — but only when maxRetries is set, and it
+// defaults to zero. On POSIX the options change nothing: none of those errors
+// occur, so no retry is ever spent.
 afterEach(async () => {
-  for (const dir of scratch.splice(0)) await rm(dir, { recursive: true, force: true });
+  for (const dir of scratch.splice(0))
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
 });
 
 async function scratchDir(): Promise<string> {
@@ -4399,7 +4409,7 @@ describe("runWorkflow — run journal (durability)", () => {
       // Step 1's durable terminal survived the abort — a resume would trust it.
       expect(step1?.status).toBe("done");
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
     }
   });
 });

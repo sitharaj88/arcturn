@@ -230,7 +230,7 @@ describe("plantCanaries", () => {
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   });
 
   it("writes canary tokens into files inside dir and returns their paths", async () => {

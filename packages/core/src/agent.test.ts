@@ -726,7 +726,7 @@ describe("sessions", () => {
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   });
 
   it("persists the conversation as a chain of entries", async () => {

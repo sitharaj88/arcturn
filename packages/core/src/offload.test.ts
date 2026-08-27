@@ -54,7 +54,11 @@ const big = (n = 40_000, char = "x"): string => char.repeat(n);
 
 afterEach(async () => {
   vi.restoreAllMocks();
-  await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  await Promise.all(
+    dirs
+      .splice(0)
+      .map((dir) => rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 })),
+  );
 });
 
 describe("offloadableText", () => {

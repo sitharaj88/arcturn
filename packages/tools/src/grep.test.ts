@@ -25,7 +25,7 @@ describe("grep tool", () => {
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   });
 
   it("finds matches and skips .git, node_modules, and binary files", async () => {
@@ -143,7 +143,7 @@ describe("grep tool given a file path", () => {
       expect(text).toContain("terraform apply -auto-approve");
       expect(text).not.toContain("No matches found");
     } finally {
-      await rmrf(dir, { recursive: true, force: true });
+      await rmrf(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
     }
   });
 });
@@ -162,7 +162,7 @@ describe("grep tool — a no-matches answer must mean it searched", () => {
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   });
 
   it("errors on a path that does not exist instead of reporting no matches", async () => {
@@ -211,7 +211,7 @@ describe("grep tool — a no-matches answer must mean it searched", () => {
       // Narrowing with a glob may drop files; it must never *add* one.
       expect((narrowed.content[0] as { text: string }).text).toContain("docs/shared.md");
     } finally {
-      await rm(outside, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
     }
   });
 

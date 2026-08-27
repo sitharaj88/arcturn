@@ -174,7 +174,7 @@ describe("main compare", () => {
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   });
 
   it("exits 0 and reports no regressions when nothing got worse", async () => {

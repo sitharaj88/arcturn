@@ -314,7 +314,7 @@ describe("createSymbolsTool", () => {
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   });
 
   it("is named 'symbols' and requires no permission field", () => {

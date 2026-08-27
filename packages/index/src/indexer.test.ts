@@ -13,7 +13,11 @@ const indexDirs: string[] = [];
 afterEach(async () => {
   await repo?.cleanup();
   repo = null;
-  await Promise.all(indexDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  await Promise.all(
+    indexDirs
+      .splice(0)
+      .map((dir) => rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 })),
+  );
 });
 
 /** A chunker that records every file it is asked to parse. */

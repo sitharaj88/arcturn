@@ -32,7 +32,11 @@ async function scratch(): Promise<string> {
   return dir;
 }
 afterEach(async () => {
-  await Promise.all(scratches.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  await Promise.all(
+    scratches
+      .splice(0)
+      .map((dir) => rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 })),
+  );
 });
 
 describe("createFileRunJournal", () => {

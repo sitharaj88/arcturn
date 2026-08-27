@@ -21,7 +21,7 @@ describe("JsonlSessionStore", () => {
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   });
 
   it("creates a session with a header line and round-trips entries", async () => {

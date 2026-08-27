@@ -405,7 +405,7 @@ describe("path comparison policy", () => {
       }
       expect(defaultCaseInsensitivePaths()).toBe(insensitive);
     } finally {
-      rmSync(probe, { recursive: true, force: true });
+      rmSync(probe, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
     }
   });
 

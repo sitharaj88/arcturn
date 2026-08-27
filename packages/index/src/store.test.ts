@@ -8,7 +8,11 @@ import { createTempIndexDir } from "./test-helpers/fixtures.js";
 const dirs: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  await Promise.all(
+    dirs
+      .splice(0)
+      .map((dir) => rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 })),
+  );
 });
 
 async function freshDir(): Promise<string> {

@@ -17,7 +17,7 @@ describe("ls tool", () => {
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   });
 
   it("lists directory contents with directories suffixed and files sized", async () => {
@@ -76,7 +76,7 @@ describe("ls tool — entries are what the filesystem says they are", () => {
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   });
 
   it("shows a symlinked directory as a directory, not as a file with the link's size", async () => {

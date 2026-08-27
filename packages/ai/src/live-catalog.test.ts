@@ -38,7 +38,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   resetCatalog();
-  await rm(tempDir, { recursive: true, force: true });
+  await rm(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
 });
 
 describe("discoverModels", () => {

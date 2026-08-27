@@ -13,7 +13,7 @@ describe("edit tool", () => {
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   });
 
   it("replaces a unique occurrence", async () => {
@@ -127,7 +127,7 @@ describe("edit tool — bytes on disk", () => {
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   });
 
   it("refuses a file that is not valid UTF-8 instead of corrupting the bytes around the edit", async () => {
