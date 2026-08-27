@@ -1704,10 +1704,27 @@ describe.skipIf(!hasGit)("TeamManager against real git", () => {
     expect(manager.get(status.id)?.status).toBe("merged");
   });
 
-  const gitKnows = (worktreeList: string, dir: string): boolean => {
-    const norm = (value: string): string =>
-      process.platform === "win32" ? value.replace(/\\/g, "/").toLowerCase() : value;
-    return norm(worktreeList).includes(norm(dir));
+  /**
+   * Whether git regards this directory as a linked worktree — asked of git,
+   * from inside it, rather than by matching a path against a listing.
+   *
+   * Matching the path does not survive Windows, which hands Node an 8.3 short
+   * name (…/RUNNER~1/…) while git prints the long one, so two spellings of
+   * one directory never compare equal. A linked worktree's git-dir is the
+   * main repository's .git/worktrees/<name>, which is the fact the assertion
+   * actually wants and is independent of how either side spells a path.
+   */
+  const isLinkedWorktree = async (dir: string): Promise<boolean> => {
+    const { stdout } = await execFileAsync("git", ["rev-parse", "--git-dir"], { cwd: dir });
+    return stdout.replace(/\\/g, "/").includes("/.git/worktrees/");
+  };
+
+  /** How many worktrees the repository has, counted rather than string-matched. */
+  const worktreeCount = async (repo: string): Promise<number> => {
+    const { stdout } = await execFileAsync("git", ["worktree", "list", "--porcelain"], {
+      cwd: repo,
+    });
+    return stdout.split("\n").filter((line) => line.startsWith("worktree ")).length;
   };
 
   it("really creates each member's worktree on disk, and really removes it afterwards", async () => {
@@ -1723,18 +1740,13 @@ describe.skipIf(!hasGit)("TeamManager against real git", () => {
     ]);
     const live: { dir: string; seeded: boolean; registered: boolean }[] = [];
     const manager = await managerFor(repo, plan, async (brief, cwd) => {
-      const { stdout } = await execFileAsync("git", ["worktree", "list"], { cwd: repo });
       live.push({
         dir: cwd,
         // A real checkout, not an empty directory: the repository's own seed
         // file is in it.
         seeded: (await stat(join(cwd, "seed.txt"))).isFile(),
-        // …and git itself knows about it while it is in use. Compared with
-        // git's spelling normalised away: git prints worktree paths with
-        // forward slashes on every platform and Windows is case-insensitive
-        // about the rest, so a literal includes() was asserting how git
-        // punctuates a path rather than whether it knows the checkout.
-        registered: gitKnows(stdout, cwd),
+        // …and git itself knows about it while it is in use.
+        registered: await isLinkedWorktree(cwd),
       });
       await writeFile(join(cwd, `${brief.id}.ts`), `export const ${brief.id} = 1;\n`);
     });
@@ -1749,8 +1761,12 @@ describe.skipIf(!hasGit)("TeamManager against real git", () => {
 
     // …and every one of them is gone from the filesystem once the team settles.
     for (const entry of live) await expect(stat(entry.dir)).rejects.toThrow();
-    const { stdout } = await execFileAsync("git", ["worktree", "list"], { cwd: repo });
-    for (const entry of live) expect(stdout).not.toContain(entry.dir);
+    // Counted, not string-matched. A "the listing does not contain this path"
+    // assertion passes for free the moment the two sides spell the path
+    // differently — which is exactly what Windows does — so it would have gone
+    // green with both worktrees still registered. One worktree left is the
+    // repository itself.
+    expect(await worktreeCount(repo)).toBe(1);
     // The work itself is not lost with the checkout: the patches outlive it.
     for (const member of status.members) {
       expect(member.patchFile).toBeDefined();

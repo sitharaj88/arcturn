@@ -737,7 +737,7 @@ async function detectContents(
   } else {
     const extDir = join(root, "extensions");
     if (await isDirectory(extDir)) {
-      for (const entry of await listDir(extDir)) extensions.push(join("extensions", entry));
+      for (const entry of await listDir(extDir)) extensions.push(packagePath("extensions", entry));
     }
   }
 
@@ -750,7 +750,7 @@ async function detectContents(
     const themesDir = join(root, "themes");
     if (await isDirectory(themesDir)) {
       for (const entry of await listDir(themesDir)) {
-        if (entry.endsWith(".json")) themes.push(join("themes", entry));
+        if (entry.endsWith(".json")) themes.push(packagePath("themes", entry));
       }
     }
   }
