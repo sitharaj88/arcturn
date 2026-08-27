@@ -1,0 +1,20 @@
+{
+  "name": "failure-design",
+  "description": "Four roles, one pipeline and four commands for what happens when a dependency misbehaves. Retry safety is decided by an oracle that runs the operation twice, never by a reading, and no later stage may soften that verdict.",
+  "version": "0.1.0",
+  "provides": {
+    "agents": [
+      "agents/dependency-cartographer.md",
+      "agents/failure-critic.md",
+      "agents/idempotency-oracle.md",
+      "agents/resilience-author.md"
+    ],
+    "workflows": ["workflows/failure-review.md"],
+    "skills": [
+      "skills/consistency-check.md",
+      "skills/failure-modes",
+      "skills/retry-audit.md",
+      "skills/timeout-budget.md"
+    ]
+  }
+}
