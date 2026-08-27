@@ -186,6 +186,35 @@ describe("first-party disclosure matches the tree it points at", () => {
     expect(firstParty.length).toBeGreaterThan(0);
   });
 
+  it("names files that exist, in every kit manifest", () => {
+    // enterprise-org shipped for two releases with `architect.md` where the
+    // file is `agents/architect.md`. `arcturn add` does not fall back to
+    // convention when a manifest is present, so every entry missed, nothing
+    // linked, and the install still reported success — an eleven-role kit that
+    // installed as an empty directory, on the live hub, for two releases.
+    //
+    // Asserted over every kit rather than that one, and against the filesystem
+    // rather than against a list, so the next manifest to drift fails here.
+    for (const entry of firstParty) {
+      const root = join(REPO_DIR, entry.source.slice("sitharaj88/arcturn/".length));
+      const manifest = join(root, "arcturn.json");
+      if (!existsSync(manifest)) continue;
+      const provides = (
+        JSON.parse(readFileSync(manifest, "utf8")) as {
+          provides?: Record<string, string[] | undefined>;
+        }
+      ).provides;
+      for (const [kind, entries] of Object.entries(provides ?? {})) {
+        for (const relative of entries ?? []) {
+          expect(
+            existsSync(join(root, relative)),
+            `${entry.name}: provides.${kind} "${relative}"`,
+          ).toBe(true);
+        }
+      }
+    }
+  });
+
   it("discloses the lane the engine would actually derive for every role", () => {
     for (const entry of firstParty) {
       const dir = join(REPO_DIR, entry.source.slice("sitharaj88/arcturn/".length), "agents");

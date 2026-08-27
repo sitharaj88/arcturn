@@ -4,25 +4,25 @@
   "version": "0.1.0",
   "provides": {
     "agents": [
-      "architect.md",
-      "developer.md",
-      "docs-writer.md",
-      "pm.md",
-      "qa-adversarial.md",
-      "qa-functional.md",
-      "release-manager.md",
-      "retro.md",
-      "security-reviewer.md",
-      "tech-lead.md",
-      "ux-reviewer.md"
+      "agents/architect.md",
+      "agents/developer.md",
+      "agents/docs-writer.md",
+      "agents/pm.md",
+      "agents/qa-adversarial.md",
+      "agents/qa-functional.md",
+      "agents/release-manager.md",
+      "agents/retro.md",
+      "agents/security-reviewer.md",
+      "agents/tech-lead.md",
+      "agents/ux-reviewer.md"
     ],
     "workflows": [
-      "bug-fix.md",
-      "docs-pass.md",
-      "feature-build.md",
-      "refactor-guard.md",
-      "release-check.md",
-      "security-audit.md"
+      "workflows/bug-fix.md",
+      "workflows/docs-pass.md",
+      "workflows/feature-build.md",
+      "workflows/refactor-guard.md",
+      "workflows/release-check.md",
+      "workflows/security-audit.md"
     ]
   }
 }
