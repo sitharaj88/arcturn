@@ -6,7 +6,7 @@ import { KindPrimer } from "@/components/hub/KindPrimer";
 import { Container } from "@/components/ui/Container";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { Section } from "@/components/ui/Section";
-import { allEntries, kindLabel, kindsInUse, orderedKinds } from "@/lib/hub";
+import { allEntries, commandsFor, kindLabel, kindsInUse, orderedKinds } from "@/lib/hub";
 import { REPO_URL } from "@/lib/utils";
 
 const LEDE =
@@ -62,6 +62,17 @@ export default function HubIndexPage() {
             items={entries.map((entry) => ({
               name: entry.name,
               kinds: orderedKinds(entry),
+              // Built here, not in the browser: the search runs over what an
+              // entry *does* — its commands — as well as what it is called,
+              // because "retry" and "accessibility" are the queries a reader
+              // actually types and neither is a package name.
+              haystack: [
+                entry.name,
+                entry.description,
+                ...commandsFor(entry).flatMap((command) => [command.command, command.line]),
+              ]
+                .join(" ")
+                .toLowerCase(),
               card: <EntryCard entry={entry} />,
             }))}
           />

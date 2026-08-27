@@ -88,6 +88,8 @@ export interface HubCommand {
   line: string;
   /** Which kind it came from, so the page can group without re-deriving. */
   kind: "skills" | "workflows";
+  /** The item's own name — the last segment of its page's route. */
+  slug: string;
 }
 
 /**
@@ -103,11 +105,13 @@ export function commandsFor(entry: HubEntry): HubCommand[] {
     command: `/${skill.name}`,
     line: skill.line ?? "",
     kind: "skills" as const,
+    slug: skill.name,
   }));
   const workflows = (entry.disclosure.workflows ?? []).map((workflow) => ({
     command: `/workflow ${workflow.name}`,
     line: `${workflow.stages} stages${workflow.budgetUsd === undefined ? "" : `, up to $${workflow.budgetUsd}`}.`,
     kind: "workflows" as const,
+    slug: workflow.name,
   }));
   return [...skills, ...workflows];
 }
