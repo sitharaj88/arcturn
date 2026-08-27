@@ -1058,8 +1058,17 @@ describe("arcturn serve", () => {
     active.child.kill("SIGTERM");
     const result = await active.done;
     expect(result.timedOut).toBe(false);
-    expect(result.code).toBe(0);
-    expect(result.stdout).toContain("shutting down");
+    // Windows has no POSIX signals: Node maps kill() onto TerminateProcess, so
+    // the handler never runs, the exit code comes back null rather than 0, and
+    // nothing is printed on the way out. Those two assertions are about a
+    // graceful shutdown, which is a POSIX-only story. The claim that has to
+    // hold everywhere — the process ended and the socket really went with it,
+    // rather than being left listening — is asserted on every platform.
+    const graceful = process.platform !== "win32";
+    if (graceful) {
+      expect(result.code).toBe(0);
+      expect(result.stdout).toContain("shutting down");
+    }
     // The socket is really gone, not merely unreferenced.
     expect(await portAccepts(port)).toBe(false);
   });
@@ -1086,7 +1095,8 @@ describe("arcturn serve", () => {
     const webPort = Number(new URL(pageUrl).port);
     active.child.kill("SIGINT");
     const result = await active.done;
-    expect(result.code).toBe(0);
+    // See the SIGTERM case above: a clean exit code is a POSIX-only claim.
+    if (process.platform !== "win32") expect(result.code).toBe(0);
     expect(await portAccepts(webPort)).toBe(false);
   });
 
@@ -1355,10 +1365,25 @@ describe("arcturn completions", () => {
     const provider = await stubProvider([{ text: "unused" }]);
     const ws = await workspace(provider.baseUrl);
 
-    for (const [shell, checker] of [
-      ["bash", ["bash", "-n"]],
-      ["zsh", ["zsh", "-n"]],
-    ] as const) {
+    // A shell that is not installed cannot check anything, and asserting
+    // against one that is absent tests the runner rather than the script —
+    // which is how this passed on a developer's macOS and failed on a Linux
+    // runner that ships no zsh.
+    //
+    // What must not happen is silence. A filter alone would turn a machine
+    // with neither shell into a green test that proved nothing, so the count
+    // is asserted first: at least one real shell has to have read this.
+    const available = (["bash", "zsh"] as const).filter((shell) => {
+      try {
+        execFileSync(shell, ["-c", "exit 0"], { stdio: "ignore", timeout: 20_000 });
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    expect(available.length).toBeGreaterThan(0);
+
+    for (const shell of available) {
       const result = await run(["completions", shell], {
         workspace: ws,
         timeoutMs: DEFAULT_SPAWN_DEADLINE_MS,
@@ -1368,7 +1393,7 @@ describe("arcturn completions", () => {
       await writeFile(script, result.stdout);
       // The real shell parses it, not a regex that hopes it would.
       expect(() =>
-        execFileSync(checker[0], [checker[1], script], { stdio: "pipe", timeout: 20_000 }),
+        execFileSync(shell, ["-n", script], { stdio: "pipe", timeout: 20_000 }),
       ).not.toThrow();
     }
   });

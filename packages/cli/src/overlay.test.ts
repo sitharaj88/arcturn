@@ -452,7 +452,14 @@ describe("overlay", () => {
       expect(asks[0]?.subject).toBe(real);
       expect(asks[0]?.description).toContain(real);
       expect(asks[0]?.description).not.toContain(shadowDir);
-      expect(asks[0]?.suggestedRule?.specifier).toBe(`${join(workDir, "src")}/**`);
+      // Separator-agnostic on purpose: the claim is which directory the rule
+      // names — the real one, not the shadow tree — and not how the platform
+      // punctuates the path. Windows produces src\** where POSIX produces
+      // src/**, and asserting the punctuation was asserting the runner.
+      const posix = (value: string): string => value.split(sep).join("/");
+      expect(posix(asks[0]?.suggestedRule?.specifier ?? "")).toBe(
+        `${posix(join(workDir, "src"))}/**`,
+      );
     });
   });
 });

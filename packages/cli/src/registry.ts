@@ -581,6 +581,26 @@ async function isFile(path: string): Promise<boolean> {
   }
 }
 
+/**
+ * A path *inside* a package, always spelled with forward slashes.
+ *
+ * These strings are not filesystem paths that happen to be relative — they are
+ * how a package names its own contents, in the disclosure a user reads before
+ * installing and in the comparison `inspect` and `add` are held to. A package
+ * is a portable artifact, so it has to describe itself the same way wherever
+ * it is opened; built with the platform separator, the same package announced
+ * `skills/greet.md` on macOS and `skills\greet.md` on Windows.
+ *
+ * Safe for reading, too: `join()` accepts a forward slash on Windows, so the
+ * one spelling works both as a label and as a path to open.
+ */
+function packagePath(...segments: readonly string[]): string {
+  return segments
+    .flatMap((segment) => segment.split(/[\\/]+/))
+    .filter((part) => part !== "")
+    .join("/");
+}
+
 async function listDir(dir: string): Promise<string[]> {
   try {
     return (await readdir(dir)).filter((entry) => !entry.startsWith("."));
@@ -606,7 +626,7 @@ async function expandProvided(
     warnings.push(`manifest "provides.${kind}" entry "${rel}" was not found`);
     return [];
   }
-  return [rel];
+  return [packagePath(rel)];
 }
 
 /**
@@ -627,7 +647,9 @@ async function detectMarkdownDir(root: string, dir: string): Promise<string[]> {
   if (!(await isDirectory(full))) return [];
   const out: string[] = [];
   for (const entry of await listDir(full)) {
-    if (entry.endsWith(".md") && (await isFile(join(full, entry)))) out.push(join(dir, entry));
+    if (entry.endsWith(".md") && (await isFile(join(full, entry)))) {
+      out.push(packagePath(dir, entry));
+    }
   }
   return out;
 }
@@ -674,7 +696,7 @@ async function detectContents(
   } else {
     const skillsDir = join(root, "skills");
     if (await isDirectory(skillsDir)) {
-      for (const entry of await listDir(skillsDir)) skills.push(join("skills", entry));
+      for (const entry of await listDir(skillsDir)) skills.push(packagePath("skills", entry));
     } else {
       for (const entry of await listDir(root)) {
         if (CONVENTION_DIRS.includes(entry) || entry === MANIFEST_FILE || entry === "mcp.json") {

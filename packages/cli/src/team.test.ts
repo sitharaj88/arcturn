@@ -1704,6 +1704,12 @@ describe.skipIf(!hasGit)("TeamManager against real git", () => {
     expect(manager.get(status.id)?.status).toBe("merged");
   });
 
+  const gitKnows = (worktreeList: string, dir: string): boolean => {
+    const norm = (value: string): string =>
+      process.platform === "win32" ? value.replace(/\\/g, "/").toLowerCase() : value;
+    return norm(worktreeList).includes(norm(dir));
+  };
+
   it("really creates each member's worktree on disk, and really removes it afterwards", async () => {
     // The existing coverage proves worktrees are *asked for* (argv against a
     // fake git) and that one line survives in `git worktree list` at the end.
@@ -1723,8 +1729,12 @@ describe.skipIf(!hasGit)("TeamManager against real git", () => {
         // A real checkout, not an empty directory: the repository's own seed
         // file is in it.
         seeded: (await stat(join(cwd, "seed.txt"))).isFile(),
-        // …and git itself knows about it while it is in use.
-        registered: stdout.includes(cwd),
+        // …and git itself knows about it while it is in use. Compared with
+        // git's spelling normalised away: git prints worktree paths with
+        // forward slashes on every platform and Windows is case-insensitive
+        // about the rest, so a literal includes() was asserting how git
+        // punctuates a path rather than whether it knows the checkout.
+        registered: gitKnows(stdout, cwd),
       });
       await writeFile(join(cwd, `${brief.id}.ts`), `export const ${brief.id} = 1;\n`);
     });

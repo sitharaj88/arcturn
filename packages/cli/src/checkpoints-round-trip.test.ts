@@ -161,21 +161,27 @@ describe("restore puts the bytes back", () => {
 });
 
 describe("restore preserves what a file IS, not only what it contains", () => {
-  it("keeps the executable bit on a restored script", async () => {
-    const store = newStore();
-    const path = join(workDir, "run.sh");
-    await writeFile(path, "#!/bin/sh\necho v1\n", "utf8");
-    await chmod(path, 0o755);
+  // Windows has no executable bit: every mode reads back the same, so the
+  // assertion would be comparing a constant with itself. Skipped by name
+  // rather than made conditional, so the report says it did not run.
+  it.skipIf(process.platform === "win32")(
+    "keeps the executable bit on a restored script",
+    async () => {
+      const store = newStore();
+      const path = join(workDir, "run.sh");
+      await writeFile(path, "#!/bin/sh\necho v1\n", "utf8");
+      await chmod(path, 0o755);
 
-    const turn = await store.beginTurn("edit the script");
-    await store.snapshot(path);
-    await writeFile(path, "#!/bin/sh\necho v2\n", "utf8");
+      const turn = await store.beginTurn("edit the script");
+      await store.snapshot(path);
+      await writeFile(path, "#!/bin/sh\necho v2\n", "utf8");
 
-    await store.restore(turn);
-    expect(await readFile(path, "utf8")).toBe("#!/bin/sh\necho v1\n");
-    const mode = (await stat(path)).mode & 0o777;
-    expect(mode & 0o111).not.toBe(0);
-  });
+      await store.restore(turn);
+      expect(await readFile(path, "utf8")).toBe("#!/bin/sh\necho v1\n");
+      const mode = (await stat(path)).mode & 0o777;
+      expect(mode & 0o111).not.toBe(0);
+    },
+  );
 
   it("does not replace a symlink with a regular file", async () => {
     const store = newStore();

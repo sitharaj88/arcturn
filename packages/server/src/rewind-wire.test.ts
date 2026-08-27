@@ -18,7 +18,7 @@
  */
 
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { Agent, MemorySessionStore } from "@arcturn/core";
 import { createProtocolClient, type ProtocolRequestError } from "@arcturn/protocol";
 import type { AgentEvent, LLMClient } from "@arcturn/types";
@@ -336,7 +336,12 @@ describe("the list's shape and bounds", () => {
     // A path outside the workspace can only ever be a refusal, and a refusal
     // that named nothing would be unactionable — but it is not something that
     // *would happen*, so it is not offered.
-    expect(workspaceRelative(ROOT, "/etc/passwd")).toBe("/etc/passwd");
+    // Resolved, not spelled: "/etc/passwd" is an absolute path on POSIX and a
+    // drive-relative one on Windows, where it becomes D:\etc\passwd. The claim
+    // under test is that a path outside the root comes back untouched, and
+    // that is what is asserted — not the punctuation of one platform's paths.
+    const outside = resolve("/etc/passwd");
+    expect(workspaceRelative(ROOT, outside)).toBe(outside);
     expect(workspaceRelative(ROOT, join(ROOT, "src", "a.ts"))).toBe("src/a.ts");
   });
 });

@@ -1580,12 +1580,18 @@ describe("RFC 0005 §1.3 — a leading /name on the served prompt path", () => {
         messages: { content: unknown }[];
       };
       const text = JSON.stringify(sent.messages);
+      // The haystack is JSON, so the needle has to be escaped the way JSON
+      // escaped it: every backslash in a Windows path becomes two, and a
+      // literal C:\Users\... never matches C:\\Users\\... . On POSIX this is
+      // the identity and the assertion is unchanged.
+      const asJson = (value: string): string => JSON.stringify(value).slice(1, -1);
+      const skillDir = join(root, "audit");
       // The template's own $SKILL_DIR expanded — proving expansion really ran…
-      expect(text).toContain(`Assets live in ${join(root, "audit")}`);
+      expect(text).toContain(`Assets live in ${asJson(skillDir)}`);
       // …and the one the client typed did not, so a remote caller cannot make
       // the engine spell out an absolute path to walk out of the workspace from.
       expect(text).toContain("$SKILL_DIR/../../../../etc/passwd");
-      expect(text).not.toContain(`${join(root, "audit")}/../../../../etc/passwd`);
+      expect(text).not.toContain(asJson(`${skillDir}/../../../../etc/passwd`));
     } finally {
       client.close();
       unregisterModel(spec.id);

@@ -5,6 +5,7 @@
  * `dry-run-wire.test.ts` — this file is about the payload contract.
  */
 
+import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   createDryRunReview,
@@ -13,7 +14,13 @@ import {
   type DryRunOverlay,
 } from "./dry-run.js";
 
-const CWD = "/repo";
+// Resolved, not spelled. "/repo" is an absolute path on POSIX and a
+// drive-relative one on Windows, where the engine resolves it to D:\repo — so
+// a fixture written as a literal asserts one platform's punctuation rather
+// than the behaviour. Every fixture path is built from this root, and the
+// assertions compare against the same construction.
+const CWD = resolve("/repo");
+const at = (relative: string): string => join(CWD, relative);
 
 interface FakeOverlay extends DryRunOverlay {
   readonly appliedWith: (readonly string[] | undefined)[];
@@ -72,9 +79,9 @@ describe("pendingChanges", () => {
   it("lists metadata only, sorted by path, with the sizes on both sides", async () => {
     const review = createDryRunReview(
       fakeOverlay([
-        change("/repo/src/b.ts", "bb"),
-        change("/repo/a.ts", "aaaa", null),
-        change("/repo/src/a.ts", "a", "xyz"),
+        change(at("src/b.ts"), "bb"),
+        change(at("a.ts"), "aaaa", null),
+        change(at("src/a.ts"), "a", "xyz"),
       ]),
     );
     const result = await review.pendingChanges("s1");
@@ -82,7 +89,7 @@ describe("pendingChanges", () => {
     expect(result.value.changes.map((row) => row.path)).toEqual(["a.ts", "src/a.ts", "src/b.ts"]);
     expect(result.value.changes[0]).toEqual({
       path: "a.ts",
-      absolutePath: "/repo/a.ts",
+      absolutePath: at("a.ts"),
       kind: "added",
       bytes: 4,
       previousBytes: 0,
@@ -92,14 +99,14 @@ describe("pendingChanges", () => {
   });
 
   it("carries the content for a single-file fetch", async () => {
-    const review = createDryRunReview(fakeOverlay([change("/repo/src/a.ts", "new text")]));
+    const review = createDryRunReview(fakeOverlay([change(at("src/a.ts"), "new text")]));
     const result = await review.pendingChanges("s1", "src/a.ts");
     if (!result.ok) throw new Error(result.error);
     expect(result.value.changes[0]?.after).toBe("new text");
   });
 
   it("withholds the content of an oversized file rather than truncating it", async () => {
-    const review = createDryRunReview(fakeOverlay([change("/repo/big.ts", "x".repeat(200))]), {
+    const review = createDryRunReview(fakeOverlay([change(at("big.ts"), "x".repeat(200))]), {
       maxBytes: 100,
     });
     const result = await review.pendingChanges("s1", "big.ts");
@@ -124,7 +131,7 @@ describe("pendingChanges", () => {
   });
 
   it("refuses a fetch for a path nothing is pending under", async () => {
-    const review = createDryRunReview(fakeOverlay([change("/repo/a.ts", "a")]));
+    const review = createDryRunReview(fakeOverlay([change(at("a.ts"), "a")]));
     const result = await review.pendingChanges("s1", "b.ts");
     expect(result).toEqual({ ok: false, error: expect.stringContaining("No pending change") });
   });
@@ -132,17 +139,17 @@ describe("pendingChanges", () => {
 
 describe("applyChanges", () => {
   it("hands the overlay the engine's own absolute paths, never the client's strings", async () => {
-    const overlay = fakeOverlay([change("/repo/src/a.ts", "a")]);
+    const overlay = fakeOverlay([change(at("src/a.ts"), "a")]);
     const review = createDryRunReview(overlay);
     const result = await review.applyChanges("s1", ["src/a.ts"]);
     if (!result.ok) throw new Error(result.error);
-    expect(overlay.appliedWith[0]).toEqual(["/repo/src/a.ts"]);
+    expect(overlay.appliedWith[0]).toEqual([at("src/a.ts")]);
     expect(result.value.applied).toEqual(["src/a.ts"]);
     expect(result.value.remaining).toBe(0);
   });
 
   it("refuses the whole request when one named path is not pending", async () => {
-    const overlay = fakeOverlay([change("/repo/a.ts", "a")]);
+    const overlay = fakeOverlay([change(at("a.ts"), "a")]);
     const review = createDryRunReview(overlay);
     const result = await review.applyChanges("s1", ["a.ts", "../../etc/passwd"]);
     expect(result.ok).toBe(false);
@@ -151,21 +158,19 @@ describe("applyChanges", () => {
   });
 
   it("empties the shadow tree after a clean full apply, and not after a partial one", async () => {
-    const clean = fakeOverlay([change("/repo/a.ts", "a"), change("/repo/b.ts", "b")]);
+    const clean = fakeOverlay([change(at("a.ts"), "a"), change(at("b.ts"), "b")]);
     await createDryRunReview(clean).applyChanges("s1");
     expect(clean.discardedWith).toEqual([undefined]);
 
-    const partial = fakeOverlay([change("/repo/a.ts", "a"), change("/repo/b.ts", "b")]);
+    const partial = fakeOverlay([change(at("a.ts"), "a"), change(at("b.ts"), "b")]);
     await createDryRunReview(partial).applyChanges("s1", ["a.ts"]);
     // The copies that did NOT land are the pending changes; deleting them
     // would be a discard nobody asked for.
     expect(partial.discardedWith).toEqual([]);
 
-    const failing = fakeOverlay([change("/repo/a.ts", "a")], () => ({
+    const failing = fakeOverlay([change(at("a.ts"), "a")], () => ({
       applied: [],
-      errors: [
-        { path: "/repo/a.ts", message: "resolves outside the workspace (symlink); refused" },
-      ],
+      errors: [{ path: at("a.ts"), message: "resolves outside the workspace (symlink); refused" }],
     }));
     const result = await createDryRunReview(failing).applyChanges("s1");
     if (!result.ok) throw new Error(result.error);
@@ -190,7 +195,7 @@ describe("applyChanges", () => {
 
 describe("discardChanges", () => {
   it("passes the whole tree through when nothing is selected", async () => {
-    const overlay = fakeOverlay([change("/repo/a.ts", "a")]);
+    const overlay = fakeOverlay([change(at("a.ts"), "a")]);
     const result = await createDryRunReview(overlay).discardChanges("s1");
     if (!result.ok) throw new Error(result.error);
     expect(overlay.discardedWith).toEqual([undefined]);
@@ -199,10 +204,10 @@ describe("discardChanges", () => {
   });
 
   it("acts on a repeated selection exactly once", async () => {
-    const overlay = fakeOverlay([change("/repo/a.ts", "a")]);
+    const overlay = fakeOverlay([change(at("a.ts"), "a")]);
     const result = await createDryRunReview(overlay).discardChanges("s1", ["a.ts", "a.ts"]);
     if (!result.ok) throw new Error(result.error);
-    expect(overlay.discardedWith).toEqual([["/repo/a.ts"]]);
+    expect(overlay.discardedWith).toEqual([[at("a.ts")]]);
     expect(result.value.discarded).toEqual(["a.ts"]);
   });
 });

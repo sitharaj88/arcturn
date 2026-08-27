@@ -282,14 +282,20 @@ describe("expandMentions — @path:12-34 line ranges", () => {
     expect(result.refusals[0]?.reason).toMatch(/image/);
   });
 
-  it("prefers a real file whose NAME ends in something that looks like a range", async () => {
-    // `notes:12-34` is a legal filename; the literal reading has to win when
-    // the stripped one resolves to nothing.
-    const dir = await workspace({ "notes:12-34": "LITERAL_NAME_SENTINEL\n" });
-    const result = await expandMentions("@notes:12-34", dir);
-    expect(result.text).toContain("LITERAL_NAME_SENTINEL");
-    expect(result.text).not.toContain("excerpt");
-  });
+  // Both of these turn on a filename containing a colon, and NTFS reserves
+  // the colon for alternate data streams — the fixture cannot exist on
+  // Windows, so there is no ambiguity there for the parser to resolve.
+  it.skipIf(process.platform === "win32")(
+    "prefers a real file whose NAME ends in something that looks like a range",
+    async () => {
+      // `notes:12-34` is a legal filename; the literal reading has to win when
+      // the stripped one resolves to nothing.
+      const dir = await workspace({ "notes:12-34": "LITERAL_NAME_SENTINEL\n" });
+      const result = await expandMentions("@notes:12-34", dir);
+      expect(result.text).toContain("LITERAL_NAME_SENTINEL");
+      expect(result.text).not.toContain("excerpt");
+    },
+  );
 
   it("leaves a suffix that cannot mean a range as part of the path", async () => {
     const dir = await workspace({ "big.ts": numbered(10) });
@@ -302,11 +308,14 @@ describe("expandMentions — @path:12-34 line ranges", () => {
     }
   });
 
-  it("does not mistake a path with a colon in it for a range", async () => {
-    const dir = await workspace({ "a:b.ts": "COLON_NAME_SENTINEL\n" });
-    const result = await expandMentions("@a:b.ts", dir);
-    expect(result.text).toContain("COLON_NAME_SENTINEL");
-  });
+  it.skipIf(process.platform === "win32")(
+    "does not mistake a path with a colon in it for a range",
+    async () => {
+      const dir = await workspace({ "a:b.ts": "COLON_NAME_SENTINEL\n" });
+      const result = await expandMentions("@a:b.ts", dir);
+      expect(result.text).toContain("COLON_NAME_SENTINEL");
+    },
+  );
 
   it("still refuses a ranged mention that escapes the workspace, unread", async () => {
     const dir = await workspace({});
