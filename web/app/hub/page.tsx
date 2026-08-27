@@ -2,6 +2,7 @@ import { ArrowUpRight } from "lucide-react";
 import type { Metadata } from "next";
 import { EntryCard } from "@/components/hub/EntryCard";
 import { HubFilter } from "@/components/hub/HubFilter";
+import { KindPrimer } from "@/components/hub/KindPrimer";
 import { Container } from "@/components/ui/Container";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { Section } from "@/components/ui/Section";
@@ -9,8 +10,8 @@ import { allEntries, kindLabel, kindsInUse, orderedKinds } from "@/lib/hub";
 import { REPO_URL } from "@/lib/utils";
 
 const LEDE =
-  "Skills, agent roles, workflows and org kits you can install with one command — each listed " +
-  "with the disclosure you would want before you run it.";
+  "Packages you install with one command: slash commands you type, pipelines you run, and the " +
+  "roles they hand work to — each listed with the disclosure you would want before you run it.";
 
 /** The registry of record, where a listing is made. */
 const REGISTRY_README = `${REPO_URL}/blob/main/registry/README.md`;
@@ -50,15 +51,21 @@ export default function HubIndexPage() {
         <PageHeader eyebrow="Registry" title="Hub" lede={LEDE} />
       </Container>
 
-      <Section density="tight">
-        <HubFilter
-          kinds={kinds}
-          items={entries.map((entry) => ({
-            name: entry.name,
-            kinds: orderedKinds(entry),
-            card: <EntryCard entry={entry} />,
-          }))}
-        />
+      {/* One section, not two: the primer explains the badges the grid below
+          is covered in, so it belongs to the grid's beat rather than sitting a
+          full rhythm away from the thing it is explaining. */}
+      <Section density="tight" eyebrow="Vocabulary" title="What a package can contain">
+        <KindPrimer />
+        <div className="mt-10 md:mt-12">
+          <HubFilter
+            kinds={kinds}
+            items={entries.map((entry) => ({
+              name: entry.name,
+              kinds: orderedKinds(entry),
+              card: <EntryCard entry={entry} />,
+            }))}
+          />
+        </div>
       </Section>
 
       <Section

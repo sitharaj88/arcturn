@@ -2,6 +2,7 @@ import { ArrowLeft, ArrowUpRight } from "lucide-react";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { CommandTable } from "@/components/hub/CommandTable";
 import { DisclosureBlocks } from "@/components/hub/Disclosure";
 import { KindBadges } from "@/components/hub/KindBadges";
 import { CommandChip } from "@/components/ui/CommandChip";
@@ -143,6 +144,14 @@ export default async function HubEntryPage({ params }: HubEntryPageProps) {
             </dl>
           </div>
         </div>
+      </Section>
+
+      <Section
+        eyebrow="Usage"
+        title="What you would type"
+        lede="Every command this package adds, in the form you would run it. A slash command is invoked by its own name; a pipeline goes through /workflow."
+      >
+        <CommandTable entry={entry} />
       </Section>
 
       <Section

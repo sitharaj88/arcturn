@@ -54,6 +54,64 @@ export const LANE_NOTE: Record<AgentLane, string> = {
   write: "Isolated worktree; its patch is captured and applied to your checkout.",
 };
 
+/**
+ * What each kind is, for somebody who has never installed one.
+ *
+ * The badges on a card are the first thing a reader meets and they are the
+ * project's own vocabulary — "skills", "agents", "org-kit" — which is exactly
+ * the vocabulary a newcomer does not have. Kept beside {@link LANE_NOTE} for
+ * the same reason that one is: two explanations of one concept drift, and the
+ * one on the page is the one people read.
+ */
+export const KIND_NOTE: Record<HubKind, string> = {
+  skills: "Slash commands you type in a session. Each is a prompt template, not code.",
+  agents:
+    "Named roles a pipeline hands work to. Each declares its tools, and the engine decides what it may touch from those — not from what it says about itself.",
+  workflows:
+    "Multi-step pipelines you start with one command. Steps run in order, some in parallel, under a spending ceiling the engine enforces.",
+  "org-kit": "Roles and pipelines together — a small organisation rather than a single command.",
+  mcp: "Model Context Protocol servers this package configures, so the agent can reach tools and data outside your repository.",
+  themes: "Colour themes for the terminal interface.",
+  extensions:
+    "Executable code that runs on your machine. The installer confirms before linking any, whatever a listing claims.",
+};
+
+/** One command a reader would type after installing, and what it does. */
+export interface HubCommand {
+  /** Exactly what to type, including the leading slash. */
+  command: string;
+  /**
+   * Plain description, from the package's own disclosure — empty when the
+   * entry declared none. Empty rather than optional so the page renders one
+   * shape, and a missing line reads as missing rather than as a bug.
+   */
+  line: string;
+  /** Which kind it came from, so the page can group without re-deriving. */
+  kind: "skills" | "workflows";
+}
+
+/**
+ * The commands an entry actually gives you, in the form you would type them.
+ *
+ * The disclosure block lists what an install *adds*; this turns that into what
+ * a reader would *do*, which is the question the card was not answering. A
+ * skill is invoked by its own name, a workflow through `/workflow`, and the
+ * difference matters the first time somebody types the wrong one.
+ */
+export function commandsFor(entry: HubEntry): HubCommand[] {
+  const skills = (entry.disclosure.skills ?? []).map((skill) => ({
+    command: `/${skill.name}`,
+    line: skill.line ?? "",
+    kind: "skills" as const,
+  }));
+  const workflows = (entry.disclosure.workflows ?? []).map((workflow) => ({
+    command: `/workflow ${workflow.name}`,
+    line: `${workflow.stages} stages${workflow.budgetUsd === undefined ? "" : `, up to $${workflow.budgetUsd}`}.`,
+    kind: "workflows" as const,
+  }));
+  return [...skills, ...workflows];
+}
+
 export interface HubMaintainer {
   name: string;
   url: string;

@@ -206,20 +206,23 @@ export function DisclosureBlocks({ entry }: { entry: HubEntry }) {
           <div id="disclosure-skills">
             <BlockHeading count={skills.length}>Skills</BlockHeading>
           </div>
-          <DisclosureTable
-            className="mt-5"
-            caption={`Skills installed by ${entry.name}`}
-            columns={[{ header: "Skill", className: "w-56" }, { header: "First line" }]}
-            rows={skills.map((skill) => ({
-              key: skill.name,
-              cells: [
-                <span key="name" className="font-mono">
-                  {skill.name}
-                </span>,
-                skill.line ?? <span className="text-faint">not disclosed</span>,
-              ],
-            }))}
-          />
+          {/*
+            Names only. What each one does is on this page already, under
+            "What you would type", in the form a reader would run it — and the
+            same prose twice, four hundred pixels apart, reads as an editing
+            mistake rather than as thoroughness. This block's job here is the
+            complete list of what lands.
+          */}
+          <ul className="mt-5 flex flex-wrap gap-2">
+            {skills.map((skill) => (
+              <li
+                key={skill.name}
+                className="rounded border border-default bg-surface-sunken px-2 py-1 font-mono text-body-sm text-muted"
+              >
+                /{skill.name}
+              </li>
+            ))}
+          </ul>
           {unlabelledSkills ? (
             <p className="mt-3 max-w-(--measure-body) text-caption text-faint">
               A skill&rsquo;s first line is read from its file. Where this entry omits one it was
