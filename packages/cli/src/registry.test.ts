@@ -1188,16 +1188,22 @@ describe("inspectPackage", () => {
 
     // Both skill shapes: a plain `<name>.md` and a `<name>/SKILL.md` folder,
     // whose loader root is the folder's parent rather than the folder itself.
+    //
+    // Written with forward slashes rather than join(): a disclosure path names
+    // a file inside a package, and a package is a portable artifact that has
+    // to describe itself identically wherever it is opened. join() would make
+    // this expectation agree with whatever the host happens to be, which is
+    // the opposite of what is being asserted.
     expect(disclosure.skills).toEqual([
-      { name: "deep", description: "A folder skill with assets.", path: join("skills", "deep") },
-      { name: "greet", description: "Greets a person by name.", path: join("skills", "greet.md") },
+      { name: "deep", description: "A folder skill with assets.", path: "skills/deep" },
+      { name: "greet", description: "Greets a person by name.", path: "skills/greet.md" },
     ]);
     expect(disclosure.mcpServers).toEqual([
       { name: "docs", transport: "http", target: "https://docs.example/mcp" },
       { name: "local", transport: "stdio", target: "node server.js" },
     ]);
-    expect(disclosure.extensions).toEqual([join("extensions", "hook.js")]);
-    expect(disclosure.themes).toEqual([join("themes", "midnight.json")]);
+    expect(disclosure.extensions).toEqual(["extensions/hook.js"]);
+    expect(disclosure.themes).toEqual(["themes/midnight.json"]);
 
     // Nothing was linked, and nothing was left behind.
     expect(await exists(join(paths.agentsRoot, "dev.md"))).toBe(false);
