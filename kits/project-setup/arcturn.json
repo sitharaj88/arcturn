@@ -1,0 +1,20 @@
+{
+  "name": "project-setup",
+  "description": "Stand a new app up properly: choose the stack with its costs named, scaffold with the ecosystem's own generator rather than files written from memory, add the layering a generator leaves out, and prove the boundary check actually fails when the rule is broken.",
+  "version": "0.1.0",
+  "provides": {
+    "agents": [
+      "agents/architecture-author.md",
+      "agents/boundary-oracle.md",
+      "agents/scaffolder.md",
+      "agents/stack-advisor.md"
+    ],
+    "workflows": ["workflows/app-setup.md"],
+    "skills": [
+      "skills/architecture-apply.md",
+      "skills/boundary-prove.md",
+      "skills/scaffold-run",
+      "skills/stack-choose.md"
+    ]
+  }
+}
