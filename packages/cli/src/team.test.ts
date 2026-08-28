@@ -1687,6 +1687,37 @@ describe.skipIf(!hasGit)("TeamManager against real git", () => {
     expect(stdout.split("\n").filter((line) => line.trim() !== "")).toHaveLength(1);
   });
 
+  it("does not report a team merged while a failed member has no work in it", async () => {
+    // The mac release flake, pinned at last: `git worktree add` for one member
+    // was killed by the per-git timeout on a starved runner, the member was
+    // recorded failed with an empty diff, and merge() folded that into
+    // "empty" — one file merged, zero conflicts, complete: true, record
+    // flipped to "merged". A member that never got to work is absence of
+    // evidence, and the record must not read as a finished team.
+    const repo = await makeRepo();
+    const plan = planJson([
+      { id: "alpha", files: ["alpha.ts"] },
+      { id: "beta", files: ["beta.ts"] },
+    ]);
+    const manager = await managerFor(repo, plan, async (brief, cwd) => {
+      if (brief.id === "beta") throw new Error("worktree died under load");
+      await writeFile(join(cwd, `${brief.id}.ts`), `export const ${brief.id} = 1;\n`);
+    });
+    const status = await manager.start("add two files");
+    const report = await manager.merge(status.id);
+
+    expect(report?.merged).toBe(1);
+    expect(report?.conflicts).toBe(0);
+    const beta = report?.outcomes.find((outcome) => outcome.memberId === "beta");
+    expect(beta?.result).toBe("failed");
+    expect(beta?.failure).toContain("worktree died under load");
+    // The two lines that were lying before:
+    expect(report?.complete).toBe(false);
+    expect(manager.get(status.id)?.status).not.toBe("merged");
+    // And the honest half still holds — alpha's work is really in the tree.
+    expect(await readFile(join(repo, "alpha.ts"), "utf8")).toContain("alpha");
+  });
+
   it("merges disjoint members cleanly into the real tree", async () => {
     const repo = await makeRepo();
     const plan = planJson([

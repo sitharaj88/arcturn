@@ -1080,7 +1080,9 @@ export interface TeamMergeOutcome {
   /** Member label. */
   title: string;
   /** Outcome kind; see {@link TeamMergeReport}. */
-  result: "merged" | "already-merged" | "empty" | "conflict" | "skipped" | "discarded";
+  result: "merged" | "already-merged" | "empty" | "conflict" | "skipped" | "discarded" | "failed";
+  /** Why the member failed, when `result` is `"failed"`. */
+  failure?: string;
   /** The patch that was (or would have been) applied. */
   patchFile?: string;
   /** `git apply`'s complaint, when `result` is `"conflict"`. */
@@ -1516,6 +1518,20 @@ export class TeamManager {
         continue;
       }
       if (!member.patchFile || member.diffStat.files === 0) {
+        // "No changes" and "never got to make changes" are different news. A
+        // member that FAILED — its worktree never came up, its agent threw —
+        // must not be folded into "empty": that is how a team whose member
+        // died on a loaded machine reported itself merged-and-complete, and
+        // the record lied. The flake that exposed this was a `git worktree
+        // add` killed by a timeout on a busy CI mac.
+        if (member.status === "failed") {
+          report.outcomes.push({
+            ...base,
+            result: "failed",
+            ...(member.error === undefined ? {} : { failure: member.error }),
+          });
+          continue;
+        }
         report.outcomes.push({ ...base, result: "empty" });
         continue;
       }
@@ -1546,7 +1562,14 @@ export class TeamManager {
     }
 
     report.complete = record.members.every(
-      (member) => member.merged || member.discarded || member.diffStat.files === 0,
+      (member) =>
+        member.merged ||
+        member.discarded ||
+        // Zero files is completeness only for a member that RAN and changed
+        // nothing (or was cancelled before starting). A failed member's zero
+        // is absence of evidence, and a team is not "merged" while one of its
+        // members' work never existed to merge.
+        (member.diffStat.files === 0 && member.status !== "failed"),
     );
     const mergeable: readonly TeamStatusValue[] = ["review", "cancelled", "interrupted"];
     if (report.complete && mergeable.includes(record.status)) {
@@ -2463,6 +2486,7 @@ const MERGE_LABEL: Readonly<Record<TeamMergeOutcome["result"], string>> = {
   conflict: "CONFLICT",
   skipped: "not attempted",
   discarded: "discarded",
+  failed: "FAILED — no work to merge",
 };
 
 /**
@@ -2479,6 +2503,11 @@ export function formatMergeReport(report: TeamMergeReport): string {
     lines.push(
       `  ${outcome.memberId}: ${MERGE_LABEL[outcome.result]} (${formatStat(outcome.stat)})`,
     );
+    if (outcome.failure) {
+      for (const line of outcome.failure.split("\n").slice(0, 3)) {
+        if (line.trim() !== "") lines.push(`      ${line.trim()}`);
+      }
+    }
     if (outcome.conflict) {
       for (const line of outcome.conflict.split("\n").slice(0, 6)) {
         if (line.trim() !== "") lines.push(`      ${line.trim()}`);

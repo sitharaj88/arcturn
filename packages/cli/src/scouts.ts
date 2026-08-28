@@ -225,9 +225,17 @@ export async function createWorktree(
 ): Promise<Worktree> {
   const execFn = options?.execFn ?? defaultExecFn;
   const timeout = options?.gitTimeoutMs ?? GIT_TIMEOUT_MS;
+  // `worktree add` performs a full checkout, so its cost scales with the
+  // repository while every other command here is metadata. One 15-second cap
+  // for both shapes was how a team member on a loaded CI mac died mid-add
+  // with "Preparing worktree…" as its entire error — the progress line of a
+  // command that was killed, not one that failed. Four times the quick-op
+  // budget, floored at a minute, keeps a starved machine or a large checkout
+  // from being read as a member's failure.
+  const addTimeout = Math.max(timeout * 4, 60_000);
   const ref = options?.ref ?? "HEAD";
-  const git = (cwd: string, args: readonly string[]): Promise<GitExecResult> =>
-    execFn("git", args, { cwd, timeout, maxBuffer: SMALL_MAX_BUFFER });
+  const git = (cwd: string, args: readonly string[], timeoutMs = timeout): Promise<GitExecResult> =>
+    execFn("git", args, { cwd, timeout: timeoutMs, maxBuffer: SMALL_MAX_BUFFER });
 
   try {
     await git(repoRoot, ["rev-parse", "--is-inside-work-tree"]);
@@ -253,8 +261,34 @@ export async function createWorktree(
   const dir = join(parent, slugifyScoutName(name));
 
   try {
-    await git(repoRoot, ["worktree", "add", "--detach", dir, ref]);
+    await git(repoRoot, ["worktree", "add", "--detach", dir, ref], addTimeout);
   } catch (error) {
+    // Env-gated forensics, kept on purpose. The team-merge flake took three
+    // sessions to pin because the only witness was a one-line error whose
+    // stderr was a progress message; this prints the whole shape of a failed
+    // `worktree add` (exit code, signal, killed flag, both streams) so the
+    // next intermittent failure carries its own evidence out of CI.
+    if (process.env.ARCTURN_TEAM_DEBUG) {
+      const failed = error as {
+        code?: unknown;
+        signal?: unknown;
+        killed?: unknown;
+        stdout?: unknown;
+        stderr?: unknown;
+        message?: unknown;
+      };
+      console.error(
+        "[worktree-add-debug]",
+        JSON.stringify({
+          code: failed.code,
+          signal: failed.signal,
+          killed: failed.killed,
+          stdout: String(failed.stdout ?? "").slice(0, 200),
+          stderr: String(failed.stderr ?? "").slice(0, 300),
+          message: String(failed.message ?? "").slice(0, 200),
+        }),
+      );
+    }
     if (ownsParent) await rm(parent, { recursive: true, force: true }).catch(() => undefined);
     if (isMissingBinary(error)) {
       throw new ScoutWorktreeError(
@@ -268,6 +302,17 @@ export async function createWorktree(
       throw new ScoutWorktreeError(
         "worktree-exists",
         `A worktree already exists at ${dir}; remove it (\`git worktree remove --force\`) and retry.`,
+        { cause: error },
+      );
+    }
+    // A killed process's stderr is whatever it had printed — for `worktree
+    // add`, usually the "Preparing worktree" progress line, which reads as
+    // nonsense in an error. Say what actually happened.
+    if ((error as { killed?: boolean }).killed === true) {
+      throw new ScoutWorktreeError(
+        "git-failed",
+        `git worktree add timed out after ${addTimeout}ms for ${dir} — the machine may be ` +
+          `under heavy load, or the checkout is large.`,
         { cause: error },
       );
     }

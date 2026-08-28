@@ -32,6 +32,21 @@ runs `arcturn add` today gets kits their engine cannot run.
   point. Deployments that want, say, a stronger model for judgment roles set
   `route.tiers` once.
 
+- **A team could report itself merged while one member's work never
+  existed.** Pinned at last, after three sessions on the suspect list: on a
+  loaded CI mac, `git worktree add` for one member was killed by the 15-second
+  per-git timeout — its entire recorded error was "Preparing worktree…", the
+  progress line of a process that was killed rather than one that failed — and
+  the member landed as failed with an empty diff. `merge()` then folded that
+  into "no changes": one file applied, zero conflicts, `complete: true`, the
+  record flipped to `merged`. Two fixes, each mutation-tested. `worktree add`
+  now gets its own timeout (four times the quick-op budget, floored at a
+  minute) because it performs a full checkout and scales with the repository
+  while every other git call here is metadata — and a kill now says it timed
+  out instead of quoting a progress line. And a failed member is a `failed`
+  merge outcome that keeps `complete` false and the team out of `merged`:
+  "changed nothing" and "never got to work" are different news.
+
 - **Why this exists at all:** every role in nine hub kits used to pin a
   concrete provider model (`anthropic/claude-opus-5` and siblings, plus two
   `zai/glm-5.3` step tags), which made every workflow in the hub answer 401
