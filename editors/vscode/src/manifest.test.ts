@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { CliProvisioner } from "./cli.js";
 import { activateWith } from "./extension.js";
+import { HUB_COMMANDS, HUB_VIEW_ID } from "./hub/view.js";
 import { SIDEBAR_COMMANDS, SIDEBAR_VIEW_ID } from "./sidebar/index.js";
 import type { TerminalHub } from "./terminal.js";
 import { fake, resetFake } from "./test-vscode.js";
@@ -83,7 +84,7 @@ describe("the manifest and the code agree about commands", () => {
     // A command registered but not contributed works from the sidebar and is
     // invisible in the palette — RFC 0004 §3 asks for every command to be
     // reachable there.
-    for (const id of Object.values(SIDEBAR_COMMANDS)) {
+    for (const id of [...Object.values(SIDEBAR_COMMANDS), ...Object.values(HUB_COMMANDS)]) {
       expect(contributed).toContain(id);
     }
   });
@@ -91,7 +92,13 @@ describe("the manifest and the code agree about commands", () => {
   it("contributes nothing neither builder actually registers", async () => {
     // The other direction: a contributed id with no handler is a palette entry
     // that fails with "command not found" when someone picks it.
-    const live = new Set([...(await registeredByBuilderA()), ...Object.values(SIDEBAR_COMMANDS)]);
+    // The hub's three are registered by `activateHub`, which `activateSidebar`
+    // calls — the same builder, one module further down.
+    const live = new Set([
+      ...(await registeredByBuilderA()),
+      ...Object.values(SIDEBAR_COMMANDS),
+      ...Object.values(HUB_COMMANDS),
+    ]);
     expect([...contributed].sort()).toEqual([...live].sort());
   });
 
@@ -110,6 +117,11 @@ describe("the manifest and the code agree about commands", () => {
       const entry = palette.find((item) => item.command === id);
       expect(entry?.when).toBe("config.arcturn.serve.enabled");
     }
+    // `refresh` is the only hub command that means anything without a node to
+    // act on, so it is the only one gated this way rather than hidden outright.
+    expect(palette.find((item) => item.command === HUB_COMMANDS.refresh)?.when).toBe(
+      "config.arcturn.serve.enabled",
+    );
   });
 
   it("names the same view the sidebar registers, and no other", async () => {
@@ -121,12 +133,17 @@ describe("the manifest and the code agree about commands", () => {
     //
     // `toEqual` covers both directions at once: the seam's id must be here,
     // and nothing that is not the seam's id may be.
-    expect(viewIds).toEqual([SIDEBAR_VIEW_ID]);
+    expect(viewIds).toEqual([SIDEBAR_VIEW_ID, HUB_VIEW_ID]);
   });
 
-  it("hides only the one command that cannot be invoked without arguments", async () => {
+  it("hides exactly the commands that cannot be invoked without arguments", async () => {
+    // A palette entry that needs a node it can never be given is an entry that
+    // can only fail. `fixDiagnostic` needs a diagnostic; the hub's install and
+    // open-on-web need a kit row.
     const hidden = palette.filter((item) => item.when === "false").map((item) => item.command);
-    expect(hidden).toEqual(["arcturn.fixDiagnostic"]);
+    expect(hidden.sort()).toEqual(
+      ["arcturn.fixDiagnostic", HUB_COMMANDS.install, HUB_COMMANDS.openOnWeb].sort(),
+    );
   });
 });
 

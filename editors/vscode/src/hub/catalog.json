@@ -1,0 +1,557 @@
+{
+  "kits": [
+    {
+      "name": "cloud-posture-review",
+      "source": "sitharaj88/arcturn/kits/cloud-posture-review",
+      "description": "Two roles, one pipeline and one skill for read-only cloud posture and IAM review, where a check that could not run is NOT-CHECKED with its reason rather than a PASS.",
+      "kinds": ["org-kit", "agents", "workflows", "skills"],
+      "agents": [
+        {
+          "name": "iam-least-privilege-analyst",
+          "lane": "exec",
+          "tools": ["read", "grep", "glob", "ls", "bash"]
+        },
+        {
+          "name": "posture-scanner",
+          "lane": "exec",
+          "tools": ["read", "grep", "glob", "ls", "bash"]
+        }
+      ],
+      "workflows": [
+        {
+          "name": "posture-review",
+          "stages": 5,
+          "budgetUsd": 20
+        }
+      ],
+      "skills": [
+        {
+          "name": "exposure-check",
+          "line": "Will not conclude \"not exposed\": the verdict names the checks that ran, their regions and the principal, and every denied API call is listed as a denial rather than a negative."
+        }
+      ]
+    },
+    {
+      "name": "complexity-guard",
+      "source": "sitharaj88/arcturn/kits/complexity-guard",
+      "description": "Three roles, one pipeline and one skill for growth-rate review and measurement-disciplined optimization, where the role that states the number is never the role that wrote the code.",
+      "kinds": ["org-kit", "agents", "workflows", "skills"],
+      "agents": [
+        {
+          "name": "complexity-reviewer",
+          "lane": "exec",
+          "tools": ["read", "grep", "glob", "ls", "search_code", "bash"]
+        },
+        {
+          "name": "optimizer",
+          "lane": "write",
+          "tools": ["read", "write", "edit", "bash", "grep", "glob", "ls"]
+        },
+        {
+          "name": "perf-analyst",
+          "lane": "exec",
+          "tools": ["read", "grep", "glob", "ls", "bash"]
+        }
+      ],
+      "workflows": [
+        {
+          "name": "complexity-gate",
+          "stages": 4,
+          "budgetUsd": 15
+        }
+      ],
+      "skills": [
+        {
+          "name": "scaling-check",
+          "line": "Names a growth class only when the measured ratios exclude every other one; otherwise reports not separable, the admitted classes and the deciding size."
+        }
+      ]
+    },
+    {
+      "name": "design-docs",
+      "source": "sitharaj88/arcturn/kits/design-docs",
+      "description": "Four commands for the writing a repository asks for before code — an ADR, an architecture map, a fitness function and a high-level design — each refusing to assert what the tree does not show.",
+      "kinds": ["skills"],
+      "agents": [],
+      "workflows": [],
+      "skills": [
+        {
+          "name": "adr-record",
+          "line": "Record one architecture decision as Proposed, with rejected alternatives only where the author supplied them or the repo shows they were tried."
+        },
+        {
+          "name": "arch-map",
+          "line": "Map a codebase from resolved imports at file:line — no node and no edge without ledger evidence, and every unresolvable wiring listed rather than drawn."
+        },
+        {
+          "name": "fitness-function",
+          "line": "Turn an architectural rule into a check and prove it bites — FAIL on a planted violation, PASS on HEAD, both transcripts, or the output is UNPROVEN CHECK."
+        },
+        {
+          "name": "hld-draft",
+          "line": "Draft a high-level design as a scaffold with labelled holes — every constraint cited to a file:line or a quoted brief, everything else Assumed — unconfirmed."
+        }
+      ]
+    },
+    {
+      "name": "design-review-org",
+      "source": "sitharaj88/arcturn/kits/design-review-org",
+      "description": "Five roles and two pipelines that review a design before the code exists, where the document's author holds no shell and the human gate is a pause the engine enforces mid-pipeline.",
+      "kinds": ["org-kit", "agents", "workflows"],
+      "agents": [
+        {
+          "name": "codebase-critic",
+          "lane": "read",
+          "tools": ["read", "grep", "glob", "ls", "search_code"]
+        },
+        {
+          "name": "design-author",
+          "lane": "write",
+          "tools": ["read", "grep", "glob", "ls", "search_code", "write"]
+        },
+        {
+          "name": "design-lead",
+          "lane": "read",
+          "tools": ["read", "grep", "glob", "ls", "search_code"]
+        },
+        {
+          "name": "impact-analyst",
+          "lane": "exec",
+          "tools": ["read", "grep", "glob", "ls", "bash"]
+        },
+        {
+          "name": "invariant-oracle",
+          "lane": "exec",
+          "tools": ["read", "grep", "glob", "ls", "bash"]
+        }
+      ],
+      "workflows": [
+        {
+          "name": "design-drift",
+          "stages": 4,
+          "budgetUsd": 15
+        },
+        {
+          "name": "design-review",
+          "stages": 4,
+          "budgetUsd": 20
+        }
+      ],
+      "skills": []
+    },
+    {
+      "name": "enterprise-org",
+      "source": "sitharaj88/arcturn/kits/enterprise-org",
+      "description": "Eleven agent roles and six pipelines that carry a change from charter to merge gate, with the reviewers on lanes that structurally cannot land a patch.",
+      "kinds": ["org-kit", "agents", "workflows"],
+      "agents": [
+        {
+          "name": "architect",
+          "lane": "read",
+          "tools": ["read", "grep", "glob", "ls", "search_code"]
+        },
+        {
+          "name": "developer",
+          "lane": "write",
+          "tools": ["read", "write", "edit", "bash", "grep", "glob", "ls"]
+        },
+        {
+          "name": "docs-writer",
+          "lane": "write",
+          "tools": ["read", "write", "edit", "bash", "grep", "glob", "ls"]
+        },
+        {
+          "name": "pm",
+          "lane": "read",
+          "tools": ["read", "grep", "glob", "ls"]
+        },
+        {
+          "name": "qa-adversarial",
+          "lane": "exec",
+          "tools": ["read", "grep", "glob", "ls", "bash"]
+        },
+        {
+          "name": "qa-functional",
+          "lane": "write",
+          "tools": ["read", "write", "edit", "bash", "grep", "glob", "ls"]
+        },
+        {
+          "name": "release-manager",
+          "lane": "exec",
+          "tools": ["read", "grep", "glob", "ls", "bash"]
+        },
+        {
+          "name": "retro",
+          "lane": "exec",
+          "tools": ["read", "grep", "glob", "ls", "bash"]
+        },
+        {
+          "name": "security-reviewer",
+          "lane": "exec",
+          "tools": ["read", "grep", "glob", "ls", "bash"]
+        },
+        {
+          "name": "tech-lead",
+          "lane": "read",
+          "tools": ["read", "grep", "glob", "ls", "search_code"]
+        },
+        {
+          "name": "ux-reviewer",
+          "lane": "read",
+          "tools": ["read", "grep", "glob", "ls"]
+        }
+      ],
+      "workflows": [
+        {
+          "name": "bug-fix",
+          "stages": 4,
+          "budgetUsd": 15
+        },
+        {
+          "name": "docs-pass",
+          "stages": 6,
+          "budgetUsd": 12
+        },
+        {
+          "name": "feature-build",
+          "stages": 4,
+          "budgetUsd": 25
+        },
+        {
+          "name": "refactor-guard",
+          "stages": 7,
+          "budgetUsd": 30
+        },
+        {
+          "name": "release-check",
+          "stages": 5,
+          "budgetUsd": 20
+        },
+        {
+          "name": "security-audit",
+          "stages": 5,
+          "budgetUsd": 20
+        }
+      ],
+      "skills": []
+    },
+    {
+      "name": "failure-design",
+      "source": "sitharaj88/arcturn/kits/failure-design",
+      "description": "What happens when a dependency answers slowly. Retry safety is decided by an oracle that runs the operation twice — including the timeout case where the first attempt already committed — never by a reading.",
+      "kinds": ["org-kit", "agents", "workflows", "skills"],
+      "agents": [
+        {
+          "name": "dependency-cartographer",
+          "lane": "read",
+          "tools": ["read", "grep", "glob", "ls", "search_code"]
+        },
+        {
+          "name": "failure-critic",
+          "lane": "read",
+          "tools": ["read", "grep", "glob", "ls", "search_code"]
+        },
+        {
+          "name": "idempotency-oracle",
+          "lane": "exec",
+          "tools": ["read", "grep", "glob", "ls", "bash"]
+        },
+        {
+          "name": "resilience-author",
+          "lane": "write",
+          "tools": ["read", "grep", "glob", "ls", "search_code", "write"]
+        }
+      ],
+      "workflows": [
+        {
+          "name": "failure-review",
+          "stages": 4,
+          "budgetUsd": 28
+        }
+      ],
+      "skills": [
+        {
+          "name": "consistency-check",
+          "line": "Find dual writes, transaction boundaries that end earlier than the code assumes, and read-after-write races the storage does not guarantee."
+        },
+        {
+          "name": "failure-modes",
+          "line": "Work every dependency through down, slow, wrong and partial, saying what actually happens at a path:line rather than that it is handled."
+        },
+        {
+          "name": "retry-audit",
+          "line": "Find every retry, multiply the attempts across all layers, and report whether the operation underneath is safe to run twice."
+        },
+        {
+          "name": "timeout-budget",
+          "line": "Trace the timeout chain hop by hop and find where it is absent, inverted, unbudgeted, or starving a shared pool."
+        }
+      ]
+    },
+    {
+      "name": "iac-plan-review",
+      "source": "sitharaj88/arcturn/kits/iac-plan-review",
+      "description": "One role, one pipeline and two skills for infrastructure change review that refuses to review a plan it did not produce, and treats the plan itself as code execution because on this domain's facts it is.",
+      "kinds": ["org-kit", "agents", "workflows", "skills"],
+      "agents": [
+        {
+          "name": "terraform-plan-reviewer",
+          "lane": "exec",
+          "tools": ["read", "grep", "glob", "ls", "bash"]
+        }
+      ],
+      "workflows": [
+        {
+          "name": "iac-change-review",
+          "stages": 5,
+          "budgetUsd": 18
+        }
+      ],
+      "skills": [
+        {
+          "name": "plan-explain",
+          "line": "Explains a plan from the plan file alone, every sentence carrying a verbatim resource address; a resource it cannot classify as stateful is unknown, never assumed stateless, and it never concludes safe or no downtime."
+        },
+        {
+          "name": "drift-report",
+          "line": "Attributes drift only to a quoted audit-log record with an event id, time and principal; everything else is unattributed. It proposes no state surgery and reads exit code 1 as an error, never as no drift."
+        }
+      ]
+    },
+    {
+      "name": "mobile-foundation",
+      "source": "sitharaj88/arcturn/kits/mobile-foundation",
+      "description": "Stand a mobile project up and keep it honest: toolchain from real doctor output, an architecture baseline proposed against the tree that exists, and an accessibility audit that runs what is runnable and names what it did not establish.",
+      "kinds": ["org-kit", "agents", "workflows", "skills"],
+      "agents": [
+        {
+          "name": "a11y-auditor",
+          "lane": "exec",
+          "tools": ["read", "grep", "glob", "ls", "bash", "search_code"]
+        },
+        {
+          "name": "baseline-author",
+          "lane": "write",
+          "tools": ["read", "grep", "glob", "ls", "search_code", "write"]
+        },
+        {
+          "name": "stack-surveyor",
+          "lane": "read",
+          "tools": ["read", "grep", "glob", "ls", "search_code"]
+        },
+        {
+          "name": "toolchain-doctor",
+          "lane": "exec",
+          "tools": ["read", "grep", "glob", "ls", "bash"]
+        }
+      ],
+      "workflows": [
+        {
+          "name": "a11y-audit",
+          "stages": 2,
+          "budgetUsd": 12
+        },
+        {
+          "name": "mobile-baseline",
+          "stages": 4,
+          "budgetUsd": 25
+        }
+      ],
+      "skills": [
+        {
+          "name": "a11y-sweep",
+          "line": "Audit mobile accessibility by running the checks this stack has and naming what source cannot decide. Emits no score and no conformance verdict."
+        },
+        {
+          "name": "arch-baseline",
+          "line": "Map the architecture this repository actually has, then propose a baseline against it with the cost of each proposal named."
+        },
+        {
+          "name": "env-doctor",
+          "line": "Report whether this machine can build this repository, from real commands with real exit codes, against the versions the repo pins."
+        },
+        {
+          "name": "release-gate",
+          "line": "Check what a store will actually reject, from the manifests in this tree, never asserting that a build is signed, compliant or ready."
+        }
+      ]
+    },
+    {
+      "name": "mobile-ground-truth",
+      "source": "sitharaj88/arcturn/kits/mobile-ground-truth",
+      "description": "Four mobile commands that answer from the tree and the toolchain rather than from memory: API availability, crash triage, upgrade impact, privacy declarations.",
+      "kinds": ["skills"],
+      "agents": [],
+      "workflows": [],
+      "skills": [
+        {
+          "name": "api-check",
+          "line": "Answer whether an API exists in the SDK you build against and whether it runs on the oldest OS you ship to, from files on this machine, never from memory."
+        },
+        {
+          "name": "crash-triage",
+          "line": "Triage a mobile crash only when the trace is symbolicated and its symbols proven to match the shipped build; otherwise name what is missing and stop."
+        },
+        {
+          "name": "privacy-declarations",
+          "line": "Draft the privacy-manifest and data-safety inputs a store asks for from what the code evidences, marking everything unevidenced as undeclarable."
+        },
+        {
+          "name": "upgrade-impact",
+          "line": "Report only the breaking changes in an upgrade that actually occur in this repository, with the compiler's own deprecation output as the evidence."
+        }
+      ]
+    },
+    {
+      "name": "plan-pressure-tests",
+      "source": "sitharaj88/arcturn/kits/plan-pressure-tests",
+      "description": "Four reader skills that pressure-test a plan somebody already wrote — its assumptions, its feasibility against your tree, its claims and its cut order — each refusing the judgment it cannot ground.",
+      "kinds": ["skills"],
+      "agents": [],
+      "workflows": [],
+      "skills": [
+        {
+          "name": "assumption-audit",
+          "line": "Grade the assumptions a plan rests on — SUPPORTED only with a file:line, a command's real output, or a page fetched this session; everything else is UNTESTED."
+        },
+        {
+          "name": "feasibility-read",
+          "line": "Read a plan against this repository — what the tree supports at file:line, what searches came back empty with their patterns, and the unknowns. No estimate."
+        },
+        {
+          "name": "rfc-review",
+          "line": "Review a design document for the comments that would change it — CONTRADICTED needs a file:line, HOLDS never rests on the document, and every drop is counted."
+        },
+        {
+          "name": "scope-cut",
+          "line": "Order scope cuts by dependency read out of the import graph, every edge with its file:line — never by value, and no cut called safe without a named consumer."
+        }
+      ]
+    },
+    {
+      "name": "project-setup",
+      "source": "sitharaj88/arcturn/kits/project-setup",
+      "description": "Stand a new app up with the ecosystem's own generator rather than files written from memory, then add the layering a generator leaves out — and prove the boundary check fails when the rule is broken.",
+      "kinds": ["org-kit", "agents", "workflows", "skills"],
+      "agents": [
+        {
+          "name": "architecture-author",
+          "lane": "write",
+          "tools": ["read", "grep", "glob", "ls", "search_code", "write", "edit"]
+        },
+        {
+          "name": "boundary-oracle",
+          "lane": "exec",
+          "tools": ["read", "grep", "glob", "ls", "bash"]
+        },
+        {
+          "name": "scaffolder",
+          "lane": "write",
+          "tools": ["read", "grep", "glob", "ls", "bash", "write"]
+        },
+        {
+          "name": "stack-advisor",
+          "lane": "read",
+          "tools": ["read", "grep", "glob", "ls", "search_code"]
+        }
+      ],
+      "workflows": [
+        {
+          "name": "app-setup",
+          "stages": 4,
+          "budgetUsd": 20
+        }
+      ],
+      "skills": [
+        {
+          "name": "architecture-apply",
+          "line": "Add the layering a generator leaves out — boundaries, a composition root, a real test — on top of the tree that actually exists."
+        },
+        {
+          "name": "boundary-prove",
+          "line": "Prove an architecture check fails when the rule is broken, by planting a violation and running it. BITES, TOOTHLESS or NO-ORACLE."
+        },
+        {
+          "name": "scaffold-run",
+          "line": "Stand a project up with the ecosystem's own generator and report what actually landed. Never hand-writes a file a generator produces."
+        },
+        {
+          "name": "stack-choose",
+          "line": "Choose a stack against a brief and this machine, with what every choice costs named. Takes acronyms like MERN apart into the decisions they hide."
+        }
+      ]
+    },
+    {
+      "name": "starter-skills",
+      "source": "sitharaj88/arcturn/kits/starter-skills",
+      "description": "Three skills for the writing a repository asks for constantly — a commit message, a pull-request description, and release notes.",
+      "kinds": ["skills"],
+      "agents": [],
+      "workflows": [],
+      "skills": [
+        {
+          "name": "commit-message"
+        },
+        {
+          "name": "pr-description"
+        },
+        {
+          "name": "release-notes"
+        }
+      ]
+    },
+    {
+      "name": "test-integrity",
+      "source": "sitharaj88/arcturn/kits/test-integrity",
+      "description": "Find the tests that cannot fail. The oracle breaks the behaviour and watches whether the test notices; the only role that can write cannot run anything, so no stage verifies its own work.",
+      "kinds": ["org-kit", "agents", "workflows", "skills"],
+      "agents": [
+        {
+          "name": "assertion-critic",
+          "lane": "read",
+          "tools": ["read", "grep", "glob", "ls", "search_code"]
+        },
+        {
+          "name": "flake-detective",
+          "lane": "exec",
+          "tools": ["read", "grep", "glob", "ls", "bash"]
+        },
+        {
+          "name": "mutation-oracle",
+          "lane": "exec",
+          "tools": ["read", "grep", "glob", "ls", "bash"]
+        },
+        {
+          "name": "test-author",
+          "lane": "write",
+          "tools": ["read", "grep", "glob", "ls", "search_code", "write", "edit"]
+        }
+      ],
+      "workflows": [
+        {
+          "name": "test-audit",
+          "stages": 4,
+          "budgetUsd": 30
+        }
+      ],
+      "skills": [
+        {
+          "name": "coverage-truth",
+          "line": "Report what a coverage number actually measures here, the exclusion list nobody reads, and which files are high-coverage and low-assurance."
+        },
+        {
+          "name": "flake-hunt",
+          "line": "Find tests whose result depends on order, timing, seed or shared state, established across runs and with the mechanism named rather than called flaky."
+        },
+        {
+          "name": "mutation-probe",
+          "line": "Prove whether a test can fail by breaking the behaviour it covers and watching whether it notices. PROVEN, BLIND or NO-ORACLE, never covered."
+        },
+        {
+          "name": "vacuous-check",
+          "line": "Read tests for assertions that cannot fail and rank them for a mutation run, as suspicions with a path:line rather than verdicts."
+        }
+      ]
+    }
+  ]
+}

@@ -94,6 +94,7 @@ vi.mock("vscode", () => {
         dispose: () => {},
       }),
       registerWebviewViewProvider: () => ({ dispose: () => {} }),
+      createTreeView: () => ({ dispose: () => {} }),
       showQuickPick: () => Promise.resolve(undefined),
       showWarningMessage: () => Promise.resolve(undefined),
       showInformationMessage: () => Promise.resolve(undefined),

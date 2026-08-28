@@ -115,6 +115,10 @@ const orderedFiles = [
   // of it cost a spawn. That observation is only available before
   // `05-sidebar-view` deliberately spends the budget.
   "out/integration/04b-active-editor.test.js",
+  // Browsing the hub must cost nothing, and that claim is only worth making
+  // while the budget 01-activation asserts is unspent is still unspent — so it
+  // goes here, ahead of the file that deliberately spends it.
+  "out/integration/08-hub-view.test.js",
   "out/integration/05-sidebar-view.test.js",
   "out/integration/06-engine-failure.test.js",
   // Deliberately hides and reveals the view, which costs more spawns — so it

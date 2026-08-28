@@ -20,6 +20,7 @@
 
 import { spawn as nodeSpawn } from "node:child_process";
 import * as vscode from "vscode";
+import { activateHub } from "../hub/view.js";
 import { ARCTURN_EXTENSION_ID, authorizeMcpServer, type McpAuthEditor } from "../mcp-auth.js";
 import type { ResolvedCliLike } from "../serve/args.js";
 import type { SocketFactory } from "../serve/connect.js";
@@ -2600,6 +2601,36 @@ export function activateSidebar(
       `This engine cannot authorize MCP servers; run "arcturn mcp auth ${server}" instead.`,
     );
   }
+
+  // ---- The hub, as a tree ------------------------------------------------
+  // Thirteen kits and forty-odd commands were reachable only from a website
+  // and a CLI you had to already know to run. The catalog is bundled, so this
+  // opens no socket; `availableCommands` is the one thing it asks the engine,
+  // and only when the engine is already up — activation still spawns nothing.
+  disposables.push(
+    activateHub(context, {
+      availableCommands: async () => {
+        // `undefined` rather than `[]` when there is no engine to ask: the
+        // tree distinguishes "this engine has no skills" from "I could not
+        // find out", and showing every kit as available is the right answer
+        // to the second but a lie about the first.
+        if (engine?.status !== "ready") return undefined;
+        const commands = await engine.listCommands();
+        return commands?.map((command) => command.name);
+      },
+      runInTerminal: (command) => {
+        // `arcturn add` writes into the workspace, so it must run there and
+        // not in whatever directory a terminal would otherwise inherit.
+        const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        const terminal = vscode.window.createTerminal({
+          name: "Arcturn Hub",
+          ...(root === undefined ? {} : { cwd: root }),
+        });
+        terminal.show();
+        terminal.sendText(command);
+      },
+    }),
+  );
 
   const disposable = new vscode.Disposable(() => {
     engine?.dispose();

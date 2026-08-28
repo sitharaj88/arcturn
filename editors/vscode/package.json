@@ -138,6 +138,24 @@
         "command": "arcturn.authorizeMcpServer",
         "title": "Authorize MCP Server",
         "category": "Arcturn"
+      },
+      {
+        "command": "arcturn.hub.install",
+        "title": "Install Kit",
+        "category": "Arcturn",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "arcturn.hub.openOnWeb",
+        "title": "Open on arcturn.dev",
+        "category": "Arcturn",
+        "icon": "$(link-external)"
+      },
+      {
+        "command": "arcturn.hub.refresh",
+        "title": "Refresh Hub",
+        "category": "Arcturn",
+        "icon": "$(refresh)"
       }
     ],
     "keybindings": [
@@ -206,6 +224,18 @@
         {
           "command": "arcturn.authorizeMcpServer",
           "when": "config.arcturn.serve.enabled"
+        },
+        {
+          "command": "arcturn.hub.refresh",
+          "when": "config.arcturn.serve.enabled"
+        },
+        {
+          "command": "arcturn.hub.install",
+          "when": "false"
+        },
+        {
+          "command": "arcturn.hub.openOnWeb",
+          "when": "false"
         }
       ],
       "editor/context": [
@@ -226,6 +256,25 @@
           "when": "!explorerResourceIsFolder && resourceScheme == file",
           "group": "arcturn@1"
         }
+      ],
+      "view/title": [
+        {
+          "command": "arcturn.hub.refresh",
+          "when": "view == arcturn.hub",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "arcturn.hub.install",
+          "when": "view == arcturn.hub && viewItem =~ /^arcturn\\.hub\\.kit\\.(available|partial)$/",
+          "group": "inline"
+        },
+        {
+          "command": "arcturn.hub.openOnWeb",
+          "when": "view == arcturn.hub && viewItem =~ /^arcturn\\.hub\\.kit\\./",
+          "group": "inline"
+        }
       ]
     },
     "viewsContainers": {
@@ -243,6 +292,12 @@
           "id": "arcturn.sidebar",
           "name": "Chat",
           "type": "webview",
+          "when": "config.arcturn.serve.enabled"
+        },
+        {
+          "id": "arcturn.hub",
+          "name": "Hub",
+          "icon": "$(package)",
           "when": "config.arcturn.serve.enabled"
         }
       ]
@@ -352,6 +407,7 @@
   },
   "scripts": {
     "build": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --minify",
+    "catalog": "node scripts/build-catalog.mjs",
     "build:integration": "esbuild test/integration/*.test.ts --bundle --outdir=out/integration --format=cjs --platform=node --external:vscode --sourcemap",
     "clean": "rm -rf dist out .vscode-test *.vsix",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.integration.json",

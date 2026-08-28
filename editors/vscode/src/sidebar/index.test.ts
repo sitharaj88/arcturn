@@ -28,6 +28,7 @@ const ledger = vi.hoisted(() => ({
     disposed: boolean;
   }[],
   views: [] as { id: string; options: unknown; provider: WebviewViewProviderLike }[],
+  treeViews: [] as { id: string; provider: unknown }[],
   posted: [] as { type: string; [key: string]: unknown }[],
   clipboard: [] as string[],
   quickPicks: [] as { items: { label: string; description?: string }[]; options: unknown }[],
@@ -56,6 +57,7 @@ const ledger = vi.hoisted(() => ({
     ledger.outputs = [];
     ledger.statusBars = [];
     ledger.views = [];
+    ledger.treeViews = [];
     ledger.posted = [];
     ledger.clipboard = [];
     ledger.quickPicks = [];
@@ -175,6 +177,10 @@ vi.mock("vscode", () => {
         ledger.statusBars.push(item);
         return item;
       },
+      createTreeView(id: string, options: { treeDataProvider: unknown }) {
+        ledger.treeViews.push({ id, provider: options.treeDataProvider });
+        return { dispose: () => {} };
+      },
       registerWebviewViewProvider(id: string, provider: unknown, options: unknown) {
         ledger.views.push({ id, options, provider: provider as WebviewViewProviderLike });
         return { dispose: () => {} };
@@ -263,6 +269,7 @@ vi.mock("vscode", () => {
   };
 });
 
+import { HUB_COMMANDS, HUB_VIEW_ID } from "../hub/view.js";
 import { activateSidebar, SIDEBAR_COMMANDS, SIDEBAR_VIEW_ID } from "./index.js";
 import { WEBVIEW_COMMANDS } from "./webview-messages.js";
 
@@ -372,9 +379,20 @@ describe("activateSidebar", () => {
 
   it("registers every command it owns, so all of them reach the palette", () => {
     activate();
+    // The hub's three come from `activateHub`, which this module calls: the
+    // same activation, one module down. Listing them here rather than
+    // exempting them keeps the "contributed ⇔ registered" pair total.
     expect([...ledger.commands.keys()].sort()).toEqual(
-      Object.values(SIDEBAR_COMMANDS).slice().sort(),
+      [...Object.values(SIDEBAR_COMMANDS), ...Object.values(HUB_COMMANDS)].sort(),
     );
+  });
+
+  it("opens the hub tree beside the chat, and asks the engine for nothing yet", () => {
+    activate();
+    // The catalog is bundled, so the tree draws with no engine and no socket.
+    // Activation spawning nothing is asserted elsewhere; this is the narrower
+    // claim that adding a second view did not change it.
+    expect(ledger.treeViews.map((view) => view.id)).toEqual([HUB_VIEW_ID]);
   });
 
   it("puts the cost item in the status bar, wired to the breakdown command", () => {
