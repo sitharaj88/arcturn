@@ -7,6 +7,9 @@
 !dist/extension.js
 !media/icon.png
 !media/arcturn-activity.svg
+# The walkthrough's prose. Without this line it packages as empty steps, and
+# only a published install would show it — `manifest.test.ts` guards the pair.
+!media/walkthrough/*.md
 !README.md
 !CHANGELOG.md
 !LICENSE

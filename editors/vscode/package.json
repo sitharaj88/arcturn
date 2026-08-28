@@ -283,7 +283,72 @@
           "markdownDescription": "Loopback port for `arcturn serve`. `0` picks an ephemeral port, which is the recommended setting \u2014 a fixed port is one more thing another process on this machine can find."
         }
       }
-    }
+    },
+    "walkthroughs": [
+      {
+        "id": "arcturn.getStarted",
+        "title": "Get started with Arcturn",
+        "description": "Install the engine, point it at a model, and ask it something.",
+        "steps": [
+          {
+            "id": "engine",
+            "title": "Install the engine",
+            "description": "The extension is a client. The `arcturn` CLI is the agent, and the panel needs 0.4.0 or newer.\n[Install CLI](command:arcturn.installCli)",
+            "media": {
+              "markdown": "media/walkthrough/engine.md"
+            },
+            "completionEvents": [
+              "onCommand:arcturn.installCli"
+            ]
+          },
+          {
+            "id": "key",
+            "title": "Point it at a model",
+            "description": "Arcturn reads provider keys from your environment. Export one, then check what the engine can reach.\n[Select Model](command:arcturn.selectModel)",
+            "media": {
+              "markdown": "media/walkthrough/key.md"
+            },
+            "completionEvents": [
+              "onCommand:arcturn.selectModel"
+            ]
+          },
+          {
+            "id": "panel",
+            "title": "Ask it something",
+            "description": "Open the panel and type. The file you have open is named, not sent \u2014 and nothing is written without a prompt you answer.\n[Open Arcturn](command:arcturn.open)",
+            "media": {
+              "markdown": "media/walkthrough/panel.md"
+            },
+            "completionEvents": [
+              "onCommand:arcturn.open",
+              "onCommand:arcturn.sendSelection"
+            ]
+          },
+          {
+            "id": "skills",
+            "title": "Teach it your work",
+            "description": "Kits are roles and workflows kept as files you can read and version. Thirteen of them are on the hub.\n[Browse the hub](https://arcturn.dev/hub)",
+            "media": {
+              "markdown": "media/walkthrough/skills.md"
+            },
+            "completionEvents": [
+              "onLink:https://arcturn.dev/hub"
+            ]
+          },
+          {
+            "id": "mcp",
+            "title": "Connect your tools",
+            "description": "MCP servers give the agent real capabilities. OAuth works even when the engine is on another machine.\n[Authorize MCP Server](command:arcturn.authorizeMcpServer)",
+            "media": {
+              "markdown": "media/walkthrough/mcp.md"
+            },
+            "completionEvents": [
+              "onCommand:arcturn.authorizeMcpServer"
+            ]
+          }
+        ]
+      }
+    ]
   },
   "scripts": {
     "build": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --minify",

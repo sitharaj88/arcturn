@@ -28,6 +28,14 @@ interface MenuItem {
   when?: string;
 }
 
+interface WalkthroughStep {
+  id: string;
+  title: string;
+  description: string;
+  media: { markdown?: string; image?: string; svg?: string };
+  completionEvents?: string[];
+}
+
 interface Manifest {
   activationEvents: string[];
   contributes: {
@@ -35,6 +43,7 @@ interface Manifest {
     menus: { commandPalette?: MenuItem[] };
     views: Record<string, { id: string; when?: string }[]>;
     configuration: { properties: Record<string, unknown> };
+    walkthroughs?: { id: string; title: string; steps: WalkthroughStep[] }[];
   };
 }
 
@@ -132,5 +141,71 @@ describe("activation stays narrow", () => {
     // second list to keep in sync and buys nothing.
     expect(manifest.activationEvents).toEqual([]);
     expect(viewIds).toContain(SIDEBAR_VIEW_ID);
+  });
+});
+
+/**
+ * The walkthrough is the only part of the extension that can be completely
+ * broken while every test passes and the code typechecks: its steps are data,
+ * its links are strings, and its prose lives in files the bundler never looks
+ * at. Three ways it silently rots, one test each.
+ */
+describe("the getting-started walkthrough", () => {
+  const walkthrough = () => {
+    const found = manifest.contributes.walkthroughs?.[0];
+    if (found === undefined) throw new Error("no walkthrough is contributed");
+    return found;
+  };
+
+  it("points every step at a file that is actually there", () => {
+    // A missing markdown file does not fail to load — it renders as a step
+    // with a title and nothing under it, which reads as a broken extension
+    // to the one person who most needs it to work.
+    for (const step of walkthrough().steps) {
+      const media = step.media.markdown ?? step.media.image ?? step.media.svg;
+      expect(media, `step "${step.id}" names no media`).toBeDefined();
+      const path = fileURLToPath(new URL(`../${media}`, import.meta.url));
+      expect(() => readFileSync(path, "utf8"), `step "${step.id}" → ${media}`).not.toThrow();
+    }
+  });
+
+  it("links only to commands the manifest contributes", () => {
+    // `command:arcturn.typo` renders as a button that does nothing at all.
+    const contributedIds = new Set(manifest.contributes.commands.map((entry) => entry.command));
+    for (const step of walkthrough().steps) {
+      for (const match of step.description.matchAll(/command:([\w.]+)/g)) {
+        expect(contributedIds, `step "${step.id}" links ${match[1]}`).toContain(match[1]);
+      }
+      for (const event of step.completionEvents ?? []) {
+        if (!event.startsWith("onCommand:")) continue;
+        expect(contributedIds, `step "${step.id}" completes on ${event}`).toContain(
+          event.slice("onCommand:".length),
+        );
+      }
+    }
+  });
+
+  it("ships its prose in the VSIX", () => {
+    // `.vscodeignore` is an allowlist: everything is excluded and the shipped
+    // files are named. A walkthrough added without a matching `!` line
+    // packages as five empty steps, and only a published install would show it.
+    const ignore = readFileSync(
+      fileURLToPath(new URL("../.vscodeignore", import.meta.url)),
+      "utf8",
+    );
+    const allowed = ignore
+      .split("\n")
+      .filter((line) => line.startsWith("!"))
+      .map((line) => line.slice(1).trim());
+    for (const step of walkthrough().steps) {
+      const media = step.media.markdown ?? step.media.image ?? step.media.svg ?? "";
+      const covered = allowed.some(
+        (rule) =>
+          rule === media ||
+          (rule.endsWith("*") && media.startsWith(rule.slice(0, -1))) ||
+          (rule.includes("*") && new RegExp(`^${rule.replace(/\*/g, "[^/]*")}$`).test(media)),
+      );
+      expect(covered, `${media} is not allowlisted in .vscodeignore`).toBe(true);
+    }
   });
 });
