@@ -41,7 +41,14 @@
  */
 
 import type { McpManager } from "@arcturn/mcp";
-import type { McpServerSummary } from "@arcturn/types";
+import type {
+  McpPromptList,
+  McpPromptRendering,
+  McpResourceContents,
+  McpResourceList,
+  McpServerSummary,
+} from "@arcturn/types";
+import { sanitizeDescription } from "./skill-tool.js";
 
 /**
  * Project a manager's servers into the wire's four fields.
@@ -76,4 +83,132 @@ export function mcpServerSummaries(manager: McpManager | undefined): McpServerSu
         ...(toolCount === undefined ? {} : { toolCount }),
       };
     });
+}
+
+/**
+ * Project a manager's resources and prompt templates onto the wire.
+ *
+ * The same decision `mcpServerSummaries` makes, made in the same place and for
+ * the same reason — except that here the risk runs the other way. A status row
+ * risks leaking a *credential outward*; a resource listing risks carrying
+ * *untrusted text inward*, into a menu a person reads and clicks. Every
+ * description a remote server wrote goes through `sanitizeDescription`, which
+ * is the treatment a skill's frontmatter already gets on the way to the same
+ * kind of surface: first line only, control characters collapsed, capped.
+ *
+ * A server's own `name` is sanitized too. It is shown as a label, and a label
+ * carrying newlines or control characters is a label that can be made to look
+ * like two rows.
+ *
+ * Resource *contents* are deliberately not sanitized: truncating a schema or a
+ * design document to one line would destroy the thing the user asked for. They
+ * are marked untrusted on the wire type instead, and the rule is the client's
+ * — render as text, never as markup.
+ */
+export async function mcpResourceList(
+  manager: McpManager | undefined,
+  server?: string,
+): Promise<McpResourceList> {
+  if (manager === undefined) return { resources: [], templates: [] };
+  const [resources, templates] = await Promise.all([
+    manager.listResources(server).catch(() => []),
+    manager.listResourceTemplates(server).catch(() => []),
+  ]);
+  return {
+    // Named field by field rather than spread, the rule this module already
+    // keeps: a field the SDK grows tomorrow is absent until somebody decides.
+    resources: resources
+      .map((entry) => ({
+        server: entry.server,
+        uri: entry.uri,
+        ...(entry.name === undefined ? {} : { name: sanitizeDescription(entry.name) }),
+        ...(entry.description === undefined
+          ? {}
+          : { description: sanitizeDescription(entry.description) }),
+        ...(entry.mimeType === undefined ? {} : { mimeType: entry.mimeType }),
+      }))
+      .sort(byServerThen((entry) => entry.uri)),
+    templates: templates
+      .map((entry) => ({
+        server: entry.server,
+        uriTemplate: entry.uriTemplate,
+        ...(entry.name === undefined ? {} : { name: sanitizeDescription(entry.name) }),
+        ...(entry.description === undefined
+          ? {}
+          : { description: sanitizeDescription(entry.description) }),
+        ...(entry.mimeType === undefined ? {} : { mimeType: entry.mimeType }),
+      }))
+      .sort(byServerThen((entry) => entry.uriTemplate)),
+  };
+}
+
+/** Project a manager's prompt templates onto the wire. */
+export async function mcpPromptList(
+  manager: McpManager | undefined,
+  server?: string,
+): Promise<McpPromptList> {
+  if (manager === undefined) return { prompts: [] };
+  const prompts = await manager.listPrompts(server).catch(() => []);
+  return {
+    prompts: prompts
+      .map((entry) => ({
+        server: entry.server,
+        name: entry.name,
+        ...(entry.description === undefined
+          ? {}
+          : { description: sanitizeDescription(entry.description) }),
+        ...(entry.arguments === undefined
+          ? {}
+          : {
+              arguments: entry.arguments.map((argument) => ({
+                name: argument.name,
+                ...(argument.description === undefined
+                  ? {}
+                  : { description: sanitizeDescription(argument.description) }),
+                ...(argument.required === undefined ? {} : { required: argument.required }),
+              })),
+            }),
+      }))
+      .sort(byServerThen((entry) => entry.name)),
+  };
+}
+
+/** Read one resource, unsanitized and marked so. */
+export async function mcpResourceRead(
+  manager: McpManager | undefined,
+  server: string,
+  uri: string,
+): Promise<McpResourceContents> {
+  if (manager === undefined) throw new Error("this engine has no MCP servers configured");
+  const contents = await manager.readResource(server, uri);
+  return {
+    contents: contents.map((block) => ({
+      uri: block.uri,
+      ...(block.mimeType === undefined ? {} : { mimeType: block.mimeType }),
+      ...(block.text === undefined ? {} : { text: block.text }),
+      ...(block.blob === undefined ? {} : { blob: block.blob }),
+    })),
+  };
+}
+
+/** Render one prompt template into role/text messages. */
+export async function mcpPromptRender(
+  manager: McpManager | undefined,
+  server: string,
+  name: string,
+  args?: Record<string, string>,
+): Promise<McpPromptRendering> {
+  if (manager === undefined) throw new Error("this engine has no MCP servers configured");
+  const messages = await manager.getPrompt(server, name, args);
+  return { messages: messages.map((message) => ({ role: message.role, text: message.text })) };
+}
+
+/** Sort by server, then by the caller's key, so two reads compare equal. */
+function byServerThen<T extends { server: string }>(
+  key: (entry: T) => string,
+): (left: T, right: T) => number {
+  return (left, right) =>
+    left.server === right.server
+      ? key(left).localeCompare(key(right))
+      : left.server.localeCompare(right.server);
 }

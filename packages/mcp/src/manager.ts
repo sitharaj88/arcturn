@@ -23,10 +23,12 @@ import {
   getPrompt as getPromptImpl,
   listPrompts as listPromptsImpl,
   listResources as listResourcesImpl,
+  listResourceTemplates as listResourceTemplatesImpl,
   type McpPromptInfo,
   type McpPromptMessage,
   type McpResourceContent,
   type McpResourceInfo,
+  type McpResourceTemplateInfo,
   readResource as readResourceImpl,
 } from "./resources.js";
 
@@ -344,6 +346,19 @@ export class McpManager {
   /** Lists resources for `server`, or every connected server when omitted. */
   async listResources(server?: string): Promise<McpResourceInfo[]> {
     return listResourcesImpl(this.clientMap(), server);
+  }
+
+  /**
+   * Lists resource *templates* for `server`, or every connected server when
+   * omitted.
+   *
+   * A template is a URI pattern a server fills in on demand — the shape a
+   * server uses for resources it generates rather than holds. Sibling to
+   * {@link listResources}, and absent until a caller needed both halves of the
+   * listing rather than one.
+   */
+  async listResourceTemplates(server?: string): Promise<McpResourceTemplateInfo[]> {
+    return listResourceTemplatesImpl(this.clientMap(), server);
   }
 
   /** Reads a resource by URI from the given (connected) server. */

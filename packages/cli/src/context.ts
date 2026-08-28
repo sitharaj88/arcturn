@@ -80,6 +80,15 @@ export interface ContextResolverOptions {
    * how a menu comes to list a skill the expander cannot find.
    */
   skills?: () => readonly Skill[];
+  /**
+   * Reads one MCP resource, for a `{ kind: "mcpResource" }` attachment.
+   *
+   * A function rather than the manager itself, for the reason `skills` is a
+   * getter: this module has no business depending on `@arcturn/mcp`, and a
+   * host without MCP servers should be able to omit it and have such an
+   * attachment refused rather than silently dropped.
+   */
+  readMcpResource?: (server: string, uri: string) => Promise<string>;
 }
 
 /**
@@ -149,6 +158,7 @@ function budgetMessage(what: string, bytes: number, limit: number): string {
 export function createContextResolver(options: ContextResolverOptions = {}): ContextResolver {
   const maxBytes = options.maxAttachmentBytes ?? PROMPT_ATTACHMENT_MAX_BYTES;
   const skills = options.skills ?? ((): readonly Skill[] => []);
+  const readMcpResource = options.readMcpResource;
 
   return {
     async buildPrompt(request: PromptContextRequest): Promise<ResolvedPrompt> {
@@ -177,6 +187,39 @@ export function createContextResolver(options: ContextResolverOptions = {}): Con
       let spent = 0;
 
       for (const attachment of request.attachments) {
+        if (attachment.kind === "mcpResource") {
+          // Named by the client, fetched here. The read is the engine's for
+          // the reason every other read is — this is where the budget lives,
+          // and a client that fetched its own copy would be spending tokens
+          // nobody counted. See `PromptAttachment` for the whole rule.
+          if (readMcpResource === undefined) {
+            throw new ContextRefusedError(
+              `Attachment ${JSON.stringify(attachment.uri)} names an MCP resource, and this ` +
+                "engine has no MCP servers configured.",
+            );
+          }
+          let text: string;
+          try {
+            text = await readMcpResource(attachment.server, attachment.uri);
+          } catch (error) {
+            // Fatal, like an unconfined path: the user asked for this content,
+            // and running the turn without it is a silent drop.
+            throw new ContextRefusedError(
+              `Attachment ${JSON.stringify(attachment.uri)} could not be read from MCP server ` +
+                `${JSON.stringify(attachment.server)}: ` +
+                `${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+          const heading = `${attachment.server}: ${attachment.uri} (MCP resource)`;
+          const block = `${heading}\n\n\`\`\`\n${text}\n\`\`\``;
+          const bytes = Buffer.byteLength(block, "utf8");
+          spent += bytes;
+          if (spent > maxBytes) {
+            throw new ContextRefusedError(budgetMessage(attachment.uri, bytes, maxBytes));
+          }
+          appended.push(block);
+          continue;
+        }
         if (!("path" in attachment)) {
           // An image with no path: a paste, a drop from outside the filesystem.
           // Nothing to confine — it was never a workspace file — so the only

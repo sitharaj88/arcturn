@@ -4532,6 +4532,21 @@ const CLIENT_SOURCE = String.raw`
       if (typeof message.label === "string") costLabel.textContent = message.label;
       return;
     }
+    if (message.type === "prefill") {
+      // Put text in the composer and leave it there. An MCP prompt template is
+      // material to read and edit, not a turn to spend on the user's behalf —
+      // so this never sends, and the caret lands at the end so typing after it
+      // is the obvious next move.
+      if (typeof message.text !== "string") return;
+      promptBox.value = message.text;
+      promptBox.focus();
+      promptBox.setSelectionRange(promptBox.value.length, promptBox.value.length);
+      // The same pair the input listener runs: the box has to regrow to fit
+      // what was just put in it, and send has to stop being disabled.
+      syncComposer();
+      syncSuggest();
+      return;
+    }
     if (message.type === "models") {
       var status = message.status === "ready" || message.status === "unavailable" ? message.status : "loading";
       var list = [];

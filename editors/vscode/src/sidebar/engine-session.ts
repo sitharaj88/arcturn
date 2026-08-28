@@ -21,6 +21,10 @@ import { buildServeArgs, cliInvocation, type ResolvedCliLike } from "../serve/ar
 import { connectToServe, type SocketFactory } from "../serve/connect.js";
 import type {
   CommandDescriptor,
+  McpPromptList,
+  McpPromptRendering,
+  McpResourceContents,
+  McpResourceList,
   McpServerSummary,
   ModelCatalogEntry,
   ProtocolClient,
@@ -147,6 +151,21 @@ export interface EngineSession {
   mcpAuthComplete(handle: string, code: string, state: string): Promise<void>;
   /** Abandon a begun authorization. */
   mcpAuthCancel(handle: string): Promise<boolean>;
+  /**
+   * The resources configured MCP servers publish, or `undefined` when the
+   * engine is older than the verb.
+   */
+  mcpResources(): Promise<McpResourceList | undefined>;
+  /** Read one resource, for preview. Untrusted text a remote server wrote. */
+  mcpReadResource(server: string, uri: string): Promise<McpResourceContents>;
+  /** The prompt templates configured MCP servers publish. */
+  mcpPrompts(): Promise<McpPromptList | undefined>;
+  /** Render one prompt template with the arguments it declares. */
+  mcpGetPrompt(
+    server: string,
+    name: string,
+    args?: Record<string, string>,
+  ): Promise<McpPromptRendering>;
   /**
    * Start a scout run: approaches raced in throwaway worktrees. `undefined`
    * when the engine is older than the verb.
@@ -494,6 +513,22 @@ export function createEngineSession(options: EngineSessionOptions): EngineSessio
     },
     async mcpAuthCancel(handle: string): Promise<boolean> {
       return requireClient().mcpAuthCancel(handle);
+    },
+    async mcpResources(): Promise<McpResourceList | undefined> {
+      return requireClient().mcpResources();
+    },
+    async mcpReadResource(server: string, uri: string): Promise<McpResourceContents> {
+      return requireClient().mcpReadResource(server, uri);
+    },
+    async mcpPrompts(): Promise<McpPromptList | undefined> {
+      return requireClient().mcpPrompts();
+    },
+    async mcpGetPrompt(
+      server: string,
+      name: string,
+      args?: Record<string, string>,
+    ): Promise<McpPromptRendering> {
+      return requireClient().mcpGetPrompt(server, name, args);
     },
     async startScout(approaches: readonly { name: string; task: string }[]) {
       return requireClient().startScout(approaches);

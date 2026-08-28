@@ -21,6 +21,7 @@
 import { spawn as nodeSpawn } from "node:child_process";
 import * as vscode from "vscode";
 import { activateHub } from "../hub/view.js";
+import { activateMcpCatalog } from "../mcp/view.js";
 import { ARCTURN_EXTENSION_ID, authorizeMcpServer, type McpAuthEditor } from "../mcp-auth.js";
 import { activateScout, SCOUT_COMMANDS } from "../scout/view.js";
 import type { ResolvedCliLike } from "../serve/args.js";
@@ -262,6 +263,7 @@ export function activateSidebar(
         case "detach":
           if (attached.delete(message.id)) {
             pasted.delete(message.id);
+            mcpAttached.delete(message.id);
             publishContext();
           }
           return;
@@ -442,6 +444,18 @@ export function activateSidebar(
   let pastedCount = 0;
 
   /**
+   * The server and URI behind an MCP-resource chip, keyed by the chip's id.
+   *
+   * Held here for the reason `pasted` is, and then for one more. The engine
+   * reads an MCP resource at prompt time — the client never fetches it — so
+   * what this map holds is a *name*, not content: two short strings, and the
+   * bytes stay on the server until a prompt spends them inside the engine's
+   * byte budget. A chip in `attached` renders it; this is what `send`
+   * actually carries.
+   */
+  let mcpAttached = new Map<string, { server: string; uri: string }>();
+
+  /**
    * Tell the user, once, that this engine cannot take attachments.
    *
    * Once per connection rather than once per attempt: a drag that drops four
@@ -533,6 +547,42 @@ export function activateSidebar(
     if (attached.size === 0) return;
     attached = new Map();
     pasted = new Map();
+    mcpAttached = new Map();
+    publishContext();
+  }
+
+  /**
+   * Take a resource an MCP server publishes.
+   *
+   * No `resolveContext` round trip and no fetch: an MCP resource is not a
+   * workspace path, so confinement has nothing to say about it, and the bytes
+   * are the engine's to read at prompt time. What is attached here is two
+   * strings — the server and the URI — which is the entire difference between
+   * this and a pasted image, where the megabytes sit on this side until
+   * `prompt` carries them.
+   *
+   * The chip is `ok` from the moment it appears, and unlike a file that is not
+   * a promise this side can keep alone: a server that goes away between
+   * attaching and sending makes the turn *refuse*, which is
+   * `ContextRefusedError`'s job and the right outcome — the user asked for
+   * that content, and a turn that quietly proceeded without it would be the
+   * silent drop RFC 0005 §1.1 forbids.
+   */
+  function attachMcpResource(server: string, uri: string, label: string): void {
+    const id = `mcp:${server}:${uri}`;
+    mcpAttached.set(id, { server, uri });
+    attached.set(id, {
+      id,
+      // No path, honestly. This is not on disk, here or on the engine's
+      // machine, and inventing one would make a chip claim a file.
+      path: "",
+      label,
+      // Unknown until the engine reads it, and `0` is what every other
+      // unmeasured chip carries rather than a guess.
+      bytes: 0,
+      kind: "other",
+      ok: true,
+    });
     publishContext();
   }
 
@@ -945,6 +995,11 @@ export function activateSidebar(
       const bytes = pasted.get(item.id);
       if (bytes !== undefined) {
         items.push({ kind: "image", data: bytes.data, mimeType: bytes.mimeType });
+        continue;
+      }
+      const resource = mcpAttached.get(item.id);
+      if (resource !== undefined) {
+        items.push({ kind: "mcpResource", server: resource.server, uri: resource.uri });
         continue;
       }
       items.push(
@@ -2629,6 +2684,34 @@ export function activateSidebar(
         });
         terminal.show();
         terminal.sendText(command);
+      },
+    }),
+  );
+
+  // ---- MCP's other two thirds --------------------------------------------
+  // A server publishes tools, resources and prompt templates. Only the first
+  // ever reached this panel, so a Figma server could be called and the frame
+  // it offers could not be attached. Attaching names the resource and lets the
+  // engine read it; previewing opens it as plain text, because it is prose a
+  // remote server wrote.
+  disposables.push(
+    activateMcpCatalog(context, {
+      mcpResources: () => withEngineResult((session) => session.mcpResources()),
+      mcpReadResource: async (server, uri) => {
+        const session = ensureEngine();
+        return session.mcpReadResource(server, uri);
+      },
+      mcpPrompts: () => withEngineResult((session) => session.mcpPrompts()),
+      mcpGetPrompt: async (server, name, args) => {
+        const session = ensureEngine();
+        return session.mcpGetPrompt(server, name, args);
+      },
+      attachResource: (server, uri, label) => attachMcpResource(server, uri, label),
+      offerPrompt: async (text) => {
+        // Offered, not sent. A template is material the user edits and decides
+        // on; sending it for them would spend a turn they did not ask for.
+        provider.reveal();
+        provider.prefillComposer(text);
       },
     }),
   );

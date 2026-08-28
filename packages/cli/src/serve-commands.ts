@@ -38,7 +38,7 @@
  */
 
 import { REMOTE_BUILT_IN_COMMAND_VERBS, REMOTE_REACHABLE_BUILT_IN_COMMANDS } from "@arcturn/server";
-import type { CommandDescriptor } from "@arcturn/types";
+import type { CommandDescriptor, McpPromptEntry } from "@arcturn/types";
 import { parseCommandLine } from "./commands.js";
 import { nearestMatches, sanitizeDescription } from "./skill-tool.js";
 import type { Skill } from "./skills.js";
@@ -57,7 +57,10 @@ import type { Skill } from "./skills.js";
  * @param skills - The discovered skill collection (`ArcturnRuntime.skills`).
  * @returns Descriptors, ready for the wire.
  */
-export function serveCommandDescriptors(skills: readonly Skill[]): CommandDescriptor[] {
+export function serveCommandDescriptors(
+  skills: readonly Skill[],
+  mcpPrompts: readonly McpPromptEntry[] = [],
+): CommandDescriptor[] {
   const fromSkills = [...skills]
     .filter((skill) => !shadowedByBuiltIn(skill.name))
     .sort((a, b) => a.name.localeCompare(b.name))
@@ -70,7 +73,30 @@ export function serveCommandDescriptors(skills: readonly Skill[]): CommandDescri
         source: skill.source,
       };
     });
-  return [...fromSkills, ...REMOTE_REACHABLE_BUILT_IN_COMMANDS.map((command) => ({ ...command }))];
+  // MCP prompts are named `server:name`, because a prompt name is only unique
+  // per server: two servers may both publish `review`, and one row winning
+  // silently would be the worse of the two possible surprises.
+  //
+  // They come last, after the built-ins, for a reason the ordering of the
+  // other two already implies: a workspace's own skills are the most specific
+  // thing a person meant, the engine's built-ins are the most predictable, and
+  // a remote server's templates are the least of both.
+  const fromMcp = mcpPrompts.map(
+    (prompt): CommandDescriptor => ({
+      name: `${prompt.server}:${prompt.name}`,
+      // Already sanitized by `mcpPromptList`, where the manager is. Defaulted
+      // here rather than left empty for the reason a nameless skill is: a row
+      // nobody can read is a row nobody can choose.
+      description: prompt.description ?? `Prompt template from ${prompt.server}`,
+      kind: "mcpPrompt",
+      server: prompt.server,
+    }),
+  );
+  return [
+    ...fromSkills,
+    ...REMOTE_REACHABLE_BUILT_IN_COMMANDS.map((command) => ({ ...command })),
+    ...fromMcp,
+  ];
 }
 
 /**

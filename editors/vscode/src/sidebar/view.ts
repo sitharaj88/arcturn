@@ -267,6 +267,17 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
   }
 
   /**
+   * Put text in the composer for the user to read, edit and send.
+   *
+   * Deliberately not retained the way `postState` and `postCost` are: a
+   * prefill is a one-shot offer, and replaying it when the view is revealed
+   * again would overwrite whatever the user had typed since.
+   */
+  prefillComposer(text: string): void {
+    this.#post({ type: "prefill", text });
+  }
+
+  /**
    * Push the model list behind the composer's chip.
    *
    * @param view - Catalog status, the projected rows, and the id the chip

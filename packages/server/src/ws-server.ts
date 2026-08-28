@@ -450,6 +450,21 @@ export class ArcturnServer {
         return this.#sessionHost.scoutRun(request.params.runId);
       case "cancelScout":
         return this.#sessionHost.cancelScout(request.params.runId);
+      case "mcpResources":
+        // Read-only and not session-scoped, like `mcpStatus`: what a server
+        // publishes is a property of the engine's MCP config, not of a
+        // conversation.
+        return this.#sessionHost.mcpResources(request.params?.server);
+      case "mcpReadResource":
+        return this.#sessionHost.mcpReadResource(request.params.server, request.params.uri);
+      case "mcpPrompts":
+        return this.#sessionHost.mcpPrompts(request.params?.server);
+      case "mcpGetPrompt":
+        return this.#sessionHost.mcpGetPrompt(
+          request.params.server,
+          request.params.name,
+          request.params.arguments,
+        );
       case "pendingChanges":
         // Read-only, so no observer is attached and no session state is
         // touched — the same shape `resolveContext` has.

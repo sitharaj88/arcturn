@@ -270,6 +270,7 @@ vi.mock("vscode", () => {
 });
 
 import { HUB_COMMANDS, HUB_VIEW_ID } from "../hub/view.js";
+import { MCP_COMMANDS } from "../mcp/view.js";
 import { SCOUT_COMMANDS } from "../scout/view.js";
 import { activateSidebar, SIDEBAR_COMMANDS, SIDEBAR_VIEW_ID } from "./index.js";
 import { WEBVIEW_COMMANDS } from "./webview-messages.js";
@@ -388,6 +389,7 @@ describe("activateSidebar", () => {
         ...Object.values(SIDEBAR_COMMANDS),
         ...Object.values(HUB_COMMANDS),
         ...Object.values(SCOUT_COMMANDS),
+        ...Object.values(MCP_COMMANDS),
       ].sort(),
     );
   });

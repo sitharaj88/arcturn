@@ -42,6 +42,11 @@ import type {
   DiscardChangesResult,
   LineRange,
   McpAuthBegun,
+  McpPromptList,
+  McpPromptRendering,
+  McpResourceContents,
+  McpResourceEntry,
+  McpResourceList,
   McpStatus,
   ModelCatalog,
   OrgMemoryList,
@@ -712,6 +717,39 @@ export interface ProtocolClient {
   scoutRun(runId: string): Promise<ScoutRun>;
   /** Stop a scout run. `false` when it was unknown or had already settled. */
   cancelScout(runId: string): Promise<boolean>;
+  /**
+   * What the configured MCP servers publish as *resources* — context a server
+   * offers rather than an action it performs.
+   *
+   * Attach one by naming it in a `{ kind: "mcpResource" }` attachment; the
+   * engine does the reading, inside the same byte budget a file gets.
+   *
+   * **Degrades to `undefined`** on the `listModels` precedent.
+   */
+  mcpResources(server?: string): Promise<McpResourceList | undefined>;
+  /**
+   * Read one resource, for preview.
+   *
+   * What comes back is untrusted text a remote server wrote. Render it as
+   * text, never as markup.
+   */
+  mcpReadResource(server: string, uri: string): Promise<McpResourceContents>;
+  /**
+   * What the configured MCP servers publish as prompt *templates*.
+   *
+   * These also arrive in `listCommands` as `kind: "mcpPrompt"`, named
+   * `server:name`. This verb exists for the argument metadata, which a command
+   * descriptor has no room for.
+   *
+   * **Degrades to `undefined`** on the `listModels` precedent.
+   */
+  mcpPrompts(server?: string): Promise<McpPromptList | undefined>;
+  /** Render one prompt template with the arguments it declares. */
+  mcpGetPrompt(
+    server: string,
+    name: string,
+    args?: Record<string, string>,
+  ): Promise<McpPromptRendering>;
   /**
    * Ask what a `--dry-run` session is holding back for review.
    *
@@ -1464,6 +1502,108 @@ class ProtocolClientImpl implements ProtocolClient {
     return isRecord(result) && result.cancelled === true;
   }
 
+  async mcpResources(server?: string): Promise<McpResourceList | undefined> {
+    let result: unknown;
+    try {
+      result = await this.#call("mcpResources", server === undefined ? undefined : { server });
+    } catch (error) {
+      if (error instanceof ProtocolRequestError && isUnsupportedMethodError(error)) {
+        return undefined;
+      }
+      throw error;
+    }
+    if (!isRecord(result)) return { resources: [], templates: [] };
+    return {
+      resources: asArray(result.resources).filter(isRecord).map(readResourceEntry),
+      templates: asArray(result.templates)
+        .filter(isRecord)
+        .map((entry) => ({
+          server: String(entry.server ?? ""),
+          uriTemplate: String(entry.uriTemplate ?? ""),
+          ...(typeof entry.name === "string" ? { name: entry.name } : {}),
+          ...(typeof entry.description === "string" ? { description: entry.description } : {}),
+          ...(typeof entry.mimeType === "string" ? { mimeType: entry.mimeType } : {}),
+        })),
+    };
+  }
+
+  async mcpReadResource(server: string, uri: string): Promise<McpResourceContents> {
+    const result = await this.#call("mcpReadResource", { server, uri });
+    if (!isRecord(result) || !Array.isArray(result.contents)) {
+      throw new ProtocolClientError(
+        ClientErrorCode.invalidResponse,
+        'Invalid mcpReadResource result: expected a "contents" array',
+      );
+    }
+    return {
+      contents: result.contents.filter(isRecord).map((block) => ({
+        uri: String(block.uri ?? ""),
+        ...(typeof block.mimeType === "string" ? { mimeType: block.mimeType } : {}),
+        ...(typeof block.text === "string" ? { text: block.text } : {}),
+        ...(typeof block.blob === "string" ? { blob: block.blob } : {}),
+      })),
+    };
+  }
+
+  async mcpPrompts(server?: string): Promise<McpPromptList | undefined> {
+    let result: unknown;
+    try {
+      result = await this.#call("mcpPrompts", server === undefined ? undefined : { server });
+    } catch (error) {
+      if (error instanceof ProtocolRequestError && isUnsupportedMethodError(error)) {
+        return undefined;
+      }
+      throw error;
+    }
+    if (!isRecord(result)) return { prompts: [] };
+    return {
+      prompts: asArray(result.prompts)
+        .filter(isRecord)
+        .map((entry) => ({
+          server: String(entry.server ?? ""),
+          name: String(entry.name ?? ""),
+          ...(typeof entry.description === "string" ? { description: entry.description } : {}),
+          ...(Array.isArray(entry.arguments)
+            ? {
+                arguments: entry.arguments.filter(isRecord).map((argument) => ({
+                  name: String(argument.name ?? ""),
+                  ...(typeof argument.description === "string"
+                    ? { description: argument.description }
+                    : {}),
+                  ...(typeof argument.required === "boolean"
+                    ? { required: argument.required }
+                    : {}),
+                })),
+              }
+            : {}),
+        })),
+    };
+  }
+
+  async mcpGetPrompt(
+    server: string,
+    name: string,
+    args?: Record<string, string>,
+  ): Promise<McpPromptRendering> {
+    const result = await this.#call("mcpGetPrompt", {
+      server,
+      name,
+      ...(args === undefined ? {} : { arguments: args }),
+    });
+    if (!isRecord(result) || !Array.isArray(result.messages)) {
+      throw new ProtocolClientError(
+        ClientErrorCode.invalidResponse,
+        'Invalid mcpGetPrompt result: expected a "messages" array',
+      );
+    }
+    return {
+      messages: result.messages.filter(isRecord).map((message) => ({
+        role: String(message.role ?? "user"),
+        text: String(message.text ?? ""),
+      })),
+    };
+  }
+
   async pendingChanges(sessionId: string, path?: string): Promise<PendingChanges | undefined> {
     let result: unknown;
     try {
@@ -2087,6 +2227,22 @@ function parseSessionExport(result: unknown): SessionExport {
  * malformed is still a run worth showing. A missing `diff` is normal: a scout
  * that changed nothing has none.
  */
+/** An array, or an empty one — a listing that came back malformed is not fatal. */
+function asArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+/** One resource row, copied field by field. */
+function readResourceEntry(entry: Record<string, unknown>): McpResourceEntry {
+  return {
+    server: String(entry.server ?? ""),
+    uri: String(entry.uri ?? ""),
+    ...(typeof entry.name === "string" ? { name: entry.name } : {}),
+    ...(typeof entry.description === "string" ? { description: entry.description } : {}),
+    ...(typeof entry.mimeType === "string" ? { mimeType: entry.mimeType } : {}),
+  };
+}
+
 function parseScoutRun(result: unknown): ScoutRun {
   const invalid = (why: string): never => {
     throw new ProtocolClientError(

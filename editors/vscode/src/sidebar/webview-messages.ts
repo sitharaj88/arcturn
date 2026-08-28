@@ -365,6 +365,15 @@ export type HostMessage =
       actions?: ConnectionAction[];
     }
   | { type: "cost"; label: string }
+  /**
+   * Put text in the composer, without sending it.
+   *
+   * For material a person should read and edit before spending a turn on —
+   * today that is an MCP prompt template, rendered by a remote server. The
+   * page replaces the composer's contents rather than appending, because the
+   * caller is offering a whole prompt rather than a fragment.
+   */
+  | { type: "prefill"; text: string }
   | {
       type: "models";
       status: ModelListStatus;

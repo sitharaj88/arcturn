@@ -161,6 +161,16 @@
         "command": "arcturn.scout.run",
         "title": "Scout Approaches",
         "category": "Arcturn"
+      },
+      {
+        "command": "arcturn.mcp.attachResource",
+        "title": "Attach MCP Resource",
+        "category": "Arcturn"
+      },
+      {
+        "command": "arcturn.mcp.runPrompt",
+        "title": "Run MCP Prompt Template",
+        "category": "Arcturn"
       }
     ],
     "keybindings": [
@@ -244,6 +254,14 @@
         },
         {
           "command": "arcturn.scout.run",
+          "when": "config.arcturn.serve.enabled"
+        },
+        {
+          "command": "arcturn.mcp.attachResource",
+          "when": "config.arcturn.serve.enabled"
+        },
+        {
+          "command": "arcturn.mcp.runPrompt",
           "when": "config.arcturn.serve.enabled"
         }
       ],

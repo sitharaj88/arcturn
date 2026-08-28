@@ -40,6 +40,10 @@ import type {
   LineRange,
   McpAuthBegun,
   McpAuthCancelled,
+  McpPromptList,
+  McpPromptRendering,
+  McpResourceContents,
+  McpResourceList,
   McpServerSummary,
   ModelCatalogEntry,
   ModelSpec,
@@ -203,6 +207,26 @@ export interface ScoutRunLike {
   readonly timedOut: boolean;
   readonly warnings: readonly string[];
   readonly error?: string;
+}
+
+/**
+ * The MCP catalog, as this package needs it.
+ *
+ * Structural, like {@link McpAuthBrokerLike}. The projection — including the
+ * sanitizing of every description a remote server wrote — is done in
+ * `@arcturn/cli`'s `serve-mcp.ts`, next to the manager, for the reason the
+ * status projection is done there: the safest place to decide what leaves a
+ * server is beside the object holding what the server said.
+ */
+export interface McpCatalogLike {
+  resources(server?: string): Promise<McpResourceList>;
+  readResource(server: string, uri: string): Promise<McpResourceContents>;
+  prompts(server?: string): Promise<McpPromptList>;
+  getPrompt(
+    server: string,
+    name: string,
+    args?: Record<string, string>,
+  ): Promise<McpPromptRendering>;
 }
 
 export interface SessionHostOptions {
@@ -398,6 +422,14 @@ export interface SessionHostOptions {
    * without the OAuth half, rather than a silent no-op.
    */
   mcpAuth?: McpAuthBrokerLike;
+  /**
+   * The resources and prompt templates configured MCP servers publish.
+   *
+   * Omitted, the four verbs answer with empty lists rather than failing — the
+   * shape `mcpStatus` uses, and right for the same reason: an engine with no
+   * MCP servers has no resources, and that is a fact rather than an error.
+   */
+  mcpCatalog?: McpCatalogLike;
   /**
    * Where scout runs are held between `startScout` and `scoutRun`.
    *
@@ -717,6 +749,7 @@ export class SessionHost {
   readonly #sessionExportLimits: SessionExportLimits;
   readonly #mcpStatus: (() => McpServerSummary[] | Promise<McpServerSummary[]>) | undefined;
   readonly #mcpAuth: McpAuthBrokerLike | undefined;
+  readonly #mcpCatalog: McpCatalogLike | undefined;
   readonly #scouts: ScoutRegistryLike | undefined;
   readonly #maxSessions: number;
   readonly #dryRun: DryRunReview;
@@ -780,6 +813,7 @@ export class SessionHost {
     this.#sessionExportLimits = options.sessionExportLimits ?? {};
     this.#mcpStatus = options.mcpStatus;
     this.#mcpAuth = options.mcpAuth;
+    this.#mcpCatalog = options.mcpCatalog;
     this.#scouts = options.scouts;
     this.#maxSessions = options.maxSessions ?? DEFAULT_MAX_SESSIONS;
     this.#dryRun = createDryRunReview(options.dryRunOverlay, options.pendingChangesLimits ?? {});
@@ -1816,6 +1850,57 @@ export class SessionHost {
       throw new Error("this engine cannot run scouts; use `/scout` in the terminal instead");
     }
     return this.#scouts;
+  }
+
+  /**
+   * Every resource the configured MCP servers publish.
+   *
+   * Empty when no catalog is wired, which is what an engine with no MCP
+   * servers honestly has. Descriptions arrive already sanitized; see
+   * `McpResourceEntry.description` for why that is not optional.
+   */
+  async mcpResources(server?: string): Promise<McpResourceList> {
+    if (!this.#mcpCatalog) return { resources: [], templates: [] };
+    return this.#mcpCatalog.resources(server);
+  }
+
+  /**
+   * Read one resource, for preview.
+   *
+   * What comes back is untrusted text a remote server wrote. It is not the
+   * path a prompt's copy takes — that read happens at prompt time, inside the
+   * context budget — so nothing here is charged against a turn.
+   *
+   * @throws When no catalog is wired, or the server is unknown or disconnected.
+   */
+  async mcpReadResource(server: string, uri: string): Promise<McpResourceContents> {
+    if (!this.#mcpCatalog) {
+      throw new Error("this engine has no MCP servers configured");
+    }
+    return this.#mcpCatalog.readResource(server, uri);
+  }
+
+  /** Every prompt template the configured MCP servers publish. */
+  async mcpPrompts(server?: string): Promise<McpPromptList> {
+    if (!this.#mcpCatalog) return { prompts: [] };
+    return this.#mcpCatalog.prompts(server);
+  }
+
+  /**
+   * Render one prompt template.
+   *
+   * @throws When no catalog is wired, the server is unknown, or the template
+   *   rejects the arguments it was given.
+   */
+  async mcpGetPrompt(
+    server: string,
+    name: string,
+    args?: Record<string, string>,
+  ): Promise<McpPromptRendering> {
+    if (!this.#mcpCatalog) {
+      throw new Error("this engine has no MCP servers configured");
+    }
+    return this.#mcpCatalog.getPrompt(server, name, args);
   }
 
   #requireMcpAuth(): McpAuthBrokerLike {

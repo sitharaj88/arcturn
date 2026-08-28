@@ -81,7 +81,13 @@ import { serveCommandDescriptors } from "./serve-commands.js";
  */
 const SERVE_SCOUT_DEADLINE_MS = 180_000;
 
-import { mcpServerSummaries } from "./serve-mcp.js";
+import {
+  mcpPromptList,
+  mcpPromptRender,
+  mcpResourceList,
+  mcpResourceRead,
+  mcpServerSummaries,
+} from "./serve-mcp.js";
 import { serveOrgMemoryStore } from "./serve-org-memory.js";
 import { createServeRewind, type ServeRewind } from "./serve-rewind.js";
 import { createServeWorkflows, type ServableWorkflowRuntime } from "./serve-workflows.js";
@@ -646,6 +652,15 @@ export function createServeHost(
     // not the same thing as a command running.
     contextResolver: createContextResolver({
       skills,
+      // The engine reads an MCP resource, never the client — the rule every
+      // other attachment kind follows, and the reason the byte budget above
+      // still applies to bytes that came off a remote server.
+      readMcpResource: async (server: string, uri: string) => {
+        const contents = await mcpResourceRead(runtime.mcp, server, uri);
+        return contents.contents
+          .map((block) => block.text ?? "(binary content, not included)")
+          .join("\n\n");
+      },
       ...(options.maxAttachmentBytes === undefined
         ? {}
         : { maxAttachmentBytes: options.maxAttachmentBytes }),
@@ -682,7 +697,13 @@ export function createServeHost(
     // The built-ins folded in alongside are chosen in `@arcturn/server` — the
     // package that knows which verbs exist, and therefore which commands this
     // wire can actually carry out. See `serve-commands.ts`.
-    commands: () => serveCommandDescriptors(skills()),
+    // Async because the MCP half is a round trip to every connected server.
+    // A server that is slow or down costs the menu its prompts and nothing
+    // else — `mcpPromptList` swallows the failure — because a `/` menu that
+    // fails to open because a remote server is unreachable is a worse outcome
+    // than one missing a row.
+    commands: async () =>
+      serveCommandDescriptors(skills(), (await mcpPromptList(runtime.mcp)).prompts),
     // ---- Export injection: one renderer, two front-ends. ----
     // `exportMarkdown`/`exportHtml` are what the terminal's `/export` already
     // calls; this hands the server the same two functions rather than a second
@@ -714,6 +735,20 @@ export function createServeHost(
     // and a snapshot taken at startup would report every server disconnected
     // forever.
     mcpStatus: () => mcpServerSummaries(runtime.mcp),
+    // The other two thirds of MCP. A server publishes tools, *resources* and
+    // *prompt templates*; Arcturn used only the first until now, so a Figma
+    // server could be called but the frame it offers could not be attached,
+    // and a Linear server's "triage this" template was invisible. The
+    // projection — including sanitizing every description a remote server
+    // wrote — is in `serve-mcp.ts`, next to the manager, for the reason the
+    // status projection is: decide what leaves beside the thing that said it.
+    mcpCatalog: {
+      resources: (server?: string) => mcpResourceList(runtime.mcp, server),
+      readResource: (server: string, uri: string) => mcpResourceRead(runtime.mcp, server, uri),
+      prompts: (server?: string) => mcpPromptList(runtime.mcp, server),
+      getPrompt: (server: string, name: string, args?: Record<string, string>) =>
+        mcpPromptRender(runtime.mcp, server, name, args),
+    },
     // ---- MCP authorization: the browser is the client's, the tokens are ours.
     // The engine's own loopback redirect is only correct when the browser can
     // reach `127.0.0.1` *here*, which an editor attached over SSH, in a

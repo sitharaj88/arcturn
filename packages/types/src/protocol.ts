@@ -425,6 +425,48 @@ export type ClientRequest =
    */
   | { id: string; method: "cancelScout"; params: { runId: string } }
   /**
+   * List the resources MCP servers publish.
+   *
+   * A resource is context a server offers rather than an action it performs —
+   * a design frame, a schema, an issue. Arcturn used only the tool third of
+   * MCP until this verb; a client attaches one by naming it in a
+   * `{ kind: "mcpResource" }` attachment, and the engine does the reading.
+   *
+   * **Optional and additive**, degrading like `listModels`.
+   */
+  | { id: string; method: "mcpResources"; params?: { server?: string } }
+  /**
+   * Read one resource, for preview.
+   *
+   * Deliberately *not* the path an attachment takes: a prompt's copy is read
+   * by the engine at prompt time, so there is exactly one reader in the path
+   * that spends tokens. This exists so a person can look before they attach,
+   * and what it returns is untrusted text from a remote server — a client
+   * renders it as text and never as markup.
+   */
+  | { id: string; method: "mcpReadResource"; params: { server: string; uri: string } }
+  /**
+   * List the prompt templates MCP servers publish.
+   *
+   * These also appear in `listCommands` as `kind: "mcpPrompt"`, so a `/` menu
+   * shows them beside skills without a client having to merge two lists. This
+   * verb exists for the argument metadata, which a command descriptor has no
+   * room for.
+   */
+  | { id: string; method: "mcpPrompts"; params?: { server?: string } }
+  /**
+   * Render one prompt template into messages.
+   *
+   * `arguments` are the template's own, by name. What comes back is untrusted
+   * text from a remote server: it is prompt material, and a client that shows
+   * it before sending should show it as text.
+   */
+  | {
+      id: string;
+      method: "mcpGetPrompt";
+      params: { server: string; name: string; arguments?: Record<string, string> };
+    }
+  /**
    * Ask what a `--dry-run` session has waiting for review.
    *
    * `--dry-run` reroutes every `write`/`edit` into a shadow copy of the
@@ -1076,7 +1118,24 @@ export type PromptAttachment =
   /** A workspace image, read by the engine and sent as a vision block. */
   | { kind: "image"; path: string }
   /** An image with no path — a paste, a drop from outside the filesystem. */
-  | { kind: "image"; data: string; mimeType: string };
+  | { kind: "image"; data: string; mimeType: string }
+  /**
+   * A resource published by an MCP server, **read by the engine** at prompt
+   * time and injected as a context block.
+   *
+   * The client names it and never fetches it, for the reason the whole union
+   * is built that way: a client that read the bytes would have moved the read
+   * outside the one place the engine confines, budgets and accounts for it.
+   * Here that matters more than usual, because the bytes come from a remote
+   * server rather than from the user's disk — so they are charged against the
+   * same context budget a file is, and truncated the same way.
+   *
+   * The server must be connected. An unknown or disconnected one is refused
+   * fatally rather than dropped, exactly as an unconfined path is: the user
+   * asked for this content, and a turn that quietly proceeds without it is the
+   * silent drop RFC 0005 §1.1 forbids.
+   */
+  | { kind: "mcpResource"; server: string; uri: string };
 
 /**
  * The `kind` discriminant of a {@link PromptAttachment}, as a value.
@@ -1396,7 +1455,14 @@ export interface CommandDescriptor {
    *
    * A client groups on this (RFC 0005 §2 puts skills first, built-ins after).
    */
-  kind: "skill" | "builtin";
+  kind: "skill" | "builtin" | "mcpPrompt";
+  /**
+   * The MCP server a `mcpPrompt` came from. Absent for every other kind.
+   *
+   * Needed because prompt names are only unique per server: two servers may
+   * both publish `review`, and `mcpGetPrompt` has to be told which one.
+   */
+  server?: string;
   /**
    * Absolute path of the markdown file a skill was loaded from — the same
    * value `Skill.source` carries, so a menu can show provenance and a person
@@ -1589,6 +1655,82 @@ export interface McpAuthBegun {
   handle?: string;
   /** The URL the client must open in a browser. Absent when `authorized`. */
   authorizationUrl?: string;
+}
+
+/** One resource an MCP server publishes. */
+export interface McpResourceEntry {
+  /** The configured server name it came from. */
+  server: string;
+  uri: string;
+  /** The server's own display name, sanitized. Absent when it set none. */
+  name?: string;
+  /**
+   * One line about the resource, **sanitized** exactly as a skill's
+   * description is — first line only, control characters collapsed,
+   * length-capped. This is text a remote server wrote that lands in a menu a
+   * person reads and clicks, which is the same problem a skill's frontmatter
+   * poses and gets the same answer.
+   */
+  description?: string;
+  mimeType?: string;
+}
+
+/** A URI template a server offers, for resources it generates on demand. */
+export interface McpResourceTemplateEntry {
+  server: string;
+  uriTemplate: string;
+  name?: string;
+  /** Sanitized, for the reason {@link McpResourceEntry.description} is. */
+  description?: string;
+  mimeType?: string;
+}
+
+/** The `mcpResources` result. */
+export interface McpResourceList {
+  resources: McpResourceEntry[];
+  templates: McpResourceTemplateEntry[];
+}
+
+/** One block of a resource's content. */
+export interface McpResourceBlock {
+  uri: string;
+  mimeType?: string;
+  /** Text content. Untrusted: a remote server wrote it. */
+  text?: string;
+  /** Base64 content, for a resource that is not text. */
+  blob?: string;
+}
+
+/** The `mcpReadResource` result. */
+export interface McpResourceContents {
+  contents: McpResourceBlock[];
+}
+
+/** One argument a prompt template takes. */
+export interface McpPromptArgument {
+  name: string;
+  /** Sanitized, for the reason {@link McpResourceEntry.description} is. */
+  description?: string;
+  required?: boolean;
+}
+
+/** One prompt template an MCP server publishes. */
+export interface McpPromptEntry {
+  server: string;
+  name: string;
+  /** Sanitized, for the reason {@link McpResourceEntry.description} is. */
+  description?: string;
+  arguments?: McpPromptArgument[];
+}
+
+/** The `mcpPrompts` result. */
+export interface McpPromptList {
+  prompts: McpPromptEntry[];
+}
+
+/** The `mcpGetPrompt` result: the rendered template, flattened to role/text. */
+export interface McpPromptRendering {
+  messages: { role: string; text: string }[];
 }
 
 /** One approach's outcome inside a {@link ScoutRun}. */

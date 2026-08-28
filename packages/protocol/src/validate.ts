@@ -115,6 +115,10 @@ const CLIENT_METHODS = [
   "startScout",
   "scoutRun",
   "cancelScout",
+  "mcpResources",
+  "mcpReadResource",
+  "mcpPrompts",
+  "mcpGetPrompt",
   "pendingChanges",
   "applyChanges",
   "discardChanges",
@@ -528,6 +532,61 @@ export function validateClientRequest(value: unknown): ClientRequestValidation {
         return fail('cancelScout requires a non-empty "runId"');
       }
       return ok<ClientRequest>({ id, method: "cancelScout", params: { runId } });
+    }
+    case "mcpResources": {
+      // An optional server filter and nothing else. Absent params is legal and
+      // means "every connected server", which is the common case.
+      const filter = serverFilter("mcpResources", params);
+      if (!filter.ok) return fail(filter.error);
+      return ok<ClientRequest>({ id, method: "mcpResources", params: filter.value });
+    }
+    case "mcpPrompts": {
+      const filter = serverFilter("mcpPrompts", params);
+      if (!filter.ok) return fail(filter.error);
+      return ok<ClientRequest>({ id, method: "mcpPrompts", params: filter.value });
+    }
+    case "mcpReadResource": {
+      if (!isRecord(params)) return fail('mcpReadResource requires an object "params"');
+      const server = params.server;
+      const uri = params.uri;
+      if (typeof server !== "string" || server === "") {
+        return fail('mcpReadResource requires a non-empty "server"');
+      }
+      if (typeof uri !== "string" || uri === "") {
+        return fail('mcpReadResource requires a non-empty "uri"');
+      }
+      return ok<ClientRequest>({ id, method: "mcpReadResource", params: { server, uri } });
+    }
+    case "mcpGetPrompt": {
+      if (!isRecord(params)) return fail('mcpGetPrompt requires an object "params"');
+      const server = params.server;
+      const name = params.name;
+      if (typeof server !== "string" || server === "") {
+        return fail('mcpGetPrompt requires a non-empty "server"');
+      }
+      if (typeof name !== "string" || name === "") {
+        return fail('mcpGetPrompt requires a non-empty "name"');
+      }
+      const rawArgs = params.arguments;
+      if (rawArgs === undefined) {
+        return ok<ClientRequest>({ id, method: "mcpGetPrompt", params: { server, name } });
+      }
+      if (!isRecord(rawArgs)) return fail('mcpGetPrompt "arguments" must be an object');
+      const args: Record<string, string> = {};
+      for (const [key, entry] of Object.entries(rawArgs)) {
+        // Strings only. A template's arguments are interpolated by a remote
+        // server, and a number or an object arriving here would be stringified
+        // by somebody — better that it is refused than guessed at.
+        if (typeof entry !== "string") {
+          return fail(`mcpGetPrompt argument ${JSON.stringify(key)} must be a string`);
+        }
+        args[key] = entry;
+      }
+      return ok<ClientRequest>({
+        id,
+        method: "mcpGetPrompt",
+        params: { server, name, arguments: args },
+      });
     }
     case "pendingChanges": {
       if (!isRecord(params)) return fail('pendingChanges requires an object "params"');
@@ -1163,7 +1222,7 @@ const CONTEXT_KINDS = ["file", "image", "directory", "missing", "other"] as cons
  * the set it accepts have to be the same set, and two literals would let them
  * stop being.
  */
-const PROMPT_ATTACHMENT_KINDS = ["file", "fileReference", "image"] as const;
+const PROMPT_ATTACHMENT_KINDS = ["file", "fileReference", "image", "mcpResource"] as const;
 
 /**
  * Validate one {@link PromptAttachment}.
@@ -1213,13 +1272,58 @@ export function validateLineRange(value: unknown): ValidationResult<LineRange> {
   return { ok: true, value: { start: value.start, end: value.end } };
 }
 
+/**
+ * Read the optional `{ server }` filter the two MCP listing verbs share.
+ *
+ * A helper rather than a shared `case` label: falling two cases through widens
+ * `method` to `string`, and the request union is discriminated on it.
+ */
+function serverFilter(
+  method: string,
+  params: unknown,
+): ValidationResult<{ server?: string } | undefined> {
+  if (params === undefined) return { ok: true, value: undefined };
+  if (!isRecord(params)) return fail(`${method} params must be an object when present`);
+  const server = params.server;
+  if (server === undefined) return { ok: true, value: {} };
+  if (!isString(server) || server === "") {
+    return fail(`${method} "server" must be a non-empty string when present`);
+  }
+  return { ok: true, value: { server } };
+}
+
 export function validatePromptAttachment(value: unknown): ValidationResult<PromptAttachment> {
   if (!isRecord(value)) return fail("PromptAttachment must be an object");
   const kind = value.kind;
-  if (kind !== "file" && kind !== "fileReference" && kind !== "image") {
+  if (kind !== "file" && kind !== "fileReference" && kind !== "image" && kind !== "mcpResource") {
     return fail(
       `PromptAttachment.kind must be one of ${PROMPT_ATTACHMENT_KINDS.map((k) => `"${k}"`).join(" | ")}`,
     );
+  }
+  if (kind === "mcpResource") {
+    // Neither `path` nor `data`: an MCP resource is named by a server and a
+    // URI, and the engine fetches it. Handled before the path/data pairing
+    // below, which is a rule about *files* and would reject this shape for
+    // having neither.
+    if (!isString(value.server) || value.server === "") {
+      return fail('PromptAttachment of kind "mcpResource" needs a non-empty "server"');
+    }
+    if (!isString(value.uri) || value.uri === "") {
+      return fail('PromptAttachment of kind "mcpResource" needs a non-empty "uri"');
+    }
+    if (value.uri.length > MAX_CONTEXT_QUERY_LENGTH) {
+      return fail(
+        `PromptAttachment.uri must be at most ${String(MAX_CONTEXT_QUERY_LENGTH)} characters`,
+      );
+    }
+    if (value.range !== undefined) {
+      return fail(
+        'PromptAttachment.range is accepted for kind "file" only — a resource is what the ' +
+          "server chose to publish, and slicing it here would be this client deciding what a " +
+          "remote document's lines mean",
+      );
+    }
+    return { ok: true, value: { kind: "mcpResource", server: value.server, uri: value.uri } };
   }
   const hasPath = value.path !== undefined;
   const hasData = value.data !== undefined;
