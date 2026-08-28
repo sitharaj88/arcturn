@@ -1,7 +1,7 @@
 {
   "name": "arcturn-vscode",
   "displayName": "Arcturn",
-  "description": "The Arcturn coding agent in VS Code — terminal integration, native sidebar, and honest cost accounting, all driven by the same engine as the CLI.",
+  "description": "The Arcturn coding agent in VS Code \u2014 terminal integration, native sidebar, and honest cost accounting, all driven by the same engine as the CLI.",
   "version": "0.1.0",
   "private": true,
   "publisher": "arcturn",
@@ -133,6 +133,11 @@
         "command": "arcturn.toggleActiveEditorContext",
         "title": "Toggle Active File Context",
         "category": "Arcturn"
+      },
+      {
+        "command": "arcturn.authorizeMcpServer",
+        "title": "Authorize MCP Server",
+        "category": "Arcturn"
       }
     ],
     "keybindings": [
@@ -197,6 +202,10 @@
         {
           "command": "arcturn.toggleActiveEditorContext",
           "when": "config.arcturn.serve.enabled"
+        },
+        {
+          "command": "arcturn.authorizeMcpServer",
+          "when": "config.arcturn.serve.enabled"
         }
       ],
       "editor/context": [
@@ -245,7 +254,7 @@
           "type": "string",
           "default": "",
           "scope": "machine-overridable",
-          "markdownDescription": "Path to the `arcturn` executable. Leave empty to search your `PATH`. A leading `~` is expanded. If this points at something that is not runnable, Arcturn says so rather than quietly falling back to `PATH` — you would otherwise be running a different engine than the one you named."
+          "markdownDescription": "Path to the `arcturn` executable. Leave empty to search your `PATH`. A leading `~` is expanded. If this points at something that is not runnable, Arcturn says so rather than quietly falling back to `PATH` \u2014 you would otherwise be running a different engine than the one you named."
         },
         "arcturn.defaultModel": {
           "type": "string",
@@ -263,7 +272,7 @@
           "type": "boolean",
           "default": true,
           "scope": "window",
-          "markdownDescription": "Include the file you have open in the Arcturn panel, as a chip you can see before you send. The panel shows the file — and the line range, when you have a selection — and the engine reads it from its path the way any other attachment is read; the extension never reads it. Turn this off to keep the panel from watching your editor. `Arcturn: Toggle Active File Context` and the chip's own dismiss control do the same thing.\n\nNote: the engine's attachment carries a path and no line range, so a selection sends the whole file. The chip says so rather than implying otherwise."
+          "markdownDescription": "Include the file you have open in the Arcturn panel, as a chip you can see before you send. The panel shows the file \u2014 and the line range, when you have a selection \u2014 and the engine reads it from its path the way any other attachment is read; the extension never reads it. Turn this off to keep the panel from watching your editor. `Arcturn: Toggle Active File Context` and the chip's own dismiss control do the same thing.\n\nNote: the engine's attachment carries a path and no line range, so a selection sends the whole file. The chip says so rather than implying otherwise."
         },
         "arcturn.serve.port": {
           "type": "number",
@@ -271,7 +280,7 @@
           "minimum": 0,
           "maximum": 65535,
           "scope": "window",
-          "markdownDescription": "Loopback port for `arcturn serve`. `0` picks an ephemeral port, which is the recommended setting — a fixed port is one more thing another process on this machine can find."
+          "markdownDescription": "Loopback port for `arcturn serve`. `0` picks an ephemeral port, which is the recommended setting \u2014 a fixed port is one more thing another process on this machine can find."
         }
       }
     }

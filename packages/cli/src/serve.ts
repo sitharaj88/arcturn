@@ -57,7 +57,8 @@ import type { CheckpointStore } from "./checkpoints.js";
 import { createContextResolver } from "./context.js";
 import { createCostGuard } from "./cost-guard.js";
 import { exportHtml, exportMarkdown, suggestExportFilename } from "./export.js";
-import type { EnvMap } from "./paths.js";
+import { createMcpAuthBroker } from "./mcp-auth.js";
+import { type EnvMap, resolveArcturnPaths } from "./paths.js";
 import {
   type ArcturnRuntime,
   buildRuntime,
@@ -689,6 +690,23 @@ export function createServeHost(
     // and a snapshot taken at startup would report every server disconnected
     // forever.
     mcpStatus: () => mcpServerSummaries(runtime.mcp),
+    // ---- MCP authorization: the browser is the client's, the tokens are ours.
+    // The engine's own loopback redirect is only correct when the browser can
+    // reach `127.0.0.1` *here*, which an editor attached over SSH, in a
+    // devcontainer or in a Codespace cannot. So the client brings a redirect it
+    // can catch and hands back the code; discovery, registration, PKCE and the
+    // credential file all stay in this process, where they already were.
+    ...(runtime.paths === undefined
+      ? {}
+      : {
+          // Re-resolved from `home` and `cwd` rather than assembled here, so
+          // the layout of `mcp.json` and `auth/` stays known in exactly one
+          // module. A runtime without `paths` is a stub or an embedder, and
+          // gets no authorization verbs rather than a guessed home directory.
+          mcpAuth: createMcpAuthBroker({
+            paths: resolveArcturnPaths({ home: runtime.paths.home, cwd: runtime.cwd }),
+          }),
+        }),
     // ---- Workflow injection: one engine, four verbs, one line. -----------
     // `/workflow` is a markdown file the workspace holds, a numbered list that
     // is real control flow, roles with derived lanes, a spend ceiling and a

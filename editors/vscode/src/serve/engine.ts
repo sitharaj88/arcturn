@@ -45,6 +45,7 @@ export type {
   ContextKind,
   ContextResolution,
   DiscardChangesResult,
+  McpServerSummary,
   Message,
   ModelCatalog,
   ModelCatalogEntry,

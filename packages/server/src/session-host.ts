@@ -38,6 +38,8 @@ import type {
   ContextResolution,
   DiscardChangesResult,
   LineRange,
+  McpAuthBegun,
+  McpAuthCancelled,
   McpServerSummary,
   ModelCatalogEntry,
   ModelSpec,
@@ -144,6 +146,25 @@ export interface AgentFactoryOptions {
 }
 
 /** Construction options for {@link SessionHost}. */
+/**
+ * The half of the MCP OAuth broker this package needs.
+ *
+ * Structural on purpose: `@arcturn/cli` owns the implementation and this
+ * package must not depend on it (nor on the MCP SDK, nor on a credential
+ * store). Three methods, matching the three wire verbs one for one.
+ */
+export interface McpAuthBrokerLike {
+  /** Start an authorization the client will finish. */
+  begin(
+    server: string,
+    redirectUri: string,
+  ): Promise<{ authorized: boolean; handle?: string; authorizationUrl?: string }>;
+  /** Deliver the code the redirect carried. */
+  complete(handle: string, code: string, state: string): Promise<void>;
+  /** Abandon a begun authorization. `false` when the handle was already gone. */
+  cancel(handle: string): Promise<boolean>;
+}
+
 export interface SessionHostOptions {
   /**
    * Builds (or resumes) the {@link Agent} backing one session. Called once per
@@ -323,6 +344,20 @@ export interface SessionHostOptions {
    * has no way to know about.
    */
   mcpStatus?: () => McpServerSummary[] | Promise<McpServerSummary[]>;
+  /**
+   * Runs the brokered MCP authorization the `mcpAuth*` verbs expose.
+   *
+   * Injected for the reason {@link SessionHostOptions.mcpStatus} is: OAuth,
+   * the credential store and the MCP manager all live outside this package.
+   * The broker's job is to hold one authorization open across two requests,
+   * which is a thing only a stateful object can do, so this is an object
+   * rather than three functions.
+   *
+   * Omitted, the three verbs fail with a message naming the CLI command that
+   * does the same job — which is the honest answer from an engine built
+   * without the OAuth half, rather than a silent no-op.
+   */
+  mcpAuth?: McpAuthBrokerLike;
   /**
    * The served runtime's `--dry-run` shadow workspace, for the review verbs.
    *
@@ -633,6 +668,7 @@ export class SessionHost {
   readonly #transcriptExporter: TranscriptExporter | undefined;
   readonly #sessionExportLimits: SessionExportLimits;
   readonly #mcpStatus: (() => McpServerSummary[] | Promise<McpServerSummary[]>) | undefined;
+  readonly #mcpAuth: McpAuthBrokerLike | undefined;
   readonly #maxSessions: number;
   readonly #dryRun: DryRunReview;
   readonly #backgroundAgents: BackgroundAgentRegistry | undefined;
@@ -694,6 +730,7 @@ export class SessionHost {
     this.#transcriptExporter = options.transcriptExporter;
     this.#sessionExportLimits = options.sessionExportLimits ?? {};
     this.#mcpStatus = options.mcpStatus;
+    this.#mcpAuth = options.mcpAuth;
     this.#maxSessions = options.maxSessions ?? DEFAULT_MAX_SESSIONS;
     this.#dryRun = createDryRunReview(options.dryRunOverlay, options.pendingChangesLimits ?? {});
     this.#backgroundAgents = options.backgroundAgents;
@@ -1616,6 +1653,63 @@ export class SessionHost {
       throw new Error(`MCP status is not a valid wire payload: ${validation.error}`);
     }
     return validation.value.servers;
+  }
+
+  /**
+   * Begin authorizing an OAuth-protected MCP server.
+   *
+   * The client supplies a redirect URI it can catch — for an editor, a
+   * `vscode://` URI that survives an SSH or devcontainer boundary the engine's
+   * own loopback would not. Everything secret stays here: discovery, dynamic
+   * client registration, the PKCE verifier and the tokens are the engine's,
+   * and the client never sees any of them.
+   *
+   * @returns Either `{ authorized: true }`, meaning stored credentials were
+   *   refreshed and no browser is needed, or a handle and the URL to open.
+   * @throws When no broker is wired, or when discovery fails.
+   */
+  async mcpAuthBegin(server: string, redirectUri: string): Promise<McpAuthBegun> {
+    const broker = this.#requireMcpAuth();
+    const begun = await broker.begin(server, redirectUri);
+    // Named out rather than spread, the rule `mcpStatus` follows: a field the
+    // broker grows tomorrow is absent here until somebody decides otherwise.
+    if (begun.authorized) return { authorized: true };
+    return {
+      authorized: false,
+      ...(begun.handle === undefined ? {} : { handle: begun.handle }),
+      ...(begun.authorizationUrl === undefined ? {} : { authorizationUrl: begun.authorizationUrl }),
+    };
+  }
+
+  /**
+   * Finish an authorization with the code the client's redirect carried.
+   *
+   * @throws When the handle is unknown or spent, when `state` does not match
+   *   the value this engine issued, or when the token exchange fails.
+   */
+  async mcpAuthComplete(handle: string, code: string, state: string): Promise<void> {
+    await this.#requireMcpAuth().complete(handle, code, state);
+  }
+
+  /**
+   * Abandon a begun authorization.
+   *
+   * @returns `false` when the handle was already gone — a client cancelling
+   *   after the engine's timeout, which is a race rather than a fault.
+   */
+  async mcpAuthCancel(handle: string): Promise<McpAuthCancelled> {
+    return { cancelled: await this.#requireMcpAuth().cancel(handle) };
+  }
+
+  #requireMcpAuth(): McpAuthBrokerLike {
+    if (!this.#mcpAuth) {
+      // Names the command that does the same job, so a client talking to an
+      // engine without the OAuth half can tell the user something useful.
+      throw new Error(
+        "this engine cannot authorize MCP servers; run `arcturn mcp auth <server>` instead",
+      );
+    }
+    return this.#mcpAuth;
   }
 
   /**

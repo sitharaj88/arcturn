@@ -423,6 +423,24 @@ export class ArcturnServer {
         });
       case "mcpStatus":
         return { servers: await this.#sessionHost.mcpStatus() };
+      case "mcpAuthBegin":
+        // Not session-scoped, like `mcpStatus`: an authorization belongs to
+        // the engine's credential store, not to a conversation. The redirect
+        // URI is the client's; see the verb's doc for why the engine's own
+        // loopback is the wrong answer whenever the browser is elsewhere.
+        return this.#sessionHost.mcpAuthBegin(request.params.server, request.params.redirectUri);
+      case "mcpAuthComplete":
+        // Returns nothing on success. The absence of an error is the answer,
+        // and anything more would be a token or a code on a wire that has no
+        // reason to carry either.
+        await this.#sessionHost.mcpAuthComplete(
+          request.params.handle,
+          request.params.code,
+          request.params.state,
+        );
+        return {};
+      case "mcpAuthCancel":
+        return this.#sessionHost.mcpAuthCancel(request.params.handle);
       case "pendingChanges":
         // Read-only, so no observer is attached and no session state is
         // touched — the same shape `resolveContext` has.

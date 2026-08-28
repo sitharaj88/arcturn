@@ -20,6 +20,7 @@
 
 import { spawn as nodeSpawn } from "node:child_process";
 import * as vscode from "vscode";
+import { ARCTURN_EXTENSION_ID, authorizeMcpServer, type McpAuthEditor } from "../mcp-auth.js";
 import type { ResolvedCliLike } from "../serve/args.js";
 import type { SocketFactory } from "../serve/connect.js";
 import {
@@ -168,6 +169,7 @@ export const SIDEBAR_COMMANDS = {
   reconnect: "arcturn.reconnect",
   showLog: "arcturn.showLog",
   toggleActiveEditorContext: "arcturn.toggleActiveEditorContext",
+  authorizeMcpServer: "arcturn.authorizeMcpServer",
 } as const;
 
 /**
@@ -2503,7 +2505,101 @@ export function activateSidebar(
         { title: "Arcturn session cost" },
       );
     }),
+    // Authorizing a hosted MCP server is the one flow the CLI cannot finish on
+    // the user's behalf when the editor is attached to anything but this
+    // machine: its redirect listener is on `127.0.0.1` *here*, and the browser
+    // is over there. `mcp-auth.ts` explains the fix; this is where the editor
+    // APIs that make it possible get handed to it.
+    vscode.commands.registerCommand(SIDEBAR_COMMANDS.authorizeMcpServer, (server?: string) =>
+      withEngine(async (session) => {
+        const name = server ?? (await pickOAuthServer(session));
+        if (name === undefined) return;
+        await runMcpAuthorization(session, name);
+      }),
+    ),
   );
+
+  /**
+   * Ask which server to authorize.
+   *
+   * Only http servers are offered, because OAuth does not apply to stdio ones,
+   * and a picker that lists a server the engine will refuse is a picker that
+   * teaches the user the feature is broken.
+   */
+  async function pickOAuthServer(session: EngineSession): Promise<string | undefined> {
+    const servers = await session.mcpServers();
+    if (servers === undefined) {
+      void vscode.window.showWarningMessage(
+        "This engine is too old to authorize MCP servers from the editor.",
+      );
+      return undefined;
+    }
+    const candidates = servers.filter((server) => server.transport === "http");
+    if (candidates.length === 0) {
+      void vscode.window.showInformationMessage(
+        "No HTTP MCP servers are configured, so there is nothing to authorize.",
+      );
+      return undefined;
+    }
+    const picked = await vscode.window.showQuickPick(
+      candidates.map((server) => ({
+        label: server.name,
+        description: server.state === "connected" ? "connected" : server.state,
+      })),
+      { title: "Authorize an MCP server", placeHolder: "Which server?" },
+    );
+    return picked?.label;
+  }
+
+  /**
+   * Run one authorization behind a cancellable progress notification.
+   *
+   * Cancellation is wired through to the engine rather than merely closing the
+   * notification: a flow abandoned in the editor but left running in the engine
+   * would hold a pending authorization for its full timeout.
+   */
+  async function runMcpAuthorization(session: EngineSession, server: string): Promise<void> {
+    const outcome = await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: `Authorizing MCP server "${server}"`,
+        cancellable: true,
+      },
+      async (_progress, token) => {
+        const controller = new AbortController();
+        const cancelled = token.onCancellationRequested(() => controller.abort());
+        try {
+          return await authorizeMcpServer({
+            client: session,
+            editor: vscodeMcpAuthEditor(),
+            server,
+            extensionId: ARCTURN_EXTENSION_ID,
+            signal: controller.signal,
+          });
+        } finally {
+          cancelled.dispose();
+        }
+      },
+    );
+
+    if (outcome.kind === "authorized" || outcome.kind === "already-authorized") {
+      const detail =
+        outcome.kind === "already-authorized" ? " (existing credentials were refreshed)" : "";
+      void vscode.window.showInformationMessage(
+        `Authorized "${server}"${detail}. Reconnect to pick up its tools.`,
+      );
+      return;
+    }
+    if (outcome.kind === "denied") {
+      void vscode.window.showWarningMessage(
+        `Authorization for "${server}" was denied: ${outcome.reason}`,
+      );
+      return;
+    }
+    void vscode.window.showWarningMessage(
+      `This engine cannot authorize MCP servers; run "arcturn mcp auth ${server}" instead.`,
+    );
+  }
 
   const disposable = new vscode.Disposable(() => {
     engine?.dispose();
@@ -2536,3 +2632,23 @@ const webSocketFactory: SocketFactory = (url) => {
   const { WebSocket } = require("ws") as { WebSocket: new (url: string) => WebSocketLike };
   return new WebSocket(url);
 };
+
+/**
+ * The three editor APIs an MCP authorization needs, bound to the real
+ * `vscode` module.
+ *
+ * `asExternalUri` is the load-bearing one. On a desktop window it hands back
+ * the `vscode://` URI unchanged; attached to a remote, a devcontainer or a
+ * Codespace it returns a tunnelled `https://` URL that reaches *this window*
+ * from a browser running on the user's own machine. That is the whole
+ * difference between an authorization that completes and one that times out.
+ */
+export function vscodeMcpAuthEditor(): McpAuthEditor {
+  return {
+    asExternalUri: async (uri) =>
+      (await vscode.env.asExternalUri(vscode.Uri.parse(uri))).toString(),
+    openExternal: (url) => Promise.resolve(vscode.env.openExternal(vscode.Uri.parse(url))),
+    onUri: (handler) =>
+      vscode.window.registerUriHandler({ handleUri: (uri) => handler(uri.query) }),
+  };
+}

@@ -313,7 +313,7 @@ export const REMOTE_BUILT_IN_COMMAND_VERBS: Readonly<Record<string, readonly str
     compact: Object.freeze(["compact"]),
     rewind: Object.freeze(["listCheckpoints", "rewindTo"]),
     export: Object.freeze(["exportSession"]),
-    mcp: Object.freeze(["mcpStatus"]),
+    mcp: Object.freeze(["mcpStatus", "mcpAuthBegin", "mcpAuthComplete", "mcpAuthCancel"]),
     // The subscription, not a verb of its own. `openSession` is what puts a
     // connection on the session's event stream, and `turnEnd` on that stream
     // is where every figure `/cost` shows comes from. Naming it here keeps the

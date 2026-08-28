@@ -100,6 +100,9 @@ const CLIENT_METHODS = [
   "compact",
   "exportSession",
   "mcpStatus",
+  "mcpAuthBegin",
+  "mcpAuthComplete",
+  "mcpAuthCancel",
   "pendingChanges",
   "applyChanges",
   "discardChanges",
@@ -410,6 +413,56 @@ export function validateClientRequest(value: unknown): ClientRequestValidation {
       // No params: MCP servers are a property of the server process, not of a
       // conversation — the same shape `listModels` has.
       return ok<ClientRequest>({ id, method: "mcpStatus" });
+    }
+    case "mcpAuthBegin": {
+      if (!isRecord(params)) return fail('mcpAuthBegin requires an object "params"');
+      const server = params.server;
+      if (typeof server !== "string" || server === "") {
+        return fail('mcpAuthBegin requires a non-empty "server"');
+      }
+      const redirectUri = params.redirectUri;
+      if (typeof redirectUri !== "string" || redirectUri === "") {
+        return fail('mcpAuthBegin requires a non-empty "redirectUri"');
+      }
+      // Parseability is checked here rather than at the authorization server,
+      // where a malformed value would come back as an opaque `invalid_request`
+      // long after the client could act on it.
+      try {
+        new URL(redirectUri);
+      } catch {
+        return fail('mcpAuthBegin "redirectUri" must be an absolute URI');
+      }
+      return ok<ClientRequest>({ id, method: "mcpAuthBegin", params: { server, redirectUri } });
+    }
+    case "mcpAuthComplete": {
+      if (!isRecord(params)) return fail('mcpAuthComplete requires an object "params"');
+      const handle = params.handle;
+      const code = params.code;
+      const state = params.state;
+      if (typeof handle !== "string" || handle === "") {
+        return fail('mcpAuthComplete requires a non-empty "handle"');
+      }
+      if (typeof code !== "string" || code === "") {
+        return fail('mcpAuthComplete requires a non-empty "code"');
+      }
+      // Required, not optional: a `state` a client may omit is a `state` an
+      // attacker may omit, and the engine would have nothing to compare.
+      if (typeof state !== "string" || state === "") {
+        return fail('mcpAuthComplete requires a non-empty "state"');
+      }
+      return ok<ClientRequest>({
+        id,
+        method: "mcpAuthComplete",
+        params: { handle, code, state },
+      });
+    }
+    case "mcpAuthCancel": {
+      if (!isRecord(params)) return fail('mcpAuthCancel requires an object "params"');
+      const handle = params.handle;
+      if (typeof handle !== "string" || handle === "") {
+        return fail('mcpAuthCancel requires a non-empty "handle"');
+      }
+      return ok<ClientRequest>({ id, method: "mcpAuthCancel", params: { handle } });
     }
     case "pendingChanges": {
       if (!isRecord(params)) return fail('pendingChanges requires an object "params"');

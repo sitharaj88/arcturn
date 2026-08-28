@@ -347,6 +347,51 @@ export type ClientRequest =
    */
   | { id: string; method: "mcpStatus" }
   /**
+   * Begin authorizing an OAuth-protected MCP server, with the client catching
+   * the redirect.
+   *
+   * The engine runs discovery, dynamic client registration and PKCE, and
+   * parks on the redirect; the client contributes only the browser round trip
+   * it can actually perform. This exists because the engine's own loopback
+   * redirect is wrong whenever the browser is elsewhere — an editor attached
+   * over SSH, a devcontainer, a Codespace — where `127.0.0.1` on the user's
+   * machine is not `127.0.0.1` on the engine's.
+   *
+   * `redirectUri` is whatever the client can catch, e.g. a `vscode://` URI.
+   * The engine registers exactly that with the authorization server, so a
+   * client that names a URI it cannot receive on will simply never complete.
+   *
+   * **Optional and additive.** An older server answers `invalidRequest`, and
+   * the client falls back to telling the user to run `arcturn mcp auth`.
+   */
+  | {
+      id: string;
+      method: "mcpAuthBegin";
+      params: { server: string; redirectUri: string };
+    }
+  /**
+   * Hand back the authorization code the redirect carried.
+   *
+   * `state` is echoed from the callback and must match the value the engine
+   * put in the authorization URL; a mismatch fails the request without
+   * reaching the token endpoint, so a code belonging to some other
+   * authorization cannot be redeemed against this one. The handle is
+   * single-use.
+   */
+  | {
+      id: string;
+      method: "mcpAuthComplete";
+      params: { handle: string; code: string; state: string };
+    }
+  /**
+   * Abandon an authorization begun by {@link mcpAuthBegin}.
+   *
+   * Answers `false` for an unknown handle rather than failing: a client
+   * cancelling after the engine's own timeout is racing a drop that already
+   * happened, and that is not an error.
+   */
+  | { id: string; method: "mcpAuthCancel"; params: { handle: string } }
+  /**
    * Ask what a `--dry-run` session has waiting for review.
    *
    * `--dry-run` reroutes every `write`/`edit` into a shadow copy of the
@@ -1495,6 +1540,28 @@ export interface McpServerSummary {
    * would be indistinguishable from a connected server that offers none.
    */
   toolCount?: number;
+}
+
+/**
+ * The `mcpAuthBegin` result.
+ *
+ * Exactly one of two shapes: `authorized` with nothing else, meaning stored
+ * credentials were refreshed and no browser is needed; or a handle and a URL
+ * for the client to open.
+ */
+export interface McpAuthBegun {
+  /** True when the server is already authorized and there is nothing to complete. */
+  authorized: boolean;
+  /** Opaque single-use handle for `mcpAuthComplete`. Absent when `authorized`. */
+  handle?: string;
+  /** The URL the client must open in a browser. Absent when `authorized`. */
+  authorizationUrl?: string;
+}
+
+/** The `mcpAuthCancel` result. */
+export interface McpAuthCancelled {
+  /** `false` when the handle was already gone, which is not an error. */
+  cancelled: boolean;
 }
 
 /** The `mcpStatus` result: every MCP server this engine is configured with. */

@@ -46,7 +46,7 @@ const ENV_VAR_PATTERN = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
  * `mcp auth` has to reach the real server to discover its authorization
  * server, so it cannot leave the placeholder in place.
  */
-function expandEnvVars(value: string, env: Record<string, string | undefined>): string {
+export function expandEnvVars(value: string, env: Record<string, string | undefined>): string {
   return value.replace(ENV_VAR_PATTERN, (match, varName: string) => {
     const resolved = env[varName];
     if (resolved === undefined) {

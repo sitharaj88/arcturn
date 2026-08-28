@@ -21,6 +21,7 @@ import { buildServeArgs, cliInvocation, type ResolvedCliLike } from "../serve/ar
 import { connectToServe, type SocketFactory } from "../serve/connect.js";
 import type {
   CommandDescriptor,
+  McpServerSummary,
   ModelCatalogEntry,
   ProtocolClient,
   SessionHeader,
@@ -120,6 +121,31 @@ export interface EngineSession {
    * the fallback picker on `undefined` rather than showing an error.
    */
   listModels(): Promise<ModelCatalogEntry[] | undefined>;
+  /**
+   * The MCP servers this engine is configured with, or `undefined` when the
+   * engine is older than the `mcpStatus` verb.
+   *
+   * Server-scoped, beside `listModels` and for the same reason: MCP servers
+   * are a property of the engine process, not of a conversation.
+   */
+  mcpServers(): Promise<McpServerSummary[] | undefined>;
+  /**
+   * Begin authorizing an OAuth-protected MCP server, with the editor catching
+   * the redirect. `undefined` when the engine is too old to broker one.
+   *
+   * See `mcp-auth.ts` for why the editor has to catch it: the engine's own
+   * loopback redirect is unreachable from the user's browser whenever the two
+   * are on different machines, which over Remote-SSH or in a devcontainer is
+   * the normal case rather than the exotic one.
+   */
+  mcpAuthBegin(
+    server: string,
+    redirectUri: string,
+  ): Promise<{ authorized: boolean; handle?: string; authorizationUrl?: string } | undefined>;
+  /** Hand back the code and state the redirect carried. */
+  mcpAuthComplete(handle: string, code: string, state: string): Promise<void>;
+  /** Abandon a begun authorization. */
+  mcpAuthCancel(handle: string): Promise<boolean>;
   /**
    * What a `/` could invoke on this engine — the workspace's markdown skills
    * plus the built-ins this wire can carry out — or `undefined` when this
@@ -444,6 +470,18 @@ export function createEngineSession(options: EngineSessionOptions): EngineSessio
     listSessions: () => requireClient().listSessions(),
     async listModels(): Promise<ModelCatalogEntry[] | undefined> {
       return (await requireClient().listModels())?.models;
+    },
+    async mcpServers(): Promise<McpServerSummary[] | undefined> {
+      return (await requireClient().mcpStatus())?.servers;
+    },
+    async mcpAuthBegin(server: string, redirectUri: string) {
+      return requireClient().mcpAuthBegin(server, redirectUri);
+    },
+    async mcpAuthComplete(handle: string, code: string, state: string): Promise<void> {
+      await requireClient().mcpAuthComplete(handle, code, state);
+    },
+    async mcpAuthCancel(handle: string): Promise<boolean> {
+      return requireClient().mcpAuthCancel(handle);
     },
     async listCommands(): Promise<CommandDescriptor[] | undefined> {
       return (await requireClient().listCommands())?.commands;

@@ -78,6 +78,7 @@ export function HubFilter({ items, kinds, pageSize = 9 }: HubFilterProps) {
   // Clamped rather than reset: narrowing a filter while on page 3 should land
   // on the last page that exists, not silently on page 1 with no explanation.
   const pageCount = Math.max(1, Math.ceil(visible.length / pageSize));
+  const pageNumbers = Array.from({ length: pageCount }, (_, index) => index + 1);
   const current = Math.min(page, pageCount - 1);
   const paged = visible.slice(current * pageSize, current * pageSize + pageSize);
   const paginated = visible.length > pageSize;
@@ -177,19 +178,23 @@ export function HubFilter({ items, kinds, pageSize = 9 }: HubFilterProps) {
           >
             <ChevronLeft aria-hidden="true" className="size-4" />
           </button>
-          {Array.from({ length: pageCount }, (_, index) => (
+          {/* Numbered from the page number itself rather than from the map
+              index: a page's identity *is* its number, so the key stays stable
+              when the count changes and the linter's array-index rule is
+              satisfied by something true rather than by a cast. */}
+          {pageNumbers.map((page) => (
             <button
-              key={`page-${index + 1}`}
+              key={`page-${page}`}
               type="button"
-              onClick={() => setPage(index)}
-              aria-label={`Page ${index + 1}`}
-              aria-current={index === current ? "page" : undefined}
+              onClick={() => setPage(page - 1)}
+              aria-label={`Page ${page}`}
+              aria-current={page - 1 === current ? "page" : undefined}
               className={cn(
                 "inline-flex size-9 items-center justify-center rounded-md border text-caption font-medium transition-colors dur-fast ease-out",
-                index === current ? CHIP_ON : CHIP_OFF,
+                page - 1 === current ? CHIP_ON : CHIP_OFF,
               )}
             >
-              {index + 1}
+              {page}
             </button>
           ))}
           <button

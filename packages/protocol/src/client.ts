@@ -41,6 +41,7 @@ import type {
   ContextResolution,
   DiscardChangesResult,
   LineRange,
+  McpAuthBegun,
   McpStatus,
   ModelCatalog,
   OrgMemoryList,
@@ -649,6 +650,44 @@ export interface ProtocolClient {
    * @returns The listing, or `undefined` when the engine has no such verb.
    */
   mcpStatus(): Promise<McpStatus | undefined>;
+  /**
+   * Begin authorizing an OAuth-protected MCP server, catching the redirect
+   * yourself.
+   *
+   * Pass a `redirectUri` this client can actually receive on. An editor passes
+   * one of its own URIs, which is the point: the engine's loopback redirect is
+   * unreachable whenever the browser is on another machine, and an editor
+   * attached over SSH or to a devcontainer is exactly that case.
+   *
+   * Resolves to `{ authorized: true }` when stored credentials were refreshed
+   * and no browser is needed. Otherwise open `authorizationUrl`, catch the
+   * redirect, and pass its `code` and `state` to
+   * {@link ProtocolClient.mcpAuthComplete}.
+   *
+   * **Degrades to `undefined`** on the `listModels` precedent: an engine
+   * without the verb costs the caller this route to authorization, not the
+   * connection, and the fallback is to tell the user to run `arcturn mcp auth`.
+   */
+  mcpAuthBegin(server: string, redirectUri: string): Promise<McpAuthBegun | undefined>;
+  /**
+   * Finish an authorization with the code and state the redirect carried.
+   *
+   * Deliberately **not** given `listModels`' "old engine → `undefined`"
+   * degradation: this is only ever called after a `mcpAuthBegin` that
+   * succeeded, so the verb is known to exist, and swallowing a rejection here
+   * would turn a failed exchange into a silent no-op the user reads as success.
+   *
+   * @throws {ProtocolRequestError} When the handle is unknown or spent, when
+   *   `state` does not match, or when the token exchange fails.
+   */
+  mcpAuthComplete(handle: string, code: string, state: string): Promise<void>;
+  /**
+   * Abandon an authorization begun by {@link ProtocolClient.mcpAuthBegin}.
+   *
+   * Resolves `false` when the handle was already gone — a client cancelling
+   * after the engine's own timeout, which is a race rather than a fault.
+   */
+  mcpAuthCancel(handle: string): Promise<boolean>;
   /**
    * Ask what a `--dry-run` session is holding back for review.
    *
@@ -1349,6 +1388,28 @@ class ProtocolClientImpl implements ProtocolClient {
     return parseMcpStatus(result);
   }
 
+  async mcpAuthBegin(server: string, redirectUri: string): Promise<McpAuthBegun | undefined> {
+    let result: unknown;
+    try {
+      result = await this.#call("mcpAuthBegin", { server, redirectUri });
+    } catch (error) {
+      if (error instanceof ProtocolRequestError && isUnsupportedMethodError(error)) {
+        return undefined;
+      }
+      throw error;
+    }
+    return parseMcpAuthBegun(result);
+  }
+
+  async mcpAuthComplete(handle: string, code: string, state: string): Promise<void> {
+    await this.#call("mcpAuthComplete", { handle, code, state });
+  }
+
+  async mcpAuthCancel(handle: string): Promise<boolean> {
+    const result = await this.#call("mcpAuthCancel", { handle });
+    return isRecord(result) && result.cancelled === true;
+  }
+
   async pendingChanges(sessionId: string, path?: string): Promise<PendingChanges | undefined> {
     let result: unknown;
     try {
@@ -1954,6 +2015,35 @@ function parseSessionExport(result: unknown): SessionExport {
     );
   }
   return validation.value;
+}
+
+/**
+ * Validate an `mcpAuthBegin` result.
+ *
+ * Two legal shapes and nothing between them: `authorized`, or a handle plus a
+ * URL. A response carrying neither is a bug in the engine rather than a state
+ * a caller should try to render, so it fails loudly here instead of returning
+ * a half-begun authorization the UI would park on forever.
+ */
+function parseMcpAuthBegun(result: unknown): McpAuthBegun {
+  const invalid = (why: string): never => {
+    throw new ProtocolClientError(
+      ClientErrorCode.invalidResponse,
+      `Invalid mcpAuthBegin result: ${why}`,
+    );
+  };
+  if (!isRecord(result)) return invalid("expected an object");
+  if (result.authorized === true) return { authorized: true };
+  if (result.authorized !== false) return invalid('"authorized" must be a boolean');
+  const handle = result.handle;
+  const authorizationUrl = result.authorizationUrl;
+  if (typeof handle !== "string" || handle === "") {
+    return invalid('an unauthorized result needs a non-empty "handle"');
+  }
+  if (typeof authorizationUrl !== "string" || authorizationUrl === "") {
+    return invalid('an unauthorized result needs a non-empty "authorizationUrl"');
+  }
+  return { authorized: false, handle, authorizationUrl };
 }
 
 function parseMcpStatus(result: unknown): McpStatus {
