@@ -47,6 +47,15 @@ runs `arcturn add` today gets kits their engine cannot run.
   merge outcome that keeps `complete` false and the team out of `merged`:
   "changed nothing" and "never got to work" are different news.
 
+- **A timed-out foreground command's process tree is killed twice, on
+  purpose.** A SIGKILL to a process group enumerates its members at delivery,
+  and a fork in flight on another CPU slips the enumeration — the child is
+  born a moment after its group was killed and survives, which for a shape
+  like `npm run dev` means the server the timeout was supposed to stop keeps
+  running. A loaded CI runner caught the race in the act. The group is now
+  killed once more after the drain delay; anything born in the gap has long
+  finished forking by then.
+
 - **Why this exists at all:** every role in nine hub kits used to pin a
   concrete provider model (`anthropic/claude-opus-5` and siblings, plus two
   `zai/glm-5.3` step tags), which made every workflow in the hub answer 401

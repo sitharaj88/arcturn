@@ -465,6 +465,16 @@ function runForeground(
       terminateProcessTree(child, "SIGKILL", killEnv);
       if (drainTimer !== undefined) return;
       drainTimer = setTimeout(() => {
+        // Second tap, on purpose. A SIGKILL to a process group enumerates its
+        // members at delivery, and a fork in flight on another CPU slips the
+        // enumeration — the child is born a moment after its group was killed
+        // and survives. On a loaded machine that window stretches; a mac CI
+        // runner caught it in the act, with a backgrounded orphan outliving
+        // the group kill to do its work. Killing the group once more after
+        // the drain delay catches anything born in the gap: for the shapes
+        // this tool runs, a forker that survived tap one has long finished
+        // forking by tap two.
+        terminateProcessTree(child, "SIGKILL", killEnv);
         // Stop reading pipes a survivor still owns, hand back what the command
         // printed before it was killed, and let this process exit without it.
         child.stdout?.destroy();

@@ -386,10 +386,15 @@ describe("bash foreground kill: process-tree termination", () => {
 
       const result = await tool.execute({ command: "sleep 2", timeoutMs: 200 }, ctx);
 
-      expect(posixKill).toHaveBeenCalledTimes(1);
-      const [pid, signal] = posixKill.mock.calls[0] as [number, NodeJS.Signals];
-      expect(typeof pid).toBe("number");
-      expect(signal).toBe("SIGKILL");
+      // Two taps, both to the group: a fork in flight when the first SIGKILL
+      // enumerates the group slips it, so the drain delay fires the same kill
+      // once more. Same pid both times — this is a repeat, not an escalation.
+      expect(posixKill).toHaveBeenCalledTimes(2);
+      for (const call of posixKill.mock.calls as [number, NodeJS.Signals][]) {
+        expect(typeof call[0]).toBe("number");
+        expect(call[0]).toBe((posixKill.mock.calls[0] as [number])[0]);
+        expect(call[1]).toBe("SIGKILL");
+      }
       expect(windowsKill).not.toHaveBeenCalled();
       expect((result.content[0] as { text: string }).text).toContain("timed out");
     },
@@ -407,7 +412,9 @@ describe("bash foreground kill: process-tree termination", () => {
 
       const result = await tool.execute({ command: "sleep 2", timeoutMs: 200 }, ctx);
 
-      expect(windowsKill).toHaveBeenCalledTimes(1);
+      // Two taps for the same reason as the POSIX route: a child spawned
+      // between taskkill's enumeration and its delivery survives one pass.
+      expect(windowsKill).toHaveBeenCalledTimes(2);
       expect(windowsKill).toHaveBeenCalledWith(expect.any(Number));
       expect(posixKill).not.toHaveBeenCalled();
       expect((result.content[0] as { text: string }).text).toContain("timed out");
