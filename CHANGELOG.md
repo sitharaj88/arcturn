@@ -10,6 +10,38 @@ CLI, the SDK, or the wire protocol.
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-08-29
+
+A patch with one job: make the hub's kits and the published engine speak the
+same language again. The kits on GitHub now name models by *tier* —
+`tier:judgment`, `tier:build`, `tier:fast` — and 0.5.0's resolvers, which
+predate the wiring, refuse those tags as unknown ids. Anyone on 0.5.0 who
+runs `arcturn add` today gets kits their engine cannot run.
+
+### Fixed
+
+- **`tier:` tags resolve.** The router and the workflow grammar have carried
+  symbolic tiers since before 0.5.0, documented as the way a kit stays
+  portable across providers — and no resolution seam ever consulted them, so
+  a tier tag fell through to the model catalog and failed as an unknown id.
+  All three seams are wired now: the terminal's workflow commands, the serve
+  path a panel's runs go through, and the `subagent` tool resolving a role's
+  own `model:`. A tier the config never named falls back to the user's main
+  model inside `specForTier`, so a tier-authored kit runs on whatever the
+  user configured with no `route.tiers` block required — which is the whole
+  point. Deployments that want, say, a stronger model for judgment roles set
+  `route.tiers` once.
+
+- **Why this exists at all:** every role in nine hub kits used to pin a
+  concrete provider model (`anthropic/claude-opus-5` and siblings, plus two
+  `zai/glm-5.3` step tags), which made every workflow in the hub answer 401
+  to anyone whose key for that one provider was missing or dead — while the
+  model they actually configured sat unused. The kits were rewritten to tiers
+  in the same change, and a hub test now walks every role's `model:` line and
+  every step's `[tag]` and refuses any concrete id, so a kit can never pin a
+  billing account again.
+
+
 ## [0.5.0] — 2026-08-29
 
 The minor bump is the wire protocol again: eleven additive verbs, one new

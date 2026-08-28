@@ -1,6 +1,6 @@
 {
   "name": "@arcturn/types",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Shared type contracts for the Arcturn agent harness",
   "license": "Apache-2.0",
   "publishConfig": {
