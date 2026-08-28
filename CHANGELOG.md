@@ -10,6 +10,70 @@ CLI, the SDK, or the wire protocol.
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-08-29
+
+The minor bump is the wire protocol again: eleven additive verbs, one new
+attachment kind, and no change to anything an existing client sends. The
+theme is one sentence — the engine had whole capabilities no client could
+reach — and every entry below is a seam that already worked in the terminal
+becoming reachable over a socket.
+
+### Added
+
+- **MCP OAuth can be brokered by the client** (`mcpAuthBegin`,
+  `mcpAuthComplete`, `mcpAuthCancel`). The engine's own loopback redirect is
+  correct on a laptop and wrong wherever the browser and the engine are
+  different machines — an editor over Remote-SSH, a devcontainer, a Codespace.
+  A client now brings a redirect URI it can actually catch; discovery, dynamic
+  client registration, PKCE and the tokens never leave the engine, and `state`
+  is the engine's to issue and verify. The redirect listener behind
+  `arcturn mcp auth` became an injectable seam to make this possible; loopback
+  is still the default and the terminal flow is unchanged.
+
+- **The other two thirds of MCP** (`mcpResources`, `mcpReadResource`,
+  `mcpPrompts`, `mcpGetPrompt`, and the `mcpResource` prompt-attachment kind).
+  A server publishes tools, resources and prompt templates; only tools ever
+  crossed this wire. A client can now list what a server offers, preview it,
+  and attach a resource *by name* — the engine reads it at prompt time, inside
+  the same byte budget a file gets, so a remote server's bytes are counted
+  where every other read is counted. Every description a server wrote is
+  sanitized on the way to a menu exactly as a skill's frontmatter is; resource
+  contents are deliberately not, and the wire type marks them untrusted.
+  Prompt templates also appear in `listCommands` as `kind: "mcpPrompt"`,
+  named `server:name`, because a template's name is unique only per server.
+  `McpManager` gained `listResourceTemplates`, the half of the listing it was
+  missing.
+
+- **Scout runs have a record** (`startScout`, `scoutRun`, `cancelScout`).
+  `/scout` was deliberately off the wire, and the recorded reason was honest: a
+  run left nothing behind to report on or cancel. `ScoutRegistry` is that
+  record — `startScout` answers with an id immediately, results stream into
+  `scoutRun` as each approach settles, and a cancel aborts the survivors while
+  keeping what finished. Worktrees are still torn down in the engine's own
+  `finally`; each approach's diff is captured into memory first, which is why
+  a client can render a comparison at all. Records are per-process and do not
+  survive an engine restart — the honest limit, written on the type.
+
+- **`exportSession`, `listCheckpoints` and `rewindTo` unchanged but newly
+  consumed** — listed here only because the VS Code extension 0.2.0 releasing
+  alongside is their first caller outside the terminal.
+
+### Fixed
+
+- **A background agent whose owner's pid was reused could stay `running`
+  forever.** The `ownerPid` lease added in 0.4.0 answers "is that process
+  alive", which is not quite the question: an operating system reuses pid
+  numbers, so a crashed manager's number could be adopted by something
+  unrelated and the liveness check would answer yes for good, with no way for
+  anyone to clear the record. The lease grew its missing half — a heartbeat
+  renewed while the agent actually runs, stale after a minute. A record with
+  no heartbeat was written by an older build and falls back to the pid check
+  alone, because declaring a live agent from last week's build dead is the
+  exact failure the mechanism exists to prevent. Both halves are
+  mutation-tested: dropping the staleness check fails the pid-reuse test, and
+  dropping the renewal fails the test that watches the stamp move on disk.
+
+
 ## [0.4.0] — 2026-08-27
 
 ### Fixed
