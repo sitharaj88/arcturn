@@ -21,11 +21,13 @@
 import { spawn as nodeSpawn } from "node:child_process";
 import * as vscode from "vscode";
 import { activateBackground } from "../background/view.js";
+import { activateCommit, COMMIT_COMMANDS } from "../commit/view.js";
 import { activateFailureWatch, FAILURE_COMMANDS } from "../failures/view.js";
 import { activateHub } from "../hub/view.js";
 import { activateInlineEdit, INLINE_COMMANDS } from "../inline/view.js";
 import { activateMcpCatalog } from "../mcp/view.js";
 import { ARCTURN_EXTENSION_ID, authorizeMcpServer, type McpAuthEditor } from "../mcp-auth.js";
+import { activateReview, REVIEW_COMMANDS } from "../review/view.js";
 import { activateScout, SCOUT_COMMANDS } from "../scout/view.js";
 import type { ResolvedCliLike } from "../serve/args.js";
 import type { SocketFactory } from "../serve/connect.js";
@@ -38,6 +40,7 @@ import {
 import { createRedactor } from "../serve/redact.js";
 import type { SpawnLike } from "../serve/supervisor.js";
 import { generateToken } from "../serve/token.js";
+import { activateSessionTools, SESSION_COMMANDS } from "../sessions/view.js";
 import { forgetFailedUserEnvironment, resolveUserEnvironment } from "../user-env.js";
 import {
   type AmbientEditor,
@@ -2687,6 +2690,69 @@ export function activateSidebar(
         });
         terminal.show();
         terminal.sendText(command);
+      },
+    }),
+  );
+
+  // ---- Review, into the Problems panel -------------------------------------
+  // The engine's /review prints prose in a terminal. The editor's native shape
+  // for "something is wrong at this line" is a diagnostic — and the existing
+  // Fix-with-Arcturn code action takes any diagnostic, so findings compose
+  // with it unwired: review, click, fix, review again.
+  disposables.push(
+    activateReview(context, {
+      askOnce: async (prompt) => {
+        const session = ensureEngine();
+        await session.start();
+        if (session.failure !== undefined) {
+          await announce(session.failure);
+          return undefined;
+        }
+        return session.askOnce(prompt, 240_000);
+      },
+    }),
+  );
+
+  // ---- Commit messages, in the Source Control view --------------------------
+  // The engine's /commit has generated Conventional Commits messages since the
+  // git commands landed, in the terminal. The place people commit from in an
+  // editor is the SCM view; the message lands in its input box and nothing is
+  // committed — the box exists so a person edits first.
+  disposables.push(
+    activateCommit(context, {
+      askOnce: async (prompt) => {
+        const session = ensureEngine();
+        await session.start();
+        if (session.failure !== undefined) {
+          await announce(session.failure);
+          return undefined;
+        }
+        return session.askOnce(prompt);
+      },
+    }),
+  );
+
+  // ---- Export, and checkpoints from the palette ------------------------------
+  // `exportSession` rendered transcripts nobody could save from the panel, and
+  // the rewind picker existed only inside the webview. Both are one palette
+  // command now; the rewind path reuses the panel's own confirmation logic,
+  // because what counts as consent to deleting files is decided in one place.
+  disposables.push(
+    activateSessionTools(context, {
+      exportSession: async (format) => {
+        const session = ensureEngine();
+        if (session.status !== "ready") return undefined;
+        return session.exportChat(format);
+      },
+      listCheckpoints: async () => {
+        const session = ensureEngine();
+        const listing = await session.controller?.listCheckpoints();
+        return listing?.checkpoints;
+      },
+      rewindTo: async (checkpointId, confirmation) => {
+        const controller = ensureEngine().controller;
+        if (controller === undefined) throw new Error("no Arcturn session is open");
+        await controller.rewindTo(checkpointId, confirmation);
       },
     }),
   );

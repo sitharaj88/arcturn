@@ -190,6 +190,16 @@ export interface EngineSession {
    */
   askOnce(prompt: string, timeoutMs?: number): Promise<string | undefined>;
   /**
+   * Render the open conversation as a document.
+   *
+   * `undefined` when no session is open or the engine predates the verb —
+   * one answer for both, because the caller's next line is the same either
+   * way: there is nothing to save.
+   */
+  exportChat(
+    format: "markdown" | "html",
+  ): Promise<{ filename: string; content: string; messageCount: number } | undefined>;
+  /**
    * Start a scout run: approaches raced in throwaway worktrees. `undefined`
    * when the engine is older than the verb.
    */
@@ -604,6 +614,19 @@ export function createEngineSession(options: EngineSessionOptions): EngineSessio
         const mine = controller?.sessionId;
         if (mine !== undefined) await client.openSession(mine).catch(() => undefined);
       }
+    },
+    async exportChat(
+      format: "markdown" | "html",
+    ): Promise<{ filename: string; content: string; messageCount: number } | undefined> {
+      const sessionId = controller?.sessionId;
+      if (sessionId === undefined) return undefined;
+      const rendered = await requireClient().exportSession(sessionId, { format });
+      if (rendered === undefined) return undefined;
+      return {
+        filename: rendered.filename,
+        content: rendered.content,
+        messageCount: rendered.messageCount,
+      };
     },
     async adoptBackgroundAgent(id: string): Promise<void> {
       // Session-scoped, unlike the other three: adopting is what puts an

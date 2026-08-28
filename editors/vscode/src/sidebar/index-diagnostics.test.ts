@@ -115,6 +115,10 @@ vi.mock("vscode", () => {
       },
       executeCommand: () => Promise.resolve(undefined),
     },
+    languages: {
+      createDiagnosticCollection: () => ({ set: () => {}, clear: () => {}, dispose: () => {} }),
+    },
+    extensions: { getExtension: () => undefined },
     workspace: {
       workspaceFolders: [{ uri: { fsPath: "/workspace" } }],
       getConfiguration: () => ({

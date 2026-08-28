@@ -3,12 +3,15 @@ import { fileURLToPath } from "node:url";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { BACKGROUND_COMMANDS, BACKGROUND_VIEW_ID } from "./background/view.js";
 import type { CliProvisioner } from "./cli.js";
+import { COMMIT_COMMANDS } from "./commit/view.js";
 import { activateWith } from "./extension.js";
 import { FAILURE_COMMANDS } from "./failures/view.js";
 import { HUB_COMMANDS, HUB_VIEW_ID } from "./hub/view.js";
 import { INLINE_COMMANDS } from "./inline/view.js";
 import { MCP_COMMANDS } from "./mcp/view.js";
+import { REVIEW_COMMANDS } from "./review/view.js";
 import { SCOUT_COMMANDS } from "./scout/view.js";
+import { SESSION_COMMANDS } from "./sessions/view.js";
 import { SIDEBAR_COMMANDS, SIDEBAR_VIEW_ID } from "./sidebar/index.js";
 import type { TerminalHub } from "./terminal.js";
 import { fake, resetFake } from "./test-vscode.js";
@@ -97,6 +100,9 @@ describe("the manifest and the code agree about commands", () => {
       ...Object.values(BACKGROUND_COMMANDS),
       ...Object.values(INLINE_COMMANDS),
       ...Object.values(FAILURE_COMMANDS),
+      ...Object.values(REVIEW_COMMANDS),
+      ...Object.values(COMMIT_COMMANDS),
+      ...Object.values(SESSION_COMMANDS),
     ]) {
       expect(contributed).toContain(id);
     }
@@ -116,6 +122,9 @@ describe("the manifest and the code agree about commands", () => {
       ...Object.values(BACKGROUND_COMMANDS),
       ...Object.values(INLINE_COMMANDS),
       ...Object.values(FAILURE_COMMANDS),
+      ...Object.values(REVIEW_COMMANDS),
+      ...Object.values(COMMIT_COMMANDS),
+      ...Object.values(SESSION_COMMANDS),
     ]);
     expect([...contributed].sort()).toEqual([...live].sort());
   });

@@ -205,6 +205,32 @@
         "command": "arcturn.askAboutFailure",
         "title": "Ask About the Last Failed Command",
         "category": "Arcturn"
+      },
+      {
+        "command": "arcturn.reviewChanges",
+        "title": "Review My Changes",
+        "category": "Arcturn"
+      },
+      {
+        "command": "arcturn.clearReview",
+        "title": "Clear Review Findings",
+        "category": "Arcturn"
+      },
+      {
+        "command": "arcturn.generateCommitMessage",
+        "title": "Generate Commit Message",
+        "category": "Arcturn",
+        "icon": "$(sparkle)"
+      },
+      {
+        "command": "arcturn.exportChat",
+        "title": "Export Chat",
+        "category": "Arcturn"
+      },
+      {
+        "command": "arcturn.checkpoints",
+        "title": "Rewind to a Checkpoint",
+        "category": "Arcturn"
       }
     ],
     "keybindings": [
@@ -327,6 +353,26 @@
         {
           "command": "arcturn.askAboutFailure",
           "when": "config.arcturn.serve.enabled"
+        },
+        {
+          "command": "arcturn.reviewChanges",
+          "when": "config.arcturn.serve.enabled"
+        },
+        {
+          "command": "arcturn.clearReview",
+          "when": "config.arcturn.serve.enabled"
+        },
+        {
+          "command": "arcturn.generateCommitMessage",
+          "when": "config.arcturn.serve.enabled"
+        },
+        {
+          "command": "arcturn.exportChat",
+          "when": "config.arcturn.serve.enabled"
+        },
+        {
+          "command": "arcturn.checkpoints",
+          "when": "config.arcturn.serve.enabled"
         }
       ],
       "editor/context": [
@@ -390,6 +436,13 @@
           "command": "arcturn.background.adopt",
           "when": "view == arcturn.background && viewItem == arcturn.background.adoptable",
           "group": "inline"
+        }
+      ],
+      "scm/title": [
+        {
+          "command": "arcturn.generateCommitMessage",
+          "when": "scmProvider == git && config.arcturn.serve.enabled",
+          "group": "navigation"
         }
       ]
     },

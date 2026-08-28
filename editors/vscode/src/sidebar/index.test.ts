@@ -244,6 +244,19 @@ vi.mock("vscode", () => {
         },
       },
     },
+    // The review feature creates a diagnostics collection and the commit
+    // feature probes for the git extension; both at activation, both inert
+    // without a command being run.
+    languages: {
+      createDiagnosticCollection: () => ({
+        set: () => {},
+        clear: () => {},
+        dispose: () => {},
+      }),
+    },
+    extensions: {
+      getExtension: () => undefined,
+    },
     workspace: {
       get workspaceFolders() {
         return ledger.folders;
@@ -276,11 +289,14 @@ vi.mock("vscode", () => {
 });
 
 import { BACKGROUND_COMMANDS, BACKGROUND_VIEW_ID } from "../background/view.js";
+import { COMMIT_COMMANDS } from "../commit/view.js";
 import { FAILURE_COMMANDS } from "../failures/view.js";
 import { HUB_COMMANDS, HUB_VIEW_ID } from "../hub/view.js";
 import { INLINE_COMMANDS } from "../inline/view.js";
 import { MCP_COMMANDS } from "../mcp/view.js";
+import { REVIEW_COMMANDS } from "../review/view.js";
 import { SCOUT_COMMANDS } from "../scout/view.js";
+import { SESSION_COMMANDS } from "../sessions/view.js";
 import { activateSidebar, SIDEBAR_COMMANDS, SIDEBAR_VIEW_ID } from "./index.js";
 import { WEBVIEW_COMMANDS } from "./webview-messages.js";
 
@@ -402,6 +418,9 @@ describe("activateSidebar", () => {
         ...Object.values(BACKGROUND_COMMANDS),
         ...Object.values(INLINE_COMMANDS),
         ...Object.values(FAILURE_COMMANDS),
+        ...Object.values(REVIEW_COMMANDS),
+        ...Object.values(COMMIT_COMMANDS),
+        ...Object.values(SESSION_COMMANDS),
       ].sort(),
     );
   });
