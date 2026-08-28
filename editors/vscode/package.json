@@ -453,6 +453,13 @@
           "title": "Arcturn",
           "icon": "media/arcturn-activity.svg"
         }
+      ],
+      "panel": [
+        {
+          "id": "arcturn-panel",
+          "title": "Arcturn",
+          "icon": "media/arcturn-activity.svg"
+        }
       ]
     },
     "views": {
@@ -462,7 +469,9 @@
           "name": "Chat",
           "type": "webview",
           "when": "config.arcturn.serve.enabled"
-        },
+        }
+      ],
+      "arcturn-panel": [
         {
           "id": "arcturn.hub",
           "name": "Hub",

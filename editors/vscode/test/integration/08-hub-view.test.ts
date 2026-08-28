@@ -19,10 +19,10 @@ import { allCommands, describeSpawns, manifest, spawnRecords } from "./helpers.j
 
 describe("the sidebar's trees", () => {
   it("is contributed as a view the workbench knows by id", async () => {
-    const views = manifest().contributes.views.arcturn ?? [];
+    const panel = manifest().contributes.views["arcturn-panel"] ?? [];
     assert.ok(
-      views.some((view) => view.id === "arcturn.hub"),
-      "the manifest does not contribute arcturn.hub",
+      panel.some((view) => view.id === "arcturn.hub"),
+      "the manifest does not contribute arcturn.hub in the panel container",
     );
     // The workbench synthesises `<id>.focus` for every view it has registered,
     // which is the only stable way to ask "do you know this view?".
@@ -50,10 +50,10 @@ describe("the sidebar's trees", () => {
   });
 
   it("contributes the background view and its four commands", async () => {
-    const views = manifest().contributes.views.arcturn ?? [];
+    const panel = manifest().contributes.views["arcturn-panel"] ?? [];
     assert.ok(
-      views.some((view) => view.id === "arcturn.background"),
-      "the manifest does not contribute arcturn.background",
+      panel.some((view) => view.id === "arcturn.background"),
+      "the manifest does not contribute arcturn.background in the panel container",
     );
     const commands = await allCommands();
     assert.ok(commands.includes("arcturn.background.focus"), "the workbench has no focus command");

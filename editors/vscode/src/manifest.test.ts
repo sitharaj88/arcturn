@@ -51,6 +51,7 @@ interface Manifest {
     commands: ManifestCommand[];
     menus: { commandPalette?: MenuItem[] };
     views: Record<string, { id: string; when?: string }[]>;
+    viewsContainers: Record<string, { id: string; title: string; icon?: string }[]>;
     configuration: { properties: Record<string, unknown> };
     walkthroughs?: { id: string; title: string; steps: WalkthroughStep[] }[];
   };
@@ -161,6 +162,26 @@ describe("the manifest and the code agree about commands", () => {
     // `toEqual` covers both directions at once: the seam's id must be here,
     // and nothing that is not the seam's id may be.
     expect(viewIds).toEqual([SIDEBAR_VIEW_ID, HUB_VIEW_ID, BACKGROUND_VIEW_ID]);
+  });
+
+  it("gives the chat the sidebar to itself, and puts the trees in the panel", async () => {
+    // Three views stacked in one activity-bar container squeezed the chat —
+    // the surface used continuously — to make room for two used occasionally.
+    // The trees live in a bottom-panel tab now, beside Terminal and Problems,
+    // which is where a jobs monitor and a catalog belong; a user who disagrees
+    // can still drag any view anywhere.
+    expect(manifest.contributes.views.arcturn?.map((view) => view.id)).toEqual([
+      SIDEBAR_VIEW_ID,
+    ]);
+    expect(manifest.contributes.views["arcturn-panel"]?.map((view) => view.id)).toEqual([
+      HUB_VIEW_ID,
+      BACKGROUND_VIEW_ID,
+    ]);
+    // The panel container must exist, and must carry an icon: VS Code uses it
+    // when a user drags the container to the activity bar.
+    const panel = manifest.contributes.viewsContainers.panel ?? [];
+    expect(panel.map((container) => container.id)).toEqual(["arcturn-panel"]);
+    expect(panel[0]?.icon).toBeTruthy();
   });
 
   it("hides exactly the commands that cannot be invoked without arguments", async () => {
