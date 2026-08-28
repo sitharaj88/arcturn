@@ -6,6 +6,77 @@ format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 The extension and the `arcturn` CLI version separately: the CLI is the engine,
 this is one of two front-ends onto it. Each release names the engine it needs.
 
+## [0.2.0] — 2026-08-29
+
+**Requires `arcturn` 0.4.0 or newer; 0.5.0 unlocks everything.** Every feature
+below degrades politely against an older engine — a message naming the
+terminal command that does the same job, never a block — but scout
+comparisons, MCP resources and prompts, and in-editor MCP authorization need
+the 0.5.0 verbs.
+
+### Getting started
+
+- **A walkthrough** (Help → Welcome → "Get started with Arcturn"): install the
+  engine, point it at a model, ask something, install a kit, connect a server —
+  in the order the failures actually happen, saying the things that surprise
+  people. The open file is *named*, not sent; nothing is written without a
+  prompt; a key exported in one terminal does not reach an already-running
+  engine.
+
+### The editor as a surface
+
+- **Edit the selection in place** (`Cmd+Alt+K` / `Ctrl+Alt+K`). Select lines,
+  say what should change, see the proposal as a diff, apply or discard. The
+  turn is read-only and the *editor* makes the edit: undo is one entry,
+  declining costs nothing, and the change cannot reach outside the selection.
+- **Review your changes into the Problems panel.** The uncommitted diff is
+  reviewed by the engine and findings land as real diagnostics — clickable,
+  with severity, picked up by the existing *Fix with Arcturn* quick fix. Review,
+  click, fix, review again, without leaving the editor.
+- **A commit message button in the Source Control view.** The staged diff (or
+  the working tree when nothing is staged), plus your repository's own recent
+  subjects for style, through the engine's Conventional Commits prompt. The
+  message lands in the input box for you to edit; nothing is committed.
+- **Failed commands are offered, quietly.** A command that exits non-zero
+  lights a status-bar item — no toast — and clicking it puts the command, exit
+  code and output tail into the composer as a ready question. Ctrl-C, typos and
+  successes never trigger it; the next success clears it.
+
+### New panels
+
+- **The Hub**, in the bottom panel: every kit from arcturn.dev/hub — workflows,
+  skills, and roles with their tool lanes — browsable offline from a bundled
+  catalog, with one-click install and an honest installed/partial/available
+  state derived from what the engine actually answers to.
+- **Background agents**, beside it: start fire-and-forget work, watch it
+  without polling forever (the tree stops asking when nothing is running), get
+  told once when something finishes, and fold its findings back into the chat.
+- The chat keeps the activity-bar sidebar to itself; both trees live in a
+  panel tab next to Terminal and Problems, and can be dragged anywhere.
+
+### Riding the 0.5.0 engine
+
+- **Scout comparisons in the diff editor.** Run competing approaches in
+  throwaway worktrees and read each result as side-by-side diffs rather than
+  patch text; hand the winning approach to the agent as findings.
+- **MCP resources and prompt templates.** Attach what a server publishes — the
+  engine reads it at prompt time, inside the same byte budget a file gets —
+  preview it as plain text, and run a server's prompt template through an
+  argument form into the composer.
+- **Authorize OAuth MCP servers from the editor**, including over Remote-SSH,
+  devcontainers and Codespaces: the editor catches the redirect through its own
+  URI handler, and tokens never leave the engine.
+
+### Sessions
+
+- **A model pick now sticks.** Selecting a model writes `arcturn.defaultModel`,
+  so new sessions, engine restarts and window reloads start on it. A session
+  reopened from history keeps its own model, deliberately.
+- **Export the conversation** as markdown or HTML, saved where you choose.
+- **Rewind from the palette**: pick a checkpoint, confirm the same modal the
+  panel shows, restore. (Asked for as a Timeline-pane integration; that VS Code
+  API is still proposal-only, and this is the closest stable surface.)
+
 ## [0.1.0] — 2026-08-27
 
 First release.
