@@ -686,7 +686,17 @@ export class BackgroundAgentManager {
       const record = this.#records.get(id);
       if (record === undefined || record.status !== "running") continue;
       record.ownerHeartbeatAt = now;
-      this.#persist(record);
+      try {
+        this.#persist(record);
+      } catch {
+        // Windows refuses a rename while any reader holds the destination
+        // open (EPERM) — and another process's manager scanning the records
+        // directory is exactly such a reader. A missed beat is harmless: the
+        // staleness window is four intervals wide, so three more chances come
+        // before anyone doubts this owner. What would NOT be harmless is the
+        // alternative — this runs inside a timer, and an uncaught throw here
+        // takes the whole engine down over a lease renewal.
+      }
     }
   }
 

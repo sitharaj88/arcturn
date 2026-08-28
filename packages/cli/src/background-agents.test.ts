@@ -489,20 +489,25 @@ describe("BackgroundAgentManager lifecycle", () => {
     const { id } = manager.start({ task: "long one" });
     await waitFor(() => manual.requests.length === 1);
 
-    const stampOf = async (): Promise<number | undefined> =>
-      (
-        JSON.parse(await readFile(join(dir, "records", `${id}.json`), "utf8")) as {
-          ownerHeartbeatAt?: number;
-        }
-      ).ownerHeartbeatAt;
+    const stampOf = async (): Promise<number | undefined> => {
+      // The read races the 10ms heartbeat's rename. On Windows that collision
+      // is an EPERM on one side or the other; either way "try again on the
+      // next poll" is the honest reading, not a failure.
+      try {
+        const raw = await readFile(join(dir, "records", `${id}.json`), "utf8");
+        return (JSON.parse(raw) as { ownerHeartbeatAt?: number }).ownerHeartbeatAt;
+      } catch {
+        return undefined;
+      }
+    };
 
     const first = await stampOf();
+    let renewed: number | undefined;
     await waitFor(async () => {
-      const now = await stampOf();
-      return now !== undefined && (first === undefined || now > first);
+      renewed = await stampOf();
+      return renewed !== undefined && (first === undefined || renewed > first);
     });
 
-    const renewed = await stampOf();
     expect(renewed).toBeDefined();
     expect(renewed ?? 0).toBeGreaterThan(first ?? 0);
     manager.dispose();
