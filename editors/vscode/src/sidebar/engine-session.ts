@@ -179,6 +179,17 @@ export interface EngineSession {
   /** Fold an agent's findings into the open session. */
   adoptBackgroundAgent(id: string): Promise<void>;
   /**
+   * Run one prompt in a throwaway session and return the assistant's text.
+   *
+   * For a gesture whose exchange should not enter the user's conversation —
+   * an inline edit is a private question about three lines, and threading it
+   * through the panel would push whatever they were discussing off the top.
+   * The session is created, prompted, read and deleted here.
+   *
+   * `undefined` when the engine is not reachable or the run produced no text.
+   */
+  askOnce(prompt: string, timeoutMs?: number): Promise<string | undefined>;
+  /**
    * Start a scout run: approaches raced in throwaway worktrees. `undefined`
    * when the engine is older than the verb.
    */
@@ -550,6 +561,49 @@ export function createEngineSession(options: EngineSessionOptions): EngineSessio
     },
     async cancelBackgroundAgent(id: string): Promise<boolean> {
       return (await requireClient().cancelBackgroundAgent(id)).accepted;
+    },
+    async askOnce(prompt: string, timeoutMs = 120_000): Promise<string | undefined> {
+      const client = requireClient();
+      const scratch = await client.createSession({ cwd: options.cwd });
+      try {
+        // Subscribing before prompting, not after: a fast engine can finish
+        // the run inside the `prompt` round trip, and a listener attached
+        // afterwards would wait out the whole timeout for events that already
+        // happened.
+        const collected: string[] = [];
+        const done = new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => {
+            unsubscribe();
+            reject(new Error("the engine did not answer in time"));
+          }, timeoutMs);
+          const unsubscribe = client.onEvent((sessionId, event) => {
+            if (sessionId !== scratch.sessionId) return;
+            if (event.type === "messageEnd") {
+              for (const part of event.message.content) {
+                if (part.type === "text") collected.push(part.text);
+              }
+            } else if (event.type === "runEnd") {
+              clearTimeout(timer);
+              unsubscribe();
+              resolve();
+            }
+          });
+        });
+        await client.openSession(scratch.sessionId);
+        await client.prompt(scratch.sessionId, prompt);
+        await done;
+        const text = collected.join("").trim();
+        return text === "" ? undefined : text;
+      } finally {
+        // Deleted whatever happened. A scratch session left behind would show
+        // up in the session picker as a conversation nobody had.
+        await client.deleteSession(scratch.sessionId).catch(() => undefined);
+        // The panel's own session is still the open one for this connection;
+        // re-attaching restores its event subscription, which `openSession`
+        // above moved to the scratch session.
+        const mine = controller?.sessionId;
+        if (mine !== undefined) await client.openSession(mine).catch(() => undefined);
+      }
     },
     async adoptBackgroundAgent(id: string): Promise<void> {
       // Session-scoped, unlike the other three: adopting is what puts an

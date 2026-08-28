@@ -177,6 +177,12 @@ vi.mock("vscode", () => {
         ledger.statusBars.push(item);
         return item;
       },
+      // Present in every host at the engine floor. Without it here the
+      // failure watcher takes its "shell integration is unavailable" branch on
+      // every activation and writes a diagnostic the log tests then see.
+      onDidEndTerminalShellExecution() {
+        return { dispose: () => {} };
+      },
       createTreeView(id: string, options: { treeDataProvider: unknown }) {
         ledger.treeViews.push({ id, provider: options.treeDataProvider });
         return { dispose: () => {} };
@@ -270,7 +276,9 @@ vi.mock("vscode", () => {
 });
 
 import { BACKGROUND_COMMANDS, BACKGROUND_VIEW_ID } from "../background/view.js";
+import { FAILURE_COMMANDS } from "../failures/view.js";
 import { HUB_COMMANDS, HUB_VIEW_ID } from "../hub/view.js";
+import { INLINE_COMMANDS } from "../inline/view.js";
 import { MCP_COMMANDS } from "../mcp/view.js";
 import { SCOUT_COMMANDS } from "../scout/view.js";
 import { activateSidebar, SIDEBAR_COMMANDS, SIDEBAR_VIEW_ID } from "./index.js";
@@ -392,6 +400,8 @@ describe("activateSidebar", () => {
         ...Object.values(SCOUT_COMMANDS),
         ...Object.values(MCP_COMMANDS),
         ...Object.values(BACKGROUND_COMMANDS),
+        ...Object.values(INLINE_COMMANDS),
+        ...Object.values(FAILURE_COMMANDS),
       ].sort(),
     );
   });
@@ -408,9 +418,21 @@ describe("activateSidebar", () => {
 
   it("puts the cost item in the status bar, wired to the breakdown command", () => {
     activate();
-    expect(ledger.statusBars).toHaveLength(1);
-    expect(ledger.statusBars[0]?.command).toBe(SIDEBAR_COMMANDS.showCost);
-    expect(ledger.statusBars[0]?.text).toContain("$0.00");
+    // Found by its command rather than by position: the failed-command item
+    // shares this bar, and a positional assertion would break every time
+    // another one is added rather than when this one is wrong.
+    const cost = ledger.statusBars.find((item) => item.command === SIDEBAR_COMMANDS.showCost);
+    expect(cost).toBeDefined();
+    expect(cost?.text).toContain("$0.00");
+  });
+
+  it("puts the failed-command item in the bar too, hidden until something fails", () => {
+    activate();
+    const failure = ledger.statusBars.find((item) => item.command === FAILURE_COMMANDS.ask);
+    expect(failure).toBeDefined();
+    // A status item that appears before anything has failed is an offer to
+    // explain nothing.
+    expect(failure?.shown).toBe(0);
   });
 
   it("keeps the cost item hidden until there is a session to describe", () => {

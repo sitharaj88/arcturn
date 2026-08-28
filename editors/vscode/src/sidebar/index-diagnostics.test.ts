@@ -95,6 +95,10 @@ vi.mock("vscode", () => {
       }),
       registerWebviewViewProvider: () => ({ dispose: () => {} }),
       createTreeView: () => ({ dispose: () => {} }),
+      // Present at the engine floor. Without it the failure watcher takes its
+      // "shell integration is unavailable" branch and writes a diagnostic that
+      // is not the one these tests are about.
+      onDidEndTerminalShellExecution: () => ({ dispose: () => {} }),
       showQuickPick: () => Promise.resolve(undefined),
       showWarningMessage: () => Promise.resolve(undefined),
       showInformationMessage: () => Promise.resolve(undefined),

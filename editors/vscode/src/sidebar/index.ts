@@ -21,7 +21,9 @@
 import { spawn as nodeSpawn } from "node:child_process";
 import * as vscode from "vscode";
 import { activateBackground } from "../background/view.js";
+import { activateFailureWatch, FAILURE_COMMANDS } from "../failures/view.js";
 import { activateHub } from "../hub/view.js";
+import { activateInlineEdit, INLINE_COMMANDS } from "../inline/view.js";
 import { activateMcpCatalog } from "../mcp/view.js";
 import { ARCTURN_EXTENSION_ID, authorizeMcpServer, type McpAuthEditor } from "../mcp-auth.js";
 import { activateScout, SCOUT_COMMANDS } from "../scout/view.js";
@@ -2685,6 +2687,44 @@ export function activateSidebar(
         });
         terminal.show();
         terminal.sendText(command);
+      },
+    }),
+  );
+
+  // ---- Failed commands -----------------------------------------------------
+  // The thing a coding agent is most often asked about is a build that broke
+  // or a suite that went red, and the extension was already subscribed to the
+  // signal that reports both — for a different reason. A status bar item
+  // rather than a notification, because a toast per failed command is a
+  // feature people mute, and then the failure that mattered goes unseen too.
+  disposables.push(
+    activateFailureWatch(context, {
+      ask: async (prompt) => {
+        await provider.reveal();
+        // Offered, not sent: a failure is the user's to decide about, and
+        // spending a turn on every red build would be expensive and rude.
+        provider.prefillComposer(prompt);
+      },
+      warn: (message) => log(message),
+    }),
+  );
+
+  // ---- Inline edit ---------------------------------------------------------
+  // The commonest edit there is — "rewrite this bit", with the bit already
+  // selected — had no gesture. Everything went through the panel, where the
+  // agent has to find the file, read it, and decide which lines were meant.
+  // Here the lines are known, the turn is read-only, and the editor makes the
+  // edit so undo works and declining costs nothing.
+  disposables.push(
+    activateInlineEdit(context, {
+      askOnce: async (prompt) => {
+        const session = ensureEngine();
+        await session.start();
+        if (session.failure !== undefined) {
+          await announce(session.failure);
+          return undefined;
+        }
+        return session.askOnce(prompt);
       },
     }),
   );

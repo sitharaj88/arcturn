@@ -4,7 +4,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { BACKGROUND_COMMANDS, BACKGROUND_VIEW_ID } from "./background/view.js";
 import type { CliProvisioner } from "./cli.js";
 import { activateWith } from "./extension.js";
+import { FAILURE_COMMANDS } from "./failures/view.js";
 import { HUB_COMMANDS, HUB_VIEW_ID } from "./hub/view.js";
+import { INLINE_COMMANDS } from "./inline/view.js";
 import { MCP_COMMANDS } from "./mcp/view.js";
 import { SCOUT_COMMANDS } from "./scout/view.js";
 import { SIDEBAR_COMMANDS, SIDEBAR_VIEW_ID } from "./sidebar/index.js";
@@ -93,6 +95,8 @@ describe("the manifest and the code agree about commands", () => {
       ...Object.values(SCOUT_COMMANDS),
       ...Object.values(MCP_COMMANDS),
       ...Object.values(BACKGROUND_COMMANDS),
+      ...Object.values(INLINE_COMMANDS),
+      ...Object.values(FAILURE_COMMANDS),
     ]) {
       expect(contributed).toContain(id);
     }
@@ -110,6 +114,8 @@ describe("the manifest and the code agree about commands", () => {
       ...Object.values(SCOUT_COMMANDS),
       ...Object.values(MCP_COMMANDS),
       ...Object.values(BACKGROUND_COMMANDS),
+      ...Object.values(INLINE_COMMANDS),
+      ...Object.values(FAILURE_COMMANDS),
     ]);
     expect([...contributed].sort()).toEqual([...live].sort());
   });

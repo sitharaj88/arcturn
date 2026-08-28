@@ -195,6 +195,16 @@
         "title": "Refresh Background Agents",
         "category": "Arcturn",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "arcturn.inlineEdit",
+        "title": "Edit Selection",
+        "category": "Arcturn"
+      },
+      {
+        "command": "arcturn.askAboutFailure",
+        "title": "Ask About the Last Failed Command",
+        "category": "Arcturn"
       }
     ],
     "keybindings": [
@@ -208,6 +218,12 @@
         "key": "ctrl+alt+m",
         "mac": "cmd+alt+m",
         "when": "editorTextFocus"
+      },
+      {
+        "command": "arcturn.inlineEdit",
+        "key": "ctrl+alt+k",
+        "mac": "cmd+alt+k",
+        "when": "editorHasSelection && config.arcturn.serve.enabled"
       }
     ],
     "menus": {
@@ -303,6 +319,14 @@
         {
           "command": "arcturn.background.adopt",
           "when": "false"
+        },
+        {
+          "command": "arcturn.inlineEdit",
+          "when": "config.arcturn.serve.enabled"
+        },
+        {
+          "command": "arcturn.askAboutFailure",
+          "when": "config.arcturn.serve.enabled"
         }
       ],
       "editor/context": [
@@ -315,6 +339,11 @@
           "command": "arcturn.sendFile",
           "when": "resourceScheme == file",
           "group": "arcturn@2"
+        },
+        {
+          "command": "arcturn.inlineEdit",
+          "when": "editorHasSelection && config.arcturn.serve.enabled",
+          "group": "arcturn@0"
         }
       ],
       "explorer/context": [
