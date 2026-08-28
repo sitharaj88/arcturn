@@ -99,6 +99,8 @@ export type ScoutErrorCode =
   | "git-missing"
   /** `repoRoot` is not inside a git work tree. */
   | "not-a-repo"
+  /** The repository has no commits yet, so there is nothing to branch from. */
+  | "empty-repo"
   /** The target directory already exists, or git already tracks a worktree there. */
   | "worktree-exists"
   /** `git` ran and failed for any other reason (unborn HEAD, locked index, …). */
@@ -252,6 +254,24 @@ export async function createWorktree(
       `Scouts need a git repository: ${repoRoot} is not inside a git work tree.`,
       { cause: error },
     );
+  }
+
+  // A freshly `git init`ed repository has an *unborn* HEAD — it points at a
+  // branch with no commit — and `git worktree add --detach <dir> HEAD` refuses
+  // it as "invalid reference: HEAD", which names git's mechanics instead of
+  // the user's situation. This is the very first thing a person following
+  // "mkdir, git init, run the setup workflow" hits, so the refusal must hand
+  // them their next command rather than a riddle.
+  if ((options?.ref ?? "HEAD") === "HEAD") {
+    try {
+      await git(repoRoot, ["rev-parse", "--verify", "HEAD^{commit}"]);
+    } catch {
+      throw new ScoutWorktreeError(
+        "empty-repo",
+        `${repoRoot} has no commits yet, and a worktree needs one to branch from. ` +
+          `Make an initial commit first: git commit --allow-empty -m "chore: init"`,
+      );
+    }
   }
 
   // A fresh mkdtemp per worktree means two approaches with the same name can

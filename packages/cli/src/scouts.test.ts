@@ -139,8 +139,12 @@ describe("createWorktree", () => {
     });
     expect(worktree.dir).toBe(join(PARENT, "approach-a"));
     expect(git.argv()[0]).toBe("rev-parse --is-inside-work-tree");
-    expect(git.argv()[1]).toBe(`worktree add --detach ${worktree.dir} HEAD`);
-    expect(git.calls[1]?.cwd).toBe("/repo");
+    // The unborn-HEAD probe sits between the repo check and the add, so a
+    // fresh `git init` is refused with the fix in hand instead of git's
+    // "invalid reference: HEAD".
+    expect(git.argv()[1]).toBe("rev-parse --verify HEAD^{commit}");
+    expect(git.argv()[2]).toBe(`worktree add --detach ${worktree.dir} HEAD`);
+    expect(git.calls[2]?.cwd).toBe("/repo");
 
     await worktree.remove();
     expect(git.argv()).toContain(`worktree remove --force ${worktree.dir}`);
@@ -173,6 +177,43 @@ describe("createWorktree", () => {
     expect((error as ScoutWorktreeError).code).toBe("not-a-repo");
     // It never got as far as trying to add a worktree.
     expect(addedDirs(git)).toHaveLength(0);
+  });
+
+  it("reports `empty-repo`, with the command that fixes it, on an unborn HEAD", async () => {
+    // The very first thing a person following "mkdir, git init, run the setup
+    // workflow" hits: a fresh repository's HEAD points at a branch with no
+    // commit, and `worktree add --detach HEAD` refuses it as "invalid
+    // reference: HEAD" — git's mechanics, not the user's situation. The
+    // refusal must hand them their next command.
+    const git = fakeGit((args) =>
+      args[0] === "rev-parse" && args.includes("HEAD^{commit}")
+        ? new Error("fatal: Needed a single revision")
+        : undefined,
+    );
+    const error = await createWorktree("/tmp/fresh", "a", {
+      execFn: git.execFn,
+      parentDir: PARENT,
+    }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(ScoutWorktreeError);
+    expect((error as ScoutWorktreeError).code).toBe("empty-repo");
+    expect((error as ScoutWorktreeError).message).toContain("no commits yet");
+    expect((error as ScoutWorktreeError).message).toContain("--allow-empty");
+    // It never got as far as trying to add a worktree.
+    expect(addedDirs(git)).toHaveLength(0);
+  });
+
+  it("skips the unborn-HEAD probe when a caller pins a concrete ref", async () => {
+    // A caller that names a ref has already decided what to branch from; the
+    // probe is only for the HEAD default, where "nothing to branch from" is
+    // otherwise discovered one confusing error too late.
+    const git = fakeGit(() => undefined);
+    await createWorktree("/tmp/pinned", "a", {
+      execFn: git.execFn,
+      parentDir: PARENT,
+      ref: "main",
+    });
+    const probes = git.calls.filter((call) => call.args.includes("HEAD^{commit}"));
+    expect(probes).toHaveLength(0);
   });
 
   it("reports `git-missing` when the binary cannot be spawned", async () => {
