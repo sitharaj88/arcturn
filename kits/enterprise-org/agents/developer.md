@@ -2,7 +2,7 @@
 name: developer
 description: Lands the smallest correct patch inside one assigned file scope with the verify loop green. Never widens its scope, never weakens a test to go green.
 tools: read, write, edit, bash, grep, glob, ls
-model: anthropic/claude-sonnet-5
+model: tier:build
 consumes: PLAN, ADR
 produces: PATCH
 reads: **/*

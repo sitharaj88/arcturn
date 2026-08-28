@@ -6730,6 +6730,15 @@ export interface WorkflowCommandRuntime extends WorkflowAgentHost {
    * workflow that names a role then fails with "no roles are loaded".
    */
   readonly agents?: ReadonlyMap<string, AgentDef>;
+  /**
+   * The runtime's model router, for `tier:<name>` tags.
+   *
+   * Structural and optional: a real `ArcturnRuntime` has one, a stub runtime
+   * in tests may not. Without it a tier tag resolves to nothing and the step
+   * is refused with the tag named — which is honest, but the kits ship tier
+   * tags now, so production callers should provide it.
+   */
+  readonly router?: { specForTier(name: string): ModelSpec | undefined };
   /** Current permission mode; `"plan"` disables both worktree lanes. */
   readonly permissionMode?: string;
   /**
@@ -6920,6 +6929,37 @@ export function workflowPostureNotices(
  *
  * @param options - Model-tag resolver and per-step agent overrides.
  */
+/**
+ * Compose a caller's tag resolver with the runtime's tier routing.
+ *
+ * The split exists because the two halves know different things. A `[tag]` or
+ * a role's `model:` that names a concrete id is the caller's to resolve
+ * against the model catalog. A `tier:<name>` names an *intent* — "the
+ * judgment model", "the build model" — and only the runtime's router knows
+ * what this deployment's config points each tier at; unset tiers fall back to
+ * the user's own main model inside `specForTier`, which is what makes a kit
+ * authored with tiers portable across providers instead of hardcoding one.
+ *
+ * The hub's kits used to pin `anthropic/claude-opus-5` in every role, and
+ * every workflow in the catalog returned 401 to anyone whose Anthropic key
+ * was missing or dead — while their configured model sat unused. Tiers are
+ * the fix; this function is where they become resolvable.
+ */
+export function composeTagResolver(
+  runtime: Pick<WorkflowCommandRuntime, "router">,
+  base: ModelTagResolver | undefined,
+): ModelTagResolver | undefined {
+  if (base === undefined && runtime.router === undefined) return undefined;
+  return (tag: string) => {
+    if (tag.startsWith("tier:")) {
+      const name = tag.slice("tier:".length).trim();
+      if (name === "") return undefined;
+      return runtime.router?.specForTier(name);
+    }
+    return base?.(tag);
+  };
+}
+
 export function createWorkflowCommands(
   options: CreateWorkflowCommandsOptions = {},
 ): SlashCommand[] {
@@ -6932,6 +6972,9 @@ export function createWorkflowCommands(
     async run(context: CommandContext): Promise<void> {
       const { ui } = context;
       const runtime = context.runtime as unknown as WorkflowCommandRuntime;
+      // Tier tags resolve through the runtime's router; concrete ids through
+      // the caller's resolver. Composed once per invocation — see the helper.
+      const resolveTag = composeTagResolver(runtime, options.resolveModelTag);
 
       // The run-status surface reads the durable journal only — no discovery, no
       // engine, no agent — so an operator can answer "what is it doing / what did
@@ -7007,9 +7050,7 @@ export function createWorkflowCommands(
               ...(runtime.emit === undefined
                 ? {}
                 : { emit: (event: AgentEvent) => runtime.emit?.(event) }),
-              ...(options.resolveModelTag === undefined
-                ? {}
-                : { resolveModel: options.resolveModelTag }),
+              ...(resolveTag === undefined ? {} : { resolveModel: resolveTag }),
               // The write lane shares this run's id so its patches land in the
               // run's artifact dir — the ones a resume re-seeds worktrees from.
               ...(lane === undefined ? {} : { writeLane: lane }),
@@ -7019,9 +7060,7 @@ export function createWorkflowCommands(
             input: runInput,
             resolveAgent,
             agentNames,
-            ...(options.resolveModelTag === undefined
-              ? {}
-              : { resolveModel: options.resolveModelTag }),
+            ...(resolveTag === undefined ? {} : { resolveModel: resolveTag }),
             signal: controller.signal,
             runId,
             journal,

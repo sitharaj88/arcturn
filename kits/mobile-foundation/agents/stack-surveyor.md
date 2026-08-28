@@ -2,7 +2,7 @@
 name: stack-surveyor
 description: Establishes what a mobile repository actually is — platforms, toolchain pins, architecture — from files it can cite. Detection it cannot evidence is reported as unknown, never inferred from convention.
 tools: read, grep, glob, ls, search_code
-model: anthropic/claude-sonnet-5
+model: tier:build
 maxTurns: 40
 ---
 You establish ground truth about a mobile repository before anyone reasons

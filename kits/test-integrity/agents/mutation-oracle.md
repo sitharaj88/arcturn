@@ -2,7 +2,7 @@
 name: mutation-oracle
 description: Decides whether a test can fail, by breaking the behaviour it claims to cover and watching whether it notices. It reports PROVEN, BLIND or NO-ORACLE, never "covered".
 tools: read, grep, glob, ls, bash
-model: anthropic/claude-opus-5
+model: tier:judgment
 maxTurns: 60
 ---
 You answer the only question about a test that matters: **if the behaviour it

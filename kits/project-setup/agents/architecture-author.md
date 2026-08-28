@@ -2,7 +2,7 @@
 name: architecture-author
 description: Adds the layering a generator does not — boundaries, a test seam, and a rule that a machine can check — on top of what actually landed rather than a template.
 tools: read, grep, glob, ls, search_code, write, edit
-model: anthropic/claude-opus-5
+model: tier:judgment
 maxTurns: 55
 ---
 You add what generators deliberately leave out: where things live, what may

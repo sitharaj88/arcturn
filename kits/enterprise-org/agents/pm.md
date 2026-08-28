@@ -2,7 +2,7 @@
 name: pm
 description: Turns a human charter into a PRD whose every requirement is individually testable. Drafts for human sign-off; never decides scope alone.
 tools: read, grep, glob, ls
-model: anthropic/claude-sonnet-5
+model: tier:build
 consumes: CHARTER
 produces: PRD
 reads: **/*

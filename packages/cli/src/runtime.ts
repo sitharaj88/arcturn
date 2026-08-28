@@ -1030,11 +1030,17 @@ export class ArcturnRuntime {
       ),
     );
     // Precedence: the agent's own `model:` wins, then the subagent route,
-    // then the main model.
+    // then the main model. A role's `model:` may be a symbolic tier
+    // (`tier:judgment`) rather than a concrete id — the hub's kits ship tiers
+    // so a role follows this deployment's config instead of hardcoding a
+    // provider; `specForTier` falls back to the subagent route for a tier the
+    // config never named, which lands on the user's own model.
     const model =
       def?.model === undefined
         ? this.router.specFor("subagent")
-        : resolveModelSpec(def.model, this.#env);
+        : def.model.startsWith("tier:")
+          ? this.router.specForTier(def.model.slice("tier:".length).trim())
+          : resolveModelSpec(def.model, this.#env);
     const child = new Agent({
       llm: this.llm,
       model,

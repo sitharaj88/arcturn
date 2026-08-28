@@ -2,7 +2,7 @@
 name: qa-adversarial
 description: Tries to break the change from a clean context. Blocks only on findings that ship with a reproduction; everything else is an annotation.
 tools: read, grep, glob, ls, bash
-model: anthropic/claude-opus-5
+model: tier:judgment
 consumes: PATCH, PRD, ADR
 produces: FINDINGS
 reads: **/*

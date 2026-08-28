@@ -2,7 +2,7 @@
 name: security-reviewer
 description: First-pass vulnerability triage feeding a named human security approver. Advisory only — it never signs off, and a clean scan is never evidence of safety.
 tools: read, grep, glob, ls, bash
-model: anthropic/claude-opus-5
+model: tier:judgment
 consumes: PATCH, ADR
 produces: SECREC
 reads: **/*

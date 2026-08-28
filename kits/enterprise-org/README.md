@@ -548,9 +548,9 @@ pass:
 
 ```bash
 cd .arcturn
-sed -i '' -e 's|anthropic/claude-opus-5|openai/gpt-5.6-sol|g' \
-          -e 's|anthropic/claude-sonnet-5|openai/gpt-5.1|g' \
-          -e 's|anthropic/claude-haiku-4-5|openai/gpt-5-mini|g' \
+sed -i '' -e 's|tier:judgment|openai/gpt-5.6-sol|g' \
+          -e 's|tier:build|openai/gpt-5.1|g' \
+          -e 's|tier:fast|openai/gpt-5-mini|g' \
           agents/*.md workflows/*.md
 arcturn --list-models   # the ids this build actually knows
 ```
@@ -621,17 +621,17 @@ Result at the time of writing (`packages/cli/dist`, 11 agents, 6 workflows):
 ```
 === AGENTS: loadAgentDefs(kits/enterprise-org/agents) ===
 files on disk: 11  parsed defs: 11
-  ok  architect          model=anthropic/claude-opus-5          resolves  prompt= 4438ch  lane=read  maxTurns=50  tools=[read,grep,glob,ls,search_code]
-  ok  developer          model=anthropic/claude-sonnet-5        resolves  prompt= 5376ch  lane=write maxTurns=50  tools=[read,write,edit,bash,grep,glob,ls]
-  ok  docs-writer        model=anthropic/claude-sonnet-5        resolves  prompt= 3866ch  lane=write maxTurns=50  tools=[read,write,edit,bash,grep,glob,ls]
-  ok  pm                 model=anthropic/claude-sonnet-5        resolves  prompt= 4424ch  lane=read  maxTurns=50  tools=[read,grep,glob,ls]
-  ok  qa-adversarial     model=anthropic/claude-opus-5          resolves  prompt= 6306ch  lane=exec  maxTurns=50  tools=[read,grep,glob,ls,bash]
-  ok  qa-functional      model=anthropic/claude-sonnet-5        resolves  prompt= 5462ch  lane=write maxTurns=50  tools=[read,write,edit,bash,grep,glob,ls]
-  ok  release-manager    model=anthropic/claude-haiku-4-5       resolves  prompt= 5561ch  lane=exec  maxTurns=50  tools=[read,grep,glob,ls,bash]
-  ok  retro              model=anthropic/claude-opus-5          resolves  prompt= 5322ch  lane=exec  maxTurns=30  tools=[read,grep,glob,ls,bash]
-  ok  security-reviewer  model=anthropic/claude-opus-5          resolves  prompt= 4992ch  lane=exec  maxTurns=50  tools=[read,grep,glob,ls,bash]
-  ok  tech-lead          model=anthropic/claude-opus-5          resolves  prompt= 4292ch  lane=read  maxTurns=50  tools=[read,grep,glob,ls,search_code]
-  ok  ux-reviewer        model=anthropic/claude-sonnet-5        resolves  prompt= 5493ch  lane=read  maxTurns=50  tools=[read,grep,glob,ls]
+  ok  architect          model=tier:judgment          resolves  prompt= 4438ch  lane=read  maxTurns=50  tools=[read,grep,glob,ls,search_code]
+  ok  developer          model=tier:build        resolves  prompt= 5376ch  lane=write maxTurns=50  tools=[read,write,edit,bash,grep,glob,ls]
+  ok  docs-writer        model=tier:build        resolves  prompt= 3866ch  lane=write maxTurns=50  tools=[read,write,edit,bash,grep,glob,ls]
+  ok  pm                 model=tier:build        resolves  prompt= 4424ch  lane=read  maxTurns=50  tools=[read,grep,glob,ls]
+  ok  qa-adversarial     model=tier:judgment          resolves  prompt= 6306ch  lane=exec  maxTurns=50  tools=[read,grep,glob,ls,bash]
+  ok  qa-functional      model=tier:build        resolves  prompt= 5462ch  lane=write maxTurns=50  tools=[read,write,edit,bash,grep,glob,ls]
+  ok  release-manager    model=tier:fast       resolves  prompt= 5561ch  lane=exec  maxTurns=50  tools=[read,grep,glob,ls,bash]
+  ok  retro              model=tier:judgment          resolves  prompt= 5322ch  lane=exec  maxTurns=30  tools=[read,grep,glob,ls,bash]
+  ok  security-reviewer  model=tier:judgment          resolves  prompt= 4992ch  lane=exec  maxTurns=50  tools=[read,grep,glob,ls,bash]
+  ok  tech-lead          model=tier:judgment          resolves  prompt= 4292ch  lane=read  maxTurns=50  tools=[read,grep,glob,ls,search_code]
+  ok  ux-reviewer        model=tier:build        resolves  prompt= 5493ch  lane=read  maxTurns=50  tools=[read,grep,glob,ls]
 agent loader warnings: none
 
 === WORKFLOWS: parseWorkflow(kits/enterprise-org/workflows) ===

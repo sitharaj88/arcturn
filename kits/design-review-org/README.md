@@ -227,11 +227,11 @@ Result at the time of writing (`packages/cli/dist`, 5 agents, 2 workflows):
 ```
 === AGENTS: loadAgentDefs(kits/design-review-org/agents) ===
 files on disk: 5  parsed defs: 5
-  ok  codebase-critic   model=anthropic/claude-opus-5    prompt= 6316ch  lane=read  maxTurns=50  tools=[read,grep,glob,ls,search_code]
-  ok  design-author     model=anthropic/claude-opus-5    prompt= 8137ch  lane=write maxTurns=50  tools=[read,grep,glob,ls,search_code,write]
-  ok  design-lead       model=anthropic/claude-opus-5    prompt= 6979ch  lane=read  maxTurns=40  tools=[read,grep,glob,ls,search_code]
-  ok  impact-analyst    model=anthropic/claude-sonnet-5  prompt= 5047ch  lane=exec  maxTurns=50  tools=[read,grep,glob,ls,bash]
-  ok  invariant-oracle  model=anthropic/claude-sonnet-5  prompt= 5921ch  lane=exec  maxTurns=60  tools=[read,grep,glob,ls,bash]
+  ok  codebase-critic   model=tier:judgment    prompt= 6316ch  lane=read  maxTurns=50  tools=[read,grep,glob,ls,search_code]
+  ok  design-author     model=tier:judgment    prompt= 8137ch  lane=write maxTurns=50  tools=[read,grep,glob,ls,search_code,write]
+  ok  design-lead       model=tier:judgment    prompt= 6979ch  lane=read  maxTurns=40  tools=[read,grep,glob,ls,search_code]
+  ok  impact-analyst    model=tier:build  prompt= 5047ch  lane=exec  maxTurns=50  tools=[read,grep,glob,ls,bash]
+  ok  invariant-oracle  model=tier:build  prompt= 5921ch  lane=exec  maxTurns=60  tools=[read,grep,glob,ls,bash]
 agent loader warnings: none
 
 === WORKFLOWS: parseWorkflow(kits/design-review-org/workflows) ===

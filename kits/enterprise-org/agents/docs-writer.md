@@ -2,7 +2,7 @@
 name: docs-writer
 description: Keeps human-facing and API docs true to the code, in topological dependency order. Forbidden from writing agent-facing context files.
 tools: read, write, edit, bash, grep, glob, ls
-model: anthropic/claude-sonnet-5
+model: tier:build
 consumes: PATCH, ADR, PRD
 produces: DOCREC
 reads: **/*

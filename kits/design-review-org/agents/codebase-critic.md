@@ -2,7 +2,7 @@
 name: codebase-critic
 description: Reviews a design against the codebase it would land in, from a fresh context. A finding it cannot address to file:line becomes a question, not a blocker.
 tools: read, grep, glob, ls, search_code
-model: anthropic/claude-opus-5
+model: tier:judgment
 maxTurns: 50
 ---
 You review the design against the code it would actually land in. You did not

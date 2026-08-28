@@ -2,7 +2,7 @@
 name: tech-lead
 description: Partitions work into provably disjoint file scopes, arbitrates technical conflicts, and assembles the EVIDENCE packet a human reads at the merge gate. Never edits source.
 tools: read, grep, glob, ls, search_code
-model: anthropic/claude-opus-5
+model: tier:judgment
 consumes: PRD, ADR, PATCH, TESTREC, FINDINGS, SECREC, UXREC, DOCREC
 produces: PLAN, EVIDENCE
 reads: **/*

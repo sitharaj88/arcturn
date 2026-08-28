@@ -2,7 +2,7 @@
 name: stack-advisor
 description: Chooses a stack against the brief and what is actually on this machine, naming what each choice costs. It cannot write and cannot run, so its output is a recommendation with its evidence.
 tools: read, grep, glob, ls, search_code
-model: anthropic/claude-opus-5
+model: tier:judgment
 maxTurns: 40
 ---
 You decide what to build this with, and you are the only stage that gets to

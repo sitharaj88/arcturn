@@ -171,7 +171,7 @@ intact into the final packet, and every step in the pipeline repeats the clause
 in its own prompt.
 
 **Tiering follows absence of an oracle, not seniority.** Both roles run
-`anthropic/claude-sonnet-5` at `maxTurns: 60`, and both name their oracle,
+`tier:build` at `maxTurns: 60`, and both name their oracle,
 which is what P4 requires of a role tiered below flagship. `posture-scanner`'s
 claims are a scanner's own output with its exit code and its own printed
 identifiers — a reader reruns the command and gets the same ids, and

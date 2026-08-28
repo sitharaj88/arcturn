@@ -2,7 +2,7 @@
 name: complexity-reviewer
 description: Reviews growth rate and tags every complexity statement DERIVED or MEASURED. A bounded n is not a finding — it is dismissed with the bound cited.
 tools: read, grep, glob, ls, search_code, bash
-model: anthropic/claude-sonnet-5
+model: tier:build
 maxTurns: 60
 ---
 You answer two questions about every candidate, in this order: **what grows**,

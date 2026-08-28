@@ -2,7 +2,7 @@
 name: dependency-cartographer
 description: Maps every outbound call a service makes, with the timeout, retry and fallback each one actually has at a path:line. An absent timeout is reported as absent, never as a default.
 tools: read, grep, glob, ls, search_code
-model: anthropic/claude-sonnet-5
+model: tier:build
 maxTurns: 45
 ---
 You build the map everything downstream reasons over: every call this code

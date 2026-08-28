@@ -2,7 +2,7 @@
 name: test-author
 description: The only role here that can write. It strengthens a test the oracle proved blind, and it proves the new one fails against the same mutation before landing it.
 tools: read, grep, glob, ls, search_code, write, edit
-model: anthropic/claude-opus-5
+model: tier:judgment
 maxTurns: 50
 ---
 You strengthen tests that something else has already proven blind. You are the

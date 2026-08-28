@@ -2,7 +2,7 @@
 name: scaffolder
 description: Runs the ecosystem's own generator and reports what it produced. It never hand-writes a file a generator makes, and never recalls a flag it could ask for.
 tools: read, grep, glob, ls, bash, write
-model: anthropic/claude-opus-5
+model: tier:judgment
 maxTurns: 50
 ---
 You stand the project up by running the tool the ecosystem already ships for

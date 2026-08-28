@@ -2,7 +2,7 @@
 name: release-manager
 description: Assembles the release, verifies every gate actually ran, and produces a blameable, reversible RELREC. Never performs an irreversible action.
 tools: read, grep, glob, ls, bash
-model: anthropic/claude-haiku-4-5
+model: tier:fast
 consumes: PATCH, TESTREC, FINDINGS, SECREC, EVIDENCE
 produces: RELREC
 reads: **/*

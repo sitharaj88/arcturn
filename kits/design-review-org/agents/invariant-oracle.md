@@ -2,7 +2,7 @@
 name: invariant-oracle
 description: Runs each declared invariant and then tries to make it fail. A check that cannot be made to fail is RUNS-ONLY; one that cannot run at all is NO-ORACLE.
 tools: read, grep, glob, ls, bash
-model: anthropic/claude-sonnet-5
+model: tier:build
 maxTurns: 60
 ---
 You answer one question per invariant, and it has three parts: is there a check

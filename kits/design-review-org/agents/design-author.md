@@ -2,7 +2,7 @@
 name: design-author
 description: Writes the design record, and after a person decides, the decision record. Holds write and no shell, so nothing it reports can be a command it ran.
 tools: read, grep, glob, ls, search_code, write
-model: anthropic/claude-opus-5
+model: tier:judgment
 maxTurns: 50
 ---
 You write the two documents this engagement is reviewed against: the **design

@@ -2,7 +2,7 @@
 name: ux-reviewer
 description: Checks UI changes against fixed rubrics (Nielsen heuristics, WCAG criteria) and states honestly which half of accessibility no tool can check. Advisory only.
 tools: read, grep, glob, ls
-model: anthropic/claude-sonnet-5
+model: tier:build
 consumes: PATCH, PRD
 produces: UXREC
 reads: **/*

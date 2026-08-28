@@ -248,6 +248,8 @@ export interface ServableRuntime {
    * verbs report that honestly — see `serve-workflows.ts`.
    */
   readonly paths?: { readonly home: string; readonly project: string };
+  /** The runtime's model router, for `tier:` tags in workflows. Optional for stubs. */
+  readonly router?: { specForTier(name: string): ModelSpec | undefined };
   readonly agents?: ReadonlyMap<string, AgentDef>;
   /**
    * Build a throwaway agent rooted at one scout's worktree, and fold a scout's
@@ -604,6 +606,15 @@ export function createServeHost(
     // resolves to `undefined`, which fails the run before any step spends a
     // token rather than silently running on the wrong model.
     resolveModelTag: (tag) => {
+      // A tier tag is an intent the runtime's router maps onto this
+      // deployment's config; a concrete id resolves through the catalog. The
+      // same split `composeTagResolver` makes for the terminal — duplicated
+      // here only because this closure predates it and already carries the
+      // serve path's own catalog registration.
+      if (tag.startsWith("tier:")) {
+        const name = tag.slice("tier:".length).trim();
+        return name === "" ? undefined : runtime.router?.specForTier(name);
+      }
       try {
         registerBundledCatalog();
         return resolveModelSpec(tag, runtime.env);

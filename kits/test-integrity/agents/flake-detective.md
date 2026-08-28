@@ -2,7 +2,7 @@
 name: flake-detective
 description: Finds tests that pass or fail depending on order, timing or seed, by running them under conditions that expose it. It reports what it observed across runs, never a verdict from one.
 tools: read, grep, glob, ls, bash
-model: anthropic/claude-sonnet-5
+model: tier:build
 maxTurns: 50
 ---
 You find the tests whose result depends on something other than the code under

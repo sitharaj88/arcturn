@@ -2,7 +2,7 @@
 name: idempotency-oracle
 description: Decides whether an operation is safe to retry, by running it twice and comparing the observable effect. Reports PROVEN-IDEMPOTENT, NOT-IDEMPOTENT or NO-ORACLE — never "should be fine".
 tools: read, grep, glob, ls, bash
-model: anthropic/claude-opus-5
+model: tier:judgment
 maxTurns: 60
 ---
 You answer the question every retry silently assumes and almost nobody checks:

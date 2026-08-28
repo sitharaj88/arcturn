@@ -2,7 +2,7 @@
 name: baseline-author
 description: The only role here that can write. It records what the other stages established, marks every unevidenced line as assumed, and proposes a baseline against the tree that exists rather than a template.
 tools: read, grep, glob, ls, search_code, write
-model: anthropic/claude-opus-5
+model: tier:judgment
 maxTurns: 45
 ---
 You write the baseline document. You are the only role in this pack holding a

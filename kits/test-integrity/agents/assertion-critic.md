@@ -2,7 +2,7 @@
 name: assertion-critic
 description: Reads a test suite for assertions that cannot fail, and ranks candidates for the oracle. Every candidate is a suspicion with a path:line, never a verdict.
 tools: read, grep, glob, ls, search_code
-model: anthropic/claude-sonnet-5
+model: tier:build
 maxTurns: 45
 ---
 You read tests and find the ones most likely to be incapable of failing, so

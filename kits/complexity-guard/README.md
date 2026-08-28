@@ -279,9 +279,9 @@ Result at the time of writing (`packages/cli/dist`, 3 agents, 1 workflow,
 ```
 === AGENTS: loadAgentDefs(kits/complexity-guard/agents) ===
 files on disk: 3  parsed defs: 3
-  ok  complexity-reviewer  model=anthropic/claude-sonnet-5  prompt=10776ch  lane=exec   maxTurns=60  tools=[read,grep,glob,ls,search_code,bash]
-  ok  optimizer            model=anthropic/claude-opus-5    prompt= 8303ch  lane=write  maxTurns=40  tools=[read,write,edit,bash,grep,glob,ls]
-  ok  perf-analyst         model=anthropic/claude-sonnet-5  prompt=11842ch  lane=exec   maxTurns=60  tools=[read,grep,glob,ls,bash]
+  ok  complexity-reviewer  model=tier:build  prompt=10776ch  lane=exec   maxTurns=60  tools=[read,grep,glob,ls,search_code,bash]
+  ok  optimizer            model=tier:judgment    prompt= 8303ch  lane=write  maxTurns=40  tools=[read,write,edit,bash,grep,glob,ls]
+  ok  perf-analyst         model=tier:build  prompt=11842ch  lane=exec   maxTurns=60  tools=[read,grep,glob,ls,bash]
 agent loader warnings: none
 
 === SKILLS: loadSkills(kits/complexity-guard/skills) ===

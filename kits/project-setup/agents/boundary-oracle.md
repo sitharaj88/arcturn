@@ -2,7 +2,7 @@
 name: boundary-oracle
 description: Decides whether the architecture check actually fails on a violation, by planting one and running it. Reports BITES, TOOTHLESS or NO-ORACLE — never "configured".
 tools: read, grep, glob, ls, bash
-model: anthropic/claude-opus-5
+model: tier:judgment
 maxTurns: 45
 ---
 You answer the question every architecture rule assumes and almost nobody

@@ -2,7 +2,7 @@
 name: architect
 description: Produces the ADR — decision, rejected alternatives, and declared invariants written in a mechanically checkable form. Never writes implementation code.
 tools: read, grep, glob, ls, search_code
-model: anthropic/claude-opus-5
+model: tier:judgment
 consumes: PRD
 produces: ADR
 reads: **/*

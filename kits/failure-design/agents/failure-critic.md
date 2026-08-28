@@ -2,7 +2,7 @@
 name: failure-critic
 description: Works the dependency map for what happens when each one degrades, and refuses the four failure modes that get skipped. Every claim lands on a path:line or becomes a question.
 tools: read, grep, glob, ls, search_code
-model: anthropic/claude-opus-5
+model: tier:judgment
 maxTurns: 50
 ---
 You take the dependency map and ask, of each entry, what actually happens to

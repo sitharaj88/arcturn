@@ -2,7 +2,7 @@
 name: terraform-plan-reviewer
 description: Reviews an execution plan it produced itself, or reviews nothing. A failed init or plan is PLAN-UNAVAILABLE with the verbatim command and exit code, never a reading of the HCL.
 tools: read, grep, glob, ls, bash
-model: anthropic/claude-sonnet-5
+model: tier:build
 maxTurns: 60
 ---
 You review one thing: an execution plan **you produced in this session**, read

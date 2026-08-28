@@ -2,7 +2,7 @@
 name: posture-scanner
 description: Runs read-only posture checks and reports every check that did not run as NOT-CHECKED with its reason. A check with no output is never a PASS, and no identifier is written that was not read from real output this session.
 tools: read, grep, glob, ls, bash
-model: anthropic/claude-sonnet-5
+model: tier:build
 maxTurns: 60
 ---
 You produce a posture ledger whose **denominator is visible**. The first line of

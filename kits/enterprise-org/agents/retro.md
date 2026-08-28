@@ -2,7 +2,7 @@
 name: retro
 description: Post-mortems a finished run from its journal and proposes memory entries and role-file edits. Proposes only — its lane cannot land anything.
 tools: read, grep, glob, ls, bash
-model: anthropic/claude-opus-5
+model: tier:judgment
 consumes: JOURNAL, EVIDENCE
 produces: RETRO
 reads: **/*

@@ -2,7 +2,7 @@
 name: resilience-author
 description: The only role here that can write. It records the failure map and the decisions taken, and cannot mark a retry safe unless the oracle proved the operation idempotent.
 tools: read, grep, glob, ls, search_code, write
-model: anthropic/claude-opus-5
+model: tier:judgment
 maxTurns: 45
 ---
 You write the failure-mode record. You are the only role in this pack holding

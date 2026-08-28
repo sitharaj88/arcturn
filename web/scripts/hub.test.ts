@@ -186,6 +186,39 @@ describe("first-party disclosure matches the tree it points at", () => {
     expect(firstParty.length).toBeGreaterThan(0);
   });
 
+  it("pins no provider-specific model anywhere a kit resolves one", () => {
+    // Every role and workflow step used to name `anthropic/claude-opus-5` (or
+    // a sibling) outright, and every workflow in the hub answered 401 to
+    // anyone whose Anthropic key was missing or dead — while their configured
+    // model sat unused. Kits express *intent* now: `tier:judgment`,
+    // `tier:build`, `tier:fast`, which a deployment's `route.tiers` maps to
+    // real ids and which fall back to the user's own model otherwise. A
+    // concrete provider id in a kit is portable to exactly one billing
+    // account, so this walks every role's `model:` line and every workflow
+    // step's `[tag]` and refuses the pin.
+    const kitsRoot = join(REPO_DIR, "kits");
+    const offences: string[] = [];
+    for (const kit of readdirSync(kitsRoot)) {
+      for (const sub of ["agents", "workflows"] as const) {
+        const dir = join(kitsRoot, kit, sub);
+        if (!existsSync(dir)) continue;
+        for (const file of readdirSync(dir).filter((name) => name.endsWith(".md"))) {
+          const text = readFileSync(join(dir, file), "utf8");
+          const model = /^model:\s*(.+)$/m.exec(text)?.[1]?.trim();
+          if (model !== undefined && !model.startsWith("tier:")) {
+            offences.push(`${kit}/${sub}/${file}: model: ${model}`);
+          }
+          for (const tag of text.matchAll(/^\d+[.)]\s*\[([^\]]+)\]/gm)) {
+            if (!(tag[1] ?? "").startsWith("tier:")) {
+              offences.push(`${kit}/${sub}/${file}: [${tag[1]}]`);
+            }
+          }
+        }
+      }
+    }
+    expect(offences).toEqual([]);
+  });
+
   it("names files that exist, in every kit manifest", () => {
     // enterprise-org shipped for two releases with `architect.md` where the
     // file is `agents/architect.md`. `arcturn add` does not fall back to

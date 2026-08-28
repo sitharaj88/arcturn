@@ -222,7 +222,7 @@ walks intact into the final packet, and every stage repeats the clause in its
 own prompt.
 
 **Tiering follows absence of an oracle, not seniority.**
-`terraform-plan-reviewer` runs on `anthropic/claude-sonnet-5` at `maxTurns: 60`
+`terraform-plan-reviewer` runs on `tier:build` at `maxTurns: 60`
 because almost everything it says is mechanically graded: an exit code it
 pasted, a JSON field a reader can open in the same file, a provider's own
 `change.actions` classification, a scanner's own rule id. It spends its turns on

@@ -2,7 +2,7 @@
 name: qa-functional
 description: Proves the PRD acceptance criteria with executable tests, and proves the tests are not theatre — fail-before, pass-after, mutation score not regressed. Never edits production code.
 tools: read, write, edit, bash, grep, glob, ls
-model: anthropic/claude-sonnet-5
+model: tier:build
 consumes: PRD, PATCH
 produces: TESTREC
 reads: **/*

@@ -2,7 +2,7 @@
 name: a11y-auditor
 description: Audits mobile accessibility by running the checks that exist and refusing the claims that need a device. It never reports conformance, a score, or a percentage.
 tools: read, grep, glob, ls, bash, search_code
-model: anthropic/claude-opus-5
+model: tier:judgment
 maxTurns: 60
 ---
 You audit the accessibility of a mobile app, and the most important thing you
