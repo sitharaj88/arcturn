@@ -171,6 +171,30 @@
         "command": "arcturn.mcp.runPrompt",
         "title": "Run MCP Prompt Template",
         "category": "Arcturn"
+      },
+      {
+        "command": "arcturn.background.start",
+        "title": "Start Background Agent",
+        "category": "Arcturn",
+        "icon": "$(add)"
+      },
+      {
+        "command": "arcturn.background.cancel",
+        "title": "Cancel Background Agent",
+        "category": "Arcturn",
+        "icon": "$(stop-circle)"
+      },
+      {
+        "command": "arcturn.background.adopt",
+        "title": "Bring Into Chat",
+        "category": "Arcturn",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "arcturn.background.refresh",
+        "title": "Refresh Background Agents",
+        "category": "Arcturn",
+        "icon": "$(refresh)"
       }
     ],
     "keybindings": [
@@ -263,6 +287,22 @@
         {
           "command": "arcturn.mcp.runPrompt",
           "when": "config.arcturn.serve.enabled"
+        },
+        {
+          "command": "arcturn.background.start",
+          "when": "config.arcturn.serve.enabled"
+        },
+        {
+          "command": "arcturn.background.refresh",
+          "when": "config.arcturn.serve.enabled"
+        },
+        {
+          "command": "arcturn.background.cancel",
+          "when": "false"
+        },
+        {
+          "command": "arcturn.background.adopt",
+          "when": "false"
         }
       ],
       "editor/context": [
@@ -289,6 +329,16 @@
           "command": "arcturn.hub.refresh",
           "when": "view == arcturn.hub",
           "group": "navigation"
+        },
+        {
+          "command": "arcturn.background.start",
+          "when": "view == arcturn.background",
+          "group": "navigation"
+        },
+        {
+          "command": "arcturn.background.refresh",
+          "when": "view == arcturn.background",
+          "group": "navigation"
         }
       ],
       "view/item/context": [
@@ -300,6 +350,16 @@
         {
           "command": "arcturn.hub.openOnWeb",
           "when": "view == arcturn.hub && viewItem =~ /^arcturn\\.hub\\.kit\\./",
+          "group": "inline"
+        },
+        {
+          "command": "arcturn.background.cancel",
+          "when": "view == arcturn.background && viewItem == arcturn.background.live",
+          "group": "inline"
+        },
+        {
+          "command": "arcturn.background.adopt",
+          "when": "view == arcturn.background && viewItem == arcturn.background.adoptable",
           "group": "inline"
         }
       ]
@@ -325,6 +385,12 @@
           "id": "arcturn.hub",
           "name": "Hub",
           "icon": "$(package)",
+          "when": "config.arcturn.serve.enabled"
+        },
+        {
+          "id": "arcturn.background",
+          "name": "Background",
+          "icon": "$(server-process)",
           "when": "config.arcturn.serve.enabled"
         }
       ]

@@ -40,18 +40,29 @@
  *
  * ## One engine, one records directory
  *
- * Worth stating plainly. A background-agent manager corrects any record still
- * `running` to `interrupted` when it loads the directory, on the reasoning that
- * a fresh manager is a fresh process and a truly live agent would have been
- * reported by the manager that started it. That reasoning is a *process*
+ * Worth stating plainly, and the note here is now a *record of a fix* rather
+ * than a warning. A background-agent manager corrects any record still
+ * `running` to `interrupted` when it loads the directory, on the reasoning
+ * that a fresh manager is a fresh process. That reasoning is a *process*
  * assumption, and `arcturn serve` is another process: an engine serving a
- * workspace where a terminal is also running `/bg` adopts the same directory
- * and will report that terminal's live agent as `interrupted`. The record
- * repairs itself when the owning manager next persists it, and the terminal's
- * own view is never wrong — but a panel can show a stale `interrupted` in the
- * window between. Fixing it properly needs an owner lease in the record, which
- * is a change to the manager's durability model rather than to this wire. See
- * `packages/server/NOTES.md` for the same note beside the decisions it explains.
+ * workspace where a terminal is also running `/bg` adopts the same directory,
+ * and used to report that terminal's live agent as `interrupted`.
+ *
+ * `@arcturn/cli`'s `BackgroundAgentManager` now carries an owner lease, in two
+ * halves that answer two different failures. `ownerPid` names the process that
+ * started an agent, so a second manager leaves a record alone while its owner
+ * is alive. `ownerHeartbeatAt` is renewed while the agent actually runs, so a
+ * record survives neither an owner that crashed nor — the case a pid alone
+ * cannot see — an owner whose pid number was reused by something unrelated.
+ * A record with no heartbeat at all was written before the lease existed and
+ * falls back to the pid check, because declaring an older build's live agent
+ * dead is the exact failure the whole mechanism exists to prevent.
+ *
+ * What that leaves is a bounded window rather than an open bug: an agent whose
+ * owner died is reported `running` until its lease goes stale, which is a
+ * minute. A panel showing "running" for a minute after a crash is a far better
+ * answer than one showing "interrupted" for a live agent, and it is the trade
+ * this design makes on purpose.
  */
 
 import { Buffer } from "node:buffer";

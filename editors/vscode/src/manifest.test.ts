@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { BACKGROUND_COMMANDS, BACKGROUND_VIEW_ID } from "./background/view.js";
 import type { CliProvisioner } from "./cli.js";
 import { activateWith } from "./extension.js";
 import { HUB_COMMANDS, HUB_VIEW_ID } from "./hub/view.js";
@@ -91,6 +92,7 @@ describe("the manifest and the code agree about commands", () => {
       ...Object.values(HUB_COMMANDS),
       ...Object.values(SCOUT_COMMANDS),
       ...Object.values(MCP_COMMANDS),
+      ...Object.values(BACKGROUND_COMMANDS),
     ]) {
       expect(contributed).toContain(id);
     }
@@ -107,6 +109,7 @@ describe("the manifest and the code agree about commands", () => {
       ...Object.values(HUB_COMMANDS),
       ...Object.values(SCOUT_COMMANDS),
       ...Object.values(MCP_COMMANDS),
+      ...Object.values(BACKGROUND_COMMANDS),
     ]);
     expect([...contributed].sort()).toEqual([...live].sort());
   });
@@ -142,16 +145,24 @@ describe("the manifest and the code agree about commands", () => {
     //
     // `toEqual` covers both directions at once: the seam's id must be here,
     // and nothing that is not the seam's id may be.
-    expect(viewIds).toEqual([SIDEBAR_VIEW_ID, HUB_VIEW_ID]);
+    expect(viewIds).toEqual([SIDEBAR_VIEW_ID, HUB_VIEW_ID, BACKGROUND_VIEW_ID]);
   });
 
   it("hides exactly the commands that cannot be invoked without arguments", async () => {
     // A palette entry that needs a node it can never be given is an entry that
     // can only fail. `fixDiagnostic` needs a diagnostic; the hub's install and
-    // open-on-web need a kit row.
+    // open-on-web need a kit row; background cancel and adopt need an agent
+    // row. Their siblings that *can* stand alone — start, refresh — are gated
+    // on the setting instead, not hidden.
     const hidden = palette.filter((item) => item.when === "false").map((item) => item.command);
     expect(hidden.sort()).toEqual(
-      ["arcturn.fixDiagnostic", HUB_COMMANDS.install, HUB_COMMANDS.openOnWeb].sort(),
+      [
+        "arcturn.fixDiagnostic",
+        HUB_COMMANDS.install,
+        HUB_COMMANDS.openOnWeb,
+        BACKGROUND_COMMANDS.cancel,
+        BACKGROUND_COMMANDS.adopt,
+      ].sort(),
     );
   });
 });

@@ -140,6 +140,16 @@ export interface BackgroundAgentManagerOptions {
   isProcessAlive?: (pid: number) => boolean;
   /** This process's own pid, stamped on the agents it starts. For tests. */
   ownerPid?: number;
+  /**
+   * How often to renew the lease on running records. Defaults to
+   * {@link HEARTBEAT_INTERVAL_MS}.
+   *
+   * Injectable for the reason `SessionHostOptions.sessionHistoryLimits` is: a
+   * test proving the stamp actually moves should not have to wait fifteen
+   * seconds to see it, and one that reached in and called the private beat
+   * would be asserting that a method exists rather than that a lease is kept.
+   */
+  heartbeatIntervalMs?: number;
 }
 
 /** The system prompt handed to a background agent when none is configured. */
@@ -183,7 +193,43 @@ interface StoredRecord {
    * about: a process that really did die.
    */
   ownerPid?: number;
+  /**
+   * When the owning process last confirmed this agent was still going, as an
+   * epoch millisecond stamp.
+   *
+   * {@link StoredRecord.ownerPid} alone answers "is a process with that number
+   * alive", which is not quite the question. An operating system reuses pids:
+   * a manager that died can have its number taken by something unrelated, and
+   * then the liveness check says yes forever and the record stays `running`
+   * for good. A heartbeat is the missing half — a lease the owner has to keep
+   * renewing, so a record whose owner stopped renewing is recoverable no
+   * matter what happened to the number.
+   *
+   * Absent means "written before heartbeats existed", and such a record falls
+   * back to the pid check alone. Treating absent as stale would declare a live
+   * agent from an older build dead, which is the exact failure this whole
+   * mechanism exists to prevent.
+   */
+  ownerHeartbeatAt?: number;
 }
+
+/**
+ * How often an owning manager renews the lease on its running records.
+ *
+ * Short enough that {@link LEASE_STALE_MS} is not a long wait after a crash,
+ * long enough that a manager with several agents is not rewriting files
+ * continuously.
+ */
+const HEARTBEAT_INTERVAL_MS = 15_000;
+
+/**
+ * How old a heartbeat may get before the owner is presumed gone.
+ *
+ * Four missed beats. Generous on purpose: the cost of declaring a live agent
+ * dead is a user told their work failed when it did not, and the cost of
+ * waiting is a minute before a genuinely crashed run is marked interrupted.
+ */
+const LEASE_STALE_MS = 60_000;
 
 /** A background agent actually in flight (constructed, mid-`prompt()`). */
 interface ActiveRun {
@@ -281,6 +327,7 @@ export class BackgroundAgentManager {
   readonly #now: () => number;
   readonly #isProcessAlive: (pid: number) => boolean;
   readonly #ownerPid: number;
+  readonly #heartbeat: ReturnType<typeof setInterval>;
 
   #llm: LLMClient;
   #model: ModelSpec;
@@ -311,6 +358,27 @@ export class BackgroundAgentManager {
     this.#ownerPid = options.ownerPid ?? process.pid;
     mkdirSync(this.#recordsDir, { recursive: true });
     this.#load();
+    // Started once and left running. `unref` so a manager holding a lease is
+    // never the reason a process refuses to exit; `setInterval` returns a
+    // Node timer here, and the optional call keeps this working under a test
+    // clock that returns a plain number.
+    this.#heartbeat = setInterval(
+      () => this.#beat(),
+      options.heartbeatIntervalMs ?? HEARTBEAT_INTERVAL_MS,
+    );
+    this.#heartbeat.unref?.();
+  }
+
+  /**
+   * Stop renewing the lease.
+   *
+   * A manager that is disposed while agents are still running deliberately
+   * leaves their records `running` with a stale heartbeat: that is exactly the
+   * state the next manager should find and correct, and writing `interrupted`
+   * here would be this process deciding on behalf of runs it is abandoning.
+   */
+  dispose(): void {
+    clearInterval(this.#heartbeat);
   }
 
   /**
@@ -587,6 +655,41 @@ export class BackgroundAgentManager {
     }
   }
 
+  /**
+   * Whether another process is still holding this record's lease.
+   *
+   * Two conditions, and both have to hold. The pid must be alive, which is the
+   * cheap check and the one that catches an ordinary crash. And the heartbeat
+   * must be recent, which is the check that catches the case the pid cannot:
+   * an owner that died and had its number reused, or one that is alive but
+   * wedged. A record from before heartbeats existed has no stamp, and falls
+   * back to the pid alone rather than being declared stale — see
+   * {@link StoredRecord.ownerHeartbeatAt}.
+   */
+  #ownerStillHolds(record: StoredRecord): boolean {
+    if (record.ownerPid === undefined) return false;
+    if (!this.#isProcessAlive(record.ownerPid)) return false;
+    if (record.ownerHeartbeatAt === undefined) return true;
+    return this.#now() - record.ownerHeartbeatAt < LEASE_STALE_MS;
+  }
+
+  /**
+   * Renew the lease on every record this process is actually running.
+   *
+   * Only `running` records this manager owns are touched, so a heartbeat can
+   * never revive somebody else's record or resurrect a finished one. The timer
+   * is `unref`ed: a heartbeat must not be the reason a process stays alive.
+   */
+  #beat(): void {
+    const now = this.#now();
+    for (const id of this.#active.keys()) {
+      const record = this.#records.get(id);
+      if (record === undefined || record.status !== "running") continue;
+      record.ownerHeartbeatAt = now;
+      this.#persist(record);
+    }
+  }
+
   #persist(record: StoredRecord): void {
     const file = join(this.#recordsDir, `${record.id}.json`);
     const tmp = `${file}.tmp`;
@@ -613,10 +716,7 @@ export class BackgroundAgentManager {
       // launch — a record still `"running"` here belongs to a process that
       // is gone, UNLESS its owner is still alive, which is the ordinary shape
       // of `arcturn serve` running beside a terminal over one `~/.arcturn`.
-      if (
-        record.status === "running" &&
-        !(record.ownerPid !== undefined && this.#isProcessAlive(record.ownerPid))
-      ) {
+      if (record.status === "running" && !this.#ownerStillHolds(record)) {
         record.status = "interrupted";
         record.endedAt ??= this.#now();
         record.error ??= "The process running this background agent exited before it finished.";

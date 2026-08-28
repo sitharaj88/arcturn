@@ -20,6 +20,7 @@
 
 import { spawn as nodeSpawn } from "node:child_process";
 import * as vscode from "vscode";
+import { activateBackground } from "../background/view.js";
 import { activateHub } from "../hub/view.js";
 import { activateMcpCatalog } from "../mcp/view.js";
 import { ARCTURN_EXTENSION_ID, authorizeMcpServer, type McpAuthEditor } from "../mcp-auth.js";
@@ -2684,6 +2685,42 @@ export function activateSidebar(
         });
         terminal.show();
         terminal.sendText(command);
+      },
+    }),
+  );
+
+  // ---- Background agents ---------------------------------------------------
+  // Four verbs, capped by the engine and unreachable from any editor for two
+  // releases. Fire-and-forget only pays off if you find out it finished, so
+  // this is a tree that polls while something runs, stops when nothing does,
+  // and offers the one action worth offering when one lands: fold its findings
+  // back into the conversation you were having.
+  disposables.push(
+    activateBackground(context, {
+      list: async () => {
+        // Never starts the engine. `withEngineResult` would, and this runs at
+        // activation — which is the one moment the extension is required to
+        // cost nothing. An engine that is not up yet cannot say what agents
+        // exist, and `undefined` is that answer; the tree shows it as "could
+        // not ask" rather than as "there are none".
+        if (engine?.status !== "ready") return undefined;
+        return engine.backgroundAgents();
+      },
+      start: async (task) => {
+        const session = ensureEngine();
+        await session.start();
+        return session.startBackgroundAgent(task);
+      },
+      cancel: async (id) => {
+        const session = ensureEngine();
+        return session.cancelBackgroundAgent(id);
+      },
+      adopt: async (id) => {
+        const session = ensureEngine();
+        await session.adoptBackgroundAgent(id);
+        // Adopting puts the findings into the open conversation, so the place
+        // to look is the chat rather than the tree it came from.
+        await provider.reveal();
       },
     }),
   );

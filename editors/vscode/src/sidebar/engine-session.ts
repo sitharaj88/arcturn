@@ -20,6 +20,7 @@
 import { buildServeArgs, cliInvocation, type ResolvedCliLike } from "../serve/args.js";
 import { connectToServe, type SocketFactory } from "../serve/connect.js";
 import type {
+  BackgroundAgentSummary,
   CommandDescriptor,
   McpPromptList,
   McpPromptRendering,
@@ -166,6 +167,17 @@ export interface EngineSession {
     name: string,
     args?: Record<string, string>,
   ): Promise<McpPromptRendering>;
+  /**
+   * Every background agent the engine knows about, or `undefined` when it is
+   * older than the verb.
+   */
+  backgroundAgents(): Promise<BackgroundAgentSummary[] | undefined>;
+  /** Start one. The engine decides its caps; there is nothing to pass but a task. */
+  startBackgroundAgent(task: string): Promise<{ id: string }>;
+  /** Stop one. `false` when it had already finished. */
+  cancelBackgroundAgent(id: string): Promise<boolean>;
+  /** Fold an agent's findings into the open session. */
+  adoptBackgroundAgent(id: string): Promise<void>;
   /**
    * Start a scout run: approaches raced in throwaway worktrees. `undefined`
    * when the engine is older than the verb.
@@ -529,6 +541,25 @@ export function createEngineSession(options: EngineSessionOptions): EngineSessio
       args?: Record<string, string>,
     ): Promise<McpPromptRendering> {
       return requireClient().mcpGetPrompt(server, name, args);
+    },
+    async backgroundAgents(): Promise<BackgroundAgentSummary[] | undefined> {
+      return (await requireClient().backgroundAgents())?.agents;
+    },
+    async startBackgroundAgent(task: string): Promise<{ id: string }> {
+      return requireClient().startBackgroundAgent(task);
+    },
+    async cancelBackgroundAgent(id: string): Promise<boolean> {
+      return (await requireClient().cancelBackgroundAgent(id)).accepted;
+    },
+    async adoptBackgroundAgent(id: string): Promise<void> {
+      // Session-scoped, unlike the other three: adopting is what puts an
+      // agent's findings into *this* conversation, so it needs the session
+      // that is open rather than the engine at large.
+      const sessionId = controller?.sessionId;
+      if (sessionId === undefined) {
+        throw new Error("no Arcturn session is open to bring the agent into");
+      }
+      await requireClient().adoptBackgroundAgent(sessionId, id);
     },
     async startScout(approaches: readonly { name: string; task: string }[]) {
       return requireClient().startScout(approaches);

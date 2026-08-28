@@ -38,6 +38,7 @@ export type {
   ApplyChangeFailure,
   ApplyChangesResult,
   AssistantMessage,
+  BackgroundAgentSummary,
   CheckpointEntry,
   CheckpointList,
   CommandDescriptor,

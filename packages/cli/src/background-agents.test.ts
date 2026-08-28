@@ -40,9 +40,9 @@ const ZERO_USAGE: Usage = {
 };
 
 /** Poll until `check()` is true, or throw after `timeoutMs`. */
-async function waitFor(check: () => boolean, timeoutMs = 5_000): Promise<void> {
+async function waitFor(check: () => boolean | Promise<boolean>, timeoutMs = 5_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
-  while (!check()) {
+  while (!(await check())) {
     if (Date.now() > deadline) throw new Error("timed out waiting for condition");
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
@@ -392,6 +392,120 @@ describe("BackgroundAgentManager lifecycle", () => {
       cwd: "/work",
     });
     expect(manager.get("bg-old")?.status).toBe("interrupted");
+  });
+
+  it("recovers a record whose owner pid was reused, which liveness alone cannot", async () => {
+    // The hole `ownerPid` left open. An operating system reuses pid numbers,
+    // so a manager that died can have its number taken by something unrelated
+    // — and then "is that pid alive?" answers yes forever and the record stays
+    // `running` for good, with no way for anyone to clear it.
+    //
+    // The lease closes it: the owner has to keep renewing a heartbeat, and a
+    // stamp older than the stale window means the owner is gone whatever the
+    // pid says. Modelled here as a record naming *this* very much alive
+    // process with an ancient heartbeat, which is exactly what a reused pid
+    // looks like from the outside.
+    const dir = await scratchDir();
+    await mkdir(join(dir, "records"), { recursive: true });
+    await writeFile(
+      join(dir, "records", "bg-reused.json"),
+      JSON.stringify({
+        id: "bg-reused",
+        sessionId: "sess-reused",
+        task: "owned by a pid somebody else now has",
+        modelId: TEST_MODEL.id,
+        status: "running",
+        createdAt: Date.now() - 600_000,
+        usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+        costUsd: 0,
+        ownerPid: process.pid,
+        ownerHeartbeatAt: Date.now() - 600_000,
+      }),
+      "utf8",
+    );
+
+    const manager = new BackgroundAgentManager({
+      dir,
+      llm: fakeLLM([]),
+      model: TEST_MODEL,
+      tools: [],
+      cwd: "/work",
+    });
+    manager.dispose();
+
+    expect(manager.get("bg-reused")?.status).toBe("interrupted");
+  });
+
+  it("leaves a record alone while its owner is still renewing the lease", async () => {
+    // The other half, and the one that matters more: a *fresh* heartbeat from
+    // a live pid must be left running. Getting this wrong turns the fix into
+    // the bug it was meant to prevent.
+    const dir = await scratchDir();
+    await mkdir(join(dir, "records"), { recursive: true });
+    await writeFile(
+      join(dir, "records", "bg-live.json"),
+      JSON.stringify({
+        id: "bg-live",
+        sessionId: "sess-live",
+        task: "genuinely still going",
+        modelId: TEST_MODEL.id,
+        status: "running",
+        createdAt: Date.now() - 30_000,
+        usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+        costUsd: 0,
+        ownerPid: process.pid,
+        ownerHeartbeatAt: Date.now(),
+      }),
+      "utf8",
+    );
+
+    const manager = new BackgroundAgentManager({
+      dir,
+      llm: fakeLLM([]),
+      model: TEST_MODEL,
+      tools: [],
+      cwd: "/work",
+    });
+    manager.dispose();
+
+    expect(manager.get("bg-live")?.status).toBe("running");
+  });
+
+  it("renews the lease on disk while an agent is actually running", async () => {
+    // A lease nobody renews is a lease that expires under a live agent, which
+    // would make the stale check *cause* the failure it exists to detect. The
+    // claim is therefore about the file on disk, not about a method existing:
+    // a running record's stamp has to move forward on its own.
+    const dir = await scratchDir();
+    const manual = manualLLM();
+    const manager = new BackgroundAgentManager({
+      dir,
+      llm: manual,
+      model: TEST_MODEL,
+      tools: [],
+      cwd: "/work",
+      heartbeatIntervalMs: 10,
+    });
+    const { id } = manager.start({ task: "long one" });
+    await waitFor(() => manual.requests.length === 1);
+
+    const stampOf = async (): Promise<number | undefined> =>
+      (
+        JSON.parse(await readFile(join(dir, "records", `${id}.json`), "utf8")) as {
+          ownerHeartbeatAt?: number;
+        }
+      ).ownerHeartbeatAt;
+
+    const first = await stampOf();
+    await waitFor(async () => {
+      const now = await stampOf();
+      return now !== undefined && (first === undefined || now > first);
+    });
+
+    const renewed = await stampOf();
+    expect(renewed).toBeDefined();
+    expect(renewed ?? 0).toBeGreaterThan(first ?? 0);
+    manager.dispose();
   });
 
   it("leaves an agent owned by a LIVE process running, and never tells a caller it failed", async () => {

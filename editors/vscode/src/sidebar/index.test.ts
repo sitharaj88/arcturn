@@ -269,6 +269,7 @@ vi.mock("vscode", () => {
   };
 });
 
+import { BACKGROUND_COMMANDS, BACKGROUND_VIEW_ID } from "../background/view.js";
 import { HUB_COMMANDS, HUB_VIEW_ID } from "../hub/view.js";
 import { MCP_COMMANDS } from "../mcp/view.js";
 import { SCOUT_COMMANDS } from "../scout/view.js";
@@ -390,16 +391,19 @@ describe("activateSidebar", () => {
         ...Object.values(HUB_COMMANDS),
         ...Object.values(SCOUT_COMMANDS),
         ...Object.values(MCP_COMMANDS),
+        ...Object.values(BACKGROUND_COMMANDS),
       ].sort(),
     );
   });
 
-  it("opens the hub tree beside the chat, and asks the engine for nothing yet", () => {
+  it("opens the hub and background trees beside the chat", () => {
     activate();
-    // The catalog is bundled, so the tree draws with no engine and no socket.
-    // Activation spawning nothing is asserted elsewhere; this is the narrower
-    // claim that adding a second view did not change it.
-    expect(ledger.treeViews.map((view) => view.id)).toEqual([HUB_VIEW_ID]);
+    // The hub's catalog is bundled, so its tree draws with no engine and no
+    // socket. The background tree asks the engine for a listing, which fails
+    // harmlessly when nothing is connected. Activation spawning nothing is
+    // asserted elsewhere; this is the narrower claim that adding views did not
+    // change it.
+    expect(ledger.treeViews.map((view) => view.id)).toEqual([HUB_VIEW_ID, BACKGROUND_VIEW_ID]);
   });
 
   it("puts the cost item in the status bar, wired to the breakdown command", () => {

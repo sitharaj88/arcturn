@@ -1020,7 +1020,10 @@ is the absence of a parameter, and `delegation-wire.test.ts` proves it on the fi
    on the (correct, for a terminal) assumption that a fresh manager is a fresh process.
    `arcturn serve` breaks that assumption, so a "read-only" `teamStatus` verb would mark
    another live process's team dead on its first call. There is no read that is actually a
-   read until a record carries an owner lease.
+   read until a record carries an owner lease. **Fixed** in `ecb8836` and extended
+   here: `ownerPid` plus a renewed `ownerHeartbeatAt` in `BackgroundAgentManager`.
+   A second manager leaves a live owner's record alone, and a record whose owner
+   crashed — or whose pid was reused — goes stale within a minute.
 2. `merge` and `discard` write to the user's checkout (`git apply`; deleting the patch that
    is the only copy of a member's work) and neither refuses mid-run. Every write verb here
    answers `sessionBusy` rather than racing; there is nothing to answer with until the
@@ -1039,7 +1042,9 @@ the same process-assumption reason `TeamManager` does. `arcturn serve` construct
 startup is therefore a third process adopting the directory: a terminal's live `/bg` can be
 reported `interrupted` until its owning manager next persists it. It self-heals, the
 terminal's own view is never wrong, and it is not new — two terminals already do it — but
-`arcturn serve` makes it reachable more often. The fix is an owner lease in the record,
+`arcturn serve` makes it reachable more often. The fix was an owner lease in the record,
+and it has since been built: see `background-agents.ts`'s `ownerPid` and
+`ownerHeartbeatAt`. What follows describes the problem as it stood.
 in `@arcturn/cli`, not here.
 
 ## Why an unknown background-agent id is an empty list rather than a refusal

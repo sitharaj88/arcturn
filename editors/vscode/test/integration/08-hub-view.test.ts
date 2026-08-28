@@ -17,7 +17,7 @@ import * as assert from "node:assert/strict";
 import * as vscode from "vscode";
 import { allCommands, describeSpawns, manifest, spawnRecords } from "./helpers.js";
 
-describe("the hub tree", () => {
+describe("the sidebar's trees", () => {
   it("is contributed as a view the workbench knows by id", async () => {
     const views = manifest().contributes.views.arcturn ?? [];
     assert.ok(
@@ -47,5 +47,41 @@ describe("the hub tree", () => {
 
     const spawned = spawnRecords().slice(before);
     assert.deepEqual(spawned, [], `browsing the hub spawned something: ${describeSpawns()}`);
+  });
+
+  it("contributes the background view and its four commands", async () => {
+    const views = manifest().contributes.views.arcturn ?? [];
+    assert.ok(
+      views.some((view) => view.id === "arcturn.background"),
+      "the manifest does not contribute arcturn.background",
+    );
+    const commands = await allCommands();
+    assert.ok(commands.includes("arcturn.background.focus"), "the workbench has no focus command");
+    for (const id of [
+      "arcturn.background.start",
+      "arcturn.background.cancel",
+      "arcturn.background.adopt",
+      "arcturn.background.refresh",
+    ]) {
+      assert.ok(commands.includes(id), `${id} is not registered`);
+    }
+  });
+
+  it("lists background agents without starting an engine to ask", async () => {
+    // The regression this exists to prevent, and one only a real workbench
+    // could have shown: the background tree refreshes at activation, and a
+    // refresh that reached for the engine would spend the activation budget
+    // `01-activation` asserts is unspent. `undefined` — "I could not ask" — is
+    // the right answer before anything is connected.
+    const before = spawnRecords().length;
+    await vscode.commands.executeCommand("arcturn.background.focus");
+    await vscode.commands.executeCommand("arcturn.background.refresh");
+
+    const spawned = spawnRecords().slice(before);
+    assert.deepEqual(
+      spawned,
+      [],
+      `listing background agents spawned something: ${describeSpawns()}`,
+    );
   });
 });
