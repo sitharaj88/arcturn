@@ -59,16 +59,6 @@ export interface ScoutRunRecord {
   readonly error?: string;
 }
 
-/** How much a finished run cost, or `undefined` when nothing was priced. */
-export function scoutRunCost(record: ScoutRunRecord): number | undefined {
-  // No `?? 0` per result: a scout on an unpriced model has an *unknown* cost,
-  // and summing it as zero would report a run as cheaper than it was. One
-  // unknown makes the total unknown, which is what `/cost` already does.
-  const priced = record.results.filter((result) => result.costUsd !== undefined);
-  if (priced.length === 0) return undefined;
-  return priced.reduce((total, result) => total + (result.costUsd ?? 0), 0);
-}
-
 /** What the registry needs in order to run anything. */
 export interface ScoutRegistryOptions {
   /**

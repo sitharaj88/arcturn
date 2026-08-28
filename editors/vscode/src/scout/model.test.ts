@@ -14,7 +14,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { parseApproaches, summarise } from "./patch.js";
+import { parseApproaches, runCostLabel, summarise } from "./patch.js";
 
 const DIFF = `diff --git a/src/store.ts b/src/store.ts
 new file mode 100644
@@ -109,5 +109,33 @@ describe("turning results into a comparison", () => {
 
   it("carries the status through, because timeout and finished read differently", () => {
     expect(summarise(results).map((entry) => entry.status)).toEqual(["finished", "timeout"]);
+  });
+});
+
+describe("what a run cost", () => {
+  const priced = (costUsd?: number) => ({
+    name: "a",
+    task: "t",
+    status: "finished",
+    finalText: "",
+    durationMs: 1,
+    files: [],
+    ...(costUsd === undefined ? {} : { costUsd }),
+  });
+
+  it("adds up the approaches when every one was priced", () => {
+    expect(runCostLabel([priced(0.25), priced(0.5)])).toBe(", $0.75");
+  });
+
+  it("says nothing rather than under-reporting when one was not", () => {
+    // A scout on an unpriced model has an unknown cost. Summing it as zero
+    // would show a run as cheaper than it was, and scouts spend outside the
+    // main agent's stream — so this is the one figure a reader has no other
+    // way to check.
+    expect(runCostLabel([priced(0.25), priced(undefined)])).toBe("");
+  });
+
+  it("says nothing for a run with no approaches", () => {
+    expect(runCostLabel([])).toBe("");
   });
 });

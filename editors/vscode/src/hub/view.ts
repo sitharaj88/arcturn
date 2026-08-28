@@ -98,8 +98,8 @@ class HubTreeProvider implements vscode.TreeDataProvider<HubNode> {
   }
 }
 
-/** Build the `TreeItem` for one node. Exported for the integration tests. */
-export function treeItemFor(node: HubNode): vscode.TreeItem {
+/** Build the `TreeItem` for one node. */
+function treeItemFor(node: HubNode): vscode.TreeItem {
   const expanded = vscode.TreeItemCollapsibleState.Expanded;
   const collapsed = vscode.TreeItemCollapsibleState.Collapsed;
   const leaf = vscode.TreeItemCollapsibleState.None;

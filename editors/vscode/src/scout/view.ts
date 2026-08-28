@@ -28,7 +28,9 @@ import {
   approachSummaryLine,
   type PatchFile,
   parseApproaches,
+  runCostLabel,
   type ScoutApproachSummary,
+  scoutHandoff,
   summarise,
   touchedPaths,
 } from "./patch.js";
@@ -106,11 +108,17 @@ class ScoutDocuments implements vscode.TextDocumentContentProvider {
     return uri;
   }
 
-  /** Forget one run's documents. */
-  forget(runId: string): void {
+  /**
+   * Drop every document except one run's.
+   *
+   * Called as a comparison opens. Without it a session that scouts three times
+   * holds every file of every approach of all three, and the earlier ones are
+   * behind closed editors nobody is going to reopen.
+   */
+  keepOnly(runId: string): void {
     const prefix = `${SCOUT_SCHEME}:/${encodeURIComponent(runId)}/`;
     for (const key of [...this.#documents.keys()]) {
-      if (key.startsWith(prefix)) this.#documents.delete(key);
+      if (!key.startsWith(prefix)) this.#documents.delete(key);
     }
   }
 
@@ -224,6 +232,7 @@ async function openComparison(
     return;
   }
 
+  documents.keepOnly(runId);
   const paths = touchedPaths(approaches);
   const picked = await vscode.window.showQuickPick(
     approaches.map((approach) => ({
@@ -233,7 +242,7 @@ async function openComparison(
       approach,
     })),
     {
-      title: `Scout results — ${paths.length} ${paths.length === 1 ? "file" : "files"} touched across ${approaches.length} approaches`,
+      title: `Scout results — ${paths.length} ${paths.length === 1 ? "file" : "files"} across ${approaches.length} approaches${runCostLabel(approaches)}`,
       placeHolder: "Which approach do you want to read?",
     },
   );
@@ -316,21 +325,3 @@ function labelOf(uri: vscode.Uri): string {
 
 /** Re-exported so the tests can build summaries without the editor. */
 export type { PatchFile, ScoutApproachSummary };
-
-/**
- * The prompt that hands a winning approach to the agent.
- *
- * The task and the findings, and an explicit note that the patch is not
- * attached — otherwise a model reading "apply this approach" may go looking
- * for a diff it was never given and invent one.
- */
-export function scoutHandoff(approach: ScoutApproachSummary): string {
-  const files = approach.files.map((file) => `- ${file.path} (${file.change})`).join("\n");
-  return (
-    `A scout explored this approach in a throwaway worktree, which has since been deleted. ` +
-    `Apply it here, against the working tree as it is now.\n\n` +
-    `**${approach.name}** — ${approach.task}\n\n` +
-    `What the scout reported:\n\n${approach.finalText}\n\n` +
-    (files === "" ? "It changed no files." : `Files it touched:\n${files}`)
-  );
-}

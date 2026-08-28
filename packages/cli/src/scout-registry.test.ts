@@ -16,7 +16,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { ScoutRegistry, scoutRunCost } from "./scout-registry.js";
+import { ScoutRegistry } from "./scout-registry.js";
 import type { ScoutApproach, ScoutReport, ScoutResult } from "./scouts.js";
 
 const TWO: ScoutApproach[] = [
@@ -186,34 +186,6 @@ describe("cancelling", () => {
     harness.finish();
     await settled();
     expect(harness.registry.cancel(id)).toBe(false);
-  });
-});
-
-describe("what a run cost", () => {
-  it("adds up the priced results", () => {
-    const run = {
-      id: "r",
-      state: "finished",
-      approaches: TWO,
-      results: [result({ costUsd: 0.25 }), result({ costUsd: 0.5 })],
-      timedOut: false,
-      warnings: [],
-    };
-    expect(scoutRunCost(run)).toBeCloseTo(0.75);
-  });
-
-  it("says unknown rather than zero when nothing was priced", () => {
-    // A scout on an unpriced model has an unknown cost, and summing it as zero
-    // would report a run as cheaper than it was — the rule `/cost` keeps.
-    const run = {
-      id: "r",
-      state: "finished",
-      approaches: TWO,
-      results: [result(), result()],
-      timedOut: false,
-      warnings: [],
-    };
-    expect(scoutRunCost(run)).toBeUndefined();
   });
 });
 

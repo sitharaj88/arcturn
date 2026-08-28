@@ -312,3 +312,36 @@ export function summarise(results: ScoutRunResults): ScoutApproachSummary[] {
     files: result.diff === undefined ? [] : parseUnifiedDiff(result.diff),
   }));
 }
+
+/**
+ * What the run cost, when every approach was priced.
+ *
+ * Deliberately silent when any approach was not: a scout on an unpriced model
+ * has an *unknown* cost, and summing it as zero would report a run as cheaper
+ * than it was. Scouts spend outside the main agent's stream, so under-reporting
+ * here is the one number a reader would have no other way to check.
+ */
+export function runCostLabel(approaches: readonly ScoutApproachSummary[]): string {
+  if (approaches.length === 0) return "";
+  if (approaches.some((approach) => approach.costUsd === undefined)) return "";
+  const total = approaches.reduce((sum, approach) => sum + (approach.costUsd ?? 0), 0);
+  return `, $${total.toFixed(2)}`;
+}
+
+/**
+ * The prompt that hands a winning approach to the agent.
+ *
+ * The task and the findings, and an explicit note that the patch is not
+ * attached — otherwise a model reading "apply this approach" may go looking
+ * for a diff it was never given and invent one.
+ */
+export function scoutHandoff(approach: ScoutApproachSummary): string {
+  const files = approach.files.map((file) => `- ${file.path} (${file.change})`).join("\n");
+  return (
+    `A scout explored this approach in a throwaway worktree, which has since been deleted. ` +
+    `Apply it here, against the working tree as it is now.\n\n` +
+    `**${approach.name}** — ${approach.task}\n\n` +
+    `What the scout reported:\n\n${approach.finalText}\n\n` +
+    (files === "" ? "It changed no files." : `Files it touched:\n${files}`)
+  );
+}
