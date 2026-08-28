@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ModelCatalogEntry } from "../serve/engine.js";
-import { chooseSendVerb, escapeCodicons, modelPickItems } from "./picker.js";
+import { chooseSendVerb, escapeCodicons, modelPersistScope, modelPickItems } from "./picker.js";
 
 describe("chooseSendVerb", () => {
   it("prompts when idle and steers mid-run", () => {
@@ -228,5 +228,22 @@ describe("engine-supplied strings reaching quick-pick fields", () => {
 
   it("keeps the extension's own codicons live — those are not engine input", () => {
     expect(modelPickItems({ observed: [] }).at(-1)?.label).toBe("$(edit) Enter a model id\u2026");
+  });
+});
+
+describe("where a model pick is saved", () => {
+  it("goes to the user's settings when the workspace has no opinion", () => {
+    expect(modelPersistScope(undefined)).toBe("global");
+    expect(modelPersistScope({})).toBe("global");
+    expect(modelPersistScope({ workspaceValue: undefined })).toBe("global");
+  });
+
+  it("goes to the workspace when the workspace already overrides the value", () => {
+    // Writing Global under a workspace override leaves the override winning:
+    // the user picks, reloads, and sees the old model — the exact complaint
+    // persistence exists to fix.
+    expect(modelPersistScope({ workspaceValue: "zai-api/glm-5.2" })).toBe("workspace");
+    // An empty string is still an override the workspace made.
+    expect(modelPersistScope({ workspaceValue: "" })).toBe("workspace");
   });
 });

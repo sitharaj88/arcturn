@@ -68,7 +68,7 @@ import {
 } from "./dry-run.js";
 import { createEngineSession, type EngineSession } from "./engine-session.js";
 import { PermissionSurface } from "./permission-surface.js";
-import { escapeCodicons, modelPickItems } from "./picker.js";
+import { escapeCodicons, modelPersistScope, modelPickItems } from "./picker.js";
 import {
   type CheckpointRow,
   confirmsRewind,
@@ -1926,6 +1926,35 @@ export function activateSidebar(
     return value === undefined || value === "" ? undefined : value;
   }
 
+  /**
+   * Write a model pick to `arcturn.defaultModel`.
+   *
+   * Into the workspace's settings when the workspace already overrides the
+   * value — updating Global under a workspace override would look like the
+   * write was lost — and into the user's settings otherwise, because a model
+   * choice is a user preference, not a property of one folder. A failed write
+   * is a log line, not an error dialog: the session did switch, and that is
+   * the thing the user asked for.
+   */
+  async function persistModelChoice(modelId: string): Promise<void> {
+    const config = vscode.workspace.getConfiguration("arcturn");
+    // The scope decision lives in picker.ts, where it is tested; this maps it
+    // onto the editor's enum and nothing more.
+    const target =
+      modelPersistScope(config.inspect<string>("defaultModel")) === "workspace"
+        ? vscode.ConfigurationTarget.Workspace
+        : vscode.ConfigurationTarget.Global;
+    try {
+      await config.update("defaultModel", modelId, target);
+    } catch (error) {
+      log(
+        `sidebar: model switched but the choice could not be saved: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
   /** What the composer's chip should name, most authoritative first. */
   function currentModelId(): string | undefined {
     return selectedModel ?? engine?.controller?.state.model ?? configuredModel();
@@ -1987,6 +2016,14 @@ export function activateSidebar(
     try {
       await controller.setModel(modelId);
       selectedModel = modelId;
+      // The part that makes the pick *stick*. `setModel` switches one session;
+      // every new session, engine restart and window reload starts from the
+      // `arcturn.defaultModel` setting — which nothing wrote until now, so a
+      // pick lasted exactly one session and read as "not retained". Persisted
+      // through the setting rather than a memento: one source of truth, the
+      // user can see and edit it, and the existing plumbing (serve args,
+      // createSession) already reads it.
+      await persistModelChoice(modelId);
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       log(`sidebar: could not switch to ${modelId}: ${reason}`);
@@ -2170,6 +2207,27 @@ export function activateSidebar(
   async function startNewSession(session: EngineSession): Promise<void> {
     await session.newSession();
     selectedModel = undefined;
+    // `createEngineSession` captured `arcturn.defaultModel` once, when the
+    // engine started — so a pick made since then (which wrote the setting)
+    // would not reach this session until a restart. Aligned here instead:
+    // when the configured model differs from what the session came up on,
+    // switch it, and treat a failure as the log line it is — the session
+    // exists either way.
+    const configured = configuredModel();
+    const controller = session.controller;
+    if (
+      configured !== undefined &&
+      controller !== undefined &&
+      controller.state.model !== configured
+    ) {
+      await controller.setModel(configured).catch((error: unknown) => {
+        log(
+          `sidebar: new session kept ${controller.state.model}; could not switch to ${configured}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      });
+    }
     clearContext();
     // Same argument as `openSession`'s: a new session, the same open file.
     refreshAmbientNow();

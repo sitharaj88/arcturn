@@ -246,3 +246,20 @@ export function modelPickItems(options: ModelPickOptions): ModelPickItem[] {
 export function chooseSendVerb(running: boolean): "prompt" | "steer" {
   return running ? "steer" : "prompt";
 }
+
+/**
+ * Where a model pick should be saved.
+ *
+ * The pick is persisted through `arcturn.defaultModel`, and the scope matters:
+ * updating Global while a workspace override exists would leave the override
+ * winning and the write looking lost — the user picks, reloads, and sees the
+ * old model again, which is the exact complaint persistence exists to fix. So
+ * the workspace wins when the workspace already has an opinion, and the user's
+ * own settings win otherwise, because a model choice is a preference of the
+ * person, not a property of one folder.
+ */
+export function modelPersistScope(
+  inspected: { workspaceValue?: unknown } | undefined,
+): "workspace" | "global" {
+  return inspected?.workspaceValue !== undefined ? "workspace" : "global";
+}

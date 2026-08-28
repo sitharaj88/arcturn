@@ -170,9 +170,7 @@ describe("the manifest and the code agree about commands", () => {
     // The trees live in a bottom-panel tab now, beside Terminal and Problems,
     // which is where a jobs monitor and a catalog belong; a user who disagrees
     // can still drag any view anywhere.
-    expect(manifest.contributes.views.arcturn?.map((view) => view.id)).toEqual([
-      SIDEBAR_VIEW_ID,
-    ]);
+    expect(manifest.contributes.views.arcturn?.map((view) => view.id)).toEqual([SIDEBAR_VIEW_ID]);
     expect(manifest.contributes.views["arcturn-panel"]?.map((view) => view.id)).toEqual([
       HUB_VIEW_ID,
       BACKGROUND_VIEW_ID,
