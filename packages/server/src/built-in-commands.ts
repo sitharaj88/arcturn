@@ -141,16 +141,17 @@ import type { CommandDescriptor } from "@arcturn/types";
  *   renders todos continuously in its plan card — there is no surface for
  *   `/todos` to open, so the row would do nothing when chosen. Adding it the
  *   day a client grows somewhere for it to lead is a one-line change here.
- * - **`scout`** — no verb, and the reason is worth writing down because it is
- *   not "nobody got to it". A scout run has no durable record anywhere: it
- *   creates throwaway git worktrees, races the approaches against a deadline,
- *   captures each diff into memory, deletes every worktree in a `finally`, and
- *   returns a report that exists only as the text it printed. There is
- *   therefore nothing for a listing verb to list and nothing for a cancel verb
- *   to name — a `startScout` would be a single request that blocks for minutes,
- *   cannot be reported on, cannot be cancelled, and hands back worktrees that
- *   are already gone. Making it reachable means giving scouts a registry with
- *   durable records first, which is an engine change, not a protocol one.
+ * - **`scout`** — three verbs now, and the note this replaces is worth
+ *   remembering rather than deleting. The objection was never squeamishness:
+ *   a scout run had no record anywhere, so a `startScout` would have been one
+ *   request blocking for minutes with nothing to report on and nothing to
+ *   cancel. What changed is that the engine grew the record — `ScoutRegistry`
+ *   in `@arcturn/cli` — so `startScout` returns an id, `scoutRun` answers with
+ *   whatever has settled, and `cancelScout` aborts a live one. The worktrees
+ *   are still deleted in a `finally` and that was never the problem: each
+ *   scout's diff is captured into memory *before* teardown, so the work
+ *   product outlives the directory it was made in. The records are per-process
+ *   and do not survive an engine restart, which is the remaining honest limit.
  * - **`team`** — no verb, and for two reasons that are each sufficient. First,
  *   the only way to reach a team manager is to construct one, and constructing
  *   one adopts the records directory and rewrites every record still `running`
@@ -236,6 +237,14 @@ export const REMOTE_REACHABLE_BUILT_IN_COMMANDS: readonly CommandDescriptor[] = 
     kind: "builtin" as const,
   }),
   Object.freeze({
+    // The description names the shape rather than a price. A scout run costs
+    // one model session per approach and the total is not knowable before it
+    // runs, so a menu row must not imply one.
+    name: "scout",
+    description: "Explore approaches in parallel worktrees and compare the diffs",
+    kind: "builtin" as const,
+  }),
+  Object.freeze({
     // Promises the whole terminal command, because all four subverbs are here.
     // The description says "background" rather than naming a cost, because what
     // one costs is not knowable before it runs and a menu row must not imply it.
@@ -314,6 +323,7 @@ export const REMOTE_BUILT_IN_COMMAND_VERBS: Readonly<Record<string, readonly str
     rewind: Object.freeze(["listCheckpoints", "rewindTo"]),
     export: Object.freeze(["exportSession"]),
     mcp: Object.freeze(["mcpStatus", "mcpAuthBegin", "mcpAuthComplete", "mcpAuthCancel"]),
+    scout: Object.freeze(["startScout", "scoutRun", "cancelScout"]),
     // The subscription, not a verb of its own. `openSession` is what puts a
     // connection on the session's event stream, and `turnEnd` on that stream
     // is where every figure `/cost` shows comes from. Naming it here keeps the

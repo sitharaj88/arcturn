@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { CliProvisioner } from "./cli.js";
 import { activateWith } from "./extension.js";
 import { HUB_COMMANDS, HUB_VIEW_ID } from "./hub/view.js";
+import { SCOUT_COMMANDS } from "./scout/view.js";
 import { SIDEBAR_COMMANDS, SIDEBAR_VIEW_ID } from "./sidebar/index.js";
 import type { TerminalHub } from "./terminal.js";
 import { fake, resetFake } from "./test-vscode.js";
@@ -84,7 +85,11 @@ describe("the manifest and the code agree about commands", () => {
     // A command registered but not contributed works from the sidebar and is
     // invisible in the palette — RFC 0004 §3 asks for every command to be
     // reachable there.
-    for (const id of [...Object.values(SIDEBAR_COMMANDS), ...Object.values(HUB_COMMANDS)]) {
+    for (const id of [
+      ...Object.values(SIDEBAR_COMMANDS),
+      ...Object.values(HUB_COMMANDS),
+      ...Object.values(SCOUT_COMMANDS),
+    ]) {
       expect(contributed).toContain(id);
     }
   });
@@ -98,6 +103,7 @@ describe("the manifest and the code agree about commands", () => {
       ...(await registeredByBuilderA()),
       ...Object.values(SIDEBAR_COMMANDS),
       ...Object.values(HUB_COMMANDS),
+      ...Object.values(SCOUT_COMMANDS),
     ]);
     expect([...contributed].sort()).toEqual([...live].sort());
   });

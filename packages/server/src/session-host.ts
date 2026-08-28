@@ -55,6 +55,9 @@ import type {
   PromptAttachment,
   RewindFailure,
   RewindResult,
+  ScoutCancelled,
+  ScoutRun,
+  ScoutStarted,
   SessionExport,
   SessionHeader,
   SessionHistory,
@@ -163,6 +166,43 @@ export interface McpAuthBrokerLike {
   complete(handle: string, code: string, state: string): Promise<void>;
   /** Abandon a begun authorization. `false` when the handle was already gone. */
   cancel(handle: string): Promise<boolean>;
+}
+
+/**
+ * The half of the scout registry this package needs.
+ *
+ * Structural, like {@link McpAuthBrokerLike}: git worktrees, model sessions and
+ * the scout engine all live in `@arcturn/cli`, and this package depends on
+ * none of them.
+ */
+export interface ScoutRegistryLike {
+  /** Start a run and return its id at once. Throws on fewer than two approaches. */
+  start(approaches: readonly { name: string; task: string }[]): string;
+  /** One run's current state, or `undefined` when the id is unknown. */
+  get(id: string): ScoutRunLike | undefined;
+  /** Abort a run. `false` when it was unknown or had already settled. */
+  cancel(id: string): boolean;
+}
+
+/** What a registry hands back for one run, before the wire projection. */
+export interface ScoutRunLike {
+  readonly id: string;
+  readonly state: string;
+  readonly approaches: readonly { name: string; task: string }[];
+  readonly results: readonly {
+    readonly name: string;
+    readonly task: string;
+    readonly status: string;
+    readonly finalText: string;
+    readonly toolCalls: readonly string[];
+    readonly costUsd?: number;
+    readonly diff?: string;
+    readonly error?: string;
+    readonly durationMs: number;
+  }[];
+  readonly timedOut: boolean;
+  readonly warnings: readonly string[];
+  readonly error?: string;
 }
 
 export interface SessionHostOptions {
@@ -358,6 +398,14 @@ export interface SessionHostOptions {
    * without the OAuth half, rather than a silent no-op.
    */
   mcpAuth?: McpAuthBrokerLike;
+  /**
+   * Where scout runs are held between `startScout` and `scoutRun`.
+   *
+   * Injected for the reason {@link SessionHostOptions.mcpAuth} is. Omitted, the
+   * three verbs fail with a message naming `/scout` in the terminal — the
+   * honest answer from an engine wired without a repository to branch from.
+   */
+  scouts?: ScoutRegistryLike;
   /**
    * The served runtime's `--dry-run` shadow workspace, for the review verbs.
    *
@@ -669,6 +717,7 @@ export class SessionHost {
   readonly #sessionExportLimits: SessionExportLimits;
   readonly #mcpStatus: (() => McpServerSummary[] | Promise<McpServerSummary[]>) | undefined;
   readonly #mcpAuth: McpAuthBrokerLike | undefined;
+  readonly #scouts: ScoutRegistryLike | undefined;
   readonly #maxSessions: number;
   readonly #dryRun: DryRunReview;
   readonly #backgroundAgents: BackgroundAgentRegistry | undefined;
@@ -731,6 +780,7 @@ export class SessionHost {
     this.#sessionExportLimits = options.sessionExportLimits ?? {};
     this.#mcpStatus = options.mcpStatus;
     this.#mcpAuth = options.mcpAuth;
+    this.#scouts = options.scouts;
     this.#maxSessions = options.maxSessions ?? DEFAULT_MAX_SESSIONS;
     this.#dryRun = createDryRunReview(options.dryRunOverlay, options.pendingChangesLimits ?? {});
     this.#backgroundAgents = options.backgroundAgents;
@@ -1699,6 +1749,73 @@ export class SessionHost {
    */
   async mcpAuthCancel(handle: string): Promise<McpAuthCancelled> {
     return { cancelled: await this.#requireMcpAuth().cancel(handle) };
+  }
+
+  /**
+   * Start a scout run and answer with its id.
+   *
+   * Returns as soon as the run is registered, not when it finishes: a scout
+   * run takes minutes, and a request that blocks for minutes is one no client
+   * can report on or cancel.
+   *
+   * @throws When no registry is wired, or fewer than two approaches are given.
+   */
+  async startScout(approaches: readonly { name: string; task: string }[]): Promise<ScoutStarted> {
+    return { runId: this.#requireScouts().start(approaches) };
+  }
+
+  /**
+   * One scout run, projected onto the wire.
+   *
+   * Field-by-field rather than by spread, the rule `mcpStatus` keeps. It
+   * matters here for one field in particular: a `ScoutResult` carries
+   * `worktreeDir`, an absolute path on the engine's machine that a client has
+   * no use for and that names a directory already deleted.
+   *
+   * @throws When no registry is wired, or the run id is unknown.
+   */
+  async scoutRun(runId: string): Promise<ScoutRun> {
+    const run = this.#requireScouts().get(runId);
+    if (run === undefined) throw new Error(`no scout run with id "${runId}"`);
+    return {
+      id: run.id,
+      state: run.state,
+      approaches: run.approaches.map((approach) => ({
+        name: approach.name,
+        task: approach.task,
+      })),
+      results: run.results.map((result) => ({
+        name: result.name,
+        task: result.task,
+        status: result.status,
+        finalText: result.finalText,
+        toolCalls: [...result.toolCalls],
+        ...(result.costUsd === undefined ? {} : { costUsd: result.costUsd }),
+        ...(result.diff === undefined ? {} : { diff: result.diff }),
+        ...(result.error === undefined ? {} : { error: result.error }),
+        durationMs: result.durationMs,
+      })),
+      timedOut: run.timedOut,
+      warnings: [...run.warnings],
+      ...(run.error === undefined ? {} : { error: run.error }),
+    };
+  }
+
+  /**
+   * Stop a scout run.
+   *
+   * @returns `false` when the run was unknown or had already settled, which is
+   *   a race rather than a fault.
+   */
+  async cancelScout(runId: string): Promise<ScoutCancelled> {
+    return { cancelled: this.#requireScouts().cancel(runId) };
+  }
+
+  #requireScouts(): ScoutRegistryLike {
+    if (!this.#scouts) {
+      throw new Error("this engine cannot run scouts; use `/scout` in the terminal instead");
+    }
+    return this.#scouts;
   }
 
   #requireMcpAuth(): McpAuthBrokerLike {

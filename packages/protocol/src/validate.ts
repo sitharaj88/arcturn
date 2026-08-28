@@ -81,6 +81,15 @@ export type ServerMessageValidation =
   | { ok: true; message: ServerMessage }
   | { ok: false; error: string };
 
+/**
+ * Most approaches one scout run may race.
+ *
+ * Each is a git worktree, a checkout and a model session running at once. The
+ * cap is about the machine rather than the protocol: a client asking for fifty
+ * would get fifty concurrent checkouts of the repository.
+ */
+export const MAX_SCOUT_APPROACHES = 8;
+
 const CLIENT_METHODS = [
   "listSessions",
   "createSession",
@@ -103,6 +112,9 @@ const CLIENT_METHODS = [
   "mcpAuthBegin",
   "mcpAuthComplete",
   "mcpAuthCancel",
+  "startScout",
+  "scoutRun",
+  "cancelScout",
   "pendingChanges",
   "applyChanges",
   "discardChanges",
@@ -463,6 +475,59 @@ export function validateClientRequest(value: unknown): ClientRequestValidation {
         return fail('mcpAuthCancel requires a non-empty "handle"');
       }
       return ok<ClientRequest>({ id, method: "mcpAuthCancel", params: { handle } });
+    }
+    case "startScout": {
+      if (!isRecord(params)) return fail('startScout requires an object "params"');
+      const raw = params.approaches;
+      if (!Array.isArray(raw)) return fail('startScout requires an "approaches" array');
+      // Two is the floor the CLI already enforces: one approach is not an
+      // exploration, and refusing it here means the engine never makes a
+      // worktree for a run that cannot answer the question it was asked.
+      if (raw.length < 2) return fail("startScout requires at least two approaches");
+      if (raw.length > MAX_SCOUT_APPROACHES) {
+        return fail(`startScout accepts at most ${MAX_SCOUT_APPROACHES} approaches`);
+      }
+      const approaches: { name: string; task: string }[] = [];
+      for (const entry of raw) {
+        if (!isRecord(entry)) return fail("each scout approach must be an object");
+        const name = entry.name;
+        const task = entry.task;
+        if (typeof name !== "string" || name === "") {
+          return fail('each scout approach needs a non-empty "name"');
+        }
+        // The name becomes a git branch and a worktree directory, so anything
+        // that is not a plain identifier is refused here rather than turned
+        // into a path by `git worktree add`.
+        if (!/^[\w-]{1,24}$/.test(name)) {
+          return fail(`scout approach name "${name}" must be 1-24 of [A-Za-z0-9_-]`);
+        }
+        if (typeof task !== "string" || task === "") {
+          return fail('each scout approach needs a non-empty "task"');
+        }
+        approaches.push({ name, task });
+      }
+      const names = new Set(approaches.map((entry) => entry.name));
+      if (names.size !== approaches.length) {
+        // Two approaches sharing a name would share a worktree path.
+        return fail("scout approach names must be unique");
+      }
+      return ok<ClientRequest>({ id, method: "startScout", params: { approaches } });
+    }
+    case "scoutRun": {
+      if (!isRecord(params)) return fail('scoutRun requires an object "params"');
+      const runId = params.runId;
+      if (typeof runId !== "string" || runId === "") {
+        return fail('scoutRun requires a non-empty "runId"');
+      }
+      return ok<ClientRequest>({ id, method: "scoutRun", params: { runId } });
+    }
+    case "cancelScout": {
+      if (!isRecord(params)) return fail('cancelScout requires an object "params"');
+      const runId = params.runId;
+      if (typeof runId !== "string" || runId === "") {
+        return fail('cancelScout requires a non-empty "runId"');
+      }
+      return ok<ClientRequest>({ id, method: "cancelScout", params: { runId } });
     }
     case "pendingChanges": {
       if (!isRecord(params)) return fail('pendingChanges requires an object "params"');

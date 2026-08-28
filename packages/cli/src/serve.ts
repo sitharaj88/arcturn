@@ -67,8 +67,20 @@ import {
   registerBundledCatalog,
   resolveModelSpec,
 } from "./runtime.js";
+import { ScoutRegistry } from "./scout-registry.js";
+import { runScouts, type ScoutAgent } from "./scouts.js";
 import { backgroundAgentRegistry } from "./serve-background.js";
 import { serveCommandDescriptors } from "./serve-commands.js";
+
+/**
+ * How long a scout run started from a socket may take.
+ *
+ * The terminal's `/scout` uses three minutes, and this matches it. A client
+ * cannot raise it: a deadline a caller chooses is a caller that can pin a
+ * repository's worktrees open for as long as it likes.
+ */
+const SERVE_SCOUT_DEADLINE_MS = 180_000;
+
 import { mcpServerSummaries } from "./serve-mcp.js";
 import { serveOrgMemoryStore } from "./serve-org-memory.js";
 import { createServeRewind, type ServeRewind } from "./serve-rewind.js";
@@ -231,6 +243,18 @@ export interface ServableRuntime {
    */
   readonly paths?: { readonly home: string; readonly project: string };
   readonly agents?: ReadonlyMap<string, AgentDef>;
+  /**
+   * Build a throwaway agent rooted at one scout's worktree, and fold a scout's
+   * spend back into this session's accounting.
+   *
+   * Optional on the same terms as `createSubagent`: without both, no scout
+   * registry is wired and the three verbs say so rather than pretending. They
+   * come as a pair because a scout that ran without its cost being recorded
+   * would make `--max-cost` and `/cost` silently under-report — scouts spend
+   * outside the main agent's event stream.
+   */
+  scoutAgent?: (cwd: string) => ScoutAgent;
+  recordExternalCost?: (costUsd: number | undefined) => void;
   readonly permissionMode?: PermissionMode;
   createSubagent?: ServableWorkflowRuntime["createSubagent"];
   /**
@@ -707,6 +731,34 @@ export function createServeHost(
             paths: resolveArcturnPaths({ home: runtime.paths.home, cwd: runtime.cwd }),
           }),
         }),
+    // ---- Scouts: a record, so a socket can watch one -----------------------
+    // `/scout` was off the wire because a run left nothing behind to report on
+    // or cancel. `ScoutRegistry` is that record. The worktrees are still torn
+    // down in `runScouts`' own `finally`; what survives is each scout's diff,
+    // captured into memory before the directory goes.
+    ...(runtime.scoutAgent === undefined || runtime.recordExternalCost === undefined
+      ? {}
+      : {
+          scouts: new ScoutRegistry({
+            run: async ({ approaches, signal, onResult }) => {
+              const report = await runScouts({
+                approaches,
+                spawn: (_approach, cwd) => scoutAgentOf(runtime)(cwd),
+                deadlineMs: SERVE_SCOUT_DEADLINE_MS,
+                repoRoot: runtime.cwd,
+                signal,
+                onResult,
+              });
+              // Folded back for the reason the terminal folds it back: a scout
+              // spends outside the main agent's event stream, so `/cost` and
+              // `--max-cost` would under-report without this.
+              for (const result of report.results) {
+                runtime.recordExternalCost?.(result.costUsd);
+              }
+              return report;
+            },
+          }),
+        }),
     // ---- Workflow injection: one engine, four verbs, one line. -----------
     // `/workflow` is a markdown file the workspace holds, a numbered list that
     // is real control flow, roles with derived lanes, a spend ceiling and a
@@ -936,4 +988,16 @@ export async function runServe(options: RunServeOptions = {}): Promise<RunServeR
       await runtime.dispose();
     },
   };
+}
+
+/**
+ * Narrow `runtime.scoutAgent` once, where the guard above already proved it.
+ *
+ * The guard is on the object and the call is inside a closure that runs later,
+ * so TypeScript cannot carry the narrowing across on its own.
+ */
+function scoutAgentOf(runtime: ServableRuntime): (cwd: string) => ScoutAgent {
+  const build = runtime.scoutAgent;
+  if (build === undefined) throw new Error("this engine has no scout agent factory");
+  return build;
 }

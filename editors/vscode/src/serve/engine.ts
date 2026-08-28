@@ -62,6 +62,7 @@ export type {
   PromptAttachment,
   RewindFailure,
   RewindResult,
+  ScoutRun,
   SessionHeader,
   SessionHistory,
   StreamEvent,

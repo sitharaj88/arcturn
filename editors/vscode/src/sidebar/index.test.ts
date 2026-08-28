@@ -270,6 +270,7 @@ vi.mock("vscode", () => {
 });
 
 import { HUB_COMMANDS, HUB_VIEW_ID } from "../hub/view.js";
+import { SCOUT_COMMANDS } from "../scout/view.js";
 import { activateSidebar, SIDEBAR_COMMANDS, SIDEBAR_VIEW_ID } from "./index.js";
 import { WEBVIEW_COMMANDS } from "./webview-messages.js";
 
@@ -383,7 +384,11 @@ describe("activateSidebar", () => {
     // same activation, one module down. Listing them here rather than
     // exempting them keeps the "contributed ⇔ registered" pair total.
     expect([...ledger.commands.keys()].sort()).toEqual(
-      [...Object.values(SIDEBAR_COMMANDS), ...Object.values(HUB_COMMANDS)].sort(),
+      [
+        ...Object.values(SIDEBAR_COMMANDS),
+        ...Object.values(HUB_COMMANDS),
+        ...Object.values(SCOUT_COMMANDS),
+      ].sort(),
     );
   });
 

@@ -53,6 +53,8 @@ import type {
   PermissionState,
   PromptAttachment,
   RewindResult,
+  ScoutRun,
+  ScoutStarted,
   SessionExport,
   SessionHeader,
   SessionHistory,
@@ -688,6 +690,28 @@ export interface ProtocolClient {
    * after the engine's own timeout, which is a race rather than a fault.
    */
   mcpAuthCancel(handle: string): Promise<boolean>;
+  /**
+   * Start a scout run: two or more approaches, each in its own throwaway git
+   * worktree, raced against the engine's deadline.
+   *
+   * Returns a run id, not a report. Poll {@link ProtocolClient.scoutRun} for
+   * progress — results appear there as each approach settles.
+   *
+   * **Degrades to `undefined`** on the `listModels` precedent: an engine
+   * without the verb costs the caller this route, not the connection.
+   */
+  startScout(
+    approaches: readonly { name: string; task: string }[],
+  ): Promise<ScoutStarted | undefined>;
+  /**
+   * How a scout run is going, and what has settled so far.
+   *
+   * Deliberately **not** given the `undefined` degradation: it is only ever
+   * called after a `startScout` that succeeded, so the verb is known to exist.
+   */
+  scoutRun(runId: string): Promise<ScoutRun>;
+  /** Stop a scout run. `false` when it was unknown or had already settled. */
+  cancelScout(runId: string): Promise<boolean>;
   /**
    * Ask what a `--dry-run` session is holding back for review.
    *
@@ -1410,6 +1434,36 @@ class ProtocolClientImpl implements ProtocolClient {
     return isRecord(result) && result.cancelled === true;
   }
 
+  async startScout(
+    approaches: readonly { name: string; task: string }[],
+  ): Promise<ScoutStarted | undefined> {
+    let result: unknown;
+    try {
+      result = await this.#call("startScout", { approaches: [...approaches] });
+    } catch (error) {
+      if (error instanceof ProtocolRequestError && isUnsupportedMethodError(error)) {
+        return undefined;
+      }
+      throw error;
+    }
+    if (!isRecord(result) || typeof result.runId !== "string" || result.runId === "") {
+      throw new ProtocolClientError(
+        ClientErrorCode.invalidResponse,
+        'Invalid startScout result: expected a non-empty "runId"',
+      );
+    }
+    return { runId: result.runId };
+  }
+
+  async scoutRun(runId: string): Promise<ScoutRun> {
+    return parseScoutRun(await this.#call("scoutRun", { runId }));
+  }
+
+  async cancelScout(runId: string): Promise<boolean> {
+    const result = await this.#call("cancelScout", { runId });
+    return isRecord(result) && result.cancelled === true;
+  }
+
   async pendingChanges(sessionId: string, path?: string): Promise<PendingChanges | undefined> {
     let result: unknown;
     try {
@@ -2025,6 +2079,51 @@ function parseSessionExport(result: unknown): SessionExport {
  * a caller should try to render, so it fails loudly here instead of returning
  * a half-begun authorization the UI would park on forever.
  */
+/**
+ * Validate a `scoutRun` result.
+ *
+ * Strict about the fields a comparison is built from — id, state, results —
+ * and forgiving about the rest, because a run whose `warnings` came back
+ * malformed is still a run worth showing. A missing `diff` is normal: a scout
+ * that changed nothing has none.
+ */
+function parseScoutRun(result: unknown): ScoutRun {
+  const invalid = (why: string): never => {
+    throw new ProtocolClientError(
+      ClientErrorCode.invalidResponse,
+      `Invalid scoutRun result: ${why}`,
+    );
+  };
+  if (!isRecord(result)) return invalid("expected an object");
+  if (typeof result.id !== "string" || result.id === "") return invalid('needs a non-empty "id"');
+  if (typeof result.state !== "string") return invalid('needs a "state"');
+  if (!Array.isArray(result.results)) return invalid('needs a "results" array');
+
+  const approaches = Array.isArray(result.approaches) ? result.approaches : [];
+  return {
+    id: result.id,
+    state: result.state,
+    approaches: approaches.filter(isRecord).map((entry) => ({
+      name: String(entry.name ?? ""),
+      task: String(entry.task ?? ""),
+    })),
+    results: result.results.filter(isRecord).map((entry) => ({
+      name: String(entry.name ?? ""),
+      task: String(entry.task ?? ""),
+      status: String(entry.status ?? "error"),
+      finalText: String(entry.finalText ?? ""),
+      toolCalls: Array.isArray(entry.toolCalls) ? entry.toolCalls.map(String) : [],
+      ...(typeof entry.costUsd === "number" ? { costUsd: entry.costUsd } : {}),
+      ...(typeof entry.diff === "string" ? { diff: entry.diff } : {}),
+      ...(typeof entry.error === "string" ? { error: entry.error } : {}),
+      durationMs: typeof entry.durationMs === "number" ? entry.durationMs : 0,
+    })),
+    timedOut: result.timedOut === true,
+    warnings: Array.isArray(result.warnings) ? result.warnings.map(String) : [],
+    ...(typeof result.error === "string" ? { error: result.error } : {}),
+  };
+}
+
 function parseMcpAuthBegun(result: unknown): McpAuthBegun {
   const invalid = (why: string): never => {
     throw new ProtocolClientError(

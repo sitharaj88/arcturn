@@ -413,11 +413,27 @@ describe("the `/` menu agrees with the verbs", () => {
     );
   });
 
-  it("does not list a scout or a team, because no verb carries either out", async () => {
+  it("lists a scout now that three verbs carry one out, and still no team", async () => {
+    // `scout` was off this list for a specific reason — a run left no record,
+    // so there was nothing to report on and nothing to cancel. `ScoutRegistry`
+    // is that record, and `startScout`/`scoutRun`/`cancelScout` are the verbs.
+    // `team` is still absent, and for reasons that have not changed: reaching a
+    // manager adopts its records directory, and merge writes to the checkout.
     const scratch = await makeScratch();
     const harness = await serve(scratch, [{ text: "hi" }]);
     const names = (await harness.client.listCommands())?.commands.map((c) => c.name) ?? [];
-    expect(names).not.toContain("scout");
+    expect(names).toContain("scout");
     expect(names).not.toContain("team");
+  });
+
+  it("refuses a one-approach scout at the wire, before a worktree is made", async () => {
+    // One approach is not a comparison. Refusing it here rather than in the
+    // engine means no worktree is created for a run that cannot answer the
+    // question it was asked — and keeps this test from starting a real one.
+    const scratch = await makeScratch();
+    const harness = await serve(scratch, [{ text: "hi" }]);
+    await expect(harness.client.startScout([{ name: "a", task: "one way" }])).rejects.toThrow(
+      /at least two approaches/i,
+    );
   });
 });

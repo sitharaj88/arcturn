@@ -441,6 +441,15 @@ export class ArcturnServer {
         return {};
       case "mcpAuthCancel":
         return this.#sessionHost.mcpAuthCancel(request.params.handle);
+      case "startScout":
+        // Not session-scoped: a scout run branches from the repository the
+        // engine was started in, not from a conversation. Returns an id, never
+        // a report — see the verb's doc for why a blocking call was refused.
+        return this.#sessionHost.startScout(request.params.approaches);
+      case "scoutRun":
+        return this.#sessionHost.scoutRun(request.params.runId);
+      case "cancelScout":
+        return this.#sessionHost.cancelScout(request.params.runId);
       case "pendingChanges":
         // Read-only, so no observer is attached and no session state is
         // touched — the same shape `resolveContext` has.

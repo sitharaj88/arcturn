@@ -392,6 +392,39 @@ export type ClientRequest =
    */
   | { id: string; method: "mcpAuthCancel"; params: { handle: string } }
   /**
+   * Start a scout run: two or more approaches, each explored in its own
+   * throwaway git worktree, raced against a deadline.
+   *
+   * Returns an id immediately rather than the report, because a scout run
+   * takes minutes and a request that blocks for minutes cannot be reported on
+   * or cancelled. Poll {@link scoutRun} for progress; results appear there as
+   * each approach settles rather than all at the end.
+   *
+   * **Optional and additive.** An engine without it answers `invalidRequest`,
+   * and the client falls back to naming `/scout` in the terminal.
+   */
+  | {
+      id: string;
+      method: "startScout";
+      params: { approaches: { name: string; task: string }[] };
+    }
+  /**
+   * Ask how a scout run is going, and what has settled so far.
+   *
+   * Each result carries the scout's `git diff` as text. The worktree it was
+   * made in is long gone by then — captured before teardown — which is why a
+   * client can render a comparison at all.
+   */
+  | { id: string; method: "scoutRun"; params: { runId: string } }
+  /**
+   * Stop a scout run.
+   *
+   * Every live scout is aborted and every worktree is still cleaned up.
+   * Results that had already settled are kept: a comparison the user cut short
+   * is still worth reading.
+   */
+  | { id: string; method: "cancelScout"; params: { runId: string } }
+  /**
    * Ask what a `--dry-run` session has waiting for review.
    *
    * `--dry-run` reroutes every `write`/`edit` into a shadow copy of the
@@ -1556,6 +1589,62 @@ export interface McpAuthBegun {
   handle?: string;
   /** The URL the client must open in a browser. Absent when `authorized`. */
   authorizationUrl?: string;
+}
+
+/** One approach's outcome inside a {@link ScoutRun}. */
+export interface ScoutRunResult {
+  /** The approach's name, as the client named it. */
+  name: string;
+  /** The task it was given. */
+  task: string;
+  /** `finished`, `timeout` or `error`. */
+  status: string;
+  /** Last assistant text — findings when finished, partial notes otherwise. */
+  finalText: string;
+  /** Tool names in call order. Names only, the rule `PermissionState.tools` keeps. */
+  toolCalls: string[];
+  /** Cumulative USD cost, absent when the model was unpriced. */
+  costUsd?: number;
+  /**
+   * The scout's work product, as `git diff` text.
+   *
+   * Absent when the scout changed nothing, or when the diff could not be
+   * captured — `warnings` on the run says which.
+   */
+  diff?: string;
+  /** Failure text when `status` is `error`, or the abort reason on a timeout. */
+  error?: string;
+  /** Wall time from worktree creation to teardown, in milliseconds. */
+  durationMs: number;
+}
+
+/** The `scoutRun` result: one run, as the engine currently holds it. */
+export interface ScoutRun {
+  id: string;
+  /** `running`, `finished`, `cancelled` or `failed`. */
+  state: string;
+  /** What was asked for, in the order it was given. */
+  approaches: { name: string; task: string }[];
+  /** What has settled so far. Grows while `state` is `running`. */
+  results: ScoutRunResult[];
+  /** True when the deadline fired or a cancel cut the run short. */
+  timedOut: boolean;
+  /** Non-fatal problems — failed cleanups, unreadable diffs. */
+  warnings: string[];
+  /** Why the run failed, when `state` is `failed`. */
+  error?: string;
+}
+
+/** The `startScout` result. */
+export interface ScoutStarted {
+  /** Poll `scoutRun` with this. */
+  runId: string;
+}
+
+/** The `cancelScout` result. */
+export interface ScoutCancelled {
+  /** `false` when the run was unknown or had already settled. */
+  cancelled: boolean;
 }
 
 /** The `mcpAuthCancel` result. */

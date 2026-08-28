@@ -22,6 +22,7 @@ import { spawn as nodeSpawn } from "node:child_process";
 import * as vscode from "vscode";
 import { activateHub } from "../hub/view.js";
 import { ARCTURN_EXTENSION_ID, authorizeMcpServer, type McpAuthEditor } from "../mcp-auth.js";
+import { activateScout, SCOUT_COMMANDS } from "../scout/view.js";
 import type { ResolvedCliLike } from "../serve/args.js";
 import type { SocketFactory } from "../serve/connect.js";
 import {
@@ -2631,6 +2632,47 @@ export function activateSidebar(
       },
     }),
   );
+
+  // ---- Scouts: a comparison, in the surface built for comparisons ---------
+  // `/scout` races approaches in throwaway worktrees and prints two patches for
+  // a person to read by eye. The editor has had `vscode.changes` all along; what
+  // was missing was a record of a run the panel could reach, which the engine
+  // now keeps.
+  disposables.push(
+    activateScout(context, {
+      startScout: (approaches) => withEngineResult((session) => session.startScout(approaches)),
+      scoutRun: async (runId) => {
+        const session = ensureEngine();
+        return session.scoutRun(runId);
+      },
+      cancelScout: async (runId) => {
+        const session = ensureEngine();
+        return session.cancelScout(runId);
+      },
+      askAgent: async (text) => {
+        // A turn, and one that costs money — which is why the action that
+        // reaches here is labelled "Ask Arcturn to apply it" rather than
+        // something that reads like a paste.
+        await withEngine(async (session) => {
+          await session.controller?.send(text);
+        });
+      },
+    }),
+  );
+
+  /** `withEngine`, for the callers that need the action's value back. */
+  async function withEngineResult<T>(
+    action: (session: EngineSession) => Promise<T>,
+  ): Promise<T | undefined> {
+    const session = ensureEngine();
+    await session.start();
+    const failure = session.failure;
+    if (failure !== undefined) {
+      await announce(failure);
+      return undefined;
+    }
+    return action(session);
+  }
 
   const disposable = new vscode.Disposable(() => {
     engine?.dispose();

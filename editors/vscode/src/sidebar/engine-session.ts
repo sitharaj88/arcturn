@@ -24,6 +24,7 @@ import type {
   McpServerSummary,
   ModelCatalogEntry,
   ProtocolClient,
+  ScoutRun,
   SessionHeader,
   SessionHistory,
   WebSocketLike,
@@ -146,6 +147,17 @@ export interface EngineSession {
   mcpAuthComplete(handle: string, code: string, state: string): Promise<void>;
   /** Abandon a begun authorization. */
   mcpAuthCancel(handle: string): Promise<boolean>;
+  /**
+   * Start a scout run: approaches raced in throwaway worktrees. `undefined`
+   * when the engine is older than the verb.
+   */
+  startScout(
+    approaches: readonly { name: string; task: string }[],
+  ): Promise<{ runId: string } | undefined>;
+  /** How a scout run is going, and what has settled so far. */
+  scoutRun(runId: string): Promise<ScoutRun>;
+  /** Stop a scout run. */
+  cancelScout(runId: string): Promise<boolean>;
   /**
    * What a `/` could invoke on this engine — the workspace's markdown skills
    * plus the built-ins this wire can carry out — or `undefined` when this
@@ -482,6 +494,15 @@ export function createEngineSession(options: EngineSessionOptions): EngineSessio
     },
     async mcpAuthCancel(handle: string): Promise<boolean> {
       return requireClient().mcpAuthCancel(handle);
+    },
+    async startScout(approaches: readonly { name: string; task: string }[]) {
+      return requireClient().startScout(approaches);
+    },
+    async scoutRun(runId: string): Promise<ScoutRun> {
+      return requireClient().scoutRun(runId);
+    },
+    async cancelScout(runId: string): Promise<boolean> {
+      return requireClient().cancelScout(runId);
     },
     async listCommands(): Promise<CommandDescriptor[] | undefined> {
       return (await requireClient().listCommands())?.commands;

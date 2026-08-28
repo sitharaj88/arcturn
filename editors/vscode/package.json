@@ -156,6 +156,11 @@
         "title": "Refresh Hub",
         "category": "Arcturn",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "arcturn.scout.run",
+        "title": "Scout Approaches",
+        "category": "Arcturn"
       }
     ],
     "keybindings": [
@@ -236,6 +241,10 @@
         {
           "command": "arcturn.hub.openOnWeb",
           "when": "false"
+        },
+        {
+          "command": "arcturn.scout.run",
+          "when": "config.arcturn.serve.enabled"
         }
       ],
       "editor/context": [
