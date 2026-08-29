@@ -8,8 +8,11 @@
  * see `@arcturn/tui`'s note about keeping scrollback outside the renderer.
  */
 
+import { isAbsolute, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { defaultSubject } from "@arcturn/core";
 import {
+  hyperlink,
   type ImageSupport,
   renderImage,
   renderMarkdown,
@@ -54,6 +57,14 @@ export interface TranscriptOptions {
    * passes the terminal's detected capability.
    */
   imageSupport?: ImageSupport;
+  /**
+   * Emit OSC 8 hyperlinks: markdown links become clickable, and a tool
+   * card's file path links to `file://` at its absolute location (resolved
+   * against `cwd`). Off by default so headless and exported output stays
+   * byte-stable; the interactive app turns it on — a terminal that does not
+   * speak OSC 8 renders the label and loses nothing.
+   */
+  hyperlinks?: { cwd: string } | undefined;
   /**
    * Glyph set used for status dots, connectors and per-tool icons (defaults to
    * {@link FANCY_GLYPHS} so headless output is deterministic; the interactive
@@ -154,7 +165,10 @@ function parseDiff(raw: string): DiffRow[] | undefined {
  * ```
  */
 export class TranscriptFormatter {
-  #options: Required<Omit<TranscriptOptions, "width" | "glyphs" | "now">> & { width: number };
+  #options: Required<Omit<TranscriptOptions, "width" | "glyphs" | "now" | "hyperlinks">> & {
+    width: number;
+    hyperlinks: { cwd: string } | undefined;
+  };
   readonly #glyphs: GlyphSet;
   /** Prefix introducing a tool's result, e.g. `"  ⎿ "`. */
   readonly #result: string;
@@ -175,6 +189,7 @@ export class TranscriptFormatter {
       showUserPrompt: options.showUserPrompt ?? true,
       showTodos: options.showTodos ?? false,
       imageSupport: options.imageSupport ?? "none",
+      hyperlinks: options.hyperlinks ?? undefined,
     };
     this.#glyphs = options.glyphs ?? FANCY_GLYPHS;
     this.#result = `  ${this.#glyphs.treeResult} `;
@@ -307,7 +322,13 @@ export class TranscriptFormatter {
       .trim();
     if (body !== "") {
       lines.push("");
-      lines.push(...(this.#options.markdown ? renderMarkdown(body, this.width) : body.split("\n")));
+      lines.push(
+        ...(this.#options.markdown
+          ? renderMarkdown(body, this.width, {
+              osc8Links: this.#options.hyperlinks !== undefined,
+            })
+          : body.split("\n")),
+      );
     }
     if (message.stopReason === "error" && message.errorMessage) {
       lines.push(style("error")(`✗ ${message.errorMessage}`));
@@ -318,11 +339,32 @@ export class TranscriptFormatter {
   #toolStart(toolCallId: string, toolName: string, input: Record<string, unknown>): string[] {
     this.#pending.set(toolCallId, { name: toolName, input, startedAt: this.#now() });
     const subject = defaultSubject(toolName, input);
-    const label =
-      subject === "" ? "" : `  ${style("muted")(oneLine(subject, Math.max(20, this.width - 14)))}`;
+    let label = "";
+    if (subject !== "") {
+      const styled = style("muted")(oneLine(subject, Math.max(20, this.width - 14)));
+      label = `  ${this.#fileLink(input, styled)}`;
+    }
     const dot = style("accent")(this.#glyphs.statusDot);
     const glyph = style("accent")(toolGlyph(toolName, this.#glyphs));
     return [`${dot} ${glyph} ${style("title")(toolName)}${label}`];
+  }
+
+  /**
+   * Wraps a tool card's label in an OSC 8 `file://` link when hyperlinks are
+   * on and the input names a file — the click that opens `src/cart.ts` in
+   * the editor straight from the transcript.
+   */
+  #fileLink(input: Record<string, unknown>, label: string): string {
+    const base = this.#options.hyperlinks;
+    if (base === undefined) return label;
+    const path = input.path ?? input.file_path;
+    if (typeof path !== "string" || path === "") return label;
+    const absolute = isAbsolute(path) ? path : join(base.cwd, path);
+    try {
+      return hyperlink(label, pathToFileURL(absolute).href);
+    } catch {
+      return label;
+    }
   }
 
   #toolEnd(toolCallId: string, result: ToolResultMessage): string[] {

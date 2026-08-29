@@ -27,6 +27,39 @@ function lines(formatter: TranscriptFormatter, events: AgentEvent[]): string[] {
   return events.flatMap((event) => formatter.format(event));
 }
 
+describe("hyperlinks", () => {
+  it("links a tool card's file path to its file:// URL when enabled", () => {
+    // OSC 8 rides the colour gate: a terminal stripped to ColorLevel.None
+    // gets no escapes of any kind, links included.
+    setColorLevel(ColorLevel.Basic);
+    const formatter = new TranscriptFormatter({ hyperlinks: { cwd: "/repo" } });
+    const line = formatter
+      .format({
+        type: "toolStart",
+        toolCallId: "t1",
+        toolName: "read",
+        input: { path: "src/cart.ts" },
+      })
+      .join("\n");
+    expect(line).toContain("\u001b]8;;file:///repo/src/cart.ts\u0007");
+    expect(line).toContain("\u001b]8;;\u0007"); // and the link is closed
+    setColorLevel(ColorLevel.None);
+  });
+
+  it("emits nothing link-shaped by default, so headless output stays byte-stable", () => {
+    const formatter = new TranscriptFormatter();
+    const line = formatter
+      .format({
+        type: "toolStart",
+        toolCallId: "t1",
+        toolName: "read",
+        input: { path: "src/cart.ts" },
+      })
+      .join("\n");
+    expect(line).not.toContain("]8;;");
+  });
+});
+
 describe("TranscriptFormatter", () => {
   it("echoes the user prompt that starts a run", () => {
     const out = lines(new TranscriptFormatter(), [

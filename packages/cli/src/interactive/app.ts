@@ -185,7 +185,7 @@ export class InteractiveApp {
   #welcomed = false;
   #dialogDepth = 0;
   /** Incremental renderer for the streaming assistant block. */
-  readonly #stream = new MarkdownStream();
+  readonly #stream = new MarkdownStream({ osc8Links: true });
   #streaming = false;
   /** Bumped whenever the todo list (or the running flag it renders with) changes. */
   #todosVersion = 0;
@@ -487,6 +487,7 @@ export class InteractiveApp {
       width: this.#width(),
       glyphs: this.#glyphs,
       imageSupport: this.#imageSupport,
+      hyperlinks: { cwd: this.#runtime.cwd },
       ...(now === undefined ? {} : { now }),
     });
   }
