@@ -1,0 +1,23 @@
+{
+  "name": "rag-blueprint",
+  "description": "Build and audit production retrieval systems on your own stack. Seven roles, two pipelines: writes are single-threaded, the ADR is carried by a file, the role that writes the eval gate holds no shell, and the red team refuses to run without a scratch target.",
+  "version": "0.1.0",
+  "provides": {
+    "agents": [
+      "agents/rag-architect.md",
+      "agents/rag-builder.md",
+      "agents/rag-eval-author.md",
+      "agents/rag-eval-runner.md",
+      "agents/rag-lead.md",
+      "agents/rag-red-teamer.md",
+      "agents/rag-surveyor.md",
+      "agents/rag-threat-modeler.md"
+    ],
+    "workflows": ["workflows/rag-review.md", "workflows/rag-setup.md"],
+    "skills": [
+      "skills/rag-architecture.md",
+      "skills/rag-eval-suite.md",
+      "skills/rag-threat-drills.md"
+    ]
+  }
+}

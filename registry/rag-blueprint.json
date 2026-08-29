@@ -1,0 +1,81 @@
+{
+  "name": "rag-blueprint",
+  "kinds": ["org-kit", "agents", "workflows", "skills"],
+  "source": "sitharaj88/arcturn/kits/rag-blueprint",
+  "description": "Build and audit production retrieval systems on your own stack. Writes are single-threaded, the ADR is carried by a file, the role that writes the eval gate holds no shell to run it, and the red team refuses to run without a scratch target.",
+  "maintainer": {
+    "name": "Sitharaj Seenivasan",
+    "url": "https://sitharaj.in"
+  },
+  "disclosure": {
+    "agents": [
+      {
+        "name": "rag-architect",
+        "lane": "write",
+        "tools": ["read", "grep", "glob", "ls", "write"]
+      },
+      {
+        "name": "rag-builder",
+        "lane": "write",
+        "tools": ["read", "grep", "glob", "ls", "bash", "write", "edit"]
+      },
+      {
+        "name": "rag-eval-author",
+        "lane": "write",
+        "tools": ["read", "grep", "glob", "ls", "write", "edit"]
+      },
+      {
+        "name": "rag-eval-runner",
+        "lane": "exec",
+        "tools": ["read", "grep", "glob", "ls", "bash"]
+      },
+      {
+        "name": "rag-lead",
+        "lane": "read",
+        "tools": ["read", "grep", "glob", "ls"]
+      },
+      {
+        "name": "rag-red-teamer",
+        "lane": "exec",
+        "tools": ["read", "grep", "glob", "ls", "bash"]
+      },
+      {
+        "name": "rag-surveyor",
+        "lane": "read",
+        "tools": ["read", "grep", "glob", "ls"]
+      },
+      {
+        "name": "rag-threat-modeler",
+        "lane": "read",
+        "tools": ["read", "grep", "glob", "ls"]
+      }
+    ],
+    "workflows": [
+      {
+        "name": "rag-setup",
+        "stages": 9,
+        "budgetUsd": 40
+      },
+      {
+        "name": "rag-review",
+        "stages": 5,
+        "budgetUsd": 20
+      }
+    ],
+    "skills": [
+      {
+        "name": "rag-architecture",
+        "line": "Designs on the stack that is already there and names the failure modes: query condensation, chunking against the embedder's window, the retrieve-k to rerank-n cascade, filtered-recall cost, a cache keyed with entitlement, orphan chunks, and the dual-index migration a model change requires."
+      },
+      {
+        "name": "rag-eval-suite",
+        "line": "Replaces the six-prompt vibe check with a gate that exits non-zero: a human-validated core that is the only part allowed to block, per-format metrics with a 30-pair floor, latency and cost, a recorded baseline, and faithfulness kept advisory."
+      },
+      {
+        "name": "rag-threat-drills",
+        "line": "Runs injection, minimal-count poisoning, entitlement bypass cold and against a warm cache, cross-tenant probes, exfiltration and denial of wallet — against a scratch target only, each CONFIRMED, MITIGATED or NO-ORACLE with its reproduction and both denominators."
+      }
+    ],
+    "executable": false
+  }
+}

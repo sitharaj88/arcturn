@@ -422,6 +422,10 @@ export class InteractiveApp {
 
     this.#tui.start();
     this.#refresh();
+    // start() paints an empty frame; this is the first one with the status
+    // bar and composer in it. Synchronous on purpose — the frame governor
+    // smooths floods, and startup is not a flood.
+    this.#tui.renderNow();
     this.#maybeAnnounceUpdate();
 
     const exited = new Promise<void>((resolve) => {

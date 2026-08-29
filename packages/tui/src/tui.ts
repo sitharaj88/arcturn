@@ -361,11 +361,16 @@ export class TUI {
    * @param options - Placement and focus behaviour.
    */
   setOverlay(component: Component | null, options: OverlayOptions = {}): void {
+    // Painted synchronously, unlike most state changes: a modal opening or
+    // closing is a one-shot event a person is waiting on, not the kind of
+    // flood the frame governor exists to smooth. Queuing a dialog behind the
+    // governor would add a frame of latency to every permission prompt for
+    // no benefit — nothing else is competing to paint at that moment.
     if (component === null) {
       const previous = this.overlayEntry;
       this.overlayEntry = null;
       if (previous && previous.options.focus !== false) this.focus(previous.previousFocus);
-      this.requestRender();
+      if (this.running) this.renderNow();
       return;
     }
     this.overlayEntry = {
@@ -374,7 +379,7 @@ export class TUI {
       previousFocus: this.focusedComponent,
     };
     if (options.focus !== false) this.focus(component);
-    this.requestRender();
+    if (this.running) this.renderNow();
   }
 
   /* ---------------------------------------------------------------------- */
