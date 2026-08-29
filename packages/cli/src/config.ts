@@ -143,6 +143,13 @@ export interface ArcturnConfig {
    * check is the CLI's only network request that is not the user's model.
    */
   updateCheck: boolean;
+  /**
+   * Ring the terminal's notification channel (OSC 9 plus BEL) when a run
+   * finishes while the window is unfocused (default `true`). Long runs are
+   * exactly when people tab away; the terminal decides what a notification
+   * looks like.
+   */
+  notify: boolean;
   /** Record reasoning-level provenance so `arcturn blame` can explain a file. */
   provenance: boolean;
   /** Route file mutations to a shadow copy for review (default `false`). */
@@ -193,6 +200,7 @@ export const DEFAULT_CONFIG: Readonly<ArcturnConfig> = Object.freeze({
   hooks: EMPTY_HOOK_CONFIG,
   audit: false,
   updateCheck: true,
+  notify: true,
   provenance: false,
   dryRun: false,
   speculation: false,
@@ -228,6 +236,7 @@ const KNOWN_KEYS = new Set([
   "verify",
   "audit",
   "updateCheck",
+  "notify",
   "provenance",
   "dryRun",
   "speculation",
@@ -460,6 +469,10 @@ export function parseConfigFile(
     if (typeof raw.updateCheck === "boolean") out.updateCheck = raw.updateCheck;
     else warnings.push(`${where}: "updateCheck" must be a boolean`);
   }
+  if (raw.notify !== undefined) {
+    if (typeof raw.notify === "boolean") out.notify = raw.notify;
+    else warnings.push(`${where}: "notify" must be a boolean`);
+  }
   if (raw.provenance !== undefined) {
     if (typeof raw.provenance === "boolean") out.provenance = raw.provenance;
     else warnings.push(`${where}: "provenance" must be a boolean`);
@@ -679,6 +692,7 @@ export function mergeConfig(base: ArcturnConfig, layer: Partial<ArcturnConfig>):
     ui: layer.ui ?? base.ui,
     audit: layer.audit ?? base.audit,
     updateCheck: layer.updateCheck ?? base.updateCheck,
+    notify: layer.notify ?? base.notify,
     provenance: layer.provenance ?? base.provenance,
     dryRun: layer.dryRun ?? base.dryRun,
     speculation: layer.speculation ?? base.speculation,

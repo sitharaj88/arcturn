@@ -106,7 +106,10 @@ async function harness(
 describe("InteractiveApp", () => {
   it("announces a newer engine once, as one muted line", async () => {
     const scratch = await makeScratch();
-    await writeFileAt(join(scratch.cwd, ".arcturn", "config.json"), JSON.stringify({ ui: "inline" }));
+    await writeFileAt(
+      join(scratch.cwd, ".arcturn", "config.json"),
+      JSON.stringify({ ui: "inline" }),
+    );
     const runtime = await buildTestRuntime(scratch, [{ text: "hi" }], {});
     const terminal = new TestTerminal({ columns: 80, rows: 24 });
     const app = new InteractiveApp({
@@ -485,6 +488,23 @@ describe("InteractiveApp in screen mode", () => {
   ): Promise<Harness> {
     return harness(turns, {}, "screen");
   }
+
+  it("rings the terminal notification only for a run that ends unfocused", async () => {
+    const h = await screenHarness([{ text: "one" }, { text: "two" }]);
+    const notified = () => h.terminal.output.split("\u001b]9;Arcturn").length - 1;
+
+    // Focused (the default): a watched run rings nothing.
+    h.terminal.injectInput("first\r");
+    await waitFor(() => !h.runtime.agent.isRunning, { timeout: 12_000 });
+    expect(notified()).toBe(0);
+
+    // The window blurs, the run finishes behind the user's back: one ring.
+    h.terminal.injectInput("\u001b[O");
+    h.terminal.injectInput("second\r");
+    await waitFor(() => !h.runtime.agent.isRunning, { timeout: 12_000 });
+    await waitFor(() => notified() === 1, { label: "notification" });
+    expect(h.terminal.output).toContain("\u001b]9;Arcturn: run finished\u0007");
+  });
 
   it("drag-selects in the app and copies on release, keeping the mouse the whole time", async () => {
     // The modern gesture: the drag is the selection, the release is the

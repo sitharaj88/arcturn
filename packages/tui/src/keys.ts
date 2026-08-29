@@ -39,6 +39,8 @@ export type SpecialKeyName =
   | "mousedown"
   | "mousedrag"
   | "mouseup"
+  | "focusin"
+  | "focusout"
   | "unknown"
   | `f${number}`;
 
@@ -149,6 +151,10 @@ const FINAL_CODES: Record<string, string> = {
   E: "clear",
   F: "end",
   H: "home",
+  // Focus reporting (DECSET 1004): the terminal says when it gains or loses
+  // the user's attention, which is what gates the finished-run notification.
+  I: "focusin",
+  O: "focusout",
   P: "f1",
   Q: "f2",
   R: "f3",

@@ -135,6 +135,13 @@ describe("escape sequences", () => {
   });
 });
 
+describe("focus reporting", () => {
+  it("decodes CSI I and CSI O as focus events", () => {
+    expect(names(decode("\u001b[I"))).toEqual(["focusin"]);
+    expect(names(decode("\u001b[O"))).toEqual(["focusout"]);
+  });
+});
+
 describe("SGR mouse reports", () => {
   it("decodes wheel up and wheel down as synthetic keys", () => {
     expect(names(decode(`${ESC}[<64;10;5M`))).toEqual(["wheelup"]);

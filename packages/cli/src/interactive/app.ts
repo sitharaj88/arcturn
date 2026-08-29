@@ -16,6 +16,7 @@
  */
 
 import { homedir, userInfo } from "node:os";
+import { join } from "node:path";
 import { JsonlSessionStore, text as textBlock } from "@arcturn/core";
 import {
   backgroundHexOf,
@@ -43,7 +44,6 @@ import {
   Viewport,
 } from "@arcturn/tui";
 import type { AgentEvent, PermissionDecision, PermissionRequest, TodoItem } from "@arcturn/types";
-import { join } from "node:path";
 import { bannerLines } from "../banner.js";
 import { type CopyResult, copyToClipboard } from "../clipboard.js";
 import {
@@ -65,9 +65,9 @@ import { type GlyphSet, resolveGlyphs } from "../glyphs.js";
 import { WORDMARK_WIDTH } from "../logo.js";
 import { createFileMentionSource, expandMentions, type FileMentionSource } from "../mentions.js";
 import { version } from "../meta.js";
-import { checkForUpdate } from "../update-check.js";
 import type { ArcturnRuntime, SessionMetrics } from "../runtime.js";
 import { resolveTheme } from "../themes.js";
+import { checkForUpdate } from "../update-check.js";
 import {
   type SubagentStatus,
   SubagentTracker,
@@ -230,6 +230,8 @@ export class InteractiveApp {
    */
   #flashTimer: ReturnType<typeof setTimeout> | undefined;
   readonly #checkForUpdate: (() => Promise<string | undefined>) | undefined;
+  /** Whether the terminal window has the user's focus (1004 reporting). */
+  #terminalFocused = true;
   #exitRequested = false;
   /**
    * The terminal's own default background as it was at startup (raw OSC 11
@@ -1032,6 +1034,7 @@ export class InteractiveApp {
         break;
       case "runEnd":
         this.#stopSpinner();
+        this.#notifyRunFinished(event.reason);
         if (event.reason === "completed" && this.#runStartedAt !== 0) {
           const elapsed = formatDuration(Date.now() - this.#runStartedAt);
           const tokens = `${formatTokens(this.#meter.total)} tokens`;
@@ -1091,6 +1094,10 @@ export class InteractiveApp {
       this.#onInterrupt();
       return true;
     }
+    if (key.name === "focusin" || key.name === "focusout") {
+      this.#terminalFocused = key.name === "focusin";
+      return true;
+    }
     if (this.#mode === "screen") {
       if (key.name === "mousedown" || key.name === "mousedrag" || key.name === "mouseup") {
         this.#onMouseSelection(key);
@@ -1120,10 +1127,7 @@ export class InteractiveApp {
       const now = Date.now();
       const streak = this.#clickStreak;
       const chained =
-        streak !== undefined &&
-        streak.x === cell.x &&
-        streak.y === cell.y &&
-        now - streak.at < 450;
+        streak !== undefined && streak.x === cell.x && streak.y === cell.y && now - streak.at < 450;
       const count = chained ? streak.count + 1 : 1;
       this.#clickStreak = { x: cell.x, y: cell.y, at: now, count };
       const inViewport = localRow < this.#viewport.renderedHeight;
@@ -1167,6 +1171,20 @@ export class InteractiveApp {
     }
     // Failure is durable information, so it does go to the transcript.
     this.#writeThemed(() => [style("warning")(`${result.why} /copy and /export still work.`)]);
+  }
+
+  /**
+   * Rings the terminal's notification channel when a run ends behind the
+   * user's back — OSC 9 for the emulators that post a real notification,
+   * BEL for the ones that badge or bounce on the bell. Focus is the gate
+   * (1004 reporting), so a run watched to its end rings nothing; so does an
+   * interrupt, because the hand that pressed it is already here.
+   */
+  #notifyRunFinished(reason: string): void {
+    if (this.#terminalFocused || reason === "interrupted") return;
+    if (this.#runtime.config.notify === false) return;
+    const title = reason === "completed" ? "run finished" : `run ${reason}`;
+    this.#terminal.write(`\u001b]9;Arcturn: ${title}\u0007\u0007`);
   }
 
   /**

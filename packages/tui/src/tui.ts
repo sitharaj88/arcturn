@@ -474,6 +474,7 @@ export class TUI {
     }
     this.terminal.enterRawMode();
     this.terminal.enableBracketedPaste();
+    this.terminal.enableFocusReporting?.();
     this.unsubscribers.push(this.terminal.onInput((data) => this.feedInput(data)));
     if (this.options.autoResize) {
       this.unsubscribers.push(this.terminal.onResize(() => this.handleResize()));
@@ -511,6 +512,7 @@ export class TUI {
       this.terminal.write("\r\n");
     }
     this.terminal.showCursor();
+    this.terminal.disableFocusReporting?.();
     this.terminal.disableBracketedPaste();
     this.terminal.exitRawMode();
   }

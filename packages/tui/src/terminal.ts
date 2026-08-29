@@ -119,6 +119,10 @@ export interface Terminal {
   enableMouse?(): void;
   /** Disables SGR mouse reporting (optional). */
   disableMouse?(): void;
+  /** Enables focus in/out reporting (optional). */
+  enableFocusReporting?(): void;
+  /** Disables focus in/out reporting (optional). */
+  disableFocusReporting?(): void;
 
   /** Restores the terminal to its original state and drops all listeners. */
   dispose(): void;
@@ -156,6 +160,9 @@ const EXIT_ALT_SCREEN = "\u001b[?1007l\u001b[?1049l";
 const ENABLE_MOUSE = "\u001b[?1002h\u001b[?1006h";
 /** Mouse reporting off. */
 const DISABLE_MOUSE = "\u001b[?1006l\u001b[?1002l";
+/** Focus in/out reporting (1004): CSI I on focus, CSI O on blur. */
+const ENABLE_FOCUS = "\u001b[?1004h";
+const DISABLE_FOCUS = "\u001b[?1004l";
 
 const DEFAULT_SIZE: TerminalSize = { columns: 80, rows: 24 };
 // SIGQUIT (Ctrl-\) is POSIX-only but harmless to register on Windows: Node simply
@@ -192,6 +199,7 @@ export class ProcessTerminal implements Terminal {
   private pasteEnabled = false;
   private altScreen = false;
   private mouseEnabled = false;
+  private focusReporting = false;
   private disposed = false;
   private inputAttached = false;
 
@@ -381,6 +389,18 @@ export class ProcessTerminal implements Terminal {
     this.write(DISABLE_MOUSE);
   }
 
+  enableFocusReporting(): void {
+    if (this.focusReporting) return;
+    this.focusReporting = true;
+    this.write(ENABLE_FOCUS);
+  }
+
+  disableFocusReporting(): void {
+    if (!this.focusReporting) return;
+    this.focusReporting = false;
+    this.write(DISABLE_FOCUS);
+  }
+
   dispose(): void {
     if (this.disposed) return;
     this.restore();
@@ -401,6 +421,10 @@ export class ProcessTerminal implements Terminal {
     if (this.mouseEnabled) {
       this.mouseEnabled = false;
       this.stdout.write(DISABLE_MOUSE);
+    }
+    if (this.focusReporting) {
+      this.focusReporting = false;
+      this.stdout.write(DISABLE_FOCUS);
     }
     if (this.altScreen) {
       this.altScreen = false;
@@ -470,6 +494,7 @@ export class TestTerminal implements Terminal {
   private paste = false;
   private altScreenOn = false;
   private mouseOn = false;
+  private focusOn = false;
   private destroyed = false;
 
   constructor(options: TestTerminalOptions = {}) {
@@ -624,6 +649,18 @@ export class TestTerminal implements Terminal {
     if (this.mouseOn) return;
     this.mouseOn = true;
     this.write(ENABLE_MOUSE);
+  }
+
+  enableFocusReporting(): void {
+    if (this.focusOn) return;
+    this.focusOn = true;
+    this.write(ENABLE_FOCUS);
+  }
+
+  disableFocusReporting(): void {
+    if (!this.focusOn) return;
+    this.focusOn = false;
+    this.write(DISABLE_FOCUS);
   }
 
   disableMouse(): void {
