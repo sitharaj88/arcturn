@@ -127,7 +127,7 @@ describe("CommandRegistry", () => {
         .complete("/co")
         .map((command) => command.name)
         .sort(),
-    ).toEqual(["commit", "compact", "cost"]);
+    ).toEqual(["commit", "compact", "copy", "cost"]);
     expect(registry.complete("mo").map((command) => command.name)).toEqual(["model"]);
     expect(registry.complete("/").length).toBe(registry.list().length);
   });
@@ -182,6 +182,18 @@ describe("built-in commands", () => {
     ]) {
       expect(text).toContain(name);
     }
+    await runtime.dispose();
+  });
+
+  it("/copy on an empty conversation says so without touching the clipboard", async () => {
+    // The pipe chain itself is covered in clipboard.test.ts; what the command
+    // owns is knowing when there is nothing to put on the clipboard.
+    const scratch = await makeScratch();
+    const runtime = await buildTestRuntime(scratch);
+    const { ui } = await run(runtime, "/copy");
+    expect(ui.notices[0]).toMatchObject({ level: "info", text: "No answer to copy yet." });
+    const all = await run(runtime, "/copy all");
+    expect(all.ui.notices[0]).toMatchObject({ level: "info", text: "Nothing to copy yet." });
     await runtime.dispose();
   });
 

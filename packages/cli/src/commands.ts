@@ -13,6 +13,7 @@ import { listModels, listPresets, refreshCatalog, subscriptionPlanFor } from "@a
 import { getTheme, setTheme } from "@arcturn/tui";
 import type { PermissionMode, PermissionRule } from "@arcturn/types";
 import { createBackgroundAgentCommands } from "./background-agents.js";
+import { copyToClipboard } from "./clipboard.js";
 import { permissionModes, persistPermissionRule, persistSetting } from "./config.js";
 import { estimateCost, formatEstimate } from "./cost-preview.js";
 import { exportHtml, exportMarkdown, suggestExportFilename } from "./export.js";
@@ -301,7 +302,7 @@ export function createBuiltInCommands(): SlashCommand[] {
           // — the most-asked "why can't I copy?" there is. The first drag is
           // the handover; the second selects. Shift-drag still bypasses the
           // grab entirely for anyone who knows their emulator's chord.
-          "Copy text: drag once to unlock selection, then drag again (or hold Shift while dragging) · typing resumes wheel scroll · /export saves the whole conversation",
+          "Copy text: /copy puts the last answer on the clipboard · drag once to unlock selection, then drag again (one screen at a time) · /export saves the whole conversation",
         ]);
       },
     },
@@ -555,6 +556,37 @@ export function createBuiltInCommands(): SlashCommand[] {
         if (confirmed !== true) return;
         await runtime.overlay.discard();
         ui.notice("info", "Pending changes discarded.");
+      },
+    },
+    {
+      name: "copy",
+      description: "Copy the last answer to the clipboard ('/copy all' for the conversation)",
+      source: "built-in",
+      async run({ ui, runtime, args }) {
+        // The alternate screen caps mouse selection at one visible frame, so
+        // an answer longer than the screen cannot be selected at all — this
+        // is the copy that needs no selection.
+        const wantAll = args.trim() === "all";
+        const text = wantAll
+          ? exportMarkdown(
+              runtime.agent.messages,
+              { model: runtime.model.displayName, exportedAt: new Date().toISOString() },
+              { showThinking: false },
+            )
+          : runtime.agent.finalText();
+        if (text === "" || (wantAll && runtime.agent.messages.length === 0)) {
+          ui.notice("info", wantAll ? "Nothing to copy yet." : "No answer to copy yet.");
+          return;
+        }
+        const result = await copyToClipboard(text);
+        if (result.ok) {
+          const what = wantAll
+            ? `the conversation (${runtime.agent.messages.length} messages)`
+            : `the last answer (${text.length} chars)`;
+          ui.notice("info", `Copied ${what} to the clipboard via ${result.via}.`);
+          return;
+        }
+        ui.notice("warn", `${result.why} /export writes the conversation to a file instead.`);
       },
     },
     {

@@ -1134,7 +1134,7 @@ export class InteractiveApp {
     this.#selectionHintShown = true;
     this.#writeThemed(() => [
       style("muted")(
-        "Mouse handed back to the terminal — select and copy now. PgUp/PgDn reaches older text, /export saves it all; typing resumes wheel scrolling.",
+        "Mouse handed back to the terminal — select and copy now (one screen at a time; PgUp/PgDn reaches older text). /copy grabs the whole last answer; typing resumes wheel scrolling.",
       ),
     ]);
   }

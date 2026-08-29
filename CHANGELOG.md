@@ -10,6 +10,17 @@ CLI, the SDK, or the wire protocol.
 
 ## [Unreleased]
 
+### Added
+
+- **`/copy` puts the last answer on the clipboard** — `/copy all` the whole
+  conversation as markdown. The alternate screen caps mouse selection at one
+  visible frame, so an answer longer than the screen could never be selected
+  at all; this is the copy that needs no selection. It pipes to the
+  platform's own tool (`pbcopy`, `clip`, `wl-copy`/`xclip`/`xsel`, in that
+  order on Linux so a Wayland session lands on the clipboard its apps read),
+  falls through tools that are missing *or* broken, and names what it tried
+  when nothing worked instead of pretending.
+
 ### Fixed
 
 - **Selecting text with the mouse now just works.** The full-screen TUI holds

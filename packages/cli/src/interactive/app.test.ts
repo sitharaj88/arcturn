@@ -222,6 +222,7 @@ describe("InteractiveApp", () => {
     expect(h.app.editor.suggestions.map((entry) => entry.value).sort()).toEqual([
       "/commit",
       "/compact",
+      "/copy",
       "/cost",
     ]);
   });
