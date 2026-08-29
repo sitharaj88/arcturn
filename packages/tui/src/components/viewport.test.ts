@@ -222,6 +222,29 @@ describe("Viewport", () => {
     expect(text).toBe(lines.join("\n"));
   });
 
+  it("double-click semantics: the word is the non-whitespace run under the cell", () => {
+    const viewport = makeViewport(["\u001b[32mrun\u001b[0m src/cart.ts --fast", "x"]);
+    viewport.renderArea(60, 2);
+
+    expect(viewport.selectWordAt(0, 7)).toBe(true); // inside "src/cart.ts"
+    expect(viewport.selectionText()).toBe("src/cart.ts");
+    // The highlight survives the copy: it is the receipt.
+    expect(viewport.hasSelection).toBe(true);
+    expect(viewport.renderArea(60, 2)[0]).toContain("\u001b[7m");
+
+    expect(viewport.selectWordAt(0, 3)).toBe(false); // the space after "run"
+    expect(viewport.selectWordAt(1, 0)).toBe(true); // one-character word
+    expect(viewport.selectionText()).toBe("x");
+  });
+
+  it("triple-click semantics: the whole display row, plain", () => {
+    const viewport = makeViewport(["\u001b[31malpha\u001b[0m beta  ", ""]);
+    viewport.renderArea(60, 2);
+    expect(viewport.selectRowAt(0)).toBe(true);
+    expect(viewport.selectionText()).toBe("alpha beta");
+    expect(viewport.selectRowAt(1)).toBe(false); // a blank row selects nothing
+  });
+
   it("declines keys it does not handle", () => {
     const viewport = makeViewport(["a"]);
     expect(viewport.handleInput(createKey("a"))).toBe(false);

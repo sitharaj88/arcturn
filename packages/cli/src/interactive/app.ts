@@ -213,8 +213,18 @@ export class InteractiveApp {
    * anyone who wants the terminal's own selection.
    */
   #selecting = false;
-  #copyHintShown = false;
+  /** The click chain (same cell, inside the multi-click window): 2 = word, 3+ = row. */
+  #clickStreak: { x: number; y: number; at: number; count: number } | undefined;
   readonly #copyToClipboard: (text: string) => Promise<CopyResult>;
+  /**
+   * The copy receipt's fade timer. The receipt is chrome, not history: a
+   * line printed into the transcript — or even a temporary component row —
+   * shifts the layout under a pointer that is mid-gesture, and a
+   * triple-click after its own double-click receipt would select the wrong
+   * line. The status bar's centre slot is the one place on screen with a
+   * fixed height, so the receipt lives there and fades on this timer.
+   */
+  #flashTimer: ReturnType<typeof setTimeout> | undefined;
   #exitRequested = false;
   /**
    * The terminal's own default background as it was at startup (raw OSC 11
@@ -394,6 +404,7 @@ export class InteractiveApp {
     this.#workflow.reset();
     if (this.#revealTimer) clearInterval(this.#revealTimer);
     if (this.#liveTimer) clearTimeout(this.#liveTimer);
+    if (this.#flashTimer) clearTimeout(this.#flashTimer);
     this.#unsubscribe?.();
     this.#unsubscribeResize?.();
     this.#unsubscribeTheme?.();
@@ -1099,10 +1110,32 @@ export class InteractiveApp {
     if (key.name === "mousedown") {
       // Only the transcript is selectable; the viewport is the first
       // component, so its area is the top `renderedHeight` screen rows.
+      const now = Date.now();
+      const streak = this.#clickStreak;
+      const chained =
+        streak !== undefined &&
+        streak.x === cell.x &&
+        streak.y === cell.y &&
+        now - streak.at < 450;
+      const count = chained ? streak.count + 1 : 1;
+      this.#clickStreak = { x: cell.x, y: cell.y, at: now, count };
+      const inViewport = localRow < this.#viewport.renderedHeight;
+      if (count >= 2 && inViewport) {
+        // Double-click takes the word, triple the row; the copy is
+        // immediate and the highlight stays up as the receipt.
+        this.#selecting = false;
+        const selected =
+          count === 2
+            ? this.#viewport.selectWordAt(localRow, column)
+            : this.#viewport.selectRowAt(localRow);
+        if (selected) {
+          const text = this.#viewport.selectionText();
+          if (text !== undefined) void this.#copySelection(text);
+        }
+        return;
+      }
       this.#viewport.clearSelection();
-      this.#selecting =
-        localRow < this.#viewport.renderedHeight &&
-        this.#viewport.beginSelectionAt(localRow, column);
+      this.#selecting = inViewport && this.#viewport.beginSelectionAt(localRow, column);
       return;
     }
     if (key.name === "mousedrag") {
@@ -1119,16 +1152,26 @@ export class InteractiveApp {
     const result = await this.#copyToClipboard(text);
     if (result.ok) {
       const chars = [...text].length;
-      const hint = this.#copyHintShown
-        ? ""
-        : " — drag selects and copies; Shift-drag uses the terminal's own selection";
-      this.#copyHintShown = true;
-      this.#writeThemed(() => [
-        style("muted")(`${this.#glyphs.unicode ? "✓" : "+"} Copied ${chars} chars${hint}`),
-      ]);
+      // Short on purpose: the status bar's centre slot yields when the three
+      // groups cannot share the width, so a receipt that fits is a receipt
+      // that shows. The longer story (Shift-drag, /copy) lives in /help.
+      this.#showFlash(`${this.#glyphs.unicode ? "✓" : "+"} Copied ${chars} chars`);
       return;
     }
+    // Failure is durable information, so it does go to the transcript.
     this.#writeThemed(() => [style("warning")(`${result.why} /copy and /export still work.`)]);
+  }
+
+  #showFlash(text: string): void {
+    this.#status.setOptions({ center: [{ text, style: "statusBarAccent" }] });
+    if (this.#flashTimer !== undefined) clearTimeout(this.#flashTimer);
+    this.#flashTimer = setTimeout(() => {
+      this.#flashTimer = undefined;
+      this.#status.setOptions({ center: [] });
+      this.#tui.requestRender();
+    }, 2_600);
+    this.#flashTimer.unref?.();
+    this.#tui.requestRender();
   }
 
   #onEscape(): void {

@@ -14,7 +14,7 @@ import { stripAnsi } from "../ansi.js";
 import { type Key, matchesKey } from "../keys.js";
 import { style as themeStyle } from "../theme.js";
 import type { Component } from "../tui.js";
-import { sliceByWidth, stringWidth, truncateToWidth, wrapText } from "../width.js";
+import { sliceByWidth, stringWidth, tokenize, truncateToWidth, wrapText } from "../width.js";
 
 /** Options for {@link Viewport}. */
 export interface ViewportOptions {
@@ -230,6 +230,73 @@ export class Viewport implements Component {
     this.selection = undefined;
     if (!span) return undefined;
     if (span.from.row === span.to.row && span.from.col === span.to.col) return undefined;
+    return this.spanText(span);
+  }
+
+  /**
+   * Selects the word under a cell — the contiguous run of non-whitespace
+   * columns, which is what a double-click means in a terminal: file paths,
+   * URLs and identifiers come out whole. Lands on nothing when the cell is
+   * blank.
+   */
+  selectWordAt(localRow: number, column: number): boolean {
+    const cell = this.contentCell(localRow, column);
+    if (cell === undefined) return false;
+    const plain = stripAnsi(this.displayRows(this.lastWidth)[cell.row] ?? "");
+    const clusters = columnClusters(plain);
+    const hit = clusters.find(
+      (cluster) => cell.col >= cluster.start && cell.col < cluster.start + cluster.width,
+    );
+    if (hit === undefined || hit.blank) return false;
+    let first = clusters.indexOf(hit);
+    let last = first;
+    while (first > 0 && !clusters[first - 1]!.blank) first--;
+    while (last < clusters.length - 1 && !clusters[last + 1]!.blank) last++;
+    const from = clusters[first]!;
+    const to = clusters[last]!;
+    this.selection = {
+      anchor: { row: cell.row, col: from.start },
+      head: { row: cell.row, col: to.start + to.width - 1 },
+    };
+    return true;
+  }
+
+  /** Selects a whole display row — the triple-click. Blank rows select nothing. */
+  selectRowAt(localRow: number): boolean {
+    const cell = this.contentCell(localRow, 0);
+    if (cell === undefined) return false;
+    const plain = stripAnsi(this.displayRows(this.lastWidth)[cell.row] ?? "").trimEnd();
+    const width = stringWidth(plain);
+    if (width === 0) return false;
+    this.selection = {
+      anchor: { row: cell.row, col: 0 },
+      head: { row: cell.row, col: width - 1 },
+    };
+    return true;
+  }
+
+  /**
+   * The selected text without ending the selection — for gestures like the
+   * double-click, where the copy is immediate but the highlight should stay
+   * up as the receipt until the next gesture replaces it.
+   */
+  selectionText(): string | undefined {
+    const span = this.orderedSelection();
+    // No zero-movement check here: a word-select of a one-character word is
+    // a real single-cell span, not an abandoned click.
+    return span ? this.spanText(span) : undefined;
+  }
+
+  /** Drops the selection without producing text. */
+  clearSelection(): void {
+    this.selection = undefined;
+  }
+
+  /** The plain text of a span: sliced by column, trimmed per row, newline-joined. */
+  private spanText(span: {
+    from: { row: number; col: number };
+    to: { row: number; col: number };
+  }): string | undefined {
     const rows = this.displayRows(this.lastWidth);
     const parts: string[] = [];
     for (let row = span.from.row; row <= span.to.row; row++) {
@@ -239,11 +306,6 @@ export class Viewport implements Component {
     }
     const text = parts.join("\n");
     return text.trim() === "" ? undefined : text;
-  }
-
-  /** Drops the selection without producing text. */
-  clearSelection(): void {
-    this.selection = undefined;
   }
 
   /** The selection with `from` before `to` in reading order, or `undefined`. */
@@ -315,6 +377,18 @@ export class Viewport implements Component {
  * over content colour (that is what makes it read as a selection), and a
  * mid-row SGR reset would otherwise switch the highlight off part-way.
  */
+/** A plain row as column-addressed grapheme clusters, blanks marked. */
+function columnClusters(plain: string): { start: number; width: number; blank: boolean }[] {
+  const clusters: { start: number; width: number; blank: boolean }[] = [];
+  let column = 0;
+  for (const token of tokenize(plain)) {
+    if (token.ansi || token.width === 0) continue;
+    clusters.push({ start: column, width: token.width, blank: token.text.trim() === "" });
+    column += token.width;
+  }
+  return clusters;
+}
+
 function highlightSpan(row: string, c1: number, c2: number): string {
   const before = sliceByWidth(row, 0, c1);
   const middle = stripAnsi(sliceByWidth(row, c1, c2));

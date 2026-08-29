@@ -479,7 +479,38 @@ describe("InteractiveApp in screen mode", () => {
     expect(h.copies).toHaveLength(1);
     expect(h.copies[0]).toContain("the amber answer");
     expect(h.terminal.isMouseEnabled).toBe(true);
-    expect(h.text()).toContain("Copied");
+    await waitFor(() => h.text().includes("Copied"), { label: "copy receipt" });
+  });
+
+  it("double-click copies the word, triple-click the row", async () => {
+    const h = await screenHarness([{ text: "the amber answer" }]);
+    h.terminal.injectInput("ask\r");
+    await waitFor(() => h.text().includes("the amber answer"));
+    // Let the run finish and its summary land, so rows stop shifting under
+    // the clicks.
+    await waitFor(() => !h.runtime.agent.isRunning, { timeout: 12_000 });
+    await waitFor(() => /tokens/.test(h.text()), { label: "run summary" });
+    await tick(20);
+
+    // Aim at the word itself: find "amber" in the rendered frame.
+    const frame = h.app.tui.buildFrame(80, 24).lines.map((line) => stripAnsi(line));
+    const row = frame.findIndex((line) => line.includes("amber"));
+    expect(row).toBeGreaterThanOrEqual(0);
+    const x = frame[row]!.indexOf("amber") + 2; // 1-based column inside the word
+    const y = row + 1;
+    const click = `\u001b[<0;${x};${y}M\u001b[<0;${x};${y}m`;
+
+    // Two clicks on the same cell inside the multi-click window: the word.
+    h.terminal.injectInput(click);
+    h.terminal.injectInput(click);
+    await tick();
+    expect(h.copies).toEqual(["amber"]);
+
+    // A third click on the same cell: the whole row, which contains the word.
+    h.terminal.injectInput(click);
+    await tick();
+    expect(h.copies).toHaveLength(2);
+    expect(h.copies[1]).toContain("the amber answer");
   });
 
   it("a plain click selects nothing and copies nothing", async () => {
