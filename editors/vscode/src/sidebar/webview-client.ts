@@ -145,6 +145,13 @@ export const SIDEBAR_STYLE = `
   --arc-brand-on: #241a0a;
   --arc-brand-soft: rgba(242, 175, 72, 0.1);
   --arc-brand-line: rgba(242, 175, 72, 0.45);
+  /*
+   * The single data-series colour. The brand amber itself sits above the
+   * dark-mode chart lightness band, so this is the same hue snapped one
+   * step down to the nearest validated step (OKLCH L 0.48-0.67, contrast
+   * >= 3:1 against the editor surface).
+   */
+  --arc-brand-chart: #c07f1e;
 }
 
 /*
@@ -159,6 +166,7 @@ body.vscode-light {
   --arc-brand-on: #ffffff;
   --arc-brand-soft: rgba(138, 82, 22, 0.07);
   --arc-brand-line: rgba(138, 82, 22, 0.4);
+  --arc-brand-chart: #8a5216;
 }
 
 /*
@@ -173,6 +181,7 @@ body.vscode-high-contrast, body.vscode-high-contrast-light {
   --arc-brand-on: var(--vscode-button-foreground, currentColor);
   --arc-brand-soft: transparent;
   --arc-brand-line: var(--vscode-focusBorder, currentColor);
+  --arc-brand-chart: var(--vscode-focusBorder, currentColor);
 }
 * { box-sizing: border-box; }
 html, body { height: 100%; }
@@ -824,6 +833,60 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
  * reads exactly as it did before the line existed.
  */
 .capability { font-size: 0.85em; opacity: 0.85; }
+/*
+ * The welcome screen's working parts: what to resume, what to try, and the
+ * shape of the last two weeks. Sections carry small-caps heads; everything
+ * data-shaped stays in text tokens with the one series colour on the marks.
+ */
+.welcome-block { width: 100%; display: flex; flex-direction: column; }
+.welcome-head {
+  margin: 14px 0 0;
+  align-self: flex-start;
+  font-size: 0.75em;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--arc-muted);
+}
+.recent-list { display: flex; flex-direction: column; gap: 4px; width: 100%; margin-top: 6px; }
+.recent-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  border: 1px solid var(--arc-border);
+  border-radius: var(--arc-radius);
+  font: inherit;
+  text-align: left;
+  color: var(--vscode-foreground);
+  background: transparent;
+  cursor: pointer;
+}
+.recent-row:hover { background: var(--arc-brand-soft); border-color: var(--arc-brand-line); }
+.recent-row:disabled { opacity: 0.5; cursor: default; }
+.recent-title { flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.recent-age { flex: none; font-size: 0.8em; color: var(--arc-muted); }
+/*
+ * Fourteen thin bars, one per day. Heights are quantised into five classes
+ * because this page never writes an inline style; the exact count rides
+ * each bar's title and the container's aria-label instead. Zero-days keep a
+ * 2px baseline stub in the border colour, so the axis reads as continuous.
+ */
+.activity-bars { display: flex; align-items: flex-end; gap: 2px; height: 30px; margin-top: 8px; }
+.activity-bar { flex: 1 1 0; min-width: 2px; border-radius: 2px 2px 0 0; background: var(--arc-brand-chart); }
+.activity-bar.level-0 { height: 2px; background: var(--arc-border); border-radius: 0; }
+.activity-bar.level-1 { height: 27%; }
+.activity-bar.level-2 { height: 51%; }
+.activity-bar.level-3 { height: 75%; }
+.activity-bar.level-4 { height: 100%; }
+.activity-axis {
+  display: flex;
+  justify-content: space-between;
+  margin: 3px 0 0;
+  font-size: 0.72em;
+  color: var(--arc-muted);
+}
+.empty-hints { margin: 16px 0 0; max-width: 40ch; font-size: 0.8em; line-height: 1.6; color: var(--arc-muted); }
 .starters { display: flex; flex-direction: column; gap: 6px; width: 100%; margin-top: 8px; }
 .starter {
   display: flex;
@@ -1989,6 +2052,10 @@ const CLIENT_SOURCE = String.raw`
   var workingRow = $("working");
   var emptyState = $("empty");
   var starters = $("starters");
+  var recentBox = $("recent");
+  var recentList = $("recent-list");
+  var activityBox = $("activity");
+  var activityBars = $("activity-bars");
   var jump = $("jump");
   var planCard = $("plan-card");
   var planToggle = $("plan-toggle");
@@ -2108,6 +2175,7 @@ const CLIENT_SOURCE = String.raw`
   var chipModel = undefined;
   var announcedModel = undefined;
   var starterButtons = [];
+  var recentButtons = [];
   var stick = true;
   var activeModelRow = -1;
   var sessions = { status: "loading", list: [], current: undefined, cwd: "" };
@@ -2758,6 +2826,7 @@ const CLIENT_SOURCE = String.raw`
     contextButton.disabled = !ready();
     if (!ready()) closeSuggest();
     starterButtons.forEach(function (node) { node.disabled = !ready(); });
+    recentButtons.forEach(function (node) { node.disabled = !ready(); });
 
     // Only a screen reader reads this now, so it says what the keys do — the
     // things a sighted user reads off the button's own face and title.
@@ -4222,10 +4291,8 @@ const CLIENT_SOURCE = String.raw`
   /* ---- wiring --------------------------------------------------------- */
 
   var STARTERS = [
-    ["Explain this file", "Explain what the file I have open does, and how it fits into the project."],
-    ["Find the bug in the selected code", "Find the bug in the code I have selected and explain why it is wrong."],
-    ["Write tests for this", "Write tests for the file I have open, covering the cases that are not covered yet."],
-    ["Review my recent changes", "Review my uncommitted changes and tell me what you would fix before I commit."]
+    ["Review my uncommitted changes", "Review my uncommitted changes: point out bugs, risks and cleanups you would make before I commit."],
+    ["Write a commit message", "Look at my staged and unstaged changes and draft a commit message in this repository's own style."]
   ];
   for (var s = 0; s < STARTERS.length; s += 1) {
     (function (entry) {
@@ -4242,6 +4309,71 @@ const CLIENT_SOURCE = String.raw`
       starters.appendChild(node);
       starterButtons.push(node);
     })(STARTERS[s]);
+  }
+
+  /*
+   * The welcome screen's live half, rebuilt whenever session data arrives:
+   * the three most recent sessions as resume buttons, and fourteen days of
+   * session counts as a micro bar strip. Both come from the same "sessions"
+   * message the history view reads — no new wire surface.
+   */
+  function renderWelcomeExtras() {
+    clear(recentList);
+    recentButtons = [];
+    var ordered = orderSessions(sessions.list);
+    var shown = 0;
+    for (var r = 0; r < ordered.length && shown < 3; r += 1) {
+      var entry = ordered[r];
+      if (entry.sessionId === sessions.current) continue;
+      shown += 1;
+      (function (item) {
+        var row = button("recent-row");
+        row.appendChild(el("span", "recent-title", sessionLabel(item)));
+        row.appendChild(el("span", "recent-age", formatAge(item.createdAt, Date.now())));
+        row.title = sessionLabel(item);
+        row.disabled = !ready();
+        row.addEventListener("click", function () { chooseSession(item.sessionId); });
+        recentList.appendChild(row);
+        recentButtons.push(row);
+      })(entry);
+    }
+    recentBox.classList.toggle("hidden", shown === 0);
+
+    clear(activityBars);
+    var DAY = 24 * 60 * 60 * 1000;
+    var today = new Date();
+    today.setHours(0, 0, 0, 0);
+    var start = today.getTime() - 13 * DAY;
+    var counts = [];
+    for (var d = 0; d < 14; d += 1) counts.push(0);
+    var total = 0;
+    for (var c = 0; c < sessions.list.length; c += 1) {
+      var at = sessions.list[c].createdAt;
+      if (typeof at !== "number" || at <= 0) continue;
+      var bucket = Math.floor((at - start) / DAY);
+      if (bucket < 0 || bucket > 13) continue;
+      counts[bucket] += 1;
+      total += 1;
+    }
+    activityBox.classList.toggle("hidden", total === 0);
+    if (total === 0) return;
+    var max = 1;
+    for (var m = 0; m < 14; m += 1) if (counts[m] > max) max = counts[m];
+    var summary = [];
+    for (var b = 0; b < 14; b += 1) {
+      var count = counts[b];
+      var level = count === 0 ? 0 : Math.max(1, Math.ceil((count / max) * 4));
+      var bar = el("span", "activity-bar level-" + level);
+      var when = new Date(start + b * DAY);
+      var label = when.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+      bar.title = label + " - " + count + (count === 1 ? " session" : " sessions");
+      activityBars.appendChild(bar);
+      if (count > 0) summary.push(label + ": " + count);
+    }
+    activityBars.setAttribute(
+      "aria-label",
+      "Sessions per day over the past two weeks. " + summary.join(", ")
+    );
   }
 
   planToggle.addEventListener("click", function () {
@@ -4561,6 +4693,9 @@ const CLIENT_SOURCE = String.raw`
         typeof message.engineOutput === "string" ? message.engineOutput : "",
         Array.isArray(message.actions) ? message.actions : []
       );
+      // The welcome screen's resume list and activity strip want session
+      // data as soon as there is an engine to ask.
+      if (message.status === "ready") post({ type: "requestSessions" });
       return;
     }
     if (message.type === "cost") {
@@ -4632,6 +4767,7 @@ const CLIENT_SOURCE = String.raw`
         typeof message.current === "string" ? message.current : undefined,
         typeof message.cwd === "string" ? message.cwd : ""
       );
+      renderWelcomeExtras();
       return;
     }
     if (message.type === "session") {

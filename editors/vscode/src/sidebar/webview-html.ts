@@ -131,7 +131,18 @@ export function renderSidebarHtml(options: SidebarHtmlOptions): string {
       <p class="empty-line">The agent behind the CLI, working in this workspace &mdash; it reads
         your files, runs commands, and asks before anything it cannot undo.</p>
       <p id="capability" class="empty-line capability hidden"></p>
+      <div id="recent" class="welcome-block hidden">
+        <p class="welcome-head">Pick up where you left off</p>
+        <div id="recent-list" class="recent-list"></div>
+      </div>
       <div id="starters" class="starters"></div>
+      <div id="activity" class="welcome-block hidden">
+        <p class="welcome-head">Past two weeks</p>
+        <div id="activity-bars" class="activity-bars" role="img"></div>
+        <p class="activity-axis" aria-hidden="true"><span>14d ago</span><span>today</span></p>
+      </div>
+      <p class="empty-hints">&#8984;&#8997;K / Ctrl+Alt+K edits the selection &middot;
+        @ attaches files &mdash; drag one in from anywhere &middot; / runs commands</p>
     </div>
     <div id="turns"></div>
     <div id="working" class="working hidden" aria-hidden="true">

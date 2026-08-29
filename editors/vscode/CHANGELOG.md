@@ -25,6 +25,17 @@ this is one of two front-ends onto it. Each release names the engine it needs.
 - An engine pinned by `arcturn.cliPath` is never auto-installed over — pinned
   means pinned.
 
+### A home screen that knows you
+
+- The welcome screen's generic starter prompts are gone. In their place:
+  **Pick up where you left off** — your three most recent sessions as
+  one-click resume buttons; two starters that earn their spot (*Review my
+  uncommitted changes*, *Write a commit message*); **Past two weeks** — a
+  fourteen-day session-activity strip drawn from data the panel already
+  had, one validated brand-hue series with per-day tooltips and a
+  screen-reader summary; and a hint line teaching the three gestures worth
+  knowing (⌘⌥K, @-attach with drag-from-anywhere, /).
+
 ### The panel wears the brand
 
 - The chat sidebar is repainted in Arcturn's own amber — with a separate,

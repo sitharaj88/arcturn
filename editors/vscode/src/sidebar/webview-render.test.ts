@@ -414,14 +414,65 @@ describe("the panel on load", () => {
     expect(panel.posted[0]).toEqual({ type: "ready" });
   });
 
-  it("offers starter prompts when there is nothing in the transcript", () => {
+  it("offers two arcturn-shaped starters when there is nothing in the transcript", () => {
     panel.send(state());
     expect(panel.byId("empty").classList.contains("hidden")).toBe(false);
     const starters = panel.byId("starters").childNodes;
-    expect(starters.length).toBeGreaterThanOrEqual(3);
-    expect(starters.length).toBeLessThanOrEqual(4);
+    expect(starters.length).toBe(2);
     (starters[0] as StubNode).dispatch("click");
     expect(panel.posted.filter((message) => message.type === "send")).toHaveLength(1);
+  });
+
+  it("resumes recent sessions from the welcome screen, current one excluded", () => {
+    panel.send(state());
+    panel.send({
+      type: "sessions",
+      status: "ready",
+      current: "01JNOW",
+      cwd: "/repo",
+      sessions: [
+        { sessionId: "01JNOW", title: "This one", createdAt: Date.now() },
+        { sessionId: "01JPREV", title: "Coupon clamp", createdAt: Date.now() - 3_600_000 },
+        { sessionId: "01JOLD", title: "SSE totals", createdAt: Date.now() - 7_200_000 },
+      ],
+    });
+    expect(panel.byId("recent").classList.contains("hidden")).toBe(false);
+    const rows = panel.byId("recent-list").childNodes;
+    expect(rows.length).toBe(2);
+    (rows[0] as StubNode).dispatch("click");
+    expect(panel.posted.at(-1)).toEqual({ type: "openSession", sessionId: "01JPREV" });
+  });
+
+  it("draws fourteen days of activity from session timestamps, counts on the marks", () => {
+    const DAY = 24 * 60 * 60 * 1000;
+    panel.send(state());
+    panel.send({
+      type: "sessions",
+      status: "ready",
+      cwd: "/repo",
+      sessions: [
+        { sessionId: "01JA", title: "a", createdAt: Date.now() },
+        { sessionId: "01JB", title: "b", createdAt: Date.now() },
+        { sessionId: "01JC", title: "c", createdAt: Date.now() - 3 * DAY },
+        // Outside the window: must not count anywhere.
+        { sessionId: "01JD", title: "d", createdAt: Date.now() - 40 * DAY },
+      ],
+    });
+    expect(panel.byId("activity").classList.contains("hidden")).toBe(false);
+    const bars = panel.byId("activity-bars").childNodes as StubNode[];
+    expect(bars.length).toBe(14);
+    // Today's bar is the tallest level and its tooltip carries the count.
+    expect(bars[13]?.className).toContain("level-4");
+    expect(bars[13]?.title).toContain("2 sessions");
+    expect(bars[10]?.title).toContain("1 session");
+    expect(bars[0]?.className).toContain("level-0");
+  });
+
+  it("hides the welcome data blocks when there is nothing to show", () => {
+    panel.send(state());
+    panel.send({ type: "sessions", status: "ready", cwd: "/repo", sessions: [] });
+    expect(panel.byId("recent").classList.contains("hidden")).toBe(true);
+    expect(panel.byId("activity").classList.contains("hidden")).toBe(true);
   });
 
   it("hides the starters once the conversation has started", () => {
@@ -1303,13 +1354,16 @@ describe("the session history, in the panel", () => {
     expect(panel.byId("transcript").classList.contains("hidden")).toBe(false);
   });
 
-  it("asks again when the engine comes back, and stays quiet when it is closed", () => {
+  it("asks for sessions whenever the engine comes back — the welcome screen reads them too", () => {
+    // This used to stay quiet while the history view was closed; the welcome
+    // screen's resume list and activity strip made session data a
+    // whenever-ready concern.
     panel.send({ type: "connection", status: "disconnected", detail: "gone" });
     const before = panel.posted.filter((message) => message.type === "requestSessions").length;
     panel.send({ type: "connection", status: "ready" });
-    expect(panel.posted.filter((message) => message.type === "requestSessions")).toHaveLength(
-      before,
-    );
+    expect(
+      panel.posted.filter((message) => message.type === "requestSessions").length,
+    ).toBeGreaterThan(before);
     open();
     panel.send({ type: "connection", status: "disconnected", detail: "gone" });
     const open_ = panel.posted.filter((message) => message.type === "requestSessions").length;
