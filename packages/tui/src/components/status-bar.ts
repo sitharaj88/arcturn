@@ -64,6 +64,17 @@ export class StatusBar implements Component {
     const separator = this.options.separator ?? "  ";
     const baseStyle = resolveStyle(this.options.style ?? "statusBar");
     const fill = this.options.fill ?? true;
+    // The rightmost cell is deliberately never used for content. Two different
+    // terminals disagree with this renderer about the last column: emulators
+    // configured to draw East-Asian-ambiguous glyphs wide (the brand mark
+    // U+2726 is one) make the line a cell longer than the width tracker
+    // counted, and some hide or wrap whatever lands in the final column
+    // outright. Either way the victim is the same — the tail of the right
+    // group, which is exactly the number the bar exists to show. One column
+    // of margin absorbs both failure modes on every emulator; the final pad
+    // below still fills the true width so the bar's background reaches the
+    // edge.
+    const content = Math.max(1, width - 1);
 
     const join = (segments: readonly StatusSegment[] | undefined): string => {
       if (!segments || segments.length === 0) return "";
@@ -80,20 +91,20 @@ export class StatusBar implements Component {
     const centerWidth = stringWidth(center);
     const rightWidth = stringWidth(right);
 
-    if (leftWidth + centerWidth + rightWidth + 2 > width) {
+    if (leftWidth + centerWidth + rightWidth + 2 > content) {
       // Not enough room for three groups: keep left and right only.
-      const budget = Math.max(0, width - rightWidth - 1);
+      const budget = Math.max(0, content - rightWidth - 1);
       const head = truncateToWidth(left, budget);
-      const line = padToWidth(head, Math.max(0, width - rightWidth)) + right;
-      return [truncateToWidth(line, width, "")];
+      const line = padToWidth(head, Math.max(0, content - rightWidth)) + right;
+      return [fill ? padToWidth(line, width) : truncateToWidth(line, content, "")];
     }
 
-    const leftPad = Math.max(0, Math.floor((width - centerWidth) / 2) - leftWidth);
+    const leftPad = Math.max(0, Math.floor((content - centerWidth) / 2) - leftWidth);
     const line =
       left +
       " ".repeat(leftPad) +
       center +
-      " ".repeat(Math.max(0, width - leftWidth - leftPad - centerWidth - rightWidth)) +
+      " ".repeat(Math.max(0, content - leftWidth - leftPad - centerWidth - rightWidth)) +
       right;
     return [fill ? padToWidth(line, width) : line];
   }

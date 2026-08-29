@@ -180,20 +180,23 @@ describe("Spinner", () => {
 });
 
 describe("StatusBar", () => {
-  it("pins segments to both edges", () => {
+  it("pins segments to both edges, one cell in from the right", () => {
+    // The last column is margin, not content: an emulator that draws an
+    // ambiguous-width glyph wide — or that mishandles the final cell — clips
+    // whatever sits there, and what sits there is the bar's number.
     expect(new StatusBar({ left: [{ text: "L" }], right: [{ text: "R" }] }).render(10)).toEqual([
-      "L        R",
+      "L       R ",
     ]);
   });
 
-  it("centres the middle group", () => {
+  it("centres the middle group within the content area", () => {
     expect(
       new StatusBar({
         left: [{ text: "L" }],
         center: [{ text: "C" }],
         right: [{ text: "R" }],
-      }).render(11),
-    ).toEqual(["L    C    R"]);
+      }).render(12),
+    ).toEqual(["L    C    R "]);
   });
 
   it("never exceeds the width when space runs out", () => {
@@ -203,7 +206,9 @@ describe("StatusBar", () => {
         right: [{ text: "right" }],
       }).render(12)[0] ?? "";
     expect(stringWidth(line)).toBeLessThanOrEqual(12);
-    expect(line.endsWith("right")).toBe(true);
+    expect(line.trimEnd().endsWith("right")).toBe(true);
+    // The margin survives even the space-starved path.
+    expect(line.endsWith(" ")).toBe(true);
   });
 });
 
