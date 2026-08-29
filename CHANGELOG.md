@@ -12,6 +12,45 @@ CLI, the SDK, or the wire protocol.
 
 ### Added
 
+- **Double-click selects the word, triple-click the row** — copied
+  immediately, highlight left up as the receipt. A word is the contiguous
+  non-whitespace run, so file paths, URLs and identifiers come out whole.
+  The copy receipt lives in the status bar's centre slot ("✓ Copied 214
+  chars"), not the transcript, so nothing shifts under a pointer that is
+  mid-gesture.
+
+- **The clipboard follows you home over SSH.** OSC 52 joins the copy chain
+  (tmux passthrough included): over SSH it goes first — a remote `pbcopy`
+  writes the remote clipboard, never the one you mean — and locally it is
+  the fallback behind the native pipes. It refuses to truncate oversized
+  payloads rather than copy half a selection silently.
+
+- **A daily one-line update notice.** Once a day the CLI asks npm whether a
+  newer `arcturn` exists and says so in one muted line at startup — never an
+  install. `updateCheck: false` silences it.
+
+- **A run that finishes behind your back says so.** Focus reporting tells
+  the app whether the window is watched; a run ending unfocused rings the
+  terminal's notification channel (OSC 9 plus BEL — a banner in iTerm2 and
+  kitty, a badge in VS Code). A watched run and an interrupt ring nothing;
+  `notify: false` turns it off.
+
+- **Clickable paths and links (OSC 8).** Markdown links are real hyperlinks,
+  and a tool card's file path links to its `file://` location — `src/cart.ts`
+  opens in the editor straight from the transcript in emulators that render
+  hyperlinks; the rest show the label and lose nothing.
+
+- **Shift+Enter works in terminals that can say it.** The kitty keyboard
+  protocol's disambiguate tier is negotiated with the screen, so modified
+  Enter and a clean ESC arrive unambiguously in kitty, WezTerm, foot and
+  ghostty; older terminals ignore the request.
+
+- **The code highlighter knows which language it is reading**: per-language
+  keyword sets over the shared core (SQL's `select` stops lighting up in
+  TypeScript; Rust gets `fn` and `mut`, Python gets `elif` and `lambda`),
+  fence-tag aliases, and value-like words — `true`, `nil`, `None` — painted
+  as values.
+
 - **`/ui` switches the renderer without editing a config file.** The
   full-screen app stays the default — it owns the whole history, repaints
   cleanly on resize, and restores your shell untouched on exit. `/ui inline`
