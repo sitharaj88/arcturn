@@ -2,7 +2,7 @@
   "name": "arcturn-vscode",
   "displayName": "Arcturn",
   "description": "The Arcturn coding agent in VS Code \u2014 terminal integration, native sidebar, and honest cost accounting, all driven by the same engine as the CLI.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "publisher": "arcturn",
   "license": "Apache-2.0",
@@ -520,6 +520,11 @@
           "maximum": 65535,
           "scope": "window",
           "markdownDescription": "Loopback port for `arcturn serve`. `0` picks an ephemeral port, which is the recommended setting \u2014 a fixed port is one more thing another process on this machine can find."
+        },
+        "arcturn.cli.autoUpdate": {
+          "type": "boolean",
+          "default": true,
+          "description": "Install the arcturn CLI automatically when it is missing, and update it (checked against npm once a day) when a newer engine is published. Everything runs in a visible terminal you can cancel. Turn off to manage the CLI yourself."
         }
       }
     },

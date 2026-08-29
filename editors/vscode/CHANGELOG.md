@@ -6,6 +6,38 @@ format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 The extension and the `arcturn` CLI version separately: the CLI is the engine,
 this is one of two front-ends onto it. Each release names the engine it needs.
 
+## [0.3.0] — 2026-08-29
+
+**Requires `arcturn` 0.4.0 or newer**, and manages it for you from here on.
+
+### The engine installs itself
+
+- **Missing CLI, no setting pinned?** The extension types `npm install -g
+  arcturn` into a terminal you can watch, and says so — no dialog to answer
+  first. A broken `arcturn.cliPath` still gets the message naming the setting,
+  because an install cannot repair a typo.
+- **Once a day it asks npm** whether a newer engine exists, and upgrades the
+  same way when one does. The check is throttled through workspace state (a
+  window reload is not a registry hit), it is the extension's only network
+  request, and every failure is silence.
+- **`arcturn.cli.autoUpdate`** (default on) turns both behaviours off in one
+  place; with it off, every install and upgrade is offered as a question.
+- An engine pinned by `arcturn.cliPath` is never auto-installed over — pinned
+  means pinned.
+
+### The panel wears the brand
+
+- The chat sidebar is repainted in Arcturn's own amber — with a separate,
+  darker accent for light themes, and everything handed back to the theme
+  under high contrast and forced colors. Primary buttons, links, the running
+  tool, the permission card, the current-model badge, focus rings, text
+  selection and the turn-settled sweep all speak with one voice now; pass,
+  fail and danger keep their own colours, because a state is not an identity.
+- The permission card borders on the brand at full strength — it is the
+  strongest thing the panel says — and its Allow button matches.
+- Scrollbars are the theme's own sliders, thin and rounded, instead of the
+  browser's default furniture.
+
 ## [0.2.0] — 2026-08-29
 
 **Requires `arcturn` 0.4.0 or newer; 0.5.0 unlocks everything.** Every feature

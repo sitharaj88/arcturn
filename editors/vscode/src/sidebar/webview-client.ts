@@ -127,21 +127,24 @@ export const SIDEBAR_STYLE = `
   /*
    * The brand. Arcturn is named for an orange giant, and the site's accent is
    * that amber — but a fixed colour cannot be right on every backdrop, so it
-   * is a token with a light-theme value rather than one constant. These are
-   * the site's own accent tokens, lifted from globals.css unchanged, plus the
-   * on-accent colour that keeps the send arrow legible against them. The
-   * values live in the declarations below and are not repeated here: a colour
-   * written twice is a colour that will disagree with itself.
+   * is a set of tokens with light-theme values rather than constants. These
+   * are the site's own accent tokens, lifted from globals.css unchanged, plus
+   * the on-accent colour that keeps the send arrow legible against them and
+   * two derived strengths: -soft is the wash a surface wears when the brand
+   * touches it, -line is a border tinted far enough to read as ours without
+   * shouting.
    *
-   * It is used only where identity belongs — the mark, the assistant's avatar,
-   * the composer's focus ring, the send button. Links stay the theme's link
-   * colour and a running tool stays the theme's blue: those are the editor's
-   * vocabulary, and repainting them would be branding something that is not
-   * ours to brand.
+   * The accent is the panel's voice, and it speaks everywhere the panel acts
+   * or asks: primary buttons, the running tool, the permission card, links,
+   * focus, the settle sweep. Status stays status — pass is green, fail is
+   * red, danger is the warning colour — because a state and an identity are
+   * different sentences and painting both amber would make them one.
    */
   --arc-brand: #f2af48;
-  --arc-brand-hover: #fad185;
+  --arc-brand-hover: #fac169;
   --arc-brand-on: #241a0a;
+  --arc-brand-soft: rgba(242, 175, 72, 0.1);
+  --arc-brand-line: rgba(242, 175, 72, 0.45);
 }
 
 /*
@@ -154,6 +157,8 @@ body.vscode-light {
   --arc-brand: #8a5216;
   --arc-brand-hover: #6f410f;
   --arc-brand-on: #ffffff;
+  --arc-brand-soft: rgba(138, 82, 22, 0.07);
+  --arc-brand-line: rgba(138, 82, 22, 0.4);
 }
 
 /*
@@ -166,6 +171,8 @@ body.vscode-high-contrast, body.vscode-high-contrast-light {
   --arc-brand: var(--vscode-focusBorder, currentColor);
   --arc-brand-hover: var(--vscode-focusBorder, currentColor);
   --arc-brand-on: var(--vscode-button-foreground, currentColor);
+  --arc-brand-soft: transparent;
+  --arc-brand-line: var(--vscode-focusBorder, currentColor);
 }
 * { box-sizing: border-box; }
 html, body { height: 100%; }
@@ -212,10 +219,11 @@ svg { flex: none; display: block; }
 .cost {
   font-size: 0.85em;
   font-variant-numeric: tabular-nums;
-  color: var(--arc-muted);
+  color: var(--arc-brand);
   padding: 1px 6px;
-  border: 1px solid var(--arc-border);
+  border: 1px solid var(--arc-brand-line);
   border-radius: 999px;
+  background: var(--arc-brand-soft);
   white-space: nowrap;
 }
 .icon-button {
@@ -233,7 +241,7 @@ svg { flex: none; display: block; }
 }
 .icon-button:hover { background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground)); }
 .icon-button:disabled { opacity: 0.4; cursor: default; }
-:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
+:focus-visible { outline: 1px solid var(--arc-brand); outline-offset: 1px; }
 
 /* ---- connection card ------------------------------------------------- */
 
@@ -263,15 +271,15 @@ button.text-button {
   padding: 3px 10px;
   border: none;
   border-radius: 3px;
-  color: var(--vscode-button-foreground);
-  background: var(--vscode-button-background);
+  color: var(--arc-brand-on);
+  background: var(--arc-brand);
   cursor: pointer;
 }
 button.text-button.secondary {
   color: var(--vscode-button-secondaryForeground);
   background: var(--vscode-button-secondaryBackground);
 }
-button.text-button:hover { background: var(--vscode-button-hoverBackground); }
+button.text-button:hover { background: var(--arc-brand-hover); }
 button.text-button.secondary:hover { background: var(--vscode-button-secondaryHoverBackground); }
 
 /* ---- transcript ------------------------------------------------------ */
@@ -300,9 +308,9 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
 .turn-assistant { padding-bottom: 16px; }
 .turn-user .turn-body {
   padding: 8px 10px;
-  border: 1px solid var(--arc-border);
+  border: 1px solid var(--arc-brand-line);
   border-radius: 10px;
-  background: var(--arc-surface);
+  background: var(--arc-brand-soft);
 }
 .turn-body > * + * { margin-top: 6px; }
 /*
@@ -458,8 +466,8 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
   color: var(--arc-muted);
 }
 .md hr { border: none; border-top: 1px solid var(--arc-border); }
-.md a { color: var(--vscode-textLink-foreground); text-decoration: none; overflow-wrap: anywhere; }
-.md a:hover { text-decoration: underline; color: var(--vscode-textLink-activeForeground); }
+.md a { color: var(--arc-brand); text-decoration: none; overflow-wrap: anywhere; }
+.md a:hover { text-decoration: underline; color: var(--arc-brand-hover); }
 /*
  * Three kinds of code, three looks: inline is a bordered chip in the run of
  * prose, a fence is a titled card, tool output is a rule-marked pre under an
@@ -490,7 +498,7 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
 .md > p + .code-block,
 .md > :where(h1, h2, h3, h4, h5, h6) + .code-block { margin-top: 3px; }
 .code-block.code-open {
-  border-color: color-mix(in srgb, var(--vscode-textLink-foreground) 45%, var(--arc-border));
+  border-color: color-mix(in srgb, var(--arc-brand) 45%, var(--arc-border));
 }
 .code-head {
   display: flex;
@@ -626,7 +634,7 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
   bottom: 0;
   height: 1px;
   transform-origin: left center;
-  background: var(--vscode-textLink-foreground);
+  background: var(--arc-brand);
   animation: arc-settle 1s ease-out both;
 }
 @keyframes arc-settle {
@@ -650,7 +658,7 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
 }
 .working-mark {
   display: flex;
-  color: var(--vscode-textLink-foreground);
+  color: var(--arc-brand);
   animation: arc-breathe 1.9s ease-in-out infinite;
 }
 .working-dots { display: inline-flex; align-items: center; gap: 3px; }
@@ -762,12 +770,13 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
   font-size: 0.8em;
   color: var(--arc-muted);
 }
-.tool-running .tool-icon { color: var(--vscode-textLink-foreground); }
-.tool-running .tool-badge { color: var(--vscode-textLink-foreground); }
+.tool-running .tool-icon { color: var(--arc-brand); }
+.tool-running .tool-badge { color: var(--arc-brand); }
 .tool-ok .tool-badge { color: var(--arc-ok); }
 .tool-error .tool-badge, .tool-error .tool-icon { color: var(--arc-err); }
-.tool-denied .tool-badge, .tool-awaitingPermission .tool-badge { color: var(--arc-warn); }
-.tool-awaitingPermission { border-color: var(--arc-warn); }
+.tool-denied .tool-badge { color: var(--arc-warn); }
+.tool-awaitingPermission .tool-badge { color: var(--arc-brand); }
+.tool-awaitingPermission { border-color: var(--arc-brand); }
 .spinner { animation: arc-spin 900ms linear infinite; transform-origin: 50% 50%; }
 @keyframes arc-spin { to { transform: rotate(360deg); } }
 .tool-body { padding: 0 8px 8px; }
@@ -804,7 +813,7 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
   padding: 32px 20px 20px;
   text-align: center;
 }
-.empty-mark { color: var(--vscode-textLink-foreground); }
+.empty-mark { color: var(--arc-brand); }
 .empty-title { margin: 0; font-size: 1.1em; font-weight: 600; }
 .empty-line { margin: 0; max-width: 34ch; color: var(--arc-muted); font-size: 0.92em; }
 /*
@@ -830,7 +839,7 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
   background: transparent;
   cursor: pointer;
 }
-.starter:hover { background: var(--vscode-list-hoverBackground); border-color: var(--vscode-focusBorder); }
+.starter:hover { background: var(--arc-brand-soft); border-color: var(--arc-brand-line); }
 .starter:disabled { opacity: 0.5; cursor: default; }
 .starter .chevron { margin-left: auto; color: var(--arc-muted); }
 
@@ -845,7 +854,7 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
   align-items: center;
   gap: 5px;
   padding: 3px 10px;
-  border: 1px solid var(--arc-border);
+  border: 1px solid var(--arc-brand-line);
   border-radius: 999px;
   font: inherit;
   font-size: 0.85em;
@@ -880,7 +889,7 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
 .todos .box { flex: none; width: 1.1em; color: var(--arc-muted); }
 .todo-done { color: var(--arc-muted); text-decoration: line-through; }
 .todo-done .box { color: var(--arc-ok); }
-.todo-inProgress .box { color: var(--vscode-textLink-foreground); }
+.todo-inProgress .box { color: var(--arc-brand); }
 
 /*
  * The permission surface: one region in the dock, two states.
@@ -889,9 +898,10 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
  * raises a native modal — the panel was not visible when the request arrived,
  * so somebody who opens it afterwards is told why nothing is moving.
  *
- * The CARD is the request itself. It borders on the warning accent rather than
- * the link accent the review card uses, because this is the state a run sits
- * in until a person answers, and it is the strongest thing this panel says.
+ * The CARD is the request itself. It borders on the brand at full strength —
+ * every other brand border in the panel is the diluted -line token — because
+ * this is Arcturn asking for something, the run sits still until a person
+ * answers, and it is the strongest thing this panel says.
  */
 .permission { margin-bottom: 8px; }
 .permission-strip {
@@ -907,12 +917,13 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
 }
 .permission-ask {
   padding: 8px 9px;
-  border: 1px solid var(--arc-warn);
+  border: 1px solid var(--arc-brand);
   border-radius: var(--arc-radius);
   background: var(--arc-surface);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.14);
   font-size: 0.9em;
 }
-.permission-head { display: flex; align-items: center; gap: 6px; color: var(--arc-warn); }
+.permission-head { display: flex; align-items: center; gap: 6px; color: var(--arc-brand); }
 .permission-title { flex: 1 1 auto; min-width: 0; font-weight: 600; }
 .permission-desc { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 /*
@@ -975,11 +986,11 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
  * the keyboard.
  */
 .permission-allow {
-  color: var(--vscode-button-foreground);
-  background: var(--vscode-button-background);
-  border-color: var(--vscode-button-background);
+  color: var(--arc-brand-on);
+  background: var(--arc-brand);
+  border-color: var(--arc-brand);
 }
-.permission-allow:hover { background: var(--vscode-button-hoverBackground); }
+.permission-allow:hover { background: var(--arc-brand-hover); }
 .permission-deny:hover { color: var(--arc-err); border-color: var(--arc-err); }
 
 /*
@@ -991,13 +1002,14 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
  * change nobody notices is a pending change that gets applied unread, and the
  * whole point of dry run is that somebody reads it first.
  *
- * Bordered in the same accent the permission strip uses, because it is the
- * same kind of thing: the panel is holding something and waiting for a person.
+ * Bordered in the diluted brand accent, because it is the same kind of thing
+ * as the permission card, one step quieter: the panel is holding something
+ * and waiting for a person, but nothing is blocked on the answer.
  */
 .dryrun {
   margin-bottom: 8px;
   padding: 7px 9px;
-  border: 1px solid var(--vscode-textLink-foreground);
+  border: 1px solid var(--arc-brand-line);
   border-radius: var(--arc-radius);
   background: var(--arc-surface);
   font-size: 0.9em;
@@ -1054,31 +1066,30 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
 .dryrun-button:hover { background: var(--vscode-list-hoverBackground); }
 .dryrun-button:disabled { opacity: 0.5; cursor: default; }
 .dryrun-primary {
-  color: var(--vscode-button-foreground);
-  background: var(--vscode-button-background);
-  border-color: var(--vscode-button-background);
+  color: var(--arc-brand-on);
+  background: var(--arc-brand);
+  border-color: var(--arc-brand);
 }
-.dryrun-primary:hover { background: var(--vscode-button-hoverBackground); }
+.dryrun-primary:hover { background: var(--arc-brand-hover); }
 .dryrun-danger:hover { color: var(--arc-err); border-color: var(--arc-err); }
 
 /*
  * The workflow surface, styled as a sibling of the review card on purpose:
  * both are "the engine is holding something you need to look at", and a person
  * who has learnt to read one should not have to learn a second vocabulary for
- * the other. What differs is the accent — the review card borders on the link
- * colour because it is about files, this borders on the warning colour while a
- * run is waiting on a person, because that is the state a pipeline can sit in
- * for an hour if nobody notices it.
+ * the other. While a run waits on a person it steps up from the diluted brand
+ * border to the full one, exactly as the permission card does — because that
+ * is the state a pipeline can sit in for an hour if nobody notices it.
  */
 .wf {
   margin-bottom: 8px;
   padding: 7px 9px;
-  border: 1px solid var(--arc-border);
+  border: 1px solid var(--arc-brand-line);
   border-radius: var(--arc-radius);
   background: var(--arc-surface);
   font-size: 0.9em;
 }
-.wf.wf-waiting { border-color: var(--arc-warn); }
+.wf.wf-waiting { border-color: var(--arc-brand); }
 .wf-head { display: flex; align-items: center; gap: 6px; }
 .wf-text { flex: 1 1 auto; min-width: 0; font-weight: 600; }
 .wf-close {
@@ -1159,11 +1170,11 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
 .wf-button:hover { background: var(--vscode-list-hoverBackground); }
 .wf-button:disabled { opacity: 0.5; cursor: default; }
 .wf-primary {
-  color: var(--vscode-button-foreground);
-  background: var(--vscode-button-background);
-  border-color: var(--vscode-button-background);
+  color: var(--arc-brand-on);
+  background: var(--arc-brand);
+  border-color: var(--arc-brand);
 }
-.wf-primary:hover { background: var(--vscode-button-hoverBackground); }
+.wf-primary:hover { background: var(--arc-brand-hover); }
 .wf-note { margin: 5px 0 0; color: var(--arc-warn); }
 
 /*
@@ -1427,7 +1438,7 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
 #model { flex: 0 1 auto; min-width: 3em; }
 #mode { flex: 0 1 auto; flex-shrink: 0.15; min-width: 3em; }
 #mode.mode-yolo { color: var(--arc-warn); border-color: var(--arc-warn); }
-#mode.mode-plan { color: var(--vscode-textLink-foreground); }
+#mode.mode-plan { color: var(--arc-brand); }
 #mode.mode-unknown .chip-label { font-style: italic; }
 .send {
   display: flex;
@@ -1542,8 +1553,8 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
   font-size: 0.72em;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: var(--vscode-badge-foreground);
-  background: var(--vscode-badge-background);
+  color: var(--arc-brand-on);
+  background: var(--arc-brand);
 }
 .model-id, .model-meta {
   margin-left: 13px;
@@ -1658,7 +1669,7 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
  */
 .mode-grants { margin-left: 22px; font-size: 0.85em; color: var(--arc-muted); }
 .mode-row:hover .mode-grants, .mode-row.active .mode-grants { color: inherit; opacity: 0.85; }
-.mode-row.mode-current .mode-name { color: var(--vscode-textLink-foreground); }
+.mode-row.mode-current .mode-name { color: var(--arc-brand); }
 #mode-status { color: var(--arc-warn); }
 
 /* ---- sessions: the history view, in the panel -------------------------- */
@@ -1694,8 +1705,8 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
   cursor: pointer;
 }
 .session-new:hover {
-  background: var(--vscode-list-hoverBackground);
-  border-color: var(--vscode-focusBorder);
+  background: var(--arc-brand-soft);
+  border-color: var(--arc-brand-line);
 }
 .session-new-where {
   margin-left: auto;
@@ -1785,6 +1796,30 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
   background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
 }
 @media (forced-colors: active) { .session-delete { opacity: 1; } }
+
+/* ---- scrollbars and selection ---------------------------------------- */
+
+/*
+ * The webview paints its own scrollbars, and unstyled ones are the one part
+ * of the panel the editor cannot theme for us. Thin, rounded, and in the
+ * theme's own slider colours — never the brand, because a scrollbar is
+ * furniture, not a voice.
+ */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb {
+  background: var(--vscode-scrollbarSlider-background, transparent);
+  border-radius: 4px;
+  background-clip: padding-box;
+  border: 2px solid transparent;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--vscode-scrollbarSlider-hoverBackground, var(--vscode-scrollbarSlider-background, transparent));
+  background-clip: padding-box;
+  border: 2px solid transparent;
+}
+::-webkit-scrollbar-corner { background: transparent; }
+/* Selected text wears a translucent brand wash over whatever it sits on. */
+::selection { background: color-mix(in srgb, var(--arc-brand) 28%, transparent); }
 
 /* One rule over everything, not a list of names. See the doc comment above. */
 @media (prefers-reduced-motion: reduce) {
