@@ -18,10 +18,12 @@ CLI, the SDK, or the wire protocol.
   press/release reports are enough to notice the gesture that wanted
   selection: the first drag (or double-click) hands the mouse back to the
   terminal with a one-line hint, the next one selects natively, and the next
-  keystroke re-takes the wheel. Copying never re-arms the grab — `Cmd+C`
-  belongs to the terminal and the app never sees it. Shift-drag still
-  bypasses everything, and `/help` now describes the handover instead of a
-  per-emulator chord table.
+  keystroke re-takes the wheel. The alternate screen has no scrollback, so
+  the handover survives `PgUp`/`PgDn` — page to any older screenful and
+  select it, or `/export` the whole conversation. Copying never re-arms the
+  grab — `Cmd+C` belongs to the terminal and the app never sees it.
+  Shift-drag still bypasses everything, and `/help` now describes the
+  handover instead of a per-emulator chord table.
 
 ## [0.5.2] — 2026-08-29
 

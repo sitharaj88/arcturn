@@ -469,6 +469,28 @@ describe("InteractiveApp in screen mode", () => {
     expect(h.terminal.isMouseEnabled).toBe(true);
   });
 
+  it("keeps the handover through PgUp/PgDn, so older screens can be selected", async () => {
+    // The alternate screen has no scrollback for the terminal to select from:
+    // paging the viewport is the only way to put older content under the
+    // mouse. If paging re-took the wheel, only the bottom screenful would
+    // ever be selectable — the exact complaint this exists to fix.
+    const h = await screenHarness();
+    h.terminal.injectInput("\u001b[<0;10;5M\u001b[<0;30;5m");
+    await tick();
+    expect(h.terminal.isMouseEnabled).toBe(false);
+
+    h.terminal.injectInput("\u001b[5~"); // PgUp
+    await tick();
+    expect(h.terminal.isMouseEnabled).toBe(false);
+    h.terminal.injectInput("\u001b[6~"); // PgDn
+    await tick();
+    expect(h.terminal.isMouseEnabled).toBe(false);
+
+    h.terminal.injectInput("a");
+    await tick();
+    expect(h.terminal.isMouseEnabled).toBe(true);
+  });
+
   it("keeps the mouse on a plain click, and releases it on a double-click", async () => {
     const h = await screenHarness();
 
