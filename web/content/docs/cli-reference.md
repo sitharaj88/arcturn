@@ -104,6 +104,7 @@ Typed inside the interactive TUI.
 | `/compact` | Summarise the conversation to free up context — see [Context management](/docs/context-management) |
 | `/sessions` | Resume an earlier session in this directory — see [Sessions](/docs/sessions) |
 | `/rewind` | Restore to an earlier turn; `/rewind <query>` jumps by intent — see [Checkpoints](/docs/checkpoints) |
+| `/copy` | Copy the last answer to the clipboard; `/copy all` for the conversation |
 | `/export` | Export the conversation to markdown or HTML |
 | `/todos` | Show the current todo list |
 | `/exit` | Quit Arcturn |
@@ -118,6 +119,7 @@ session is a tree, so the branch you rewound away from is still there.
 | `/model` | Switch the model; `/model refresh` re-queries each provider's own list |
 | `/cost` | Show usage and cost; also `limit <usd>`, `preview [steps]` |
 | `/theme` | Switch the colour theme |
+| `/ui` | Switch the renderer: `screen` (full-screen app, default) or `inline` (terminal-native) |
 | `/permissions` | Show rules and mode; also `suggest` |
 | `/mcp` | Show MCP server status |
 

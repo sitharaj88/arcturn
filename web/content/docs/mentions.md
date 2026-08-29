@@ -41,11 +41,15 @@ appends content or attaches images alongside it:
   prompt as a fenced block, itself capped at **2000 lines / 200KB** with a truncation
   marker (`… truncated (2000 line / 200KB cap)`) when either limit hits. A file over 2MB
   is never buffered at all — the token is left as-is with a `(too large to inline)` note.
-- **Anything that doesn't resolve** — a path that doesn't exist, a directory, an absolute
-  path elsewhere, or `../` traversal outside the working directory — is left completely
-  untouched. No note, no error. This is also why `someone@example.com` in a sentence is
-  never mistaken for a mention: a mention only starts at an `@` preceded by whitespace or
-  the start of the string.
+- **An absolute path attaches from anywhere.** `@/Users/you/Downloads/screenshot.png`
+  works even though the file is outside the workspace — writing `/` is an explicit
+  gesture at a known location by the person the engine works for. See
+  [Path safety](#path-safety) for what stays refused.
+- **Anything that doesn't resolve** — a path that doesn't exist, a directory, or `../`
+  traversal outside the working directory — is left completely untouched. No note, no
+  error. This is also why `someone@example.com` in a sentence is never mistaken for a
+  mention: a mention only starts at an `@` preceded by whitespace or the start of the
+  string.
 
 ```text
 Fix the null check in @src/agent.ts and compare the result against @docs/before.png
@@ -63,18 +67,44 @@ submit exactly as they were during completion.
 
 ### Path safety
 
-Resolution happens in two steps, both of which must pass:
+The rule: **an absolute path attaches from anywhere; a relative path stays inside the
+workspace.** An absolute path — typed after `@`, picked in the panel's Attach dialog, or
+produced by a drag, which always carries one — is an explicit gesture at a known
+location. What stays refused is the *covert* escape: a mention that reads as
+workspace-local but quietly leaves it, because the person reading `@src/config` has been
+told a lie about what was read.
+
+For a relative mention, resolution happens in two steps, both of which must pass:
 
 1. **Lexical containment** — the path is resolved against the working directory and must
    equal it or fall under it; `../` traversal outside the root is rejected immediately.
 2. **Real-path containment** — because a symlink *inside* the workspace can still point
    outside it, the final check compares `realpath()` of both the root and the resolved
-   target. A mention is only expanded if the real, symlink-resolved path also stays under
-   the real root.
+   target. A relative mention is only expanded if the real, symlink-resolved path also
+   stays under the real root.
 
 Both checks fail closed: any error (a broken symlink, a permission error) is treated as
 "does not resolve," which — per the rule above — leaves the mention completely untouched
-rather than erroring.
+rather than erroring. And a refusal is a blind wall, not a filesystem oracle: the engine
+does not confirm whether the path it refused to read exists.
+
+### Drag a file in — from anywhere
+
+A drag-and-drop onto the terminal *is* a paste: the emulator inserts the dropped file's
+absolute path as pasted text — shell-escaped on macOS (`/Users/you/My\ File.png`),
+quoted on some Linux terminals. The composer recognises that shape and rewrites it into
+an `@`-mention, quoting paths with spaces, so dropping a screenshot from Finder onto the
+prompt reads as:
+
+```text
+@"/Users/you/Desktop/Screenshot 2026-08-29.png"
+```
+
+Deliberately strict about when it fires: every whitespace-separated token in the paste
+must unescape to an existing absolute path, so pasted prose, code, or a lone `/` is
+never rewritten — it inserts verbatim, as one undo unit. A multi-file drop becomes
+several mentions. The VS Code panel's drop target and Attach dialog accept any file for
+the same reason and through the same engine gate: one rule, both front-ends.
 
 ## Extending completion
 

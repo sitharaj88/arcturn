@@ -38,13 +38,34 @@ terminal*, so you can always read what it ran and re-run it yourself.
 | Arcturn: New Session | `arcturn.newSession` | — | Starts a new session in the sidebar. |
 | Arcturn: Abort Run | `arcturn.abortRun` | — | Stops the turn in flight. |
 | Arcturn: Show Cost | `arcturn.showCost` | — | The breakdown behind the status bar figure. |
+| Arcturn: Edit Selection | `arcturn.inlineEdit` | `ctrl+alt+k` / `cmd+alt+k` | Select lines, say what should change, see the proposal as a diff, apply or discard. The turn is read-only and the *editor* makes the edit: undo is one entry, declining costs nothing, and the change cannot reach outside the selection. |
+| Arcturn: Review My Changes | `arcturn.reviewChanges` | — | The uncommitted diff, reviewed by the engine; findings land in the Problems panel as real diagnostics — clickable, with severity, picked up by *Fix with Arcturn*. |
+| Arcturn: Clear Review Findings | `arcturn.clearReview` | — | Empties those diagnostics when you are done with them. |
+| Arcturn: Generate Commit Message | `arcturn.generateCommitMessage` | — | The staged diff (or the working tree when nothing is staged), plus your repository's own recent subjects for style. The message lands in the Source Control input box for you to edit; nothing is committed. Also a button in the Source Control view. |
+| Arcturn: Ask About the Last Failed Command | `arcturn.askAboutFailure` | — | Puts the command, exit code and output tail of the last non-zero exit into the composer as a ready question. The same thing the quiet status-bar item does when clicked. |
+| Arcturn: Review Pending Changes | `arcturn.showDiff` | — | Show what a dry run wants to change, as diffs. |
+| Arcturn: Apply Pending Changes | `arcturn.applyChanges` | — | Land those changes in the workspace. |
+| Arcturn: Discard Pending Changes | `arcturn.discardChanges` | — | Throw them away. |
+| Arcturn: Export Chat | `arcturn.exportChat` | — | The conversation as markdown or HTML, saved where you choose. |
+| Arcturn: Rewind to a Checkpoint | `arcturn.checkpoints` | — | Pick a checkpoint, confirm the same modal the panel shows, restore. |
+| Arcturn: Scout Approaches | `arcturn.scout.run` | — | Run competing approaches in throwaway worktrees and read each result as side-by-side diffs; hand the winner to the agent as findings. |
+| Arcturn: Authorize MCP Server | `arcturn.authorizeMcpServer` | — | OAuth for an MCP server from the editor, including over Remote-SSH, devcontainers and Codespaces. Tokens never leave the engine. |
+| Arcturn: Attach MCP Resource | `arcturn.mcp.attachResource` | — | Attach what a server publishes; the engine reads it at prompt time, inside the same byte budget a file gets. |
+| Arcturn: Run MCP Prompt Template | `arcturn.mcp.runPrompt` | — | A server's prompt template, through an argument form, into the composer. |
+| Arcturn: Start Background Agent | `arcturn.background.start` | — | Fire-and-forget work, watched from the Background Agents tree. |
+| Arcturn: Refresh Background Agents | `arcturn.background.refresh` | — | Re-ask the engine what is running. |
+| Arcturn: Refresh Hub | `arcturn.hub.refresh` | — | Re-derive each kit's installed/partial/available state from what the engine actually answers to. |
 | Arcturn: Reconnect | `arcturn.reconnect` | — | Restarts `arcturn serve` and reattaches after the engine dies. |
 | Arcturn: Toggle Active File Context | `arcturn.toggleActiveEditorContext` | — | Turns off — or back on — the panel's habit of including the file you have open with your next message. Same switch as `arcturn.context.activeEditor` and as the chip's own dismiss control. |
 | Arcturn: Show Log | `arcturn.showLog` | — | Opens the **Arcturn Sidebar** output channel — everything the engine wrote, redacted, plus which environment the extension resolved. This is where you look when something did not start. |
 
-The last eight drive the sidebar, so they are hidden from the palette when
-`arcturn.serve.enabled` is off — with no serve there is no engine behind them,
-and six entries that can only fail is not a menu.
+Everything from *Select Model* down drives the sidebar, so those commands are
+hidden from the palette when `arcturn.serve.enabled` is off — with no serve
+there is no engine behind them, and a menu of entries that can only fail is
+not a menu. Four more commands never appear in the palette at all: *Install
+Kit* and *Open on arcturn.dev* live on the Hub tree's rows, *Cancel* and
+*Bring Into Chat* on the Background Agents tree's — each acts on the row it
+sits on.
 
 The code action becomes available once the extension has activated — that is,
 after you have run an Arcturn command or opened the Arcturn view once in this
@@ -60,6 +81,7 @@ what that costs.
 | `arcturn.serve.enabled` | `true` | Run `arcturn serve` for the native sidebar. Turn it off for terminal integration only; the Arcturn view goes away with it. |
 | `arcturn.serve.port` | `0` | Loopback port for `arcturn serve`. `0` picks an ephemeral port, which is what you want. |
 | `arcturn.context.activeEditor` | `true` | Include the file you have open with your next panel message. See below. |
+| `arcturn.cli.autoUpdate` | `true` | Install a missing engine without asking, and once a day ask npm whether a newer one exists. Off, every install and upgrade is offered as a question instead. An engine pinned by `arcturn.cliPath` is never auto-installed over — pinned means pinned. |
 
 ### The file you have open
 
@@ -129,8 +151,14 @@ Honest status, because a roadmap written as a feature list is a lie:
   model picker, the sessions view and the reconnect path all speak the engine's
   WebSocket protocol — the same `ProtocolClient` verbs any other client gets,
   and nothing beyond them.
+- **Stage 3 — the editor as a surface: shipped.** Edit-selection-in-place,
+  review-into-Problems, the commit message button, the failed-command
+  status-bar item, the Hub and Background Agents trees in the bottom panel,
+  scout comparisons in the diff editor, MCP resources, prompt templates and
+  in-editor OAuth — and an engine that provisions and updates itself at
+  startup, in the background.
 
-Neither stage has been through a long soak in daily use yet. The tests are
+None of the stages has been through a long soak in daily use yet. The tests are
 real and the demo path in RFC 0004 §4 works; treat the mileage as young.
 
 Two behaviours worth knowing about before they surprise you:
@@ -255,7 +283,7 @@ From the repository root:
 ```bash
 pnpm install
 pnpm -C editors/vscode run build      # esbuild -> dist/extension.js
-pnpm -C editors/vscode run package    # @vscode/vsce -> arcturn-vscode-0.2.0.vsix
+pnpm -C editors/vscode run package    # @vscode/vsce -> arcturn-vscode-0.3.0.vsix
 npx vitest run editors/vscode         # the extension's own tests
 ```
 
