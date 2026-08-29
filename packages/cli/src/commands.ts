@@ -14,7 +14,12 @@ import { getTheme, setTheme } from "@arcturn/tui";
 import type { PermissionMode, PermissionRule } from "@arcturn/types";
 import { createBackgroundAgentCommands } from "./background-agents.js";
 import { copyToClipboard } from "./clipboard.js";
-import { permissionModes, persistPermissionRule, persistSetting } from "./config.js";
+import {
+  permissionModes,
+  persistModelPick,
+  persistPermissionRule,
+  persistSetting,
+} from "./config.js";
 import { estimateCost, formatEstimate } from "./cost-preview.js";
 import { exportHtml, exportMarkdown, suggestExportFilename } from "./export.js";
 import type { ExtensionCommand } from "./extensions.js";
@@ -338,16 +343,34 @@ export function createBuiltInCommands(): SlashCommand[] {
           );
           return;
         }
-        if (args !== "") {
+        // The pick is a default, not a whim: it outlives the session, like
+        // the extension's picker has since 0.2.0. Persistence failing must
+        // not un-switch the live session, so it downgrades to a warning.
+        const applyPick = async (id: string) => {
+          let spec: ReturnType<typeof runtime.setModel>;
           try {
-            const spec = runtime.setModel(args);
-            ui.notice(
-              "info",
-              `Model set to ${spec.displayName} (${spec.id}).${runtime.agent.isRunning ? " Applies from the next request." : ""}`,
-            );
+            spec = runtime.setModel(id);
           } catch (error) {
             ui.notice("error", error instanceof Error ? error.message : String(error));
+            return;
           }
+          let saved = "";
+          try {
+            const file = await persistModelPick(spec.id, runtime.paths);
+            saved = ` Saved as your default (${file}).`;
+          } catch (error) {
+            ui.notice(
+              "warn",
+              `Switched for this session, but the pick could not be saved: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+          ui.notice(
+            "info",
+            `Model set to ${spec.displayName} (${spec.id}).${runtime.agent.isRunning ? " Applies from the next request." : ""}${saved}`,
+          );
+        };
+        if (args !== "") {
+          await applyPick(args);
           return;
         }
         const choice = await ui.select(
@@ -361,15 +384,7 @@ export function createBuiltInCommands(): SlashCommand[] {
           { filterable: true },
         );
         if (!choice) return;
-        try {
-          const spec = runtime.setModel(choice);
-          ui.notice(
-            "info",
-            `Model set to ${spec.displayName} (${spec.id}).${runtime.agent.isRunning ? " Applies from the next request." : ""}`,
-          );
-        } catch (error) {
-          ui.notice("error", error instanceof Error ? error.message : String(error));
-        }
+        await applyPick(choice);
       },
     },
     {

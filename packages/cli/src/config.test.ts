@@ -11,6 +11,7 @@ import {
   mergeConfig,
   parseConfigFile,
   parsePermissionMode,
+  persistModelPick,
   persistPermissionRule,
   persistSetting,
 } from "./config.js";
@@ -420,6 +421,62 @@ describe("persistSetting", () => {
     await persistSetting("model", "openai/gpt-5-mini", "user", paths);
     const stored = JSON.parse(await readFile(paths.userConfig, "utf8")) as ArcturnConfig;
     expect(stored.model).toBe("openai/gpt-5-mini");
+  });
+});
+
+describe("persistModelPick", () => {
+  it("writes the pick as the model on a fresh config", async () => {
+    const { home, cwd } = await scratch();
+    const paths = resolveArcturnPaths({ home, cwd, env: {} });
+    await persistModelPick("zai-api/glm-5.3", paths);
+    const stored = JSON.parse(await readFile(paths.userConfig, "utf8")) as ArcturnConfig;
+    expect(stored.model).toBe("zai-api/glm-5.3");
+    expect(stored.route).toBeUndefined();
+  });
+
+  it("moves a user-layer route.main with the pick, leaving the rest of the route alone", async () => {
+    const { home, cwd } = await scratch();
+    const paths = resolveArcturnPaths({ home, cwd, env: {} });
+    await writeFile(
+      paths.userConfig,
+      JSON.stringify({
+        model: "zai-api/glm-5.2",
+        route: { main: "zai-api/glm-5.2", subagent: "cheap/one", tiers: { judgment: "big/one" } },
+        theme: "light",
+      }),
+    );
+    await persistModelPick("zai-api/glm-5.3", paths);
+    const stored = JSON.parse(await readFile(paths.userConfig, "utf8")) as ArcturnConfig;
+    expect(stored.model).toBe("zai-api/glm-5.3");
+    // A pick that wrote only `model` would look saved and change nothing:
+    // route.main outvotes it wherever a route is resolved.
+    expect(stored.route).toEqual({
+      main: "zai-api/glm-5.3",
+      subagent: "cheap/one",
+      tiers: { judgment: "big/one" },
+    });
+    expect(stored.theme).toBe("light");
+  });
+
+  it("does not invent a route.main where the config never had one", async () => {
+    const { home, cwd } = await scratch();
+    const paths = resolveArcturnPaths({ home, cwd, env: {} });
+    await writeFile(paths.userConfig, JSON.stringify({ route: { subagent: "cheap/one" } }));
+    await persistModelPick("zai-api/glm-5.3", paths);
+    const stored = JSON.parse(await readFile(paths.userConfig, "utf8")) as ArcturnConfig;
+    expect(stored.route).toEqual({ subagent: "cheap/one" });
+  });
+
+  it("a failover chain keeps its tail: the pick becomes the head, duplicates drop", async () => {
+    const { home, cwd } = await scratch();
+    const paths = resolveArcturnPaths({ home, cwd, env: {} });
+    await writeFile(
+      paths.userConfig,
+      JSON.stringify({ model: ["zai-api/glm-5.2", "openai/gpt-5", "zai-api/glm-5.3"] }),
+    );
+    await persistModelPick("zai-api/glm-5.3", paths);
+    const stored = JSON.parse(await readFile(paths.userConfig, "utf8")) as ArcturnConfig;
+    expect(stored.model).toEqual(["zai-api/glm-5.3", "zai-api/glm-5.2", "openai/gpt-5"]);
   });
 });
 

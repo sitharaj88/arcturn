@@ -278,6 +278,32 @@ describe("ModelRouter.specForTier", () => {
     router.rebind(OPUS);
     expect(router.specForTier("cheap")).toBe(OPUS);
   });
+
+  it("rebind clears a configured route.main, so the switch governs routed calls", () => {
+    const resolve = catalogResolver([FLAGSHIP, OPUS, HAIKU]);
+    const router = createModelRouter({ main: FLAGSHIP.id }, resolve, FLAGSHIP);
+    expect(router.specFor("main")).toBe(FLAGSHIP);
+    router.rebind(OPUS);
+    // Without the clear, config.main keeps outvoting the explicit switch on
+    // every routed call — the chat speaks the new model while sub-agents,
+    // tiers and workflow stages quietly keep billing the old one.
+    expect(router.specFor("main")).toBe(OPUS);
+    expect(router.specFor("subagent")).toBe(OPUS);
+    expect(router.specForTier("anything")).toBe(OPUS);
+  });
+
+  it("rebind leaves the per-kind overrides and tiers standing — only main is the pick", () => {
+    const resolve = catalogResolver([FLAGSHIP, OPUS, HAIKU]);
+    const router = createModelRouter(
+      { main: FLAGSHIP.id, subagent: HAIKU.id, tiers: { judgment: HAIKU.id } },
+      resolve,
+      FLAGSHIP,
+    );
+    router.rebind(OPUS);
+    expect(router.specFor("main")).toBe(OPUS);
+    expect(router.specFor("subagent")).toBe(HAIKU);
+    expect(router.specForTier("judgment")).toBe(HAIKU);
+  });
 });
 
 describe("resolveModelTag", () => {

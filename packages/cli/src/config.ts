@@ -897,3 +897,43 @@ export async function persistSetting<K extends keyof ArcturnConfig>(
   await writeFile(file, `${JSON.stringify(next, null, 2)}\n`, "utf8");
   return file;
 }
+
+/**
+ * Persist an interactive model pick as the user's default.
+ *
+ * Two keys govern which model actually runs: `model` (the session's primary,
+ * and the router's fallback) and `route.main` (an explicit override that
+ * wins over the session model wherever a route is resolved). A pick that
+ * wrote only `model` would look saved and change nothing against a config
+ * carrying `route.main` — so when the user layer has one, it moves with the
+ * pick. The other route keys (`subagent`, `compaction`, `title`, `tiers`)
+ * are deliberate policy, not the pick, and stay untouched — as does a
+ * project-layer config, which outranks the user layer on purpose.
+ *
+ * A `model` failover chain keeps its tail: the pick becomes the head and the
+ * remaining entries stay behind it as fallbacks.
+ *
+ * @param id - Resolved catalog id of the picked model.
+ * @param paths - Resolved filesystem layout.
+ * @returns The file written (always the user config).
+ */
+export async function persistModelPick(id: string, paths: ArcturnPaths): Promise<string> {
+  const file = paths.userConfig;
+  let existing: Record<string, unknown> = {};
+  try {
+    const parsed: unknown = JSON.parse(await readFile(file, "utf8"));
+    if (isRecord(parsed)) existing = parsed;
+  } catch {
+    // Treat an absent or broken file as empty.
+  }
+  const model = Array.isArray(existing.model)
+    ? [id, ...existing.model.filter((entry) => entry !== id)]
+    : id;
+  const next: Record<string, unknown> = { ...existing, model };
+  if (isRecord(existing.route) && typeof existing.route.main === "string") {
+    next.route = { ...existing.route, main: id };
+  }
+  await mkdir(dirname(file), { recursive: true });
+  await writeFile(file, `${JSON.stringify(next, null, 2)}\n`, "utf8");
+  return file;
+}

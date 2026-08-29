@@ -134,7 +134,9 @@ export interface ModelRouter {
   /**
    * Drop cached resolutions and adopt a new fallback — call after the
    * session's main model changes, or routes that defaulted to the old one
-   * keep resolving to it.
+   * keep resolving to it. Also clears a configured `route.main`: the switch
+   * is an explicit choice of main model, and a config default must not keep
+   * outvoting it on routed calls. Per-kind overrides and `tiers` survive.
    *
    * @param fallback - The new main model.
    */
@@ -170,6 +172,13 @@ export function createModelRouter(
   const cache = new Map<RouteKind, ModelSpec>();
   const tierCache = new Map<string, ModelSpec>();
   let active = fallback;
+  // `route.main` is a startup default, not a standing veto: an explicit
+  // in-session switch (`rebind`) clears it, or the pick would govern the
+  // chat while every routed call — sub-agents, tiers, workflow stages —
+  // quietly kept the config file's model. The per-kind overrides
+  // (`subagent`, `compaction`, `title`) and `tiers` are deliberate policy
+  // and survive a switch.
+  let mainOverride = config.main;
   const collectedWarnings: string[] = [];
 
   // `label` is a `RouteKind` for the four fixed routes and `tier:<name>` for
@@ -198,9 +207,9 @@ export function createModelRouter(
 
     const spec =
       kind === "main"
-        ? config.main === undefined
+        ? mainOverride === undefined
           ? active
-          : resolveConfigured(config.main, kind)
+          : resolveConfigured(mainOverride, kind)
         : config[kind] === undefined
           ? specFor("main")
           : resolveConfigured(config[kind], kind);
@@ -237,6 +246,7 @@ export function createModelRouter(
     warnings: () => [...collectedWarnings],
     rebind(next: ModelSpec): void {
       active = next;
+      mainOverride = undefined;
       cache.clear();
       tierCache.clear();
     },

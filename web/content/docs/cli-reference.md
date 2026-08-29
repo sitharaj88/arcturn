@@ -116,7 +116,7 @@ session is a tree, so the branch you rewound away from is still there.
 
 | Command | What it does |
 |---|---|
-| `/model` | Switch the model; `/model refresh` re-queries each provider's own list |
+| `/model` | Switch the model — the pick persists as your default; `/model refresh` re-queries each provider's own list |
 | `/cost` | Show usage and cost; also `limit <usd>`, `preview [steps]` |
 | `/theme` | Switch the colour theme |
 | `/ui` | Switch the renderer: `screen` (full-screen app, default) or `inline` (terminal-native) |

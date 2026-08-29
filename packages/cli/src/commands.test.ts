@@ -242,6 +242,28 @@ describe("built-in commands", () => {
     await runtime.dispose();
   });
 
+  it("/model persists the pick as the user default, moving a route.main with it", async () => {
+    const scratch = await makeScratch();
+    const runtime = await buildTestRuntime(scratch);
+    const ui = fakeUi();
+    await run(runtime, "/model anthropic/claude-opus-4-5", ui);
+    // The pick outlives the session: without this, the next launch reads the
+    // config's old model and the switch silently evaporates.
+    const stored = JSON.parse(await readFile(runtime.paths.userConfig, "utf8")) as {
+      model: string;
+    };
+    expect(stored.model).toBe("anthropic/claude-opus-4-5");
+    expect(ui.notices[0]?.text).toContain("Saved as your default");
+
+    // A failed pick persists nothing.
+    await run(runtime, "/model nope/nope", ui);
+    const after = JSON.parse(await readFile(runtime.paths.userConfig, "utf8")) as {
+      model: string;
+    };
+    expect(after.model).toBe("anthropic/claude-opus-4-5");
+    await runtime.dispose();
+  });
+
   it("/clear starts a new session and clears the screen", async () => {
     const scratch = await makeScratch();
     const runtime = await buildTestRuntime(scratch, [{ text: "hi" }]);

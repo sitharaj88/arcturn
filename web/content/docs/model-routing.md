@@ -126,6 +126,13 @@ returned without re-resolving. `router.rebind(newFallback)` clears the cache and
 new fallback; call it after the session's main model changes (e.g. `/model <id>`), or
 routes that defaulted to the old fallback keep resolving to it.
 
+`route.main` is a **startup default, not a standing veto**: an explicit in-session
+switch (`/model <id>`) clears it, so the pick governs every routed call — sub-agents,
+tier fallbacks, workflow stages — not just the chat. The per-kind overrides and `tiers`
+survive the switch; they are deliberate policy, not the pick. The pick also persists as
+your default: `/model` writes it back to the user config, moving a user-layer
+`route.main` with it (a project-layer config still outranks the user layer, on purpose).
+
 ## Failure handling: never blocks startup
 
 If a configured route id fails to resolve — unknown model, a deregistered preset, a typo

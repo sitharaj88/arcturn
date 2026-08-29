@@ -10,6 +10,29 @@ CLI, the SDK, or the wire protocol.
 
 ## [Unreleased]
 
+### Changed
+
+- **A `/model` pick now sticks, in the CLI too.** Switching models persists
+  the choice to `~/.arcturn/config.json` as the new default — the extension's
+  picker has worked this way since 0.2.0, and the terminal now keeps the same
+  promise. A user-layer `route.main` moves with the pick, because a pick that
+  only wrote `model` would look saved and change nothing: `route.main`
+  outvotes it wherever a route is resolved. The other route keys and `tiers`
+  are policy, not the pick, and stay put; so does a project-layer config,
+  which outranks the user layer on purpose. A `model` failover chain keeps
+  its tail — the pick becomes the head, the fallbacks stay behind it. If the
+  write fails, the session still switches and says why the save did not.
+
+### Fixed
+
+- **An in-session model switch now governs routed calls.** With `route.main`
+  set in config, `/model` changed what the chat spoke while sub-agents, tier
+  fallbacks and workflow stages quietly kept resolving — and billing — the
+  configured model. `rebind` now clears the `main` override: an explicit
+  switch is a choice of main model everywhere. Per-kind overrides
+  (`subagent`, `compaction`, `title`) and `tiers` survive, as deliberate
+  policy should.
+
 ## [0.5.3] — 2026-08-29
 
 A session's worth of field reports from real use, and the terminal work they
