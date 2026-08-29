@@ -136,6 +136,13 @@ export interface ArcturnConfig {
   requestStallTimeoutMs?: number;
   /** Record an append-only audit trail per session (default `false`). */
   audit: boolean;
+  /**
+   * Once a day, ask npm whether a newer `arcturn` exists and say so in one
+   * line (default `true`). A notice, never an install: replacing a binary
+   * out from under its own running process is not this tool's call. The
+   * check is the CLI's only network request that is not the user's model.
+   */
+  updateCheck: boolean;
   /** Record reasoning-level provenance so `arcturn blame` can explain a file. */
   provenance: boolean;
   /** Route file mutations to a shadow copy for review (default `false`). */
@@ -185,6 +192,7 @@ export const DEFAULT_CONFIG: Readonly<ArcturnConfig> = Object.freeze({
   ui: "screen" as const,
   hooks: EMPTY_HOOK_CONFIG,
   audit: false,
+  updateCheck: true,
   provenance: false,
   dryRun: false,
   speculation: false,
@@ -219,6 +227,7 @@ const KNOWN_KEYS = new Set([
   "requestStallTimeoutMs",
   "verify",
   "audit",
+  "updateCheck",
   "provenance",
   "dryRun",
   "speculation",
@@ -447,6 +456,10 @@ export function parseConfigFile(
     if (typeof raw.audit === "boolean") out.audit = raw.audit;
     else warnings.push(`${where}: "audit" must be a boolean`);
   }
+  if (raw.updateCheck !== undefined) {
+    if (typeof raw.updateCheck === "boolean") out.updateCheck = raw.updateCheck;
+    else warnings.push(`${where}: "updateCheck" must be a boolean`);
+  }
   if (raw.provenance !== undefined) {
     if (typeof raw.provenance === "boolean") out.provenance = raw.provenance;
     else warnings.push(`${where}: "provenance" must be a boolean`);
@@ -665,6 +678,7 @@ export function mergeConfig(base: ArcturnConfig, layer: Partial<ArcturnConfig>):
     theme: layer.theme ?? base.theme,
     ui: layer.ui ?? base.ui,
     audit: layer.audit ?? base.audit,
+    updateCheck: layer.updateCheck ?? base.updateCheck,
     provenance: layer.provenance ?? base.provenance,
     dryRun: layer.dryRun ?? base.dryRun,
     speculation: layer.speculation ?? base.speculation,

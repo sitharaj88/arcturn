@@ -87,6 +87,8 @@ async function harness(
       copies.push(text);
       return { ok: true, via: "test" };
     },
+    // Unit tests never touch the npm registry.
+    checkForUpdate: async () => undefined,
   });
   const exit = app.run();
   await tick();
@@ -102,6 +104,27 @@ async function harness(
 }
 
 describe("InteractiveApp", () => {
+  it("announces a newer engine once, as one muted line", async () => {
+    const scratch = await makeScratch();
+    await writeFileAt(join(scratch.cwd, ".arcturn", "config.json"), JSON.stringify({ ui: "inline" }));
+    const runtime = await buildTestRuntime(scratch, [{ text: "hi" }], {});
+    const terminal = new TestTerminal({ columns: 80, rows: 24 });
+    const app = new InteractiveApp({
+      runtime,
+      terminal,
+      streamThrottleMs: 5,
+      checkForUpdate: async () => "9.9.9",
+    });
+    const exit = app.run();
+    await waitFor(() => stripAnsi(terminal.output).includes("Update available"));
+    expect(stripAnsi(terminal.output)).toContain("9.9.9");
+    expect(stripAnsi(terminal.output)).toContain("npm install -g arcturn");
+    terminal.injectInput(CTRL_C);
+    terminal.injectInput(CTRL_C);
+    await exit;
+    await runtime.dispose();
+  });
+
   it("prints a bannered welcome card with the model, mode and working directory", async () => {
     const h = await harness();
     const text = h.text();

@@ -43,6 +43,7 @@ import {
   Viewport,
 } from "@arcturn/tui";
 import type { AgentEvent, PermissionDecision, PermissionRequest, TodoItem } from "@arcturn/types";
+import { join } from "node:path";
 import { bannerLines } from "../banner.js";
 import { type CopyResult, copyToClipboard } from "../clipboard.js";
 import {
@@ -64,6 +65,7 @@ import { type GlyphSet, resolveGlyphs } from "../glyphs.js";
 import { WORDMARK_WIDTH } from "../logo.js";
 import { createFileMentionSource, expandMentions, type FileMentionSource } from "../mentions.js";
 import { version } from "../meta.js";
+import { checkForUpdate } from "../update-check.js";
 import type { ArcturnRuntime, SessionMetrics } from "../runtime.js";
 import { resolveTheme } from "../themes.js";
 import {
@@ -138,6 +140,8 @@ export interface InteractiveAppOptions {
   queryTerminalBackground?: () => Promise<string | undefined>;
   /** Overrides the clipboard pipe (tests). Defaults to the real one. */
   copyToClipboard?: (text: string) => Promise<CopyResult>;
+  /** Overrides the daily update probe (tests). Defaults to the real one. */
+  checkForUpdate?: () => Promise<string | undefined>;
 }
 
 const SPINNER_INTERVAL_MS = 90;
@@ -225,6 +229,7 @@ export class InteractiveApp {
    * fixed height, so the receipt lives there and fades on this timer.
    */
   #flashTimer: ReturnType<typeof setTimeout> | undefined;
+  readonly #checkForUpdate: (() => Promise<string | undefined>) | undefined;
   #exitRequested = false;
   /**
    * The terminal's own default background as it was at startup (raw OSC 11
@@ -255,6 +260,7 @@ export class InteractiveApp {
       options.copyToClipboard ??
       ((text) =>
         copyToClipboard(text, { writeToTerminal: (sequence) => this.#terminal.write(sequence) }));
+    this.#checkForUpdate = options.checkForUpdate;
     this.#queryTerminalBg =
       options.queryTerminalBackground ?? (() => queryTerminalBackground({ timeoutMs: 150 }));
 
@@ -391,6 +397,7 @@ export class InteractiveApp {
 
     this.#tui.start();
     this.#refresh();
+    this.#maybeAnnounceUpdate();
 
     const exited = new Promise<void>((resolve) => {
       this.#resolveExit = resolve;
@@ -1160,6 +1167,32 @@ export class InteractiveApp {
     }
     // Failure is durable information, so it does go to the transcript.
     this.#writeThemed(() => [style("warning")(`${result.why} /copy and /export still work.`)]);
+  }
+
+  /**
+   * The daily update notice, off the startup path: one muted line when npm
+   * has moved on, nothing in every other case, and never an install — see
+   * update-check.ts. `updateCheck: false` turns it off entirely.
+   */
+  #maybeAnnounceUpdate(): void {
+    if (this.#runtime.config.updateCheck === false) return;
+    const check =
+      this.#checkForUpdate ??
+      (() =>
+        checkForUpdate({
+          currentVersion: version(),
+          stateFile: join(this.#runtime.paths.home, "update-check.json"),
+        }));
+    void check()
+      .then((latest) => {
+        if (latest === undefined) return;
+        this.#writeThemed(() => [
+          style("muted")(
+            `Update available: ${version()} -> ${latest} - npm install -g arcturn (updateCheck: false silences this)`,
+          ),
+        ]);
+      })
+      .catch(() => undefined);
   }
 
   #showFlash(text: string): void {
