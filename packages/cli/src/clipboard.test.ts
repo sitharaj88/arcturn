@@ -67,6 +67,61 @@ describe("copyToClipboard", () => {
     if (!result.ok) expect(result.why).toContain("first, second");
   });
 
+  it("falls back to OSC 52 through the terminal when every pipe fails locally", async () => {
+    const { impl } = fakeSpawn({});
+    const written: string[] = [];
+    const result = await copyToClipboard("hello", {
+      tools,
+      spawnImpl: impl,
+      env: {},
+      writeToTerminal: (sequence) => written.push(sequence),
+    });
+    expect(result).toEqual({ ok: true, via: "osc52" });
+    expect(written).toHaveLength(1);
+    expect(written[0]).toBe(`\u001b]52;c;${Buffer.from("hello").toString("base64")}\u0007`);
+  });
+
+  it("leads with OSC 52 over SSH — a remote pbcopy is the wrong clipboard", async () => {
+    const { impl, calls } = fakeSpawn({ first: { outcome: 0 } });
+    const written: string[] = [];
+    const result = await copyToClipboard("x", {
+      tools,
+      spawnImpl: impl,
+      env: { SSH_TTY: "/dev/ttys001" },
+      writeToTerminal: (sequence) => written.push(sequence),
+    });
+    expect(result).toEqual({ ok: true, via: "osc52" });
+    expect(calls).toHaveLength(0); // no pipe was ever spawned
+    expect(written).toHaveLength(1);
+  });
+
+  it("wraps the sequence in tmux passthrough when inside tmux", async () => {
+    const { impl } = fakeSpawn({});
+    const written: string[] = [];
+    await copyToClipboard("x", {
+      tools,
+      spawnImpl: impl,
+      env: { SSH_TTY: "y", TMUX: "/tmp/tmux-1/default,123,0" },
+      writeToTerminal: (sequence) => written.push(sequence),
+    });
+    expect(written[0]?.startsWith("\u001bPtmux;\u001b\u001b]52;c;")).toBe(true);
+    expect(written[0]?.endsWith("\u001b\\")).toBe(true);
+  });
+
+  it("refuses to truncate: an oversized payload falls through, named honestly", async () => {
+    const { impl } = fakeSpawn({});
+    const written: string[] = [];
+    const result = await copyToClipboard("y".repeat(100_000), {
+      tools,
+      spawnImpl: impl,
+      env: {},
+      writeToTerminal: (sequence) => written.push(sequence),
+    });
+    expect(written).toHaveLength(0);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.why).toContain("osc52");
+  });
+
   it("orders Wayland before X11 on linux and uses the native tool elsewhere", () => {
     expect(clipboardToolsFor("darwin").map((tool) => tool.command)).toEqual(["pbcopy"]);
     expect(clipboardToolsFor("win32").map((tool) => tool.command)).toEqual(["clip"]);

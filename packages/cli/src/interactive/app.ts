@@ -241,7 +241,10 @@ export class InteractiveApp {
     this.#streamThrottleMs = options.streamThrottleMs ?? 60;
     this.#interruptWindowMs = options.interruptWindowMs ?? 1500;
     this.#initialPrompt = options.initialPrompt;
-    this.#copyToClipboard = options.copyToClipboard ?? copyToClipboard;
+    this.#copyToClipboard =
+      options.copyToClipboard ??
+      ((text) =>
+        copyToClipboard(text, { writeToTerminal: (sequence) => this.#terminal.write(sequence) }));
     this.#queryTerminalBg =
       options.queryTerminalBackground ?? (() => queryTerminalBackground({ timeoutMs: 150 }));
 
@@ -1290,6 +1293,9 @@ export class InteractiveApp {
       setInput: (text) => {
         this.#editor.setText(text);
         this.#tui.requestRender();
+      },
+      writeRaw: (sequence) => {
+        this.#terminal.write(sequence);
       },
       workflowLive: (event) => {
         this.#workflow.handle(event);

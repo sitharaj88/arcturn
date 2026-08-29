@@ -78,6 +78,13 @@ export interface CommandUi {
   /** Ask the app to shut down. */
   exit(): void;
   /**
+   * Write a raw escape sequence to the controlling terminal, bypassing the
+   * transcript — the channel OSC 52 clipboard writes ride. Optional because
+   * only a host that actually owns a terminal can offer it; a headless host
+   * omits it and the features that need it degrade honestly.
+   */
+  writeRaw?(sequence: string): void;
+  /**
    * Feed the ephemeral live run block: a workflow's structured progress events,
    * kept apart from the durable {@link notice} transcript. A headless host (or
    * a test) omits it, and the run behaves exactly as before. Optional, because
@@ -623,7 +630,10 @@ export function createBuiltInCommands(): SlashCommand[] {
           ui.notice("info", wantAll ? "Nothing to copy yet." : "No answer to copy yet.");
           return;
         }
-        const result = await copyToClipboard(text);
+        const result = await copyToClipboard(
+          text,
+          ui.writeRaw ? { writeToTerminal: ui.writeRaw.bind(ui) } : {},
+        );
         if (result.ok) {
           const what = wantAll
             ? `the conversation (${runtime.agent.messages.length} messages)`
