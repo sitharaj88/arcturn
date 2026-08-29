@@ -10,6 +10,11 @@ CLI, the SDK, or the wire protocol.
 
 ## [Unreleased]
 
+## [0.5.4] — 2026-08-30
+
+One complaint, chased to both of its roots: a model you picked should be the
+model you get — everywhere, and still tomorrow.
+
 ### Changed
 
 - **A `/model` pick now sticks, in the CLI too.** Switching models persists

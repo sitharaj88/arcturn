@@ -1,8 +1,8 @@
 {
   "name": "arcturn-monorepo",
   "private": true,
-  "version": "0.5.3",
-  "description": "Arcturn (\u2726) \u2014 the agent harness where every turn counts",
+  "version": "0.5.4",
+  "description": "Arcturn (✦) — the agent harness where every turn counts",
   "license": "Apache-2.0",
   "author": "Sitharaj Seenivasan",
   "repository": {
