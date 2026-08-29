@@ -24,7 +24,10 @@ export const CSI = `${ESC}[`;
  * stays dependency-free for string handling.
  */
 const ANSI_SOURCE =
-  "[\\u001b\\u009b][[\\]()#;?]*" +
+  // The private-parameter bytes <, = and > are part of the CSI prefix (kitty
+  // keyboard pushes, SGR mouse reports), not final bytes — without them here
+  // a sequence like `CSI > 1 u` would be stripped in half.
+  "[\\u001b\\u009b][[\\]()#;?<>=]*" +
   "(?:(?:(?:(?:;[-a-zA-Z\\d/#&.:=?%@~_]+)*" +
   "|[a-zA-Z\\d]+(?:;[-a-zA-Z\\d/#&.:=?%@~_]*)*)?\\u0007)" +
   "|(?:(?:\\d{1,4}(?:;\\d{0,4})*)?[\\dA-PR-TZcf-nq-uy=><~]))";

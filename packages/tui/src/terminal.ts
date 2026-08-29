@@ -123,6 +123,10 @@ export interface Terminal {
   enableFocusReporting?(): void;
   /** Disables focus in/out reporting (optional). */
   disableFocusReporting?(): void;
+  /** Pushes the kitty keyboard protocol's disambiguate tier (optional). */
+  enableKeyboardEnhancements?(): void;
+  /** Pops the kitty keyboard protocol back off (optional). */
+  disableKeyboardEnhancements?(): void;
 
   /** Restores the terminal to its original state and drops all listeners. */
   dispose(): void;
@@ -163,6 +167,14 @@ const DISABLE_MOUSE = "\u001b[?1006l\u001b[?1002l";
 /** Focus in/out reporting (1004): CSI I on focus, CSI O on blur. */
 const ENABLE_FOCUS = "\u001b[?1004h";
 const DISABLE_FOCUS = "\u001b[?1004l";
+/**
+ * Kitty keyboard protocol, "disambiguate escape codes" tier (flag 1): the
+ * chords legacy encoding cannot express — Shift+Enter, Ctrl+Enter, a clean
+ * ESC — arrive as CSI-u sequences the decoder already reads. Pushed and
+ * popped as a pair; terminals that predate the protocol ignore both.
+ */
+const PUSH_KITTY_KEYBOARD = "\u001b[>1u";
+const POP_KITTY_KEYBOARD = "\u001b[<u";
 
 const DEFAULT_SIZE: TerminalSize = { columns: 80, rows: 24 };
 // SIGQUIT (Ctrl-\) is POSIX-only but harmless to register on Windows: Node simply
@@ -200,6 +212,7 @@ export class ProcessTerminal implements Terminal {
   private altScreen = false;
   private mouseEnabled = false;
   private focusReporting = false;
+  private kittyKeyboard = false;
   private disposed = false;
   private inputAttached = false;
 
@@ -401,6 +414,18 @@ export class ProcessTerminal implements Terminal {
     this.write(DISABLE_FOCUS);
   }
 
+  enableKeyboardEnhancements(): void {
+    if (this.kittyKeyboard) return;
+    this.kittyKeyboard = true;
+    this.write(PUSH_KITTY_KEYBOARD);
+  }
+
+  disableKeyboardEnhancements(): void {
+    if (!this.kittyKeyboard) return;
+    this.kittyKeyboard = false;
+    this.write(POP_KITTY_KEYBOARD);
+  }
+
   dispose(): void {
     if (this.disposed) return;
     this.restore();
@@ -425,6 +450,10 @@ export class ProcessTerminal implements Terminal {
     if (this.focusReporting) {
       this.focusReporting = false;
       this.stdout.write(DISABLE_FOCUS);
+    }
+    if (this.kittyKeyboard) {
+      this.kittyKeyboard = false;
+      this.stdout.write(POP_KITTY_KEYBOARD);
     }
     if (this.altScreen) {
       this.altScreen = false;
@@ -495,6 +524,7 @@ export class TestTerminal implements Terminal {
   private altScreenOn = false;
   private mouseOn = false;
   private focusOn = false;
+  private kittyOn = false;
   private destroyed = false;
 
   constructor(options: TestTerminalOptions = {}) {
@@ -661,6 +691,18 @@ export class TestTerminal implements Terminal {
     if (!this.focusOn) return;
     this.focusOn = false;
     this.write(DISABLE_FOCUS);
+  }
+
+  enableKeyboardEnhancements(): void {
+    if (this.kittyOn) return;
+    this.kittyOn = true;
+    this.write(PUSH_KITTY_KEYBOARD);
+  }
+
+  disableKeyboardEnhancements(): void {
+    if (!this.kittyOn) return;
+    this.kittyOn = false;
+    this.write(POP_KITTY_KEYBOARD);
   }
 
   disableMouse(): void {

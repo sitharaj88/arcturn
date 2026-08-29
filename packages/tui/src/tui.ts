@@ -475,6 +475,7 @@ export class TUI {
     this.terminal.enterRawMode();
     this.terminal.enableBracketedPaste();
     this.terminal.enableFocusReporting?.();
+    this.terminal.enableKeyboardEnhancements?.();
     this.unsubscribers.push(this.terminal.onInput((data) => this.feedInput(data)));
     if (this.options.autoResize) {
       this.unsubscribers.push(this.terminal.onResize(() => this.handleResize()));
@@ -498,6 +499,10 @@ export class TUI {
     for (const off of this.unsubscribers) off();
     this.unsubscribers = [];
 
+    // Popped before the alternate screen closes: kitty scopes the keyboard
+    // stack to the screen buffer, so a pop issued after the switch would land
+    // on the main screen's stack instead of undoing this session's push.
+    this.terminal.disableKeyboardEnhancements?.();
     if (this.options.mode === "screen") {
       // Drop the theme canvas (and any other attribute) *before* the shell's
       // screen comes back, or its prompt inherits the tint.

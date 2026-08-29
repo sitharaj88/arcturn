@@ -575,6 +575,9 @@ describe("InteractiveApp in screen mode", () => {
   it("enters the alternate screen and shows the banner in the viewport", async () => {
     const h = await screenHarness();
     expect(h.terminal.output).toContain("\u001b[?1049h");
+    // Focus reporting and the kitty keyboard tier ride the same lifecycle.
+    expect(h.terminal.output).toContain("\u001b[?1004h");
+    expect(h.terminal.output).toContain("\u001b[>1u");
     const text = h.text();
     expect(text).toContain("every turn counts");
     expect(text).toContain("Ask arcturn anything");
