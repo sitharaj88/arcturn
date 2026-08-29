@@ -198,8 +198,12 @@ describe("bash tool", () => {
     const taskId = (startResult.details as { taskId: string }).taskId;
 
     expect(manager.kill(taskId)).toBe(true);
-    await new Promise((r) => setTimeout(r, 300));
-    expect(manager.poll(taskId)?.running).toBe(false);
+    // Polled, not slept: the kill is dispatched synchronously but the manager
+    // only learns the process died when its close event lands, and on a cold
+    // Windows runner taskkill plus teardown can outlast any fixed pause — a
+    // 300ms sleep here failed a release from exactly that. The property is
+    // "killed means it stops", not "killed means it stops in 300ms".
+    expect(await waitUntil(() => manager.poll(taskId)?.running === false, 8_000)).toBe(true);
     expect(manager.kill("nonexistent-task-id")).toBe(false);
   }, 10_000);
 
