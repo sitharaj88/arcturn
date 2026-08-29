@@ -107,6 +107,26 @@ function usage(inputTokens = 1, outputTokens = 2): Usage {
 const FRONT = ["---", "name: demo", "description: A demo", "---"].join("\n");
 const SHIP_FRONT = ["---", "name: ship", "description: A demo", "---"].join("\n");
 
+/**
+ * Poll until `check` holds, or the budget runs out.
+ *
+ * The honest way to await an effect that happens on its own schedule: a fixed
+ * sleep asserts a machine speed rather than a behaviour, and passes locally
+ * while failing on whichever CI runner is busiest.
+ */
+async function waitUntil(
+  check: () => boolean | Promise<boolean>,
+  maxWaitMs: number,
+  stepMs = 25,
+): Promise<boolean> {
+  const deadline = Date.now() + maxWaitMs;
+  while (Date.now() < deadline) {
+    if (await check()) return true;
+    await new Promise((resolve) => setTimeout(resolve, stepMs));
+  }
+  return check();
+}
+
 describe("parseWorkflow", () => {
   it("parses frontmatter, a sequential list and model tags", () => {
     const workflow = parseOk(
@@ -1628,8 +1648,10 @@ describe("runWorkflow — per-step deadline", () => {
     // The engine moved on without waiting — but the exec lane's own abort
     // handling (background-task reap, worktree kept for forensics) still runs
     // in the background. Give it a moment to drain, same as production.
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(log).toContain("kill");
+    // Polled, not slept: the reap is asynchronous, and a fixed wait is a bet
+    // on how loaded the machine is. A Windows CI runner lost that bet on a
+    // 50ms guess while the same commit passed everywhere else.
+    expect(await waitUntil(() => log.includes("kill"), 5_000)).toBe(true);
     expect(lane.removed).toEqual([]);
   });
 
