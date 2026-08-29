@@ -165,6 +165,33 @@ describe("styling", () => {
     expect((line ?? "").split("\u001b[").length - 1).toBeGreaterThan(6);
   });
 
+  it("keywords follow the fence tag: SQL's select is not TypeScript's", () => {
+    setColorLevel(ColorLevel.TrueColor);
+    const keywordStyled = (line: string | undefined, word: string) =>
+      (line ?? "").includes(word) && (line ?? "").split(word)[0]!.endsWith("m");
+    const [sql] = highlightCode(["select id from users"], "sql");
+    const [ts] = highlightCode(["const select = from(users)"], "typescript");
+    // In SQL both verbs are keywords; in TS they are ordinary identifiers,
+    // so the runs around them differ. Content is never altered either way.
+    expect(stripAnsi(sql ?? "")).toBe("select id from users");
+    expect(stripAnsi(ts ?? "")).toBe("const select = from(users)");
+    expect(keywordStyled(sql, "select")).toBe(true);
+    const langAware = highlightCode(["fn main() { let mut x = 1; }"], "rust")[0] ?? "";
+    expect(stripAnsi(langAware)).toBe("fn main() { let mut x = 1; }");
+    expect(langAware.split("\u001b[").length).toBeGreaterThan(4);
+  });
+
+  it("paints literal constants as values in every language", () => {
+    setColorLevel(ColorLevel.TrueColor);
+    const [js] = highlightCode(["return true ?? null"], "js");
+    const [py] = highlightCode(["x = None"], "py");
+    expect(stripAnsi(js ?? "")).toBe("return true ?? null");
+    expect(stripAnsi(py ?? "")).toBe("x = None");
+    // The literals carry a style of their own — more escapes than plain text.
+    expect((js ?? "").split("\u001b[").length).toBeGreaterThan(4);
+    expect((py ?? "").split("\u001b[").length).toBeGreaterThan(2);
+  });
+
   it("only treats # as a comment for languages that use it", () => {
     setColorLevel(ColorLevel.None);
     expect(highlightCode(["# comment"], "bash")).toEqual(["# comment"]);

@@ -455,7 +455,6 @@ const COMMON_KEYWORDS = new Set([
   "this",
   "throw",
   "trait",
-  "true",
   "try",
   "type",
   "typeof",
@@ -465,6 +464,154 @@ const COMMON_KEYWORDS = new Set([
   "while",
   "with",
   "yield",
+]);
+
+/** Fence-tag aliases, so `py` and `python` mean one thing. */
+const LANG_ALIASES: Record<string, string> = {
+  javascript: "js",
+  jsx: "js",
+  typescript: "ts",
+  tsx: "ts",
+  python: "py",
+  ruby: "rb",
+  rust: "rs",
+  golang: "go",
+  shell: "sh",
+  bash: "sh",
+  zsh: "sh",
+  "c++": "cpp",
+  csharp: "cs",
+  yml: "yaml",
+};
+
+/**
+ * Words that highlight only under their own fence tag. Layered over the
+ * shared set, so `select` no longer lights up in TypeScript and `fn` does
+ * not need to pollute Python — the fix for the flat list's false positives
+ * without growing a parser.
+ */
+const LANG_KEYWORDS: Record<string, ReadonlySet<string>> = {
+  js: new Set(["declare", "delete", "extends", "instanceof", "of", "keyof", "infer"]),
+  ts: new Set(["declare", "delete", "extends", "instanceof", "of", "keyof", "infer", "unknown"]),
+  py: new Set([
+    "and",
+    "assert",
+    "del",
+    "elif",
+    "except",
+    "global",
+    "is",
+    "lambda",
+    "nonlocal",
+    "not",
+    "or",
+    "pass",
+  ]),
+  rb: new Set([
+    "begin",
+    "do",
+    "end",
+    "ensure",
+    "module",
+    "next",
+    "nil",
+    "rescue",
+    "then",
+    "unless",
+    "until",
+    "when",
+  ]),
+  rs: new Set([
+    "dyn",
+    "extern",
+    "fn",
+    "impl",
+    "loop",
+    "match",
+    "mod",
+    "move",
+    "mut",
+    "ref",
+    "unsafe",
+    "where",
+  ]),
+  go: new Set(["chan", "defer", "fallthrough", "func", "go", "goto", "map", "package", "range"]),
+  sh: new Set(["do", "done", "echo", "elif", "esac", "exit", "export", "fi", "local", "then"]),
+  sql: new Set([
+    "alter",
+    "and",
+    "by",
+    "create",
+    "delete",
+    "drop",
+    "group",
+    "having",
+    "insert",
+    "into",
+    "join",
+    "limit",
+    "not",
+    "on",
+    "or",
+    "order",
+    "table",
+    "update",
+    "values",
+    "where",
+  ]),
+  java: new Set([
+    "extends",
+    "final",
+    "implements",
+    "instanceof",
+    "native",
+    "package",
+    "synchronized",
+    "throws",
+    "transient",
+    "volatile",
+  ]),
+  cpp: new Set([
+    "auto",
+    "constexpr",
+    "delete",
+    "friend",
+    "inline",
+    "namespace",
+    "nullptr",
+    "operator",
+    "template",
+    "typename",
+    "using",
+    "virtual",
+  ]),
+  cs: new Set([
+    "base",
+    "checked",
+    "delegate",
+    "event",
+    "internal",
+    "namespace",
+    "out",
+    "override",
+    "sealed",
+    "using",
+    "virtual",
+  ]),
+};
+
+/** Value-like words, painted as values in every language. */
+const LITERAL_CONSTANTS = new Set([
+  "true",
+  "false",
+  "null",
+  "nil",
+  "undefined",
+  "None",
+  "True",
+  "False",
+  "NaN",
+  "Infinity",
 ]);
 
 const HASH_COMMENT_LANGS = new Set([
@@ -502,7 +649,9 @@ const CODE_TOKEN =
  * @param lang - Language hint from the fence, used only to enable `#` comments.
  */
 export function highlightCode(lines: readonly string[], lang = ""): string[] {
-  const hashComments = HASH_COMMENT_LANGS.has(lang.toLowerCase());
+  const language = LANG_ALIASES[lang.toLowerCase()] ?? lang.toLowerCase();
+  const hashComments = HASH_COMMENT_LANGS.has(language);
+  const extraKeywords = LANG_KEYWORDS[language];
   const base = themeStyle("codeBg");
   return lines.map((line) => {
     let out = "";
@@ -522,7 +671,13 @@ export function highlightCode(lines: readonly string[], lang = ""): string[] {
         out += themeStyle("codeString")(raw);
       } else if (num !== undefined) {
         out += themeStyle("codeNumber")(raw);
-      } else if (ident !== undefined && COMMON_KEYWORDS.has(ident)) {
+      } else if (ident !== undefined && LITERAL_CONSTANTS.has(ident)) {
+        // Value-like words read as values: the number colour, not the keyword one.
+        out += themeStyle("codeNumber")(raw);
+      } else if (
+        ident !== undefined &&
+        (COMMON_KEYWORDS.has(ident) || extraKeywords?.has(ident) === true)
+      ) {
         out += themeStyle("codeKeyword")(raw);
       } else {
         out += base(raw);
