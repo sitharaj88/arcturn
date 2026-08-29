@@ -56,13 +56,16 @@ export interface ArcturnConfig {
   /** TUI colour theme. */
   theme: ArcturnThemeName;
   /**
-   * Interactive rendering mode (default `"screen"`).
+   * Interactive rendering mode (default `"inline"`).
    *
-   * `"screen"` is the full-screen app: an alternate-screen UI with a
-   * scrollable, reflowing transcript — resizes repaint cleanly by
-   * construction, and exit restores the shell untouched (resume with
-   * `--continue`/`/resume`, or `/export` for a copy of the transcript).
-   * `"inline"` is the classic bottom-of-scrollback block.
+   * `"inline"` is the modern-CLI shape: the transcript flows into the
+   * terminal's own scrollback while the composer repaints at the bottom, so
+   * the mouse is never grabbed — selection, wheel scrolling and copy are the
+   * terminal's own, a drag auto-scrolls through the whole history, and the
+   * conversation is still in scrollback after exit. `"screen"` is the
+   * full-screen app: an alternate-screen UI with a scrollable, reflowing
+   * transcript — resizes repaint cleanly by construction, and exit restores
+   * the shell untouched — at the cost of one-screen-at-a-time selection.
    */
   ui: "screen" | "inline";
   /** Extra text appended verbatim to the system prompt. */
@@ -178,7 +181,7 @@ export const DEFAULT_CONFIG: Readonly<ArcturnConfig> = Object.freeze({
   permissions: [] as PermissionRule[],
   thinking: "off" as ThinkingLevel,
   theme: "dark" as ArcturnThemeName,
-  ui: "screen" as const,
+  ui: "inline" as const,
   hooks: EMPTY_HOOK_CONFIG,
   audit: false,
   provenance: false,

@@ -151,7 +151,7 @@ export async function peekUiMode(cwd?: string): Promise<"screen" | "inline"> {
       // Missing or malformed file: the real config loader reports that later.
     }
   }
-  return "screen";
+  return "inline";
 }
 
 /**

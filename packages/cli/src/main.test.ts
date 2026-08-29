@@ -127,13 +127,13 @@ describe("main", () => {
 });
 
 describe("peekUiMode", () => {
-  it("defaults to screen so the boot banner never flashes before the alt-screen app", async () => {
+  it("defaults to inline — the terminal-native mode is the out-of-the-box one", async () => {
     const { peekUiMode } = await import("./main.js");
     const scratch = await makeScratch();
     const previousHome = process.env.ARCTURN_HOME;
     process.env.ARCTURN_HOME = scratch.home;
     try {
-      expect(await peekUiMode(scratch.cwd)).toBe("screen");
+      expect(await peekUiMode(scratch.cwd)).toBe("inline");
     } finally {
       if (previousHome === undefined) delete process.env.ARCTURN_HOME;
       else process.env.ARCTURN_HOME = previousHome;
@@ -173,7 +173,7 @@ describe("peekUiMode", () => {
     process.env.ARCTURN_HOME = scratch.home;
     try {
       await writeFileAt(join(scratch.cwd, ".arcturn", "config.json"), "{not json");
-      expect(await peekUiMode(scratch.cwd)).toBe("screen");
+      expect(await peekUiMode(scratch.cwd)).toBe("inline");
     } finally {
       if (previousHome === undefined) delete process.env.ARCTURN_HOME;
       else process.env.ARCTURN_HOME = previousHome;

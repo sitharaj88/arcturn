@@ -559,6 +559,52 @@ export function createBuiltInCommands(): SlashCommand[] {
       },
     },
     {
+      name: "ui",
+      description:
+        "Switch the renderer: inline (terminal-native, default) or screen (full-screen app)",
+      source: "built-in",
+      async run({ ui, runtime, args }) {
+        const current = runtime.config.ui;
+        const apply = async (choice: "inline" | "screen") => {
+          if (choice === current) {
+            ui.notice("info", `Already using the ${choice} renderer.`);
+            return;
+          }
+          // The renderer is chosen at launch — it decides alt screen, mouse
+          // and scrollback ownership before the first frame — so this
+          // persists the choice and says so rather than pretending to
+          // switch a running screen live.
+          runtime.config.ui = choice;
+          const file = await persistSetting("ui", choice, "user", runtime.paths);
+          ui.notice("info", `UI set to ${choice} (saved to ${file}). Takes effect next launch.`);
+        };
+        const wanted = args.trim();
+        if (wanted === "inline" || wanted === "screen") {
+          await apply(wanted);
+          return;
+        }
+        if (wanted !== "") {
+          ui.notice("error", `Unknown UI "${wanted}". Use "inline" or "screen".`);
+          return;
+        }
+        const choice = await ui.select("Select a renderer", [
+          {
+            value: "inline",
+            label: current === "inline" ? "inline  (current)" : "inline",
+            description: "Terminal-native: select, scroll and copy with the terminal itself",
+            data: "inline" as const,
+          },
+          {
+            value: "screen",
+            label: current === "screen" ? "screen  (current)" : "screen",
+            description: "Full-screen app: alternate screen, clean resizes, pinned composer",
+            data: "screen" as const,
+          },
+        ]);
+        if (choice !== undefined) await apply(choice);
+      },
+    },
+    {
       name: "copy",
       description: "Copy the last answer to the clipboard ('/copy all' for the conversation)",
       source: "built-in",

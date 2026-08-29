@@ -10,6 +10,19 @@ CLI, the SDK, or the wire protocol.
 
 ## [Unreleased]
 
+### Changed
+
+- **The terminal-native renderer is now the default.** `arcturn` launches in
+  inline mode: the transcript flows into your terminal's own scrollback while
+  the composer repaints at the bottom — so selecting, scrolling and copying
+  are the terminal's own gestures, a drag auto-scrolls through the whole
+  history, and the conversation is still in scrollback after you quit.
+  Nothing is grabbed, nothing is a mode. The full-screen app is one command
+  away: `/ui screen` persists the choice (`/ui inline` to come back,
+  `ARCTURN_UI` or the `ui` config field to pin it per project), and all of
+  its selection work — the drag handover, alternate scroll, `/copy` — ships
+  with it for those who prefer it.
+
 ### Added
 
 - **`/copy` puts the last answer on the clipboard** — `/copy all` the whole

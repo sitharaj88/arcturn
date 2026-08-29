@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { registerModel, unregisterModel } from "@arcturn/ai";
 import type { PermissionMode } from "@arcturn/types";
 import { describe, expect, it } from "vitest";
@@ -182,6 +183,26 @@ describe("built-in commands", () => {
     ]) {
       expect(text).toContain(name);
     }
+    await runtime.dispose();
+  });
+
+  it("/ui persists the renderer choice and is honest that it lands next launch", async () => {
+    const scratch = await makeScratch();
+    const runtime = await buildTestRuntime(scratch);
+    expect(runtime.config.ui).toBe("inline"); // the terminal-native default
+
+    const { ui } = await run(runtime, "/ui screen");
+    expect(runtime.config.ui).toBe("screen");
+    expect(ui.notices[0]?.text).toContain("Takes effect next launch");
+    const written = JSON.parse(await readFile(runtime.paths.userConfig, "utf8")) as {
+      ui?: string;
+    };
+    expect(written.ui).toBe("screen");
+
+    const again = await run(runtime, "/ui screen");
+    expect(again.ui.notices[0]?.text).toContain("Already using");
+    const bad = await run(runtime, "/ui sideways");
+    expect(bad.ui.notices[0]?.level).toBe("error");
     await runtime.dispose();
   });
 
