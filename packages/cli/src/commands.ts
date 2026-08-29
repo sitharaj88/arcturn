@@ -296,6 +296,12 @@ export function createBuiltInCommands(): SlashCommand[] {
           ...all.map((command) => `  /${command.name.padEnd(width)}  ${command.description}`),
           "",
           "Enter submits · Shift+Enter newline · Esc aborts · Ctrl+C twice or Ctrl+D exits",
+          // The TUI holds the mouse for wheel scrolling, which silently
+          // disables the terminal's own click-drag selection — the most-asked
+          // "why can't I copy?" there is. The bypass is the terminal's, not
+          // ours, and differs per emulator; naming it here is the difference
+          // between a ten-second answer and a bug report.
+          "Copy text: hold Shift while dragging (VS Code, most terminals) — Option on iTerm2, Fn on Apple Terminal · /export saves the whole conversation",
         ]);
       },
     },

@@ -245,3 +245,16 @@ Close with one line:
 ```
 
 Anything that is not marked is still a draft. Say that, in those words, as the last line.
+
+## Where it goes
+
+**The document is a file, not a chat message.** Write it to
+`docs/design/hld-<topic-as-kebab-case>.md` — create `docs/design/` if it does not exist —
+because this draft is the input to `/workflow design-review`, which reads the record from
+disk, and because a design that lives in terminal scrollback is gone the moment the
+session is. In the chat, print only the path you wrote and the closing counts line;
+printing the whole document twice buries the summary a person actually acts on.
+
+If a file by that name already exists, read it first and write the new draft beside it
+with a `-2` suffix rather than over it — an earlier draft someone reviewed is evidence,
+not scratch space.

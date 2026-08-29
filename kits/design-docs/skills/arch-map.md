@@ -255,3 +255,12 @@ rather than a summary the reader has to take on faith.
 infra files exist.
 
 **Recall bound** — as specified in section 7.
+
+## Where it goes
+
+**The map is a file, not a chat message.** Write it to `docs/design/arch-map.md` —
+create `docs/design/` if it does not exist — and overwrite the previous one: a map is a
+reading of the tree as it stands, git history keeps the old readings, and two maps of
+different commits side by side answer no question either answers alone. In the chat,
+print only the path and the recall bound; `/hld-draft` and `/workflow design-review`
+consume the file, not the scrollback.
