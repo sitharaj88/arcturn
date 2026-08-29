@@ -32,9 +32,10 @@ describe("createCliProvisioner", () => {
     provisioner.dispose();
   });
 
-  it("shows exactly one notification when the CLI is missing, however often it is asked", async () => {
-    // Three commands in a row on a machine without the engine must not stack
-    // three identical toasts.
+  it("installs automatically when the CLI is missing, in a terminal the user can watch", async () => {
+    // A fresh install landing on a panel that needs a CLI it does not have
+    // should just get one — visibly. The terminal is the transparency: the
+    // exact command on screen, Ctrl+C available, nothing silent.
     const provisioner = createCliProvisioner({
       platform: "linux",
       home: "/home/me",
@@ -45,16 +46,42 @@ describe("createCliProvisioner", () => {
 
     expect(await provisioner.resolveCli()).toBe(undefined);
     await provisioner.resolveCli();
-    await provisioner.resolveCli();
+    await provisioner.settled();
 
+    expect(fake.terminals).toHaveLength(1);
+    expect(fake.terminals[0]?.sent).toEqual([{ text: "npm install -g arcturn", addNewLine: true }]);
+    expect(fake.terminals[0]?.shows).toBeGreaterThan(0);
+    // One notification, however often it is asked — and it names the setting
+    // that turns the behaviour off, which is what makes automatic honest.
+    expect(fake.messages).toHaveLength(1);
+    expect(fake.messages[0]?.level).toBe("info");
+    expect(fake.messages[0]?.message).toContain("arcturn.cli.autoUpdate");
+    provisioner.dispose();
+  });
+
+  it("asks first when auto-management is turned off", async () => {
+    fake.config["arcturn.cli.autoUpdate"] = false;
+    const provisioner = createCliProvisioner({
+      platform: "linux",
+      home: "/home/me",
+      pathVar: "/usr/bin",
+      isExecutable: () => false,
+      probeVersion: async () => undefined,
+    });
+
+    expect(await provisioner.resolveCli()).toBe(undefined);
+    await provisioner.settled();
+
+    expect(fake.terminals).toHaveLength(0);
     expect(fake.messages).toHaveLength(1);
     expect(fake.messages[0]?.message).toContain("not found on your PATH");
     expect(fake.messages[0]?.items).toContain("Install");
     provisioner.dispose();
   });
 
-  it("installs by typing the command into a terminal, never silently", async () => {
+  it("still types the command into a terminal when the user opts to install manually", async () => {
     // RFC 0004 §1: the user watches exactly what executes.
+    fake.config["arcturn.cli.autoUpdate"] = false;
     fake.messageAnswer = "Install";
     const provisioner = createCliProvisioner({
       platform: "linux",
@@ -69,7 +96,6 @@ describe("createCliProvisioner", () => {
 
     expect(fake.terminals).toHaveLength(1);
     expect(fake.terminals[0]?.sent).toEqual([{ text: "npm install -g arcturn", addNewLine: true }]);
-    expect(fake.terminals[0]?.shows).toBeGreaterThan(0);
     provisioner.dispose();
   });
 
@@ -88,8 +114,10 @@ describe("createCliProvisioner", () => {
     provisioner.dispose();
   });
 
-  it("offers an upgrade for an old engine but still hands the caller the binary", async () => {
-    // Degrading is honest; refusing to run at all over a version number is not.
+  it("upgrades an old engine automatically, and still hands the caller the binary", async () => {
+    // Degrading is honest; refusing to run at all over a version number is not
+    // — so the caller gets the binary it has while the terminal fetches the
+    // one it needs.
     const provisioner = createCliProvisioner({
       platform: "darwin",
       home: "/Users/me",
@@ -99,12 +127,184 @@ describe("createCliProvisioner", () => {
     });
 
     const cli = await provisioner.resolveCli();
+    await provisioner.settled();
 
     expect(cli?.command).toBe("/usr/local/bin/arcturn");
-    expect(fake.messages).toHaveLength(1);
+    expect(fake.terminals[0]?.sent).toEqual([
+      { text: "npm install -g arcturn@latest", addNewLine: true },
+    ]);
     expect(fake.messages[0]?.message).toContain("0.1.0");
+    provisioner.dispose();
+  });
+
+  it("asks before upgrading when auto-management is turned off", async () => {
+    fake.config["arcturn.cli.autoUpdate"] = false;
+    const provisioner = createCliProvisioner({
+      platform: "darwin",
+      home: "/Users/me",
+      pathVar: "/usr/local/bin",
+      isExecutable: (candidate) => candidate === "/usr/local/bin/arcturn",
+      probeVersion: async () => "0.1.0",
+    });
+
+    await provisioner.resolveCli();
+    await provisioner.settled();
+
+    expect(fake.terminals).toHaveLength(0);
     expect(fake.messages[0]?.items).toContain("Upgrade");
     provisioner.dispose();
+  });
+
+  it("updates once a day when npm has a newer engine, and not on every resolve", async () => {
+    // The daily check is the whole point of "not manual": a user who never
+    // reads release notes still ends up current. Throttled through the shared
+    // state so a window reload is not a registry hit.
+    const memory = new Map<string, unknown>();
+    const state = {
+      get: <T,>(key: string): T | undefined => memory.get(key) as T | undefined,
+      update: async (key: string, value: unknown) => void memory.set(key, value),
+    };
+    let clock = 200_000_000; // past the first 24h window from epoch 0
+    let asked = 0;
+    const build = () =>
+      createCliProvisioner({
+        platform: "darwin",
+        home: "/Users/me",
+        pathVar: "/usr/local/bin",
+        isExecutable: (candidate) => candidate === "/usr/local/bin/arcturn",
+        probeVersion: async () => "0.5.0",
+        state,
+        now: () => clock,
+        fetchLatestVersion: async () => {
+          asked += 1;
+          return "0.5.2";
+        },
+      });
+
+    const first = build();
+    await first.resolveCli();
+    await first.settled();
+    expect(asked).toBe(1);
+    expect(fake.terminals[0]?.sent).toEqual([
+      { text: "npm install -g arcturn@latest", addNewLine: true },
+    ]);
+    expect(fake.messages[0]?.message).toContain("0.5.0 → 0.5.2");
+    first.dispose();
+
+    // An hour later — same day, same state: no second registry hit.
+    clock += 60 * 60 * 1000;
+    const second = build();
+    await second.resolveCli();
+    await second.settled();
+    expect(asked).toBe(1);
+    second.dispose();
+
+    // A day later: checked again.
+    clock += 25 * 60 * 60 * 1000;
+    const third = build();
+    await third.resolveCli();
+    await third.settled();
+    expect(asked).toBe(2);
+    third.dispose();
+  });
+
+  it("never auto-updates a binary pinned by arcturn.cliPath", async () => {
+    // `npm install -g` can freshen what PATH found; it cannot touch the file
+    // an explicit setting points at. For a pinned path the daily check would
+    // open a terminal that fixes nothing, so it must not run at all.
+    fake.config["arcturn.cliPath"] = "/opt/custom/arcturn";
+    const memory = new Map<string, unknown>();
+    const state = {
+      get: <T,>(key: string): T | undefined => memory.get(key) as T | undefined,
+      update: async (key: string, value: unknown) => void memory.set(key, value),
+    };
+    let asked = 0;
+    const provisioner = createCliProvisioner({
+      platform: "darwin",
+      home: "/Users/me",
+      pathVar: "/usr/local/bin",
+      isExecutable: (candidate) =>
+        candidate === "/opt/custom/arcturn" || candidate === "/usr/local/bin/arcturn",
+      probeVersion: async () => "0.5.0",
+      state,
+      now: () => 200_000_000,
+      fetchLatestVersion: async () => {
+        asked += 1;
+        return "0.5.2";
+      },
+    });
+
+    const resolved = await provisioner.resolveCli();
+    await provisioner.settled();
+
+    expect(resolved?.source).toBe("setting");
+    expect(asked).toBe(0);
+    expect(fake.terminals).toHaveLength(0);
+    expect(fake.messages).toHaveLength(0);
+    provisioner.dispose();
+  });
+
+  it("asks — never auto-runs — when a pinned engine is below the floor", async () => {
+    // Below MIN_ENGINE_VERSION the offer path fires; for a pinned path it
+    // must degrade to the question, because the install command cannot repair
+    // the setting.
+    fake.config["arcturn.cliPath"] = "/opt/custom/arcturn";
+    const provisioner = createCliProvisioner({
+      platform: "darwin",
+      home: "/Users/me",
+      pathVar: "/usr/local/bin",
+      isExecutable: (candidate) => candidate === "/opt/custom/arcturn",
+      probeVersion: async () => "0.1.0",
+    });
+
+    await provisioner.resolveCli();
+    await provisioner.settled();
+
+    expect(fake.terminals).toHaveLength(0);
+    expect(fake.messages[0]?.message).toContain("0.1.0");
+    provisioner.dispose();
+  });
+
+  it("stays silent when the engine is current or the registry cannot be reached", async () => {
+    // "Could not check" must never surface as an error to somebody who merely
+    // opened their editor.
+    const memory = new Map<string, unknown>();
+    const state = {
+      get: <T,>(key: string): T | undefined => memory.get(key) as T | undefined,
+      update: async (key: string, value: unknown) => void memory.set(key, value),
+    };
+    const current = createCliProvisioner({
+      platform: "darwin",
+      home: "/Users/me",
+      pathVar: "/usr/local/bin",
+      isExecutable: (candidate) => candidate === "/usr/local/bin/arcturn",
+      probeVersion: async () => "0.5.2",
+      state,
+      now: () => 1,
+      fetchLatestVersion: async () => "0.5.2",
+    });
+    await current.resolveCli();
+    await current.settled();
+    expect(fake.terminals).toHaveLength(0);
+    expect(fake.messages).toHaveLength(0);
+    current.dispose();
+
+    const offline = createCliProvisioner({
+      platform: "darwin",
+      home: "/Users/me",
+      pathVar: "/usr/local/bin",
+      isExecutable: (candidate) => candidate === "/usr/local/bin/arcturn",
+      probeVersion: async () => "0.5.2",
+      state,
+      now: () => 60 * 60 * 60 * 1000,
+      fetchLatestVersion: async () => {
+        throw new Error("offline");
+      },
+    });
+    await offline.resolveCli();
+    await offline.settled();
+    expect(fake.messages).toHaveLength(0);
+    offline.dispose();
   });
 
   it("says nothing about the version when the engine is new enough", async () => {
@@ -210,6 +410,7 @@ describe("createCliProvisioner: the environment it looks in", () => {
   });
 
   it("says the shell probe failed in the same notification that says the CLI is missing", async () => {
+    fake.config["arcturn.cli.autoUpdate"] = false;
     const provisioner = createCliProvisioner({
       platform: "darwin",
       home: "/Users/me",

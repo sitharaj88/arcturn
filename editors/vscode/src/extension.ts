@@ -46,7 +46,7 @@ export interface ExtensionDeps {
 
 export function activate(context: vscode.ExtensionContext): Promise<void> {
   return activateWith(context, {
-    provisioner: createCliProvisioner(),
+    provisioner: createCliProvisioner({ state: context.globalState }),
     hub: createTerminalHub(),
     platform: process.platform,
   });
