@@ -452,6 +452,37 @@ describe("InteractiveApp in screen mode", () => {
     return harness(turns, {}, "screen");
   }
 
+  it("hands the mouse back on a drag, and re-takes it on the next keystroke", async () => {
+    // The grab exists for wheel scrolling; a drag is the gesture that wanted
+    // the terminal's own selection instead. First drag = handover (with a
+    // one-time hint), next drag selects natively, any keystroke re-grabs.
+    const h = await screenHarness();
+    expect(h.terminal.isMouseEnabled).toBe(true);
+
+    h.terminal.injectInput("\u001b[<0;10;5M\u001b[<0;30;5m");
+    await tick();
+    expect(h.terminal.isMouseEnabled).toBe(false);
+    expect(h.text()).toContain("Mouse handed back to the terminal");
+
+    h.terminal.injectInput("a");
+    await tick();
+    expect(h.terminal.isMouseEnabled).toBe(true);
+  });
+
+  it("keeps the mouse on a plain click, and releases it on a double-click", async () => {
+    const h = await screenHarness();
+
+    // One click, same cell down and up: focus, not selection.
+    h.terminal.injectInput("\u001b[<0;10;5M\u001b[<0;10;5m");
+    await tick();
+    expect(h.terminal.isMouseEnabled).toBe(true);
+
+    // The second press of a double-click: the word-select gesture.
+    h.terminal.injectInput("\u001b[<0;10;5M");
+    await tick();
+    expect(h.terminal.isMouseEnabled).toBe(false);
+  });
+
   it("enters the alternate screen and shows the banner in the viewport", async () => {
     const h = await screenHarness();
     expect(h.terminal.output).toContain("\u001b[?1049h");

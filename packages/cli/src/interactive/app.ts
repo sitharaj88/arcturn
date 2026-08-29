@@ -198,6 +198,21 @@ export class InteractiveApp {
   readonly #toolProgress = new ToolCallProgressTracker();
   #todos: readonly TodoItem[] = [];
   #lastInterrupt = 0;
+  /**
+   * Text selection, without asking the user to learn anything.
+   *
+   * Screen mode holds the mouse for wheel scrolling, and a held mouse is a
+   * terminal that cannot select text. The press/release cells the grab
+   * reports are enough to notice the gesture that wanted selection — a drag,
+   * or a double-click — so the first such gesture hands the mouse back to the
+   * terminal (with a one-time hint), the next one selects natively, and the
+   * next keystroke re-takes the wheel. Copying itself never re-grabs: Cmd+C
+   * lives in the terminal and this app never sees it.
+   */
+  #mouseDownCell: { x: number; y: number } | undefined;
+  #lastClick: { x: number; y: number; at: number } | undefined;
+  #mouseReleasedForSelection = false;
+  #selectionHintShown = false;
   #exitRequested = false;
   /**
    * The terminal's own default background as it was at startup (raw OSC 11
@@ -296,6 +311,7 @@ export class InteractiveApp {
     this.#tui.setComponents(this.#liveComponents());
     this.#tui.focus(this.#inputBox);
     this.#tui.onKey((key) => this.#onGlobalKey(key));
+    this.#tui.onKeyEvent((key) => this.#onAnyKey(key));
   }
 
   /** The command registry, exposed for tests and extensions. */
@@ -1052,16 +1068,70 @@ export class InteractiveApp {
       this.#onInterrupt();
       return true;
     }
-    if (
-      this.#mode === "screen" &&
-      (matchesKey(key, "wheelup") ||
+    if (this.#mode === "screen") {
+      if (key.name === "mousedown" || key.name === "mouseup") {
+        this.#onMouseButton(key);
+        return true;
+      }
+      if (
+        matchesKey(key, "wheelup") ||
         matchesKey(key, "wheeldown") ||
         matchesKey(key, "pageup") ||
-        matchesKey(key, "pagedown"))
-    ) {
-      return this.#viewport.handleInput(key);
+        matchesKey(key, "pagedown")
+      ) {
+        return this.#viewport.handleInput(key);
+      }
     }
     return false;
+  }
+
+  /**
+   * Runs on every key, even ones the editor consumes: a real keystroke means
+   * the selection moment has passed, so the wheel is re-taken. Mouse leftovers
+   * (a release straggling in after the grab dropped) are not keystrokes.
+   */
+  #onAnyKey(key: Key): void {
+    if (!this.#mouseReleasedForSelection || this.#mode !== "screen") return;
+    if (key.name === "mousedown" || key.name === "mouseup") return;
+    if (key.name === "wheelup" || key.name === "wheeldown") return;
+    this.#mouseReleasedForSelection = false;
+    this.#terminal.enableMouse?.();
+  }
+
+  /** See {@link #mouseReleasedForSelection}: spot the gesture that wanted to select. */
+  #onMouseButton(key: Key): void {
+    const cell = key.mouse;
+    if (cell === undefined) return;
+    if (key.name === "mousedown") {
+      this.#mouseDownCell = cell;
+      const previous = this.#lastClick;
+      this.#lastClick = { ...cell, at: Date.now() };
+      const doubleClick =
+        previous !== undefined &&
+        previous.x === cell.x &&
+        previous.y === cell.y &&
+        Date.now() - previous.at < 400;
+      if (doubleClick) this.#releaseMouseForSelection();
+      return;
+    }
+    const down = this.#mouseDownCell;
+    this.#mouseDownCell = undefined;
+    if (down !== undefined && (down.x !== cell.x || down.y !== cell.y)) {
+      this.#releaseMouseForSelection();
+    }
+  }
+
+  #releaseMouseForSelection(): void {
+    if (this.#mouseReleasedForSelection) return;
+    this.#mouseReleasedForSelection = true;
+    this.#terminal.disableMouse?.();
+    if (this.#selectionHintShown) return;
+    this.#selectionHintShown = true;
+    this.#writeThemed(() => [
+      style("muted")(
+        "Mouse handed back to the terminal — select and copy now; the next keystroke resumes wheel scrolling.",
+      ),
+    ]);
   }
 
   #onEscape(): void {

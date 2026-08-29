@@ -200,6 +200,7 @@ export class TUI {
   private readonly options: Required<TUIOptions>;
   private readonly decoder = new KeyDecoder();
   private readonly keyHandlers: KeyHandler[] = [];
+  private readonly keyObservers: ((key: Key) => void)[] = [];
 
   private componentList: Component[] = [];
   private focusedComponent: Component | null = null;
@@ -393,6 +394,23 @@ export class TUI {
   }
 
   /**
+   * Observes every decoded key before dispatch, consumed or not.
+   *
+   * An {@link TUI.onKey} handler only hears what the focused component let
+   * through, which is right for handling and wrong for noticing — "the user
+   * touched the keyboard" is a fact a host may need even when the editor
+   * eats the keystroke (the mouse re-grab after a text selection lives on
+   * exactly that fact). Observers cannot consume.
+   */
+  onKeyEvent(observer: (key: Key) => void): Unsubscribe {
+    this.keyObservers.push(observer);
+    return () => {
+      const index = this.keyObservers.indexOf(observer);
+      if (index !== -1) this.keyObservers.splice(index, 1);
+    };
+  }
+
+  /**
    * Dispatches a key event: overlay first, then the focused component, then the
    * global handlers. Schedules a render if anything consumed it.
    *
@@ -400,6 +418,7 @@ export class TUI {
    * @returns `true` when the key was consumed.
    */
   dispatchKey(key: Key): boolean {
+    for (const observer of [...this.keyObservers]) observer(key);
     const target = this.overlayEntry?.component ?? this.focusedComponent;
     let handled = target?.handleInput?.(key) ?? false;
     if (!handled) {

@@ -130,8 +130,8 @@ describe("escape sequences", () => {
     expect(names(decode(`${ESC}[27;5;97~`))).toEqual(["ctrl+a"]);
   });
 
-  it("swallows SGR mouse reports without emitting a key", () => {
-    expect(decode(`${ESC}[<0;10;5M`)).toEqual([]);
+  it("swallows SGR mouse reports for buttons the TUI has no use for", () => {
+    expect(decode(`${ESC}[<1;10;5M`)).toEqual([]);
   });
 });
 
@@ -161,8 +161,17 @@ describe("SGR mouse reports", () => {
     expect(names(decode(`${ESC}[<81;10;5M`))).toEqual(["wheeldown"]); // ctrl
   });
 
-  it("swallows click press and release without emitting keys", () => {
-    expect(decode(`${ESC}[<0;10;5M${ESC}[<0;10;5m`)).toEqual([]);
+  it("surfaces a left press and release with their cells, so a host can spot a drag", () => {
+    const keys = decode(`${ESC}[<0;10;5M${ESC}[<0;22;7m`);
+    expect(names(keys)).toEqual(["mousedown", "mouseup"]);
+    expect(keys[0]!.mouse).toEqual({ x: 10, y: 5 });
+    expect(keys[1]!.mouse).toEqual({ x: 22, y: 7 });
+    expect(keys[0]!.text).toBeUndefined();
+    expect(keys[1]!.text).toBeUndefined();
+  });
+
+  it("still swallows middle and right clicks entirely", () => {
+    expect(decode(`${ESC}[<1;10;5M${ESC}[<1;10;5m`)).toEqual([]);
     expect(decode(`${ESC}[<2;40;12M${ESC}[<2;40;12m`)).toEqual([]);
   });
 
@@ -202,6 +211,7 @@ describe("SGR mouse reports", () => {
   it("interleaves wheel events with ordinary keys in one chunk", () => {
     expect(names(decode(`a${ESC}[<64;3;4Mb`))).toEqual(["a", "wheelup", "b"]);
     expect(names(decode(`${ESC}[<0;1;1Mx${ESC}[<65;1;1M${ESC}[A`))).toEqual([
+      "mousedown",
       "x",
       "wheeldown",
       "up",

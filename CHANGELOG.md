@@ -10,6 +10,19 @@ CLI, the SDK, or the wire protocol.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Selecting text with the mouse now just works.** The full-screen TUI holds
+  the mouse for wheel scrolling, and a held mouse is a terminal that cannot
+  select — the most-asked "why can't I copy?" there is. The grab's own
+  press/release reports are enough to notice the gesture that wanted
+  selection: the first drag (or double-click) hands the mouse back to the
+  terminal with a one-line hint, the next one selects natively, and the next
+  keystroke re-takes the wheel. Copying never re-arms the grab — `Cmd+C`
+  belongs to the terminal and the app never sees it. Shift-drag still
+  bypasses everything, and `/help` now describes the handover instead of a
+  per-emulator chord table.
+
 ## [0.5.2] — 2026-08-29
 
 Three small fixes from the first real user session, each of a shape the suite

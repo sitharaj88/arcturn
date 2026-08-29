@@ -36,6 +36,8 @@ export type SpecialKeyName =
   | "paste"
   | "wheelup"
   | "wheeldown"
+  | "mousedown"
+  | "mouseup"
   | "unknown"
   | `f${number}`;
 
@@ -57,6 +59,13 @@ export interface Key {
   readonly text?: string;
   /** Full pasted content when {@link Key.name} is `"paste"`. */
   readonly paste?: string;
+  /**
+   * 1-based cell coordinates when {@link Key.name} is `"mousedown"` or
+   * `"mouseup"`. Present so a host can tell a click from a drag — the gap
+   * between where the button went down and where it came up — without the
+   * TUI growing a mouse vocabulary of its own.
+   */
+  readonly mouse?: { readonly x: number; readonly y: number };
 }
 
 interface Mods {
@@ -448,18 +457,43 @@ const SGR_BUTTON_MASK = 0x43;
 /**
  * Decodes an SGR mouse report (`CSI < Cb ; Cx ; Cy M` press/motion, `… m` release).
  *
- * Wheel motion surfaces as a `wheelup` / `wheeldown` key with no modifiers;
- * every other mouse event (clicks, drags, releases) is consumed without
- * emitting a key so it never reaches the editor as garbage text.
+ * Wheel motion surfaces as a `wheelup` / `wheeldown` key with no modifiers,
+ * and the left button surfaces as `mousedown` / `mouseup` carrying its cell —
+ * that pair is how a host notices a drag it should hand back to the terminal.
+ * Everything else (other buttons, motion) is consumed without emitting a key
+ * so it never reaches the editor as garbage text.
  */
 function decodeSgrMouse(paramText: string, final: string, seq: string, consumed: number): Step {
   if (final !== "M" && final !== "m") return { consumed };
-  const cb = Number.parseInt(paramText.slice(1).split(";")[0] ?? "", 10);
-  if (Number.isNaN(cb) || final !== "M") return { consumed };
+  const parts = paramText.slice(1).split(";");
+  const cb = Number.parseInt(parts[0] ?? "", 10);
+  if (Number.isNaN(cb)) return { consumed };
   const button = cb & SGR_BUTTON_MASK;
+  // Bit 32 marks motion, and the mask drops it — so a left-drag motion report
+  // (code 32) would read as button 0. Motion is never a press or a release.
+  const isLeftButton = button === 0 && (cb & 32) === 0;
+  if (final === "m") {
+    if (isLeftButton) {
+      const mouse = sgrCell(parts);
+      if (mouse) return { key: { ...makeKey("mouseup", seq), mouse }, consumed };
+    }
+    return { consumed };
+  }
   if (button === SGR_WHEEL_UP) return { key: makeKey("wheelup", seq), consumed };
   if (button === SGR_WHEEL_DOWN) return { key: makeKey("wheeldown", seq), consumed };
+  if (isLeftButton) {
+    const mouse = sgrCell(parts);
+    if (mouse) return { key: { ...makeKey("mousedown", seq), mouse }, consumed };
+  }
   return { consumed };
+}
+
+/** Reads the 1-based `Cx ; Cy` cell out of an SGR mouse report's parameters. */
+function sgrCell(parts: readonly string[]): { x: number; y: number } | undefined {
+  const x = Number.parseInt(parts[1] ?? "", 10);
+  const y = Number.parseInt(parts[2] ?? "", 10);
+  if (Number.isNaN(x) || Number.isNaN(y)) return undefined;
+  return { x, y };
 }
 
 /** Builds a key from a Unicode code point plus modifier flags. */
