@@ -98,6 +98,17 @@ CLI, the SDK, or the wire protocol.
 
 ### Fixed
 
+- **Scrolling is smooth now.** Two causes, both fixed in the renderer: every
+  stdin chunk used to paint its own full frame, so a wheel flick sheared at
+  chunk rate — a ~60fps frame governor now collapses request floods into
+  steady trailing frames (the first paint after quiet stays immediate, so a
+  lone keystroke never waits); and each wheel event jumped three rows while
+  modern emulators already multiply a physical notch into several events, so
+  scrolling was chunky *and* 3× overspeed — one row per event now. Typing at
+  the composer's right edge also wraps properly: the caret used to render
+  one column past a full row and get truncated into an ellipsis; it now
+  drops to a fresh continuation line the way a terminal wraps.
+
 - **Selecting text is one gesture: drag, release, it's on the clipboard.**
   The full-screen app owns selection now instead of negotiating with the
   terminal for it. The mouse grab uses cell-motion reporting, so a drag

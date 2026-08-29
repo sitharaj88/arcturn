@@ -212,6 +212,8 @@ export class TUI {
   private groundOwner: "cells" | "terminal" = "cells";
 
   private renderScheduled = false;
+  private lastRenderAt = 0;
+  private frameTimer: ReturnType<typeof setTimeout> | undefined;
   private running = false;
   private escapeTimer: ReturnType<typeof setTimeout> | undefined;
   private resizeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -487,6 +489,10 @@ export class TUI {
   stop(): void {
     if (!this.running) return;
     this.running = false;
+    if (this.frameTimer !== undefined) {
+      clearTimeout(this.frameTimer);
+      this.frameTimer = undefined;
+    }
     if (this.escapeTimer !== undefined) {
       clearTimeout(this.escapeTimer);
       this.escapeTimer = undefined;
@@ -556,9 +562,17 @@ export class TUI {
     this.overlayEntry?.component.invalidate?.();
   }
 
+  /** One frame per this many milliseconds while events flood in (~60fps). */
+  private static readonly FRAME_INTERVAL_MS = 16;
+
   /**
-   * Schedules a render on the microtask queue. Multiple calls within the same
-   * synchronous block collapse into a single frame.
+   * Schedules a render. Multiple calls within the same synchronous block
+   * collapse into a single frame (microtask), and calls arriving faster than
+   * the frame interval collapse into one trailing frame — a wheel flick or a
+   * fast stream repaints at a steady ~60fps instead of once per stdin chunk,
+   * which is the difference between smooth scrolling and shearing. The first
+   * render after quiet stays on the microtask queue, so a lone keystroke
+   * never waits on the governor.
    */
   requestRender(): void {
     // Before start() there is nothing to paint INTO: in screen mode the
@@ -568,7 +582,15 @@ export class TUI {
     // no memory at all. (renderNow() stays unguarded — tests drive an
     // unstarted TUI through it deliberately.)
     if (!this.running) return;
-    if (this.renderScheduled) return;
+    if (this.renderScheduled || this.frameTimer !== undefined) return;
+    const since = Date.now() - this.lastRenderAt;
+    if (since < TUI.FRAME_INTERVAL_MS) {
+      this.frameTimer = setTimeout(() => {
+        this.frameTimer = undefined;
+        this.renderNow();
+      }, TUI.FRAME_INTERVAL_MS - since);
+      return;
+    }
     this.renderScheduled = true;
     queueMicrotask(() => {
       this.renderScheduled = false;
@@ -578,6 +600,7 @@ export class TUI {
 
   /** Renders synchronously, bypassing the microtask scheduler. */
   renderNow(): void {
+    this.lastRenderAt = Date.now();
     const width = Math.max(1, this.terminal.columns);
     const height = Math.max(1, this.terminal.rows);
     const frame = this.buildFrame(width, height);

@@ -31,7 +31,7 @@ describe("Viewport", () => {
 
   it("keeps the visible window anchored while content streams in below", () => {
     const lines = Array.from({ length: 10 }, (_, i) => `l${i}`);
-    const viewport = makeViewport(lines);
+    const viewport = makeViewport(lines, 3);
     viewport.renderArea(60, 4); // ["l6".."l9"]
 
     viewport.handleInput(createKey("wheelup")); // offset 3
@@ -73,7 +73,7 @@ describe("Viewport", () => {
 
   it("shows the indicator row only while scrolled, with the row count", () => {
     const lines = Array.from({ length: 8 }, (_, i) => `l${i}`);
-    const viewport = makeViewport(lines);
+    const viewport = makeViewport(lines, 3);
     const following = viewport.renderArea(60, 4);
     expect(following.some((l) => l.includes("below"))).toBe(false);
 

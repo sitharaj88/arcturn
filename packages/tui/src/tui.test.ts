@@ -333,6 +333,10 @@ describe("render scheduling", () => {
   it("collapses several requestRender calls into one frame", async () => {
     const { terminal, tui, component } = makeTui(["a"]);
     tui.start();
+    // start() just painted, so an immediate request lands inside the frame
+    // governor's ~60fps window; let the window pass so this test measures
+    // coalescing, not the governor (which has its own test below).
+    await new Promise((resolve) => setTimeout(resolve, 20));
     terminal.clearWrites();
     component.lines = ["b"];
     tui.requestRender();
@@ -342,6 +346,34 @@ describe("render scheduling", () => {
     await Promise.resolve();
     expect(terminal.writes).toHaveLength(1);
     expect(stripAnsi(terminal.output)).toContain("b");
+    tui.stop();
+  });
+
+  it("governs a flood to one trailing frame instead of one frame per event", async () => {
+    // A wheel flick delivers many stdin chunks in a few milliseconds; each
+    // used to paint its own full frame. Requests inside the frame interval
+    // now collapse into a single trailing frame — smooth scrolling is a
+    // steady ~60fps, not shearing at chunk rate.
+    const { terminal, tui, component } = makeTui(["a"]);
+    tui.start();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    terminal.clearWrites();
+    component.lines = ["b"];
+    tui.requestRender();
+    await Promise.resolve(); // first request after quiet: immediate frame
+    const afterFirst = terminal.writes.length;
+    expect(afterFirst).toBe(1);
+    component.lines = ["c"];
+    for (let i = 0; i < 10; i += 1) {
+      tui.requestRender();
+      await Promise.resolve();
+    }
+    // Still within the frame window: nothing painted yet.
+    expect(terminal.writes.length).toBe(afterFirst);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    // One trailing frame carried the final state.
+    expect(terminal.writes.length).toBe(afterFirst + 1);
+    expect(stripAnsi(terminal.output)).toContain("c");
     tui.stop();
   });
 

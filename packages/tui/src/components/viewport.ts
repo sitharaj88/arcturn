@@ -20,7 +20,12 @@ import { sliceByWidth, stringWidth, tokenize, truncateToWidth, wrapText } from "
 export interface ViewportOptions {
   /** Produces the logical (unwrapped, styled) transcript lines at a width. */
   readonly getLines: (width: number) => readonly string[];
-  /** Rows scrolled per wheel step (default 3). */
+  /**
+   * Rows scrolled per wheel event (default 1). One, deliberately: every
+   * modern emulator already multiplies a physical notch into several wheel
+   * events (xterm.js one per computed line, kitty via its multiplier), so a
+   * larger step here compounds into chunky, overspeed scrolling.
+   */
   readonly wheelStep?: number;
   /**
    * When this reports `true` and the content fits the area, the content is
@@ -343,7 +348,7 @@ export class Viewport implements Component {
   }
 
   private wheelStep(): number {
-    return Math.max(1, this.options.wheelStep ?? 3);
+    return Math.max(1, this.options.wheelStep ?? 1);
   }
 
   /** Wraps the logical lines into display rows, reusing cached wraps per line. */
