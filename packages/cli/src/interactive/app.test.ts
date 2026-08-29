@@ -489,6 +489,29 @@ describe("InteractiveApp in screen mode", () => {
     return harness(turns, {}, "screen");
   }
 
+  it("Shift+Tab cycles the permission mode, idle and mid-run alike", async () => {
+    const h = await screenHarness([{ text: "slow answer", delayMs: 300 }]);
+    expect(h.runtime.permissionMode).toBe("default");
+
+    h.terminal.injectInput("\u001b[Z"); // Shift+Tab
+    await tick();
+    expect(h.runtime.permissionMode).toBe("acceptEdits");
+    h.terminal.injectInput("\u001b[Z");
+    await tick();
+    expect(h.runtime.permissionMode).toBe("plan");
+    h.terminal.injectInput("\u001b[Z");
+    await tick();
+    expect(h.runtime.permissionMode).toBe("default");
+
+    // Mid-run is when the switch is most wanted; it must not wait for runEnd.
+    h.terminal.injectInput("go\r");
+    await waitFor(() => h.runtime.agent.isRunning);
+    h.terminal.injectInput("\u001b[Z");
+    await tick();
+    expect(h.runtime.permissionMode).toBe("acceptEdits");
+    await waitFor(() => !h.runtime.agent.isRunning, { timeout: 12_000 });
+  });
+
   it("rings the terminal notification only for a run that ends unfocused", async () => {
     const h = await screenHarness([{ text: "one" }, { text: "two" }]);
     const notified = () => h.terminal.output.split("\u001b]9;Arcturn").length - 1;

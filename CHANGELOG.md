@@ -12,6 +12,18 @@ CLI, the SDK, or the wire protocol.
 
 ### Added
 
+- **Change the permission mode and model mid-run, in both front-ends.** The
+  engine now applies `setPermissionMode` while a run is in flight — the mode
+  lands on the very next permission evaluation, which is exactly when "stop
+  asking, accept edits" is worth saying; a prompt already on screen settles
+  under the answer you give it, and a stored `deny` rule still outranks
+  every mode. The VS Code panel's mode chip therefore works during a run
+  (older engines still refuse politely, and the chip explains). In the
+  terminal, **Shift+Tab cycles default → acceptEdits → plan** any time —
+  idle, mid-run, even with a permission prompt up (`yolo` stays out of the
+  cycle; a bypass should never be one accidental keystroke away). `/model`
+  mid-run says honestly that it applies from the next request.
+
 - **Double-click selects the word, triple-click the row** — copied
   immediately, highlight left up as the receipt. A word is the contiguous
   non-whitespace run, so file paths, URLs and identifiers come out whole.

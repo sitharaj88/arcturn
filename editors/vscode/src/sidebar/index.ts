@@ -1096,7 +1096,10 @@ export function activateSidebar(
    * rather than degrading against an older engine (see `ProtocolClient`), and
    * that rejection is repeated to the user verbatim in its own words: a panel
    * that showed `plan` over a session still in `yolo` would have told somebody
-   * the agent will not write, right before it writes.
+   * the agent will not write, right before it writes. Engines from 0.5.3 on
+   * apply the change mid-run (from the next permission evaluation); an older
+   * engine's `sessionBusy` refusal surfaces here the same verbatim way, and
+   * the user tries again after the run.
    */
   async function applyPermissionMode(mode: PermissionMode): Promise<void> {
     await withEngine(async (session) => {

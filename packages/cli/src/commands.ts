@@ -303,7 +303,7 @@ export function createBuiltInCommands(): SlashCommand[] {
           "Commands",
           ...all.map((command) => `  /${command.name.padEnd(width)}  ${command.description}`),
           "",
-          "Enter submits · Shift+Enter newline · Esc aborts · Ctrl+C twice or Ctrl+D exits",
+          "Enter submits · Shift+Enter newline · Shift+Tab cycles permission mode · Esc aborts · Ctrl+C twice or Ctrl+D exits",
           // Selection is app-owned in the full-screen app: the drag is the
           // selection and the release is the copy, straight to the system
           // clipboard. Shift-drag still reaches the terminal's own selection
@@ -341,7 +341,10 @@ export function createBuiltInCommands(): SlashCommand[] {
         if (args !== "") {
           try {
             const spec = runtime.setModel(args);
-            ui.notice("info", `Model set to ${spec.displayName} (${spec.id}).`);
+            ui.notice(
+              "info",
+              `Model set to ${spec.displayName} (${spec.id}).${runtime.agent.isRunning ? " Applies from the next request." : ""}`,
+            );
           } catch (error) {
             ui.notice("error", error instanceof Error ? error.message : String(error));
           }
@@ -360,7 +363,10 @@ export function createBuiltInCommands(): SlashCommand[] {
         if (!choice) return;
         try {
           const spec = runtime.setModel(choice);
-          ui.notice("info", `Model set to ${spec.displayName} (${spec.id}).`);
+          ui.notice(
+            "info",
+            `Model set to ${spec.displayName} (${spec.id}).${runtime.agent.isRunning ? " Applies from the next request." : ""}`,
+          );
         } catch (error) {
           ui.notice("error", error instanceof Error ? error.message : String(error));
         }

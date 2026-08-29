@@ -187,21 +187,22 @@ describe("RFC 0005 §1.2 — a mode is a request, the engine is the authority", 
     expect(tool.ran()).toBe(0);
   });
 
-  it("refuses a mode change mid-run rather than half-applying it", async () => {
+  it("applies a mode change mid-run, in time for the next evaluation", async () => {
+    // Three prompts into a long run is exactly when "stop asking" is worth
+    // saying; the switch must not wait for runEnd.
     const tool = createSpyTool();
     const llm = createGatedLLM(textTurn("done"));
     const { client, sessionId } = await harness(llm, [tool]);
 
     const run = client.prompt(sessionId, "hello");
     await new Promise((resolve) => setTimeout(resolve, 20));
-    await expect(client.setPermissionMode(sessionId, "yolo")).rejects.toMatchObject({
-      code: "sessionBusy",
-    });
+    const state = await client.setPermissionMode(sessionId, "acceptEdits");
+    // The answer is the engine's resulting state, live mid-run.
+    expect(state.mode).toBe("acceptEdits");
     llm.release();
     await run;
 
-    // Still the mode it started on: nothing was half-applied.
-    expect((await client.permissionState(sessionId))?.mode).toBe("default");
+    expect((await client.permissionState(sessionId))?.mode).toBe("acceptEdits");
   });
 });
 

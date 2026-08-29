@@ -43,7 +43,13 @@ import {
   truncateToWidth,
   Viewport,
 } from "@arcturn/tui";
-import type { AgentEvent, PermissionDecision, PermissionRequest, TodoItem } from "@arcturn/types";
+import type {
+  AgentEvent,
+  PermissionDecision,
+  PermissionMode,
+  PermissionRequest,
+  TodoItem,
+} from "@arcturn/types";
 import { bannerLines } from "../banner.js";
 import { type CopyResult, copyToClipboard } from "../clipboard.js";
 import {
@@ -1099,6 +1105,10 @@ export class InteractiveApp {
       this.#terminalFocused = key.name === "focusin";
       return true;
     }
+    if (matchesKey(key, "shift+tab")) {
+      this.#cyclePermissionMode();
+      return true;
+    }
     if (this.#mode === "screen") {
       if (key.name === "mousedown" || key.name === "mousedrag" || key.name === "mouseup") {
         this.#onMouseSelection(key);
@@ -1172,6 +1182,24 @@ export class InteractiveApp {
     }
     // Failure is durable information, so it does go to the transcript.
     this.#writeThemed(() => [style("warning")(`${result.why} /copy and /export still work.`)]);
+  }
+
+  /**
+   * Shift+Tab cycles default -> acceptEdits -> plan -> default, any time:
+   * idle, mid-run, or with a permission prompt on screen — mid-run is when
+   * the switch is most wanted, and the engine applies it from the next
+   * permission evaluation. `yolo` is deliberately not in the cycle (a
+   * bypass should never be one accidental keystroke away; /permissions
+   * still reaches it) and cycling from yolo steps back to default.
+   */
+  #cyclePermissionMode(): void {
+    const cycle: PermissionMode[] = ["default", "acceptEdits", "plan"];
+    const current = this.#runtime.permissionMode;
+    const index = cycle.indexOf(current);
+    const next = cycle[(index + 1) % cycle.length] ?? "default";
+    this.#runtime.setPermissionMode(next);
+    this.#showFlash(`mode: ${next}`);
+    this.#refresh();
   }
 
   /**

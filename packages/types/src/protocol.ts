@@ -205,14 +205,15 @@ export type ClientRequest =
    * **It never edits rules.** Rules live in a file a person owns; there is no
    * wire path that writes one. See `permissionDecision`'s `scope`.
    *
-   * **Refused mid-run** with `sessionBusy`. A mode changed halfway through a
-   * turn would mean one half of that turn ran under one policy and the other
-   * half under another — a tool call already blocked on a client's answer
-   * settling under the old rules while the next call in the same turn settles
-   * under the new. RFC 0005 §2 promises the change "takes effect on the next
-   * turn"; refusing while a run is in flight is what makes that literally
-   * true, and it hands the client something to act on (abort, or wait) rather
-   * than a change silently deferred to a moment it cannot observe.
+   * **Applies mid-run.** The mode is consulted at each permission
+   * evaluation, so a change lands on the session's very next tool call —
+   * three prompts into a long run is exactly when "stop asking, accept
+   * edits" is worth saying. A prompt already on screen settles under the
+   * answer the person gives it; every later call evaluates under the new
+   * mode; a stored `deny` rule outranks every mode either side of the
+   * change. (Servers before protocol 0.5.3 refused this mid-run with
+   * `sessionBusy`; a client should treat that answer as "try again after
+   * runEnd", which is also what the refusal used to mean.)
    *
    * Answers with the resulting {@link PermissionState} — the *engine's* answer
    * to "what am I now", not an echo of what was asked, so a client never has

@@ -1475,32 +1475,26 @@ export class SessionHost {
    * **It never edits rules.** There is no wire path that writes one; see
    * {@link SessionHost.handlePermissionDecision}.
    *
-   * **Refused mid-run.** A mode that changed halfway through a turn would
-   * split that turn across two policies: a tool call already blocked on a
-   * client's answer would settle under the old rules while the next call in
-   * the same turn settled under the new, and nothing in the transcript would
-   * say which was which. Refusing with `sessionBusy` is what makes RFC 0005
-   * §2's "takes effect on the next turn" literally true, and it hands the
-   * client something to do (abort, or wait for `runEnd`) rather than a change
-   * deferred to a moment it cannot observe. It is the same refusal
-   * {@link SessionHost.deleteSession} makes, for the same reason: some
-   * operations have no correct meaning while a turn is in flight.
+   * **Applies mid-run.** The mode is consulted at each permission
+   * *evaluation*, so a change lands on the session's very next tool call —
+   * which is the moment a person reaches for it: three prompts into a long
+   * run is exactly when "stop asking, accept edits" is worth saying, and
+   * refusing until `runEnd` made the switch useless precisely when it was
+   * wanted. The semantics stay whole: a prompt already on screen settles
+   * under the answer the person gives it (the decision path is untouched),
+   * every later call evaluates under the new mode, and a stored `deny` rule
+   * still outranks every mode either side of the change. This used to refuse
+   * with `sessionBusy`; RFC 0005 §2's "takes effect on the next turn" is
+   * superseded by "takes effect on the next evaluation", which is both
+   * sooner and easier to state.
    *
    * @param sessionId - Session to change.
-   * @param mode - Mode to run under from the next turn.
+   * @param mode - Mode in force from the next permission evaluation.
    * @returns The resulting state — what the engine says it is, not an echo.
-   * @throws {SessionHostError} `sessionNotFound` when the session is not live,
-   *   or `sessionBusy` while a run is in flight.
+   * @throws {SessionHostError} `sessionNotFound` when the session is not live.
    */
   setPermissionMode(sessionId: string, mode: PermissionMode): PermissionState {
     const session = this.#require(sessionId);
-    if (session.agent.isRunning) {
-      throw new SessionHostError(
-        "sessionBusy",
-        `Session ${sessionId} is running a turn; a permission mode may not change halfway ` +
-          "through one. Abort the run or wait for it to end, then set the mode.",
-      );
-    }
     session.agent.setPermissionMode(mode);
     return this.#permissionState(session, sessionId);
   }
