@@ -161,7 +161,7 @@ describe("createCliProvisioner", () => {
     // state so a window reload is not a registry hit.
     const memory = new Map<string, unknown>();
     const state = {
-      get: <T,>(key: string): T | undefined => memory.get(key) as T | undefined,
+      get: <T>(key: string): T | undefined => memory.get(key) as T | undefined,
       update: async (key: string, value: unknown) => void memory.set(key, value),
     };
     let clock = 200_000_000; // past the first 24h window from epoch 0
@@ -208,6 +208,71 @@ describe("createCliProvisioner", () => {
     third.dispose();
   });
 
+  it("provisions in the background without being asked, and without blocking", async () => {
+    // Activation calls this and does not await it: a missing engine is dealt
+    // with while the editor opens, not on the first command a user runs.
+    const provisioner = createCliProvisioner({
+      platform: "darwin",
+      home: "/Users/me",
+      pathVar: "/usr/local/bin",
+      isExecutable: () => false,
+      probeVersion: async () => undefined,
+    });
+
+    // Returns synchronously — nothing is awaited on the activation path.
+    provisioner.provisionInBackground();
+    expect(fake.terminals).toHaveLength(0);
+
+    await provisioner.settled();
+    expect(fake.terminals[0]?.sent).toEqual([{ text: "npm install -g arcturn", addNewLine: true }]);
+    provisioner.dispose();
+  });
+
+  it("lets only one window start an install, so four windows are not four npm runs", async () => {
+    // The one-shot guards are per window; the claim that stops a stampede has
+    // to be profile-wide, which is what globalState is.
+    const memory = new Map<string, unknown>();
+    const state = {
+      get: <T>(key: string): T | undefined => memory.get(key) as T | undefined,
+      update: async (key: string, value: unknown) => void memory.set(key, value),
+    };
+    let clock = 500_000_000;
+    const window = () =>
+      createCliProvisioner({
+        platform: "darwin",
+        home: "/Users/me",
+        pathVar: "/usr/local/bin",
+        isExecutable: () => false,
+        probeVersion: async () => undefined,
+        state,
+        now: () => clock,
+      });
+
+    const first = window();
+    first.provisionInBackground();
+    await first.settled();
+    expect(fake.terminals).toHaveLength(1);
+
+    // Three more windows open moments later: they find the engine missing
+    // too, and each declines because the claim is still warm.
+    for (let i = 0; i < 3; i += 1) {
+      const other = window();
+      other.provisionInBackground();
+      await other.settled();
+      other.dispose();
+    }
+    expect(fake.terminals).toHaveLength(1);
+
+    // The claim expires, so a later attempt is not blocked forever.
+    clock += 6 * 60 * 1000;
+    const later = window();
+    later.provisionInBackground();
+    await later.settled();
+    expect(fake.terminals).toHaveLength(2);
+    later.dispose();
+    first.dispose();
+  });
+
   it("never auto-updates a binary pinned by arcturn.cliPath", async () => {
     // `npm install -g` can freshen what PATH found; it cannot touch the file
     // an explicit setting points at. For a pinned path the daily check would
@@ -215,7 +280,7 @@ describe("createCliProvisioner", () => {
     fake.config["arcturn.cliPath"] = "/opt/custom/arcturn";
     const memory = new Map<string, unknown>();
     const state = {
-      get: <T,>(key: string): T | undefined => memory.get(key) as T | undefined,
+      get: <T>(key: string): T | undefined => memory.get(key) as T | undefined,
       update: async (key: string, value: unknown) => void memory.set(key, value),
     };
     let asked = 0;
@@ -270,7 +335,7 @@ describe("createCliProvisioner", () => {
     // opened their editor.
     const memory = new Map<string, unknown>();
     const state = {
-      get: <T,>(key: string): T | undefined => memory.get(key) as T | undefined,
+      get: <T>(key: string): T | undefined => memory.get(key) as T | undefined,
       update: async (key: string, value: unknown) => void memory.set(key, value),
     };
     const current = createCliProvisioner({

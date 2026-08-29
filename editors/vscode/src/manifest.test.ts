@@ -72,6 +72,7 @@ async function registeredByBuilderA(): Promise<string[]> {
   const provisioner: CliProvisioner = {
     resolveCli: async () => undefined,
     runInstall: () => {},
+    provisionInBackground: () => {},
     settled: async () => {},
     dispose: () => {},
   };

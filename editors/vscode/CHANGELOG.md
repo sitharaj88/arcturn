@@ -8,14 +8,23 @@ this is one of two front-ends onto it. Each release names the engine it needs.
 
 ## [0.3.0] — 2026-08-29
 
-**Requires `arcturn` 0.4.0 or newer**, and manages it for you from here on.
+**Requires `arcturn` 0.4.0 or newer; 0.5.3 unlocks the mid-run permission chip.**
+The extension manages the engine for you from here on.
 
 ### The engine installs itself
 
+- **It provisions at startup, in the background.** Activation registers its
+  commands and returns; finding, installing or updating the engine happens
+  while the editor finishes opening. The first thing you run finds a ready
+  CLI instead of triggering an install mid-sentence. Nothing is awaited on
+  the activation path.
 - **Missing CLI, no setting pinned?** The extension types `npm install -g
   arcturn` into a terminal you can watch, and says so — no dialog to answer
   first. A broken `arcturn.cliPath` still gets the message naming the setting,
   because an install cannot repair a typo.
+- **Four open windows are not four `npm install` runs.** The install claim
+  lives in profile-wide state with a five-minute expiry, so exactly one
+  window starts an install and a cancelled one does not wedge the feature.
 - **Once a day it asks npm** whether a newer engine exists, and upgrades the
   same way when one does. The check is throttled through workspace state (a
   window reload is not a registry hit), it is the extension's only network

@@ -57,7 +57,10 @@ export interface CliProvisionerOptions {
   readonly pathVar?: string;
   readonly isExecutable?: (candidate: string) => boolean;
   /** Where the daily update-check timestamp lives. `context.globalState` in production. */
-  readonly state?: { get<T>(key: string): T | undefined; update(key: string, value: unknown): Thenable<void> };
+  readonly state?: {
+    get<T>(key: string): T | undefined;
+    update(key: string, value: unknown): Thenable<void>;
+  };
   /** Clock, for tests. */
   readonly now?: () => number;
   /** Registry probe, for tests. Production asks registry.npmjs.org once a day. */
@@ -82,6 +85,16 @@ export interface CliProvisionerOptions {
 export interface CliProvisioner extends vscode.Disposable {
   /** Resolve the engine, notifying at most once per window if it is missing. */
   readonly resolveCli: ResolveCli;
+  /**
+   * Resolve once in the background, off the activation path.
+   *
+   * Activation calls this and does not await it: an engine that is missing or
+   * stale should be dealt with while the editor finishes opening, not on the
+   * first command a user runs — that is the difference between "it was ready"
+   * and a terminal appearing in the middle of somebody's sentence. Failures
+   * are swallowed here; the resolve itself already notifies exactly once.
+   */
+  provisionInBackground(): void;
   /** Type an install (or upgrade) into a visible terminal. */
   runInstall(kind: "install" | "upgrade"): void;
   /** Await any notification follow-up still in flight. Tests only. */
@@ -140,6 +153,14 @@ function isExecutableFile(candidate: string): boolean {
 
 /** A day: often enough to stay current, rare enough to never be noticed. */
 const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+/** Profile-wide key holding the timestamp of the last install this profile started. */
+const INSTALL_CLAIM_KEY = "arcturn.lastInstallStartedAt";
+/**
+ * How long one window's install claim suppresses another window's. Long
+ * enough to cover a slow `npm install -g` on a cold cache, short enough that
+ * a cancelled one does not block the next attempt for the rest of the day.
+ */
+const INSTALL_CLAIM_TTL_MS = 5 * 60 * 1000;
 
 /**
  * The engine's latest published version, from the npm registry.
@@ -203,6 +224,27 @@ export function createCliProvisioner(options: CliProvisionerOptions = {}): CliPr
     followUp = followUp.then(() => work);
   }
 
+  /**
+   * Whether this window may open an install terminal right now.
+   *
+   * The one-shot guards above are per window, and a person with four windows
+   * open has four provisioners that each independently notice the same
+   * missing engine. Without a shared claim they would open four terminals and
+   * run four concurrent `npm install -g`, which is how a global install ends
+   * up half-written. The claim lives in `globalState`, which every window in
+   * the profile shares, and it expires so a crashed or cancelled install
+   * cannot wedge the feature permanently.
+   */
+  function claimInstallSlot(): boolean {
+    const state = options.state;
+    if (state === undefined) return true;
+    const now = options.now?.() ?? Date.now();
+    const last = state.get<number>(INSTALL_CLAIM_KEY) ?? 0;
+    if (now - last < INSTALL_CLAIM_TTL_MS) return false;
+    void state.update(INSTALL_CLAIM_KEY, now);
+    return true;
+  }
+
   /** Type the command into a visible terminal. Never resets any guard. */
   function launchInstall(kind: "install" | "upgrade"): void {
     const command = installCommand(kind);
@@ -241,7 +283,7 @@ export function createCliProvisioner(options: CliProvisionerOptions = {}): CliPr
     // watch and Ctrl+C, not behind a button they have to find. The
     // notification is the consent surface: it says what is running and where,
     // and the setting turns the whole behaviour off.
-    if (autoManaged() && choicesOptions.allowAuto !== false) {
+    if (autoManaged() && choicesOptions.allowAuto !== false && claimInstallSlot()) {
       launchInstall("install");
       const choice = await vscode.window.showInformationMessage(
         "Arcturn is installing its CLI engine in the terminal (npm install -g arcturn). " +
@@ -260,11 +302,14 @@ export function createCliProvisioner(options: CliProvisionerOptions = {}): CliPr
     }
   }
 
-  async function offerUpgrade(current: string, upgradeOptions?: { allowAuto?: boolean }): Promise<void> {
+  async function offerUpgrade(
+    current: string,
+    upgradeOptions?: { allowAuto?: boolean },
+  ): Promise<void> {
     // The same rule as offerInstall: `npm install -g` can freshen what PATH
     // found, but it cannot touch the file an explicit `arcturn.cliPath`
     // points at, so a pinned engine is asked about and never auto-launched.
-    if (autoManaged() && upgradeOptions?.allowAuto !== false) {
+    if (autoManaged() && upgradeOptions?.allowAuto !== false && claimInstallSlot()) {
       launchInstall("upgrade");
       void vscode.window.showInformationMessage(
         `Arcturn is updating its engine (${current} → ${MIN_ENGINE_VERSION}+) in the terminal. ` +
@@ -303,6 +348,7 @@ export function createCliProvisioner(options: CliProvisionerOptions = {}): CliPr
       return;
     }
     if (latest === undefined || !isOutdated(installed, latest)) return;
+    if (!claimInstallSlot()) return;
     launchInstall("upgrade");
     void vscode.window.showInformationMessage(
       `Arcturn is updating its engine (${installed} → ${latest}) in the terminal. ` +
@@ -345,9 +391,7 @@ export function createCliProvisioner(options: CliProvisionerOptions = {}): CliPr
       notifiedUpgrade = true;
       // Offered, not enforced: an old engine still runs, and blocking the
       // user over a version number they did not choose is not our call.
-      track(
-        offerUpgrade(version as string, { allowAuto: decision.cli.source === "path" }),
-      );
+      track(offerUpgrade(version as string, { allowAuto: decision.cli.source === "path" }));
     } else if (version !== undefined && decision.cli.source === "path") {
       // Above the floor: still check, once a day, whether npm has moved on.
       // Only for a PATH-resolved binary — `npm install -g` can freshen what
@@ -368,12 +412,22 @@ export function createCliProvisioner(options: CliProvisionerOptions = {}): CliPr
     notifiedUpgrade = false;
   });
 
+  /** The single cached resolve every entry point shares. */
+  function resolveCached(): Promise<ResolvedCli | undefined> {
+    pending ??= resolveOnce();
+    return pending;
+  }
+
   return {
-    resolveCli() {
-      pending ??= resolveOnce();
-      return pending;
-    },
+    resolveCli: resolveCached,
     runInstall,
+    provisionInBackground() {
+      track(
+        resolveCached()
+          .then(() => undefined)
+          .catch(() => undefined),
+      );
+    },
     settled() {
       return followUp;
     },

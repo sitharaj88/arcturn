@@ -35,6 +35,7 @@ function makeDeps(resolved?: ResolvedCli | null): {
   const provisioner: CliProvisioner = {
     resolveCli: async () => answer,
     runInstall: () => {},
+    provisionInBackground: () => {},
     settled: async () => {},
     dispose: () => {},
   };

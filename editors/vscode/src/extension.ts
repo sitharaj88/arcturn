@@ -64,6 +64,14 @@ export async function activateWith(
   const { provisioner, hub, platform } = deps;
   context.subscriptions.push(provisioner, hub);
 
+  // Provision off the activation path, never on it. Activation registers
+  // commands synchronously and returns; the engine is found, installed or
+  // updated while the editor finishes opening, so the first command a user
+  // runs finds a ready CLI instead of triggering an install mid-sentence.
+  // Nothing is awaited here — RFC 0004 §3 gives activation no process budget,
+  // and this deliberately spends its own outside that window.
+  provisioner.provisionInBackground();
+
   function folderFor(uri: vscode.Uri): vscode.WorkspaceFolder | undefined {
     return vscode.workspace.getWorkspaceFolder(uri) ?? vscode.workspace.workspaceFolders?.[0];
   }

@@ -1,6 +1,6 @@
 {
   "name": "@arcturn/tui",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "Terminal UI library with differential rendering Internal to the arcturn CLI; API may change in any release.",
   "license": "Apache-2.0",
   "publishConfig": {

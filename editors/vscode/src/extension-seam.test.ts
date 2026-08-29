@@ -28,6 +28,7 @@ describe("activation before the sidebar exists", () => {
       provisioner: {
         resolveCli: async () => cli,
         runInstall: () => {},
+        provisionInBackground: () => {},
         settled: async () => {},
         dispose: () => {},
       },

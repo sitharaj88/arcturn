@@ -10,7 +10,31 @@ CLI, the SDK, or the wire protocol.
 
 ## [Unreleased]
 
+## [0.5.3] — 2026-08-29
+
+A session's worth of field reports from real use, and the terminal work they
+turned into: text selection that behaves like a modern application, scrolling
+that is smooth, permission modes that change when you need them to, files that
+attach from anywhere, and a retrieval-system kit for the thing everyone is
+trying to build.
+
 ### Added
+
+- **A RAG blueprint kit** (`kits/rag-blueprint`, and in the Hub): eight roles,
+  two pipelines and three skills for building and auditing retrieval systems
+  on your own stack. `rag-setup` surveys what exists, threat-models before it
+  designs, writes an ADR to a file, builds ingestion, retrieval and
+  observability in serialized slices, then gates shipping on red-team drills
+  and an evaluation suite whose author holds no shell to run it.
+  `rag-review` points the same discipline at a system you already have. It
+  designs against the failures that actually sink these systems — chunking
+  checked against the embedder's context window, the retrieve-k → rerank-n
+  cascade with its per-candidate cost, entitlement filtering with its recall
+  cost measured for a low-entitlement identity, a semantic cache keyed to
+  include entitlement (one keyed on the query alone leaks past a correct
+  filter), orphan chunks, and the dual-index migration an embedding-model
+  change requires. No model verdict blocks; the drills refuse to run without
+  a confirmed scratch index.
 
 - **Attach files from anywhere — drag and drop, both front-ends.** The rule,
   stated once and enforced in one place: *an absolute path attaches from
