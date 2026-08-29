@@ -1,6 +1,6 @@
 import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative, sep } from "node:path";
 import { validatePromptAttachment } from "@arcturn/protocol";
 import { PROMPT_ATTACHMENT_MAX_BYTES } from "@arcturn/server";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -26,11 +26,22 @@ describe("createContextResolver().buildPrompt", () => {
     expect(result.refusals).toEqual([]);
   });
 
-  it("reports a mention that escapes the workspace instead of skipping it silently", async () => {
+  it("attaches an absolute mention from anywhere — the explicit path is the consent", async () => {
     await writeFile(join(outside, "s.txt"), "OUTSIDE\n", "utf8");
     const result = await resolver.buildPrompt({
       cwd,
       text: `read @${join(outside, "s.txt")}`,
+      attachments: [],
+    });
+    expect(result.text).toContain("OUTSIDE");
+    expect(result.refusals).toEqual([]);
+  });
+
+  it("reports a covert escape — a relative mention leaving the workspace — instead of skipping it silently", async () => {
+    await writeFile(join(outside, "s.txt"), "OUTSIDE\n", "utf8");
+    const result = await resolver.buildPrompt({
+      cwd,
+      text: `read @${relative(cwd, join(outside, "s.txt")).split(sep).join("/")}`,
       attachments: [],
     });
     expect(result.text).not.toContain("OUTSIDE");
@@ -56,13 +67,25 @@ describe("createContextResolver().buildPrompt", () => {
     expect(result.text).toContain("ATTACHED");
   });
 
-  it("refuses an attachment outside the workspace, fatally", async () => {
+  it("attaches an absolute attachment from anywhere", async () => {
+    await writeFile(join(outside, "s.txt"), "OUTSIDE\n", "utf8");
+    const result = await resolver.buildPrompt({
+      cwd,
+      text: "look",
+      attachments: [{ kind: "file", path: join(outside, "s.txt") }],
+    });
+    expect(result.text).toContain("OUTSIDE");
+  });
+
+  it("refuses a covert relative attachment outside the workspace, fatally", async () => {
     await writeFile(join(outside, "s.txt"), "OUTSIDE\n", "utf8");
     await expect(
       resolver.buildPrompt({
         cwd,
         text: "look",
-        attachments: [{ kind: "file", path: join(outside, "s.txt") }],
+        attachments: [
+          { kind: "file", path: relative(cwd, join(outside, "s.txt")).split(sep).join("/") },
+        ],
       }),
     ).rejects.toThrow(/outside the workspace/);
   });
@@ -170,11 +193,18 @@ describe("createContextResolver().resolve", () => {
   it("separates 'outside the workspace' from 'does not exist'", async () => {
     await writeFile(join(outside, "s.txt"), "OUTSIDE\n", "utf8");
 
-    const escaped = await resolver.resolve({ cwd, query: join(outside, "s.txt") });
-    // The file really is there. The engine does not say so, because it did not
-    // look — reporting `exists` for a path it refuses to read would make this
-    // read-only verb a filesystem oracle for exactly the paths confinement
-    // exists to hide.
+    // An absolute query resolves honestly: attachable, and not in the
+    // workspace — the picker can label it as elsewhere.
+    const elsewhere = await resolver.resolve({ cwd, query: join(outside, "s.txt") });
+    expect(elsewhere).toMatchObject({ inWorkspace: false, exists: true, kind: "file" });
+
+    // The covert relative escape stays a wall, and stays a *blind* one: no
+    // stat, so this read-only verb is no filesystem oracle for the paths
+    // confinement hides.
+    const escaped = await resolver.resolve({
+      cwd,
+      query: relative(cwd, join(outside, "s.txt")).split(sep).join("/"),
+    });
     expect(escaped).toMatchObject({
       inWorkspace: false,
       exists: false,
@@ -308,15 +338,29 @@ describe("createContextResolver() — ranged file attachments", () => {
     ).rejects.toThrow(/symlink leading outside the workspace/);
   });
 
-  it("still confines a ranged attachment, and reads nothing outside the workspace", async () => {
+  it("still confines a covert ranged attachment; an absolute one reads its excerpt", async () => {
     await writeFile(join(outside, "s.txt"), numbered(60).replace(/L/g, "OUT"), "utf8");
     await expect(
       resolver.buildPrompt({
         cwd,
         text: "explain",
-        attachments: [{ kind: "file", path: join(outside, "s.txt"), range: { start: 1, end: 2 } }],
+        attachments: [
+          {
+            kind: "file",
+            path: relative(cwd, join(outside, "s.txt")).split(sep).join("/"),
+            range: { start: 1, end: 2 },
+          },
+        ],
       }),
     ).rejects.toThrow(/outside the workspace/);
+
+    const allowed = await resolver.buildPrompt({
+      cwd,
+      text: "explain",
+      attachments: [{ kind: "file", path: join(outside, "s.txt"), range: { start: 1, end: 2 } }],
+    });
+    expect(allowed.text).toContain("OUT001");
+    expect(allowed.text).not.toContain("OUT060");
   });
 
   it("charges the byte budget for the excerpt, not for the file it came from", async () => {

@@ -21,7 +21,7 @@
 
 import { type Dirent, readdirSync, readFileSync } from "node:fs";
 import { readFile, realpath, stat } from "node:fs/promises";
-import { extname, join, relative, resolve, sep } from "node:path";
+import { extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { ImageContent, LineRange } from "@arcturn/types";
 
 /** One entry offered by a mention completion source. */
@@ -512,22 +512,88 @@ export type WorkspacePathVerdict =
   | { outcome: "missing"; path: string; relativePath: string; reason: string };
 
 /**
- * The one workspace-confinement gate every context path in this codebase goes
- * through — `@`-mentions, `prompt` attachments, and `resolveContext`.
+ * Rewrites a paste that is nothing but file paths into `@`-mentions.
+ *
+ * A drag-and-drop onto a terminal *is* a paste: the emulator inserts the
+ * dropped file's absolute path (shell-escaped on macOS, quoted on some
+ * Linux terminals) as pasted text. This is the other half of "attach from
+ * anywhere" — the engine accepts absolute paths, and this makes the drop
+ * gesture produce one. Deliberately strict about when it fires: every
+ * whitespace-separated token must unescape to an existing absolute path, so
+ * pasted prose, code, or a lone `/` can never be rewritten. Anything else
+ * returns `undefined` and the paste inserts verbatim.
+ *
+ * @param text - The pasted text.
+ * @param isFile - Filesystem probe, injectable for tests.
+ */
+export function pastedPathsAsMentions(
+  text: string,
+  isFile: (path: string) => boolean,
+): string | undefined {
+  const trimmed = text.trim();
+  if (trimmed === "" || trimmed.includes("\n")) return undefined;
+  // Tokenize the way a shell drop is written: a quoted run is one token
+  // (some Linux terminals quote), `\ ` is an escaped space (Finder
+  // escapes), bare whitespace separates a multi-file drop.
+  const tokens: string[] = [];
+  let i = 0;
+  while (i < trimmed.length) {
+    const ch = trimmed[i] ?? "";
+    if (/\s/.test(ch)) {
+      i += 1;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      const close = trimmed.indexOf(ch, i + 1);
+      if (close === -1) return undefined;
+      tokens.push(trimmed.slice(i + 1, close));
+      i = close + 1;
+      continue;
+    }
+    let j = i;
+    while (j < trimmed.length && (!/\s/.test(trimmed[j] ?? "") || trimmed[j - 1] === "\\")) {
+      j += 1;
+    }
+    tokens.push(trimmed.slice(i, j).replaceAll("\\ ", " "));
+    i = j;
+  }
+  if (tokens.length === 0) return undefined;
+  const paths: string[] = [];
+  for (const candidate of tokens) {
+    if (!isAbsolute(candidate) || !isFile(candidate)) return undefined;
+    paths.push(candidate);
+  }
+  return `${paths.map((path) => (/\s/.test(path) ? `@"${path}"` : `@${path}`)).join(" ")} `;
+}
+
+/**
+ * The one path gate every context path in this codebase goes through —
+ * `@`-mentions, `prompt` attachments, and `resolveContext`.
  *
  * Deliberately one function. RFC 0005 §1.1 requires the served path to inherit
  * "the strictest existing rule rather than a new one", and the way a rule stops
  * being the strictest is that somebody writes a second one that agrees with it
- * until it does not. This *is* the rule the TUI has always applied; the served
- * path now calls it rather than approximating it.
+ * until it does not. Both front-ends call this rather than approximating it.
  *
- * Two gates, and both are needed:
+ * The rule: **an absolute path attaches from anywhere; a relative path stays
+ * inside the workspace.** Writing `/` (or dragging a file in — a drop always
+ * carries an absolute path) is an explicit gesture at a known location by the
+ * person the engine works for, and their screenshot in `~/Downloads` is
+ * legitimate context. What stays refused is the *covert* escape: a mention
+ * that reads as workspace-local — `src/../../secrets`, or a symlink inside
+ * the tree pointing out of it — must not quietly leave, because the person
+ * reading `@src/config` has been told a lie about what was read. Verdicts for
+ * an allowed absolute path report `outcome: "inside"` — historically "inside
+ * the workspace", now "cleared to attach" — with the absolute path as its own
+ * display path.
  *
- * 1. **Lexical.** `resolve` collapses `../` and absolutizes, so a mention that
- *    names a path outside the root is refused before any syscall.
+ * Two gates guard the relative case, and both are needed:
+ *
+ * 1. **Lexical.** `resolve` collapses `../`, so a relative mention that names
+ *    a path outside the root is refused before any syscall.
  * 2. **Real.** A symlink *inside* the workspace can still point outside it, so
- *    the final check compares symlink-resolved paths. A mention never reads
- *    through such a link (see `security-review.test.ts`).
+ *    the final check compares symlink-resolved paths. A relative mention never
+ *    reads through such a link (see `security-review.test.ts`).
  *
  * @param root - Workspace root; resolved here, so a relative one is fine.
  * @param rawPath - Path as the client wrote it.
@@ -537,6 +603,25 @@ export async function confineToWorkspace(
   rawPath: string,
 ): Promise<WorkspacePathVerdict> {
   const resolvedRoot = resolve(root);
+  if (isAbsolute(rawPath)) {
+    const absolute = resolve(rawPath);
+    // Inside-the-root absolutes keep their workspace-relative identity so an
+    // absolute drop of a project file dedupes with the same file mentioned
+    // relatively; genuinely outside ones are their own display path.
+    const within = absolute === resolvedRoot || absolute.startsWith(resolvedRoot + sep);
+    const display = within ? relative(resolvedRoot, absolute).split(sep).join("/") : absolute;
+    try {
+      const real = await realpath(absolute);
+      return { outcome: "inside", path: absolute, realPath: real, relativePath: display };
+    } catch {
+      return {
+        outcome: "missing",
+        path: absolute,
+        relativePath: display,
+        reason: "does not exist",
+      };
+    }
+  }
   const resolved = resolve(resolvedRoot, rawPath);
   if (resolved !== resolvedRoot && !resolved.startsWith(resolvedRoot + sep)) {
     return {

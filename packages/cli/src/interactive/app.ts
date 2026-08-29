@@ -15,6 +15,7 @@
  * instead, so a dialog never gets torn in half.
  */
 
+import { statSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { join } from "node:path";
 import { JsonlSessionStore, text as textBlock } from "@arcturn/core";
@@ -69,7 +70,12 @@ import {
 import { createGitStatusTracker, type GitStatusTracker } from "../git-status.js";
 import { type GlyphSet, resolveGlyphs } from "../glyphs.js";
 import { WORDMARK_WIDTH } from "../logo.js";
-import { createFileMentionSource, expandMentions, type FileMentionSource } from "../mentions.js";
+import {
+  createFileMentionSource,
+  expandMentions,
+  type FileMentionSource,
+  pastedPathsAsMentions,
+} from "../mentions.js";
 import { version } from "../meta.js";
 import type { ArcturnRuntime, SessionMetrics } from "../runtime.js";
 import { resolveTheme } from "../themes.js";
@@ -300,6 +306,17 @@ export class InteractiveApp {
     this.#editor = new PromptEditor({
       placeholder: "Ask arcturn anything, or type / for commands",
       prompt: `${this.#glyphs.promptCaret} `,
+      // A file dragged onto the terminal arrives as a pasted absolute path;
+      // rewriting it into an @-mention is what makes the drop attach the
+      // file, from anywhere on disk, the same as the editor panel's drop.
+      transformPaste: (text) =>
+        pastedPathsAsMentions(text, (candidate) => {
+          try {
+            return statSync(candidate).isFile();
+          } catch {
+            return false;
+          }
+        }) ?? text,
       maxVisibleLines: 8,
       autocompleteTriggers: ["/", "@"],
       autocomplete: {

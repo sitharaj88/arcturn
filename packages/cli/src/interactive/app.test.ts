@@ -489,6 +489,24 @@ describe("InteractiveApp in screen mode", () => {
     return harness(turns, {}, "screen");
   }
 
+  it("a dropped file pastes as a mention and attaches from outside the workspace", async () => {
+    // A terminal drop is a bracketed paste of the absolute path. The editor
+    // rewrites it to an @-mention; the engine reads it from anywhere.
+    const outside = await makeScratch();
+    await writeFileAt(join(outside.cwd, "dropped.txt"), "content from far away");
+    const h = await screenHarness([{ text: "saw it" }]);
+
+    const dropped = join(outside.cwd, "dropped.txt");
+    h.terminal.injectInput(`\u001b[200~${dropped}\u001b[201~`);
+    await tick();
+    expect(h.app.editor.text).toBe(`@${dropped} `);
+
+    h.terminal.injectInput("\r");
+    await waitFor(() => h.text().includes("saw it"), { timeout: 12_000 });
+    const sent = h.runtime.agent.messages.map((m) => JSON.stringify(m.content)).join("");
+    expect(sent).toContain("content from far away");
+  });
+
   it("Shift+Tab cycles the permission mode, idle and mid-run alike", async () => {
     const h = await screenHarness([{ text: "slow answer", delayMs: 300 }]);
     expect(h.runtime.permissionMode).toBe("default");

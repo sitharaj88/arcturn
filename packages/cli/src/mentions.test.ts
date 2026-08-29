@@ -7,6 +7,7 @@ import {
   expandMentions,
   fuzzyScore,
   type MentionExtraSource,
+  pastedPathsAsMentions,
 } from "./mentions.js";
 
 /** A tiny valid 1x1 transparent PNG, for image-mention tests. */
@@ -129,6 +130,32 @@ describe("createFileMentionSource", () => {
   });
 });
 
+describe("pastedPathsAsMentions", () => {
+  const files = new Set(["/tmp/a.png", "/tmp/with space.txt", "/Users/x/shot.png"]);
+  const isFile = (path: string) => files.has(path);
+
+  it("rewrites a dropped path into a mention, quoting spaces", () => {
+    expect(pastedPathsAsMentions("/tmp/a.png", isFile)).toBe("@/tmp/a.png ");
+    expect(pastedPathsAsMentions("/tmp/with\\ space.txt", isFile)).toBe('@"/tmp/with space.txt" ');
+    expect(pastedPathsAsMentions("'/tmp/with space.txt'", isFile)).toBe('@"/tmp/with space.txt" ');
+  });
+
+  it("rewrites a multi-file drop into one mention per file", () => {
+    expect(pastedPathsAsMentions("/tmp/a.png /Users/x/shot.png", isFile)).toBe(
+      "@/tmp/a.png @/Users/x/shot.png ",
+    );
+  });
+
+  it("never rewrites prose, code, relative paths, or a path that is not a file", () => {
+    expect(pastedPathsAsMentions("hello world", isFile)).toBeUndefined();
+    expect(pastedPathsAsMentions("const x = 1;", isFile)).toBeUndefined();
+    expect(pastedPathsAsMentions("src/cart.ts", isFile)).toBeUndefined();
+    expect(pastedPathsAsMentions("/tmp/missing.txt", isFile)).toBeUndefined();
+    expect(pastedPathsAsMentions("/tmp/a.png and also words", isFile)).toBeUndefined();
+    expect(pastedPathsAsMentions("line one\n/tmp/a.png", isFile)).toBeUndefined();
+  });
+});
+
 describe("expandMentions", () => {
   it("injects text-file content at the end and leaves the token in place", async () => {
     const dir = await workspace({ "notes.txt": "hello from notes" });
@@ -197,11 +224,29 @@ describe("expandMentions", () => {
     expect(result.images).toEqual([]);
   });
 
-  it("rejects an absolute path outside cwd", async () => {
+  it("attaches an absolute path from anywhere — the explicit gesture is the consent", async () => {
+    // A drag from the OS always carries an absolute path; writing one is the
+    // same gesture typed. What stays refused is the covert escape below.
+    const outside = await workspace({ "notes.txt": "from far away" });
     const dir = await workspace({});
-    const result = await expandMentions("@/etc/passwd", dir);
-    expect(result.text).toBe("@/etc/passwd");
-    expect(result.images).toEqual([]);
+    const result = await expandMentions(`@${outside}/notes.txt`, dir);
+    expect(result.text).toContain("from far away");
+    expect(result.refusals).toEqual([]);
+  });
+
+  it("stays quiet about an absolute path that does not exist", async () => {
+    const dir = await workspace({});
+    const result = await expandMentions("@/no/such/file/anywhere", dir);
+    expect(result.text).toBe("@/no/such/file/anywhere");
+    expect(result.refusals).toEqual([]);
+  });
+
+  it("still refuses the covert escape: a relative mention may not leave the workspace", async () => {
+    const dir = await workspace({});
+    const result = await expandMentions("@../../../etc/passwd", dir);
+    expect(result.text).toBe("@../../../etc/passwd");
+    expect(result.refusals).toHaveLength(1);
+    expect(result.refusals[0]?.reason).toContain("outside the workspace");
   });
 
   it("does not treat an email-like token as a mention", async () => {

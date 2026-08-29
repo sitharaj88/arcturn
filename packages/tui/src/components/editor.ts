@@ -66,6 +66,13 @@ export interface AutocompleteProvider {
 export interface EditorOptions {
   /** Text shown when the buffer is empty. */
   readonly placeholder?: string;
+  /**
+   * Rewrites pasted text before insertion. The hook for hosts that read
+   * meaning into a paste — a terminal drag-and-drop arrives as nothing but a
+   * pasted path, and the CLI turns it into an attachment mention here.
+   * Return the replacement; the paste is inserted verbatim without one.
+   */
+  readonly transformPaste?: (text: string) => string;
   /** Initial buffer contents. */
   readonly initialText?: string;
   /** Marker drawn before the first line (default `"› "`). */
@@ -276,9 +283,12 @@ export class Editor implements Component {
   /* ---------------------------------------------------------------------- */
 
   handleInput(key: Key): boolean {
-    // 1. Bracketed paste is inserted verbatim as one undo unit.
+    // 1. Bracketed paste is inserted as one undo unit — through the host's
+    //    transform when it supplies one (the CLI turns a dropped file's
+    //    pasted path into an @-mention there).
     if (key.name === "paste") {
-      this.insertText(key.paste ?? "", true);
+      const raw = key.paste ?? "";
+      this.insertText(this.options.transformPaste?.(raw) ?? raw, true);
       return true;
     }
 

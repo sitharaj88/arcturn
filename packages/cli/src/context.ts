@@ -34,7 +34,7 @@
  */
 
 import { stat } from "node:fs/promises";
-import { extname } from "node:path";
+import { extname, isAbsolute } from "node:path";
 import {
   type ContextQueryRequest,
   ContextRefusedError,
@@ -402,13 +402,18 @@ export function createContextResolver(options: ContextResolverOptions = {}): Con
           ...kinds,
           path: verdict.path,
           relativePath: verdict.relativePath,
-          inWorkspace: true,
+          inWorkspace: !isAbsolute(verdict.relativePath),
           exists: false,
           bytes: 0,
           kind: "missing",
           reason: "nothing exists at this path",
         };
       }
+
+      // An allowed absolute path outside the root is attachable but must not
+      // claim to be in the workspace: its verdict carries the absolute path
+      // as its own display path, which is the tell.
+      const within = !isAbsolute(verdict.relativePath);
 
       let info: Awaited<ReturnType<typeof stat>>;
       try {
@@ -420,7 +425,7 @@ export function createContextResolver(options: ContextResolverOptions = {}): Con
           ...kinds,
           path: verdict.path,
           relativePath: verdict.relativePath,
-          inWorkspace: true,
+          inWorkspace: within,
           exists: false,
           bytes: 0,
           kind: "missing",
@@ -435,7 +440,7 @@ export function createContextResolver(options: ContextResolverOptions = {}): Con
           ...kinds,
           path: verdict.path,
           relativePath: verdict.relativePath,
-          inWorkspace: true,
+          inWorkspace: within,
           exists: true,
           bytes: 0,
           kind: "directory",
@@ -449,7 +454,7 @@ export function createContextResolver(options: ContextResolverOptions = {}): Con
           ...kinds,
           path: verdict.path,
           relativePath: verdict.relativePath,
-          inWorkspace: true,
+          inWorkspace: within,
           exists: true,
           bytes: 0,
           kind: "other",
@@ -465,7 +470,7 @@ export function createContextResolver(options: ContextResolverOptions = {}): Con
         ...kinds,
         path: verdict.path,
         relativePath: verdict.relativePath,
-        inWorkspace: true,
+        inWorkspace: within,
         exists: true,
         bytes: info.size,
         kind,

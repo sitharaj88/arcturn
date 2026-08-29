@@ -798,12 +798,16 @@ describe("RFC 0005 §1.1 — context and attachments on the wire", () => {
 
     const { client, sessionId } = await connectedClient(runtime);
     try {
-      // Absolute, and plainly elsewhere. Unlike a mention this is fatal: the
-      // client named the file, so running the turn without it would be exactly
-      // the silent drop RFC 0005 §1.1 forbids.
+      // A covert relative escape. Unlike a mention this is fatal: the
+      // client named the file, so running the turn without it would be
+      // exactly the silent drop RFC 0005 §1.1 forbids. (An *absolute* path
+      // attaches from anywhere — the drop gesture always carries one.)
       await expect(
         client.prompt(sessionId, "look at this", [
-          { kind: "file", path: join(outside, "secrets.txt") },
+          {
+            kind: "file",
+            path: relative(runtime.cwd, join(outside, "secrets.txt")).split(sep).join("/"),
+          },
         ]),
       ).rejects.toMatchObject({ code: "invalidRequest" });
 
@@ -1069,7 +1073,7 @@ describe("ranged file attachments — a selection, not the whole file", () => {
         client.prompt(sessionId, "look at this", [
           {
             kind: "file",
-            path: join(outside, "secrets.txt"),
+            path: relative(runtime.cwd, join(outside, "secrets.txt")).split(sep).join("/"),
             range: { start: 12, end: 14 },
           },
         ]),

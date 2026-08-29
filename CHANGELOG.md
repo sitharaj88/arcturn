@@ -12,6 +12,21 @@ CLI, the SDK, or the wire protocol.
 
 ### Added
 
+- **Attach files from anywhere — drag and drop, both front-ends.** The rule,
+  stated once and enforced in one place: *an absolute path attaches from
+  anywhere; a relative path stays inside the workspace.* Writing `/` — or
+  dragging a file in, which always produces an absolute path — is an explicit
+  gesture at a known location; the covert escape (`src/../../secrets`, a
+  symlink inside the tree pointing out) stays refused exactly as before. In
+  the **VS Code panel**, dropping a file from Finder or picking one in the
+  Attach dialog now works for any file on disk. In the **terminal**, a drop
+  arrives as a pasted path — the composer recognises it (Finder's escaped
+  spaces, quoted paths, multi-file drops included) and rewrites it into
+  `@`-mentions on the spot; prose and code paste untouched. `resolveContext`
+  answers honestly for an outside file (`inWorkspace: false`, real size and
+  kind) while a refused relative escape stays a blind wall — no filesystem
+  oracle.
+
 - **Change the permission mode and model mid-run, in both front-ends.** The
   engine now applies `setPermissionMode` while a run is in flight — the mode
   lands on the very next permission evaluation, which is exactly when "stop
