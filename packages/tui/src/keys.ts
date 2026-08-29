@@ -37,6 +37,7 @@ export type SpecialKeyName =
   | "wheelup"
   | "wheeldown"
   | "mousedown"
+  | "mousedrag"
   | "mouseup"
   | "unknown"
   | `f${number}`;
@@ -60,10 +61,10 @@ export interface Key {
   /** Full pasted content when {@link Key.name} is `"paste"`. */
   readonly paste?: string;
   /**
-   * 1-based cell coordinates when {@link Key.name} is `"mousedown"` or
-   * `"mouseup"`. Present so a host can tell a click from a drag — the gap
-   * between where the button went down and where it came up — without the
-   * TUI growing a mouse vocabulary of its own.
+   * 1-based cell coordinates when {@link Key.name} is `"mousedown"`,
+   * `"mousedrag"` or `"mouseup"` — the three moments of a selection gesture.
+   * Present so a host can own text selection itself without the TUI growing
+   * a mouse vocabulary of its own.
    */
   readonly mouse?: { readonly x: number; readonly y: number };
 }
@@ -469,9 +470,11 @@ function decodeSgrMouse(paramText: string, final: string, seq: string, consumed:
   const cb = Number.parseInt(parts[0] ?? "", 10);
   if (Number.isNaN(cb)) return { consumed };
   const button = cb & SGR_BUTTON_MASK;
-  // Bit 32 marks motion, and the mask drops it — so a left-drag motion report
-  // (code 32) would read as button 0. Motion is never a press or a release.
-  const isLeftButton = button === 0 && (cb & 32) === 0;
+  // Bit 32 marks motion. Motion with the left button held is the drag a
+  // selection follows; motion with any other button stays swallowed.
+  const isMotion = (cb & 32) !== 0;
+  const isLeftButton = button === 0 && !isMotion;
+  const isLeftDrag = button === 0 && isMotion;
   if (final === "m") {
     if (isLeftButton) {
       const mouse = sgrCell(parts);
@@ -481,9 +484,12 @@ function decodeSgrMouse(paramText: string, final: string, seq: string, consumed:
   }
   if (button === SGR_WHEEL_UP) return { key: makeKey("wheelup", seq), consumed };
   if (button === SGR_WHEEL_DOWN) return { key: makeKey("wheeldown", seq), consumed };
-  if (isLeftButton) {
+  if (isLeftButton || isLeftDrag) {
     const mouse = sgrCell(parts);
-    if (mouse) return { key: { ...makeKey("mousedown", seq), mouse }, consumed };
+    if (mouse) {
+      const name = isLeftDrag ? "mousedrag" : "mousedown";
+      return { key: { ...makeKey(name, seq), mouse }, consumed };
+    }
   }
   return { consumed };
 }

@@ -10,20 +10,16 @@ CLI, the SDK, or the wire protocol.
 
 ## [Unreleased]
 
-### Changed
-
-- **The terminal-native renderer is now the default.** `arcturn` launches in
-  inline mode: the transcript flows into your terminal's own scrollback while
-  the composer repaints at the bottom — so selecting, scrolling and copying
-  are the terminal's own gestures, a drag auto-scrolls through the whole
-  history, and the conversation is still in scrollback after you quit.
-  Nothing is grabbed, nothing is a mode. The full-screen app is one command
-  away: `/ui screen` persists the choice (`/ui inline` to come back,
-  `ARCTURN_UI` or the `ui` config field to pin it per project), and all of
-  its selection work — the drag handover, alternate scroll, `/copy` — ships
-  with it for those who prefer it.
-
 ### Added
+
+- **`/ui` switches the renderer without editing a config file.** The
+  full-screen app stays the default — it owns the whole history, repaints
+  cleanly on resize, and restores your shell untouched on exit. `/ui inline`
+  (picker on bare `/ui`) persists the terminal-native alternative, where the
+  transcript flows into the terminal's own scrollback and selection,
+  scrolling and copy are the terminal's own gestures. Honest about timing: a
+  renderer is chosen at launch, so the switch lands next launch. `ARCTURN_UI`
+  and the `ui` config field still pin it per project.
 
 - **`/copy` puts the last answer on the clipboard** — `/copy all` the whole
   conversation as markdown. The alternate screen caps mouse selection at one
@@ -36,22 +32,19 @@ CLI, the SDK, or the wire protocol.
 
 ### Fixed
 
-- **Selecting text with the mouse now just works.** The full-screen TUI holds
-  the mouse for wheel scrolling, and a held mouse is a terminal that cannot
-  select — the most-asked "why can't I copy?" there is. The grab's own
-  press/release reports are enough to notice the gesture that wanted
-  selection: the first drag (or double-click) hands the mouse back to the
-  terminal with a one-line hint, the next one selects natively, and the next
-  keystroke returns to the composer and re-takes the wheel. **Scrolling keeps
-  working the whole time**: the app requests alternate scroll (mode 1007)
-  with the alternate screen, so during the handover the wheel arrives as
-  arrow keys — and the transcript viewport, which holds focus while the
-  mouse is released, scrolls one line per arrow instead of letting them spin
-  prompt history. `PgUp`/`PgDn` page as well; select any older screenful, or
-  `/copy` and `/export` for more than a screenful. Copying never re-arms the
-  grab — `Cmd+C` belongs to the terminal and the app never sees it.
-  Shift-drag still bypasses everything, and `/help` now describes the
-  handover instead of a per-emulator chord table.
+- **Selecting text is one gesture: drag, release, it's on the clipboard.**
+  The full-screen app owns selection now instead of negotiating with the
+  terminal for it. The mouse grab uses cell-motion reporting, so a drag
+  arrives as it happens: the transcript highlights the span live (reverse
+  video, column-precise through colours, wide glyphs and wrapped lines),
+  riding the top or bottom edge auto-scrolls so a selection can grow across
+  any number of screenfuls — the thing terminal-side selection in an
+  alternate screen can never do — and on release the text is piped straight
+  to the system clipboard, plain and trimmed, with a one-line `✓ Copied N
+  chars` receipt. A click selects nothing, the wheel never stops working,
+  and nothing is a mode. Shift-drag still reaches the terminal's own
+  selection, and `/copy` / `/export` still cover whole answers and whole
+  conversations without any mouse at all.
 
 ## [0.5.2] — 2026-08-29
 

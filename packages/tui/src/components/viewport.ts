@@ -10,10 +10,11 @@
  * @packageDocumentation
  */
 
+import { stripAnsi } from "../ansi.js";
 import { type Key, matchesKey } from "../keys.js";
 import { style as themeStyle } from "../theme.js";
 import type { Component } from "../tui.js";
-import { stringWidth, truncateToWidth, wrapText } from "../width.js";
+import { sliceByWidth, stringWidth, truncateToWidth, wrapText } from "../width.js";
 
 /** Options for {@link Viewport}. */
 export interface ViewportOptions {
@@ -57,6 +58,18 @@ export class Viewport implements Component {
   /** Wrap cache: logical line → its display rows at {@link Viewport.cacheWidth}. */
   private cache = new Map<string, readonly string[]>();
   private cacheWidth = -1;
+  /** Width most recently given to {@link Viewport.renderArea}. */
+  private lastWidth = 80;
+
+  /**
+   * The live text selection, in absolute display coordinates: `row` indexes
+   * {@link Viewport.displayRows}, `col` is a 0-based display column. Absolute,
+   * not screen-relative, so the selection stays glued to its text while the
+   * view scrolls under the pointer.
+   */
+  private selection:
+    | { anchor: { row: number; col: number }; head: { row: number; col: number } }
+    | undefined;
 
   constructor(options: ViewportOptions) {
     this.options = options;
@@ -85,6 +98,7 @@ export class Viewport implements Component {
 
   renderArea(width: number, height: number): string[] {
     this.lastHeight = height;
+    this.lastWidth = width;
     const rows = this.displayRows(width);
     const total = rows.length;
 
@@ -95,7 +109,20 @@ export class Viewport implements Component {
 
     // The window of `height` rows ending `offset` rows above the bottom.
     const end = total - this.offset;
-    const visible = rows.slice(Math.max(0, end - height), end);
+    const start = Math.max(0, end - height);
+    const visible = rows.slice(start, end);
+    // Paint the live selection onto the rows it crosses, before padding and
+    // the scroll banner are laid over the frame.
+    const span = this.orderedSelection();
+    if (span) {
+      for (let i = 0; i < visible.length; i++) {
+        const row = start + i;
+        if (row < span.from.row || row > span.to.row) continue;
+        const c1 = row === span.from.row ? span.from.col : 0;
+        const c2 = row === span.to.row ? span.to.col + 1 : Number.POSITIVE_INFINITY;
+        visible[i] = highlightSpan(visible[i] ?? "", c1, c2);
+      }
+    }
     const lines: string[] = [];
     const slack = height - visible.length;
     // Bottom-anchored by default; centered while the host says the view is
@@ -124,9 +151,9 @@ export class Viewport implements Component {
       this.scrollBy(-this.wheelStep());
       return true;
     }
-    // One line per arrow. Only ever reached while the viewport holds focus —
-    // the selection handover, where alternate scroll (terminal.ts) delivers
-    // wheel motion as arrow keys — so this never competes with an editor.
+    // One line per arrow. Only ever reached while the viewport holds focus,
+    // where alternate scroll (terminal.ts) can deliver wheel motion as arrow
+    // keys — so this never competes with an editor.
     if (matchesKey(key, "up")) {
       this.scrollBy(1);
       return true;
@@ -152,6 +179,96 @@ export class Viewport implements Component {
       return true;
     }
     return false;
+  }
+
+  /** Height most recently given to {@link Viewport.renderArea}. */
+  get renderedHeight(): number {
+    return this.lastHeight;
+  }
+
+  /** `true` while a selection gesture is holding a span. */
+  get hasSelection(): boolean {
+    return this.selection !== undefined;
+  }
+
+  /**
+   * Begins a selection at a cell of the rendered area (0-based row within
+   * the area, 0-based column). Lands on the nearest content row, so a drag
+   * that starts on the blank padding above a short transcript still selects
+   * from the top.
+   *
+   * @returns `false` when there is no content to select at all.
+   */
+  beginSelectionAt(localRow: number, column: number): boolean {
+    const cell = this.contentCell(localRow, column);
+    if (cell === undefined) return false;
+    this.selection = { anchor: cell, head: { ...cell } };
+    return true;
+  }
+
+  /**
+   * Extends the selection to a cell, auto-scrolling when the pointer rides
+   * the top or bottom edge — which is how a drag selects more than a
+   * screenful: the view moves, the anchor stays glued to its text.
+   */
+  dragSelectionTo(localRow: number, column: number): void {
+    if (this.selection === undefined) return;
+    if (localRow <= 0) this.scrollBy(1);
+    else if (localRow >= this.lastHeight - 1) this.scrollBy(-1);
+    const cell = this.contentCell(localRow, column);
+    if (cell !== undefined) this.selection.head = cell;
+  }
+
+  /**
+   * Ends the gesture and returns the selected text, plain and
+   * newline-joined, with per-row trailing whitespace trimmed the way
+   * terminals trim it. A click — no movement, or nothing but blanks — ends
+   * with `undefined` and no selection left behind.
+   */
+  endSelection(): string | undefined {
+    const span = this.orderedSelection();
+    this.selection = undefined;
+    if (!span) return undefined;
+    if (span.from.row === span.to.row && span.from.col === span.to.col) return undefined;
+    const rows = this.displayRows(this.lastWidth);
+    const parts: string[] = [];
+    for (let row = span.from.row; row <= span.to.row; row++) {
+      const c1 = row === span.from.row ? span.from.col : 0;
+      const c2 = row === span.to.row ? span.to.col + 1 : Number.POSITIVE_INFINITY;
+      parts.push(stripAnsi(sliceByWidth(rows[row] ?? "", c1, c2)).trimEnd());
+    }
+    const text = parts.join("\n");
+    return text.trim() === "" ? undefined : text;
+  }
+
+  /** Drops the selection without producing text. */
+  clearSelection(): void {
+    this.selection = undefined;
+  }
+
+  /** The selection with `from` before `to` in reading order, or `undefined`. */
+  private orderedSelection():
+    | { from: { row: number; col: number }; to: { row: number; col: number } }
+    | undefined {
+    if (this.selection === undefined) return undefined;
+    const { anchor, head } = this.selection;
+    const forward = anchor.row < head.row || (anchor.row === head.row && anchor.col <= head.col);
+    return forward ? { from: anchor, to: head } : { from: head, to: anchor };
+  }
+
+  /** Maps an area cell to the nearest absolute content cell. */
+  private contentCell(localRow: number, column: number): { row: number; col: number } | undefined {
+    const rows = this.displayRows(this.lastWidth);
+    const total = rows.length;
+    if (total === 0) return undefined;
+    const height = this.lastHeight;
+    const end = total - this.offset;
+    const start = Math.max(0, end - height);
+    const visibleCount = Math.min(height, end - start);
+    const slack = height - visibleCount;
+    const padTop = slack > 0 && this.options.centered?.() ? Math.floor(slack / 2) : slack;
+    const row = Math.max(0, Math.min(total - 1, start + (localRow - padTop)));
+    return { row, col: Math.max(0, column) };
   }
 
   /** Scrolls by `delta` display rows (positive = up, away from the tail). */
@@ -189,4 +306,19 @@ export class Viewport implements Component {
     }
     return rows;
   }
+}
+
+/**
+ * Repaints columns `[c1, c2)` of a styled row in reverse video.
+ *
+ * The middle is stripped of its own styling first: selection colour must win
+ * over content colour (that is what makes it read as a selection), and a
+ * mid-row SGR reset would otherwise switch the highlight off part-way.
+ */
+function highlightSpan(row: string, c1: number, c2: number): string {
+  const before = sliceByWidth(row, 0, c1);
+  const middle = stripAnsi(sliceByWidth(row, c1, c2));
+  const after = Number.isFinite(c2) ? sliceByWidth(row, c2) : "";
+  if (middle === "") return row;
+  return `${before}\u001b[7m${middle}\u001b[27m${after}`;
 }

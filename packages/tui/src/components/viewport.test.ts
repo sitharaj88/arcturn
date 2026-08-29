@@ -173,6 +173,55 @@ describe("Viewport", () => {
     expect(viewport.isFollowing).toBe(true);
   });
 
+  it("selects across rows: live highlight, plain text on release", () => {
+    const lines = ["\u001b[31malpha beta\u001b[0m", "gamma delta", "epsilon"];
+    const viewport = makeViewport(lines);
+    viewport.renderArea(60, 3);
+
+    // Anchor at row 0 col 6 ("beta"), drag to row 1 col 4 (end of "gamma").
+    expect(viewport.beginSelectionAt(0, 6)).toBe(true);
+    viewport.dragSelectionTo(1, 4);
+
+    const frame = viewport.renderArea(60, 3);
+    expect(frame[0]).toContain("\u001b[7m");
+    expect(frame[1]).toContain("\u001b[7m");
+    expect(frame[2]).not.toContain("\u001b[7m");
+
+    const text = viewport.endSelection();
+    expect(text).toBe("beta\ngamma");
+    // The gesture is over: nothing highlighted, nothing held.
+    expect(viewport.hasSelection).toBe(false);
+    expect(viewport.renderArea(60, 3)[0]).not.toContain("\u001b[7m");
+  });
+
+  it("selects backwards the same as forwards", () => {
+    const viewport = makeViewport(["one", "two", "three"]);
+    viewport.renderArea(60, 3);
+    viewport.beginSelectionAt(2, 2);
+    viewport.dragSelectionTo(0, 0);
+    expect(viewport.endSelection()).toBe("one\ntwo\nthr");
+  });
+
+  it("a click — no movement — ends with nothing", () => {
+    const viewport = makeViewport(["one", "two"]);
+    viewport.renderArea(60, 2);
+    viewport.beginSelectionAt(0, 1);
+    expect(viewport.endSelection()).toBeUndefined();
+  });
+
+  it("auto-scrolls while the drag rides the top edge, growing past a screenful", () => {
+    const lines = Array.from({ length: 10 }, (_, i) => `line-${i}`);
+    const viewport = makeViewport(lines);
+    viewport.renderArea(60, 4); // shows line-6..line-9
+
+    viewport.beginSelectionAt(3, 5); // "line-9", col 5
+    for (let i = 0; i < 6; i++) viewport.dragSelectionTo(0, 0); // ride the top edge
+    const text = viewport.endSelection();
+    // Six edge ticks scrolled six rows: the head reached line-0, so the span
+    // covers the whole buffer ("line-9" is six columns, so col 5+1 keeps it whole).
+    expect(text).toBe(lines.join("\n"));
+  });
+
   it("declines keys it does not handle", () => {
     const viewport = makeViewport(["a"]);
     expect(viewport.handleInput(createKey("a"))).toBe(false);

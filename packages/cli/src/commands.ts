@@ -297,12 +297,11 @@ export function createBuiltInCommands(): SlashCommand[] {
           ...all.map((command) => `  /${command.name.padEnd(width)}  ${command.description}`),
           "",
           "Enter submits · Shift+Enter newline · Esc aborts · Ctrl+C twice or Ctrl+D exits",
-          // The TUI holds the mouse for wheel scrolling, but a drag or
-          // double-click hands it back so the terminal's own selection works
-          // — the most-asked "why can't I copy?" there is. The first drag is
-          // the handover; the second selects. Shift-drag still bypasses the
-          // grab entirely for anyone who knows their emulator's chord.
-          "Copy text: /copy puts the last answer on the clipboard · drag once to unlock selection, then drag again (one screen at a time) · /export saves the whole conversation",
+          // Selection is app-owned in the full-screen app: the drag is the
+          // selection and the release is the copy, straight to the system
+          // clipboard. Shift-drag still reaches the terminal's own selection
+          // for anyone who prefers it.
+          "Copy text: drag over the transcript — it lands on the clipboard when you release · /copy grabs the whole last answer · /export saves the conversation",
         ]);
       },
     },
@@ -561,7 +560,7 @@ export function createBuiltInCommands(): SlashCommand[] {
     {
       name: "ui",
       description:
-        "Switch the renderer: inline (terminal-native, default) or screen (full-screen app)",
+        "Switch the renderer: screen (full-screen app, default) or inline (terminal-native)",
       source: "built-in",
       async run({ ui, runtime, args }) {
         const current = runtime.config.ui;

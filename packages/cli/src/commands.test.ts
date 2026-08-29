@@ -189,17 +189,17 @@ describe("built-in commands", () => {
   it("/ui persists the renderer choice and is honest that it lands next launch", async () => {
     const scratch = await makeScratch();
     const runtime = await buildTestRuntime(scratch);
-    expect(runtime.config.ui).toBe("inline"); // the terminal-native default
+    expect(runtime.config.ui).toBe("screen"); // the full-screen app is the default
 
-    const { ui } = await run(runtime, "/ui screen");
-    expect(runtime.config.ui).toBe("screen");
+    const { ui } = await run(runtime, "/ui inline");
+    expect(runtime.config.ui).toBe("inline");
     expect(ui.notices[0]?.text).toContain("Takes effect next launch");
     const written = JSON.parse(await readFile(runtime.paths.userConfig, "utf8")) as {
       ui?: string;
     };
-    expect(written.ui).toBe("screen");
+    expect(written.ui).toBe("inline");
 
-    const again = await run(runtime, "/ui screen");
+    const again = await run(runtime, "/ui inline");
     expect(again.ui.notices[0]?.text).toContain("Already using");
     const bad = await run(runtime, "/ui sideways");
     expect(bad.ui.notices[0]?.level).toBe("error");

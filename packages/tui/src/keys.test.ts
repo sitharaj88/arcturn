@@ -175,8 +175,10 @@ describe("SGR mouse reports", () => {
     expect(decode(`${ESC}[<2;40;12M${ESC}[<2;40;12m`)).toEqual([]);
   });
 
-  it("swallows drag motion and wheel release variants", () => {
-    expect(decode(`${ESC}[<32;12;6M`)).toEqual([]);
+  it("surfaces a left-button drag with its cell, and swallows other motion", () => {
+    const drag = decode(`${ESC}[<32;12;6M`);
+    expect(names(drag)).toEqual(["mousedrag"]);
+    expect(drag[0]!.mouse).toEqual({ x: 12, y: 6 });
     expect(decode(`${ESC}[<35;12;6M`)).toEqual([]);
     expect(decode(`${ESC}[<64;12;6m`)).toEqual([]);
   });

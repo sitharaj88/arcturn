@@ -63,6 +63,7 @@ interface Harness {
   terminal: TestTerminal;
   runtime: ArcturnRuntime;
   exit: Promise<number>;
+  copies: string[];
   text: () => string;
 }
 
@@ -77,7 +78,16 @@ async function harness(
   await writeFileAt(join(scratch.cwd, ".arcturn", "config.json"), JSON.stringify({ ui }));
   const runtime = await buildTestRuntime(scratch, turns, overrides);
   const terminal = new TestTerminal({ columns: 80, rows: 24 });
-  const app = new InteractiveApp({ runtime, terminal, streamThrottleMs: 5 });
+  const copies: string[] = [];
+  const app = new InteractiveApp({
+    runtime,
+    terminal,
+    streamThrottleMs: 5,
+    copyToClipboard: async (text) => {
+      copies.push(text);
+      return { ok: true, via: "test" };
+    },
+  });
   const exit = app.run();
   await tick();
   cleanups.push(async () => {
@@ -88,7 +98,7 @@ async function harness(
     terminal.injectInput(CTRL_C);
     await exit;
   });
-  return { app, terminal, runtime, exit, text: () => stripAnsi(terminal.output) };
+  return { app, terminal, runtime, exit, copies, text: () => stripAnsi(terminal.output) };
 }
 
 describe("InteractiveApp", () => {
@@ -453,63 +463,39 @@ describe("InteractiveApp in screen mode", () => {
     return harness(turns, {}, "screen");
   }
 
-  it("hands the mouse back on a drag, and re-takes it on the next keystroke", async () => {
-    // The grab exists for wheel scrolling; a drag is the gesture that wanted
-    // the terminal's own selection instead. First drag = handover (with a
-    // one-time hint), next drag selects natively, any keystroke re-grabs.
-    const h = await screenHarness();
-    expect(h.terminal.isMouseEnabled).toBe(true);
+  it("drag-selects in the app and copies on release, keeping the mouse the whole time", async () => {
+    // The modern gesture: the drag is the selection, the release is the
+    // copy. No handover, no second drag, and the wheel never stops working.
+    const h = await screenHarness([{ text: "the amber answer" }]);
+    h.terminal.injectInput("ask\r");
+    await waitFor(() => h.text().includes("the amber answer"));
 
-    h.terminal.injectInput("\u001b[<0;10;5M\u001b[<0;30;5m");
+    // Press near the top of the viewport, drag to the bottom, release.
+    h.terminal.injectInput("\u001b[<0;1;1M");
+    h.terminal.injectInput("\u001b[<32;40;9M\u001b[<32;80;20M");
+    h.terminal.injectInput("\u001b[<0;80;20m");
     await tick();
-    expect(h.terminal.isMouseEnabled).toBe(false);
-    expect(h.text()).toContain("Mouse handed back to the terminal");
 
-    h.terminal.injectInput("a");
-    await tick();
+    expect(h.copies).toHaveLength(1);
+    expect(h.copies[0]).toContain("the amber answer");
     expect(h.terminal.isMouseEnabled).toBe(true);
-    // The keystroke that ended the handover already landed in the composer.
-    expect(h.app.editor.text).toBe("a");
+    expect(h.text()).toContain("Copied");
   });
 
-  it("keeps the handover through scrolling - pages, and the arrows the wheel becomes", async () => {
-    // The alternate screen has no scrollback for the terminal to select
-    // from: scrolling the viewport is the only way to put older content
-    // under the mouse. During the handover the wheel reaches the app as
-    // arrow keys (alternate scroll, mode 1007), so arrows must scroll the
-    // transcript and keep the handover alive - never spin prompt history.
+  it("a plain click selects nothing and copies nothing", async () => {
     const h = await screenHarness();
-    expect(h.terminal.output).toContain("\u001b[?1007h");
-    h.terminal.injectInput("\u001b[<0;10;5M\u001b[<0;30;5m");
-    await tick();
-    expect(h.terminal.isMouseEnabled).toBe(false);
-
-    for (const sequence of ["\u001b[5~", "\u001b[6~", "\u001b[A", "\u001b[B"]) {
-      h.terminal.injectInput(sequence);
-      await tick();
-      expect(h.terminal.isMouseEnabled).toBe(false);
-    }
-    // The wheel's arrows scrolled the transcript, not the composer's history.
-    expect(h.app.editor.text).toBe("");
-
-    h.terminal.injectInput("a");
-    await tick();
-    expect(h.terminal.isMouseEnabled).toBe(true);
-    expect(h.app.editor.text).toBe("a");
-  });
-
-  it("keeps the mouse on a plain click, and releases it on a double-click", async () => {
-    const h = await screenHarness();
-
-    // One click, same cell down and up: focus, not selection.
     h.terminal.injectInput("\u001b[<0;10;5M\u001b[<0;10;5m");
     await tick();
+    expect(h.copies).toHaveLength(0);
     expect(h.terminal.isMouseEnabled).toBe(true);
+  });
 
-    // The second press of a double-click: the word-select gesture.
-    h.terminal.injectInput("\u001b[<0;10;5M");
+  it("ignores a press that lands on the composer, not the transcript", async () => {
+    const h = await screenHarness();
+    // Row 24 is the status bar region, far below the viewport.
+    h.terminal.injectInput("\u001b[<0;10;24M\u001b[<32;40;24M\u001b[<0;40;24m");
     await tick();
-    expect(h.terminal.isMouseEnabled).toBe(false);
+    expect(h.copies).toHaveLength(0);
   });
 
   it("enters the alternate screen and shows the banner in the viewport", async () => {

@@ -147,10 +147,15 @@ export interface ProcessTerminalOptions {
 const ENTER_ALT_SCREEN = "\u001b[?1049h\u001b[?1007h";
 /** Leave the alternate screen buffer, restoring the shell's screen. */
 const EXIT_ALT_SCREEN = "\u001b[?1007l\u001b[?1049l";
-/** Button-event mouse reporting (1000) in SGR encoding (1006). */
-const ENABLE_MOUSE = "\u001b[?1000h\u001b[?1006h";
+/**
+ * Cell-motion mouse reporting (1002) in SGR encoding (1006): presses,
+ * releases, wheel motion, and — the reason it is 1002 rather than 1000 —
+ * motion while a button is held, which is the drag an app-owned text
+ * selection follows.
+ */
+const ENABLE_MOUSE = "\u001b[?1002h\u001b[?1006h";
 /** Mouse reporting off. */
-const DISABLE_MOUSE = "\u001b[?1006l\u001b[?1000l";
+const DISABLE_MOUSE = "\u001b[?1006l\u001b[?1002l";
 
 const DEFAULT_SIZE: TerminalSize = { columns: 80, rows: 24 };
 // SIGQUIT (Ctrl-\) is POSIX-only but harmless to register on Windows: Node simply

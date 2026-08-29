@@ -44,6 +44,7 @@ import {
 } from "@arcturn/tui";
 import type { AgentEvent, PermissionDecision, PermissionRequest, TodoItem } from "@arcturn/types";
 import { bannerLines } from "../banner.js";
+import { type CopyResult, copyToClipboard } from "../clipboard.js";
 import {
   type CommandRegistry,
   type CommandUi,
@@ -135,6 +136,8 @@ export interface InteractiveAppOptions {
    * `undefined` disables terminal-background syncing entirely.
    */
   queryTerminalBackground?: () => Promise<string | undefined>;
+  /** Overrides the clipboard pipe (tests). Defaults to the real one. */
+  copyToClipboard?: (text: string) => Promise<CopyResult>;
 }
 
 const SPINNER_INTERVAL_MS = 90;
@@ -199,20 +202,19 @@ export class InteractiveApp {
   #todos: readonly TodoItem[] = [];
   #lastInterrupt = 0;
   /**
-   * Text selection, without asking the user to learn anything.
+   * Text selection, owned by the app — one gesture, no modes.
    *
-   * Screen mode holds the mouse for wheel scrolling, and a held mouse is a
-   * terminal that cannot select text. The press/release cells the grab
-   * reports are enough to notice the gesture that wanted selection — a drag,
-   * or a double-click — so the first such gesture hands the mouse back to the
-   * terminal (with a one-time hint), the next one selects natively, and the
-   * next keystroke re-takes the wheel. Copying itself never re-grabs: Cmd+C
-   * lives in the terminal and this app never sees it.
+   * Screen mode holds the mouse (cell-motion tracking), so the drag arrives
+   * as mousedown/mousedrag/mouseup with cells. The viewport turns those into
+   * a live reverse-video span over its own display rows — absolute
+   * coordinates, so riding the top edge auto-scrolls and the selection grows
+   * across screenfuls — and on release the selected text goes straight to
+   * the system clipboard. Shift-drag still bypasses the grab entirely for
+   * anyone who wants the terminal's own selection.
    */
-  #mouseDownCell: { x: number; y: number } | undefined;
-  #lastClick: { x: number; y: number; at: number } | undefined;
-  #mouseReleasedForSelection = false;
-  #selectionHintShown = false;
+  #selecting = false;
+  #copyHintShown = false;
+  readonly #copyToClipboard: (text: string) => Promise<CopyResult>;
   #exitRequested = false;
   /**
    * The terminal's own default background as it was at startup (raw OSC 11
@@ -239,6 +241,7 @@ export class InteractiveApp {
     this.#streamThrottleMs = options.streamThrottleMs ?? 60;
     this.#interruptWindowMs = options.interruptWindowMs ?? 1500;
     this.#initialPrompt = options.initialPrompt;
+    this.#copyToClipboard = options.copyToClipboard ?? copyToClipboard;
     this.#queryTerminalBg =
       options.queryTerminalBackground ?? (() => queryTerminalBackground({ timeoutMs: 150 }));
 
@@ -311,7 +314,6 @@ export class InteractiveApp {
     this.#tui.setComponents(this.#liveComponents());
     this.#tui.focus(this.#inputBox);
     this.#tui.onKey((key) => this.#onGlobalKey(key));
-    this.#tui.onKeyEvent((key) => this.#onAnyKey(key));
   }
 
   /** The command registry, exposed for tests and extensions. */
@@ -1069,8 +1071,8 @@ export class InteractiveApp {
       return true;
     }
     if (this.#mode === "screen") {
-      if (key.name === "mousedown" || key.name === "mouseup") {
-        this.#onMouseButton(key);
+      if (key.name === "mousedown" || key.name === "mousedrag" || key.name === "mouseup") {
+        this.#onMouseSelection(key);
         return true;
       }
       if (
@@ -1085,69 +1087,45 @@ export class InteractiveApp {
     return false;
   }
 
-  /**
-   * Runs on every key, even ones a component consumes: a real keystroke
-   * means the selection moment has passed, so the wheel is re-taken and the
-   * composer gets its focus back — this runs before the key is dispatched,
-   * so the very keystroke that ends the handover already lands in the
-   * editor. Scrolling is not that signal: mouse leftovers (a release
-   * straggling in after the grab dropped), wheel keys, PgUp/PgDn, and plain
-   * arrows — which is what the wheel *is* during the handover, via the
-   * terminal's alternate scroll — all keep it alive, because the alternate
-   * screen has no scrollback of its own and paging the viewport is the only
-   * way to bring older content under the mouse.
-   */
-  #onAnyKey(key: Key): void {
-    if (!this.#mouseReleasedForSelection || this.#mode !== "screen") return;
-    if (key.name === "mousedown" || key.name === "mouseup") return;
-    if (key.name === "wheelup" || key.name === "wheeldown") return;
-    if (key.name === "pageup" || key.name === "pagedown") return;
-    if (key.name === "up" || key.name === "down") return;
-    this.#mouseReleasedForSelection = false;
-    this.#terminal.enableMouse?.();
-    this.#tui.focus(this.#inputBox);
-  }
-
-  /** See {@link #mouseReleasedForSelection}: spot the gesture that wanted to select. */
-  #onMouseButton(key: Key): void {
+  /** See {@link #selecting}: the drag is the selection, the release is the copy. */
+  #onMouseSelection(key: Key): void {
     const cell = key.mouse;
     if (cell === undefined) return;
+    const localRow = cell.y - 1;
+    const column = cell.x - 1;
     if (key.name === "mousedown") {
-      this.#mouseDownCell = cell;
-      const previous = this.#lastClick;
-      this.#lastClick = { ...cell, at: Date.now() };
-      const doubleClick =
-        previous !== undefined &&
-        previous.x === cell.x &&
-        previous.y === cell.y &&
-        Date.now() - previous.at < 400;
-      if (doubleClick) this.#releaseMouseForSelection();
+      // Only the transcript is selectable; the viewport is the first
+      // component, so its area is the top `renderedHeight` screen rows.
+      this.#viewport.clearSelection();
+      this.#selecting =
+        localRow < this.#viewport.renderedHeight &&
+        this.#viewport.beginSelectionAt(localRow, column);
       return;
     }
-    const down = this.#mouseDownCell;
-    this.#mouseDownCell = undefined;
-    if (down !== undefined && (down.x !== cell.x || down.y !== cell.y)) {
-      this.#releaseMouseForSelection();
+    if (key.name === "mousedrag") {
+      if (this.#selecting) this.#viewport.dragSelectionTo(localRow, column);
+      return;
     }
+    if (!this.#selecting) return;
+    this.#selecting = false;
+    const text = this.#viewport.endSelection();
+    if (text !== undefined) void this.#copySelection(text);
   }
 
-  #releaseMouseForSelection(): void {
-    if (this.#mouseReleasedForSelection) return;
-    this.#mouseReleasedForSelection = true;
-    this.#terminal.disableMouse?.();
-    // With the mouse released, the terminal's alternate scroll turns wheel
-    // motion into arrow keys. Focusing the viewport is what makes them
-    // scroll: the transcript, not the composer, owns the arrows while the
-    // user is reading back — and it is why a wheel never spins the prompt
-    // history mid-selection.
-    this.#tui.focus(this.#viewport);
-    if (this.#selectionHintShown) return;
-    this.#selectionHintShown = true;
-    this.#writeThemed(() => [
-      style("muted")(
-        "Mouse handed back to the terminal — select and copy freely, scrolling still works (one screen at a time). /copy grabs the whole last answer; typing returns to the composer.",
-      ),
-    ]);
+  async #copySelection(text: string): Promise<void> {
+    const result = await this.#copyToClipboard(text);
+    if (result.ok) {
+      const chars = [...text].length;
+      const hint = this.#copyHintShown
+        ? ""
+        : " — drag selects and copies; Shift-drag uses the terminal's own selection";
+      this.#copyHintShown = true;
+      this.#writeThemed(() => [
+        style("muted")(`${this.#glyphs.unicode ? "✓" : "+"} Copied ${chars} chars${hint}`),
+      ]);
+      return;
+    }
+    this.#writeThemed(() => [style("warning")(`${result.why} /copy and /export still work.`)]);
   }
 
   #onEscape(): void {
