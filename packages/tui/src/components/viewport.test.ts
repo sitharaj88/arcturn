@@ -155,10 +155,28 @@ describe("Viewport", () => {
     expect(viewport.renderArea(60, 3)).toEqual(["l6", "l7", "l8"]);
   });
 
+  it("scrolls one line per arrow, for the wheel that arrives as arrows", () => {
+    // The selection handover focuses the viewport while alternate scroll
+    // (mode 1007) delivers wheel motion as plain arrow keys.
+    const lines = Array.from({ length: 10 }, (_, i) => `l${i}`);
+    const viewport = makeViewport(lines);
+    viewport.renderArea(60, 4); // max offset 6
+
+    expect(viewport.handleInput(createKey("up"))).toBe(true);
+    expect(viewport.renderArea(60, 4)[0]).toBe("… 1 line below · End/G to follow");
+    viewport.handleInput(createKey("up"));
+    expect(viewport.renderArea(60, 4)[0]).toBe("… 2 lines below · End/G to follow");
+
+    expect(viewport.handleInput(createKey("down"))).toBe(true);
+    expect(viewport.renderArea(60, 4)[0]).toBe("… 1 line below · End/G to follow");
+    viewport.handleInput(createKey("down")); // back to following
+    expect(viewport.isFollowing).toBe(true);
+  });
+
   it("declines keys it does not handle", () => {
     const viewport = makeViewport(["a"]);
     expect(viewport.handleInput(createKey("a"))).toBe(false);
-    expect(viewport.handleInput(createKey("up"))).toBe(false);
+    expect(viewport.handleInput(createKey("left"))).toBe(false);
     expect(viewport.handleInput(createKey("enter"))).toBe(false);
     expect(viewport.handleInput(createKey("pageup", { ctrl: true }))).toBe(false);
   });

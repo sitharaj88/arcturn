@@ -136,10 +136,17 @@ export interface ProcessTerminalOptions {
   readonly fallbackSize?: TerminalSize;
 }
 
-/** Enter the alternate screen buffer (xterm 1049: saves cursor + screen). */
-const ENTER_ALT_SCREEN = "\u001b[?1049h";
+/**
+ * Enter the alternate screen buffer (xterm 1049: saves cursor + screen), with
+ * alternate scroll (1007) alongside it: while the app is *not* holding the
+ * mouse, the terminal turns wheel motion into arrow keys instead of dropping
+ * it. That is what keeps the wheel alive through the selection handover --
+ * mouse reporting takes precedence whenever it is on, so 1007 costs nothing
+ * the rest of the time, and terminals that do not know it ignore it.
+ */
+const ENTER_ALT_SCREEN = "\u001b[?1049h\u001b[?1007h";
 /** Leave the alternate screen buffer, restoring the shell's screen. */
-const EXIT_ALT_SCREEN = "\u001b[?1049l";
+const EXIT_ALT_SCREEN = "\u001b[?1007l\u001b[?1049l";
 /** Button-event mouse reporting (1000) in SGR encoding (1006). */
 const ENABLE_MOUSE = "\u001b[?1000h\u001b[?1006h";
 /** Mouse reporting off. */

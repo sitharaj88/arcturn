@@ -1086,21 +1086,26 @@ export class InteractiveApp {
   }
 
   /**
-   * Runs on every key, even ones the editor consumes: a real keystroke means
-   * the selection moment has passed, so the wheel is re-taken. Three kinds of
-   * key are not that signal: mouse leftovers (a release straggling in after
-   * the grab dropped), wheel keys, and PgUp/PgDn — the alternate screen has
-   * no scrollback for the terminal to select from, so paging the viewport is
-   * how older content is brought under the mouse, and it has to survive the
-   * handover or only the bottom screenful would ever be selectable.
+   * Runs on every key, even ones a component consumes: a real keystroke
+   * means the selection moment has passed, so the wheel is re-taken and the
+   * composer gets its focus back — this runs before the key is dispatched,
+   * so the very keystroke that ends the handover already lands in the
+   * editor. Scrolling is not that signal: mouse leftovers (a release
+   * straggling in after the grab dropped), wheel keys, PgUp/PgDn, and plain
+   * arrows — which is what the wheel *is* during the handover, via the
+   * terminal's alternate scroll — all keep it alive, because the alternate
+   * screen has no scrollback of its own and paging the viewport is the only
+   * way to bring older content under the mouse.
    */
   #onAnyKey(key: Key): void {
     if (!this.#mouseReleasedForSelection || this.#mode !== "screen") return;
     if (key.name === "mousedown" || key.name === "mouseup") return;
     if (key.name === "wheelup" || key.name === "wheeldown") return;
     if (key.name === "pageup" || key.name === "pagedown") return;
+    if (key.name === "up" || key.name === "down") return;
     this.#mouseReleasedForSelection = false;
     this.#terminal.enableMouse?.();
+    this.#tui.focus(this.#inputBox);
   }
 
   /** See {@link #mouseReleasedForSelection}: spot the gesture that wanted to select. */
@@ -1130,11 +1135,17 @@ export class InteractiveApp {
     if (this.#mouseReleasedForSelection) return;
     this.#mouseReleasedForSelection = true;
     this.#terminal.disableMouse?.();
+    // With the mouse released, the terminal's alternate scroll turns wheel
+    // motion into arrow keys. Focusing the viewport is what makes them
+    // scroll: the transcript, not the composer, owns the arrows while the
+    // user is reading back — and it is why a wheel never spins the prompt
+    // history mid-selection.
+    this.#tui.focus(this.#viewport);
     if (this.#selectionHintShown) return;
     this.#selectionHintShown = true;
     this.#writeThemed(() => [
       style("muted")(
-        "Mouse handed back to the terminal — select and copy now (one screen at a time; PgUp/PgDn reaches older text). /copy grabs the whole last answer; typing resumes wheel scrolling.",
+        "Mouse handed back to the terminal — select and copy freely, scrolling still works (one screen at a time). /copy grabs the whole last answer; typing returns to the composer.",
       ),
     ]);
   }

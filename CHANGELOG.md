@@ -29,9 +29,13 @@ CLI, the SDK, or the wire protocol.
   press/release reports are enough to notice the gesture that wanted
   selection: the first drag (or double-click) hands the mouse back to the
   terminal with a one-line hint, the next one selects natively, and the next
-  keystroke re-takes the wheel. The alternate screen has no scrollback, so
-  the handover survives `PgUp`/`PgDn` — page to any older screenful and
-  select it, or `/export` the whole conversation. Copying never re-arms the
+  keystroke returns to the composer and re-takes the wheel. **Scrolling keeps
+  working the whole time**: the app requests alternate scroll (mode 1007)
+  with the alternate screen, so during the handover the wheel arrives as
+  arrow keys — and the transcript viewport, which holds focus while the
+  mouse is released, scrolls one line per arrow instead of letting them spin
+  prompt history. `PgUp`/`PgDn` page as well; select any older screenful, or
+  `/copy` and `/export` for more than a screenful. Copying never re-arms the
   grab — `Cmd+C` belongs to the terminal and the app never sees it.
   Shift-drag still bypasses everything, and `/help` now describes the
   handover instead of a per-emulator chord table.

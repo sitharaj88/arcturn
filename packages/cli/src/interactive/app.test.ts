@@ -468,28 +468,34 @@ describe("InteractiveApp in screen mode", () => {
     h.terminal.injectInput("a");
     await tick();
     expect(h.terminal.isMouseEnabled).toBe(true);
+    // The keystroke that ended the handover already landed in the composer.
+    expect(h.app.editor.text).toBe("a");
   });
 
-  it("keeps the handover through PgUp/PgDn, so older screens can be selected", async () => {
-    // The alternate screen has no scrollback for the terminal to select from:
-    // paging the viewport is the only way to put older content under the
-    // mouse. If paging re-took the wheel, only the bottom screenful would
-    // ever be selectable — the exact complaint this exists to fix.
+  it("keeps the handover through scrolling - pages, and the arrows the wheel becomes", async () => {
+    // The alternate screen has no scrollback for the terminal to select
+    // from: scrolling the viewport is the only way to put older content
+    // under the mouse. During the handover the wheel reaches the app as
+    // arrow keys (alternate scroll, mode 1007), so arrows must scroll the
+    // transcript and keep the handover alive - never spin prompt history.
     const h = await screenHarness();
+    expect(h.terminal.output).toContain("\u001b[?1007h");
     h.terminal.injectInput("\u001b[<0;10;5M\u001b[<0;30;5m");
     await tick();
     expect(h.terminal.isMouseEnabled).toBe(false);
 
-    h.terminal.injectInput("\u001b[5~"); // PgUp
-    await tick();
-    expect(h.terminal.isMouseEnabled).toBe(false);
-    h.terminal.injectInput("\u001b[6~"); // PgDn
-    await tick();
-    expect(h.terminal.isMouseEnabled).toBe(false);
+    for (const sequence of ["\u001b[5~", "\u001b[6~", "\u001b[A", "\u001b[B"]) {
+      h.terminal.injectInput(sequence);
+      await tick();
+      expect(h.terminal.isMouseEnabled).toBe(false);
+    }
+    // The wheel's arrows scrolled the transcript, not the composer's history.
+    expect(h.app.editor.text).toBe("");
 
     h.terminal.injectInput("a");
     await tick();
     expect(h.terminal.isMouseEnabled).toBe(true);
+    expect(h.app.editor.text).toBe("a");
   });
 
   it("keeps the mouse on a plain click, and releases it on a double-click", async () => {

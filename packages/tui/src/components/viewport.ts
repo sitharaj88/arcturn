@@ -124,6 +124,17 @@ export class Viewport implements Component {
       this.scrollBy(-this.wheelStep());
       return true;
     }
+    // One line per arrow. Only ever reached while the viewport holds focus —
+    // the selection handover, where alternate scroll (terminal.ts) delivers
+    // wheel motion as arrow keys — so this never competes with an editor.
+    if (matchesKey(key, "up")) {
+      this.scrollBy(1);
+      return true;
+    }
+    if (matchesKey(key, "down")) {
+      this.scrollBy(-1);
+      return true;
+    }
     if (matchesKey(key, "pageup")) {
       this.scrollBy(page);
       return true;
