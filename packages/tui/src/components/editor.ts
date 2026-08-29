@@ -820,6 +820,29 @@ export class Editor implements Component {
     const contentWidth = Math.max(1, width - promptWidth);
 
     const visual = this.buildVisualLines(contentWidth);
+    // The caret occupies the column after the last glyph, so a cursor at the
+    // end of an exactly-full visual row would render one column past the
+    // width — which the frame renderer then truncates into an ellipsis, and
+    // typing appears to stop at the edge instead of wrapping. Give that
+    // caret a home: an empty continuation row right after the full one.
+    const cursorText = this.lines[this.cursorLine] ?? "";
+    if (this.cursorCol === cursorText.length) {
+      for (let i = visual.length - 1; i >= 0; i--) {
+        const vl = visual[i]!;
+        if (vl.logical !== this.cursorLine) continue;
+        if (
+          vl.end === cursorText.length &&
+          stringWidth(cursorText.slice(vl.start, vl.end)) >= contentWidth
+        ) {
+          visual.splice(i + 1, 0, {
+            logical: this.cursorLine,
+            start: cursorText.length,
+            end: cursorText.length,
+          });
+        }
+        break;
+      }
+    }
     const cursorVisual = this.findVisualIndex(visual);
     const maxVisible = Math.max(1, this.options.maxVisibleLines ?? 10);
     this.scrollOffset = clampScroll(this.scrollOffset, cursorVisual, visual.length, maxVisible);
@@ -888,14 +911,19 @@ export class Editor implements Component {
   }
 
   private findVisualIndex(visual: VisualLine[]): number {
+    // The last matching row wins: a cursor sitting on the boundary two rows
+    // share (the end of one is the start of the next) belongs to the later
+    // row, so typing past the fold lands the caret at the start of the next
+    // visual line rather than one column past the end of the full one.
     let fallback = 0;
+    let match = -1;
     for (let i = 0; i < visual.length; i++) {
       const vl = visual[i]!;
       if (vl.logical !== this.cursorLine) continue;
       fallback = i;
-      if (this.cursorCol >= vl.start && this.cursorCol <= vl.end) return i;
+      if (this.cursorCol >= vl.start && this.cursorCol <= vl.end) match = i;
     }
-    return fallback;
+    return match === -1 ? fallback : match;
   }
 
   private previousGrapheme(text: string, offset: number): number {

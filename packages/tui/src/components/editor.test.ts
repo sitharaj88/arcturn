@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { ColorLevel, setColorLevel, stripAnsi } from "../ansi.js";
 import { createKey, type Key, KeyDecoder } from "../keys.js";
+import { stringWidth } from "../width.js";
 import {
   type AutocompleteProvider,
   type AutocompleteSuggestion,
@@ -30,6 +31,27 @@ function pasteKey(content: string): Key {
 }
 
 describe("typing", () => {
+  it("wraps the caret to a fresh row at the edge — never one column past it", () => {
+    // The caret occupies the column after the last glyph. On an exactly-full
+    // row that column is past the width, and an over-wide row is what the
+    // frame renderer truncates into an ellipsis — the "typing stops at the
+    // edge" bug. Every rendered row must stay inside the width, and the
+    // caret must move to a continuation row instead.
+    const editor = new Editor({ prompt: "> " });
+    editor.onFocus();
+    editor.setText("abcdefghijklmnopqr"); // exactly 18 columns; width 20 - prompt 2
+    const rows = editor.render(20);
+    expect(rows.length).toBe(2);
+    for (const row of rows) expect(stringWidth(row)).toBeLessThanOrEqual(20);
+    expect(editor.getCursor()).toMatchObject({ row: 1 });
+
+    // Typing continues on the next visual line.
+    editor.handleInput(createKey("s", { text: "s" }));
+    const after = editor.render(20);
+    expect(stripAnsi(after[1] ?? "")).toContain("s");
+    for (const row of after) expect(stringWidth(row)).toBeLessThanOrEqual(20);
+  });
+
   it("inserts printable characters at the caret", () => {
     const editor = new Editor();
     type(editor, "hello");
