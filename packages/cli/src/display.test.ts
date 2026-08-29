@@ -1,11 +1,17 @@
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { ColorLevel, setColorLevel } from "@arcturn/tui";
 import type { AgentEvent, ToolResultMessage } from "@arcturn/types";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { TranscriptFormatter } from "./display.js";
 import { ASCII_GLYPHS, FANCY_GLYPHS } from "./glyphs.js";
 
-beforeAll(() => {
+beforeEach(() => {
   // Deterministic, colour-free output so assertions can match plain text.
+  // Per test, not once: colour is global process state, so a test that raises
+  // before restoring it would otherwise leak styling into every later
+  // assertion — which is exactly how one platform-specific failure became
+  // three.
   setColorLevel(ColorLevel.None);
 });
 
@@ -32,7 +38,9 @@ describe("hyperlinks", () => {
     // OSC 8 rides the colour gate: a terminal stripped to ColorLevel.None
     // gets no escapes of any kind, links included.
     setColorLevel(ColorLevel.Basic);
-    const formatter = new TranscriptFormatter({ hyperlinks: { cwd: "/repo" } });
+    const cwd = process.platform === "win32" ? "C:\\repo" : "/repo";
+    const expected = pathToFileURL(join(cwd, "src", "cart.ts")).href;
+    const formatter = new TranscriptFormatter({ hyperlinks: { cwd } });
     const line = formatter
       .format({
         type: "toolStart",
@@ -41,9 +49,11 @@ describe("hyperlinks", () => {
         input: { path: "src/cart.ts" },
       })
       .join("\n");
-    expect(line).toContain("\u001b]8;;file:///repo/src/cart.ts\u0007");
+    // The URL is built the way the formatter builds it, so this asserts the
+    // link exists and points at the resolved file — not that any one platform
+    // spells a file URL the way POSIX does.
+    expect(line).toContain(`\u001b]8;;${expected}\u0007`);
     expect(line).toContain("\u001b]8;;\u0007"); // and the link is closed
-    setColorLevel(ColorLevel.None);
   });
 
   it("emits nothing link-shaped by default, so headless output stays byte-stable", () => {
