@@ -10,6 +10,49 @@ CLI, the SDK, or the wire protocol.
 
 ## [Unreleased]
 
+## [0.5.2] — 2026-08-29
+
+Three small fixes from the first real user session, each of a shape the suite
+could not have found on its own: a person following the docs on a fresh
+machine hit all three inside an hour.
+
+### Fixed
+
+- **A fresh repository is refused with its fix, not with git's riddle.** The
+  very first step of the setup playbook — `mkdir`, `git init`,
+  `/workflow app-setup` — died with `invalid reference: HEAD`, because a
+  freshly initialized repository's HEAD points at a branch with no commit and
+  a worktree needs one to branch from. Worktree creation now probes for the
+  unborn HEAD up front and refuses with the next command in the message:
+  `git commit --allow-empty -m "chore: init"`. Workflows, scouts and teams
+  all go through the same gate; a caller that pins a concrete ref skips the
+  probe, having already decided what to branch from.
+
+- **`/help` answers the most-asked question there is.** The TUI holds the
+  mouse for wheel scrolling, which silently disables the terminal's own
+  click-drag selection — so "why can't I copy?" had a ten-second answer that
+  lived nowhere. The keybindings line now names the bypass (Shift-drag in
+  VS Code and most terminals, Option on iTerm2, Fn on Apple Terminal) and
+  points at `/export` for the whole conversation.
+
+- **The status bar's number stops living in the last column.** `ctx 41%` was
+  rendered flush against the terminal's final cell, and two kinds of emulator
+  disagree with the renderer about that cell: those that draw East-Asian-
+  ambiguous glyphs wide (the ✦ brand mark is one, counted as a single cell by
+  the width tracker) shift the whole line a column right, and some mishandle
+  the final column outright. The right group now ends one cell in from the
+  edge — a margin that absorbs both failure modes — while the bar's
+  background still fills the full width.
+
+### Kits
+
+- `/hld-draft` and `/arch-map` (design-docs, fetched from GitHub rather than
+  npm) now end with a **Where it goes** contract: `docs/design/hld-<topic>.md`
+  and `docs/design/arch-map.md`, with chat carrying only the path and the
+  summary line. The design-review workflow reads the record from disk, and a
+  design that lives in terminal scrollback is gone when the session is.
+
+
 ## [0.5.1] — 2026-08-29
 
 A patch with one job: make the hub's kits and the published engine speak the
