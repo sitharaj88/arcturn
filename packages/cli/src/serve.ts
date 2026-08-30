@@ -950,6 +950,18 @@ export interface RunServeOptions {
    * a pipeline that already trusts the repository it checked out.
    */
   trustProviders?: boolean;
+  /**
+   * `--no-project-code`: run nothing this project declares — hooks, `verify`,
+   * extensions, stdio MCP servers. Forwarded to {@link buildRuntime}.
+   */
+  projectCode?: boolean;
+  /**
+   * `--trust-project`: run this project's own code without asking, for a
+   * pipeline that already trusts the checkout. A served runtime never gets a
+   * confirmer — nobody is at a terminal — so without this its project code
+   * stays off and `runServe` reports why.
+   */
+  trustProject?: boolean;
 }
 
 /** What {@link runServe} hands back to its caller (`main.ts`). */
@@ -965,6 +977,18 @@ export interface RunServeResult {
    * page prompt for it.
    */
   webUrl?: string;
+  /**
+   * Startup warnings from the runtime this server wraps.
+   *
+   * `serve` printed none of these at all, which mattered most for the one
+   * thing it is worst placed to notice: a project whose hooks, `verify`,
+   * extensions and MCP servers were refused (nobody is at a terminal here, so
+   * they always are, absent `--trust-project`) would go quiet with no
+   * explanation on the surface that stays up longest. `runServeCommand` prints
+   * them; they are returned rather than written here so the IO stays at the
+   * CLI layer and the decision stays testable.
+   */
+  warnings: readonly string[];
   /** Stop accepting connections, close every socket, and dispose the runtime. */
   stop: () => Promise<void>;
 }
@@ -987,6 +1011,8 @@ export async function runServe(options: RunServeOptions = {}): Promise<RunServeR
     ...(options.model === undefined ? {} : { model: options.model }),
     ...(options.configProviders === undefined ? {} : { configProviders: options.configProviders }),
     ...(options.trustProviders === undefined ? {} : { trustProviders: options.trustProviders }),
+    ...(options.projectCode === undefined ? {} : { projectCode: options.projectCode }),
+    ...(options.trustProject === undefined ? {} : { trustProject: options.trustProject }),
   });
 
   const sessionHost = createServeHost(
@@ -1040,6 +1066,7 @@ export async function runServe(options: RunServeOptions = {}): Promise<RunServeR
     url: formatServeUrl(host, port),
     token,
     ...(web === undefined ? {} : { webUrl: web.url }),
+    warnings: [...runtime.warnings],
     stop: async () => {
       if (stopped) return;
       stopped = true;

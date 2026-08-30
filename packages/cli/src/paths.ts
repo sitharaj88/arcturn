@@ -44,6 +44,18 @@ export interface ArcturnPaths {
   readonly sessionsRoot: string;
   /** `~/.arcturn/live-models.json` — cache for live model discovery. */
   readonly liveModelsCache: string;
+  /**
+   * `~/.arcturn/trust.json` — which projects may run their own code.
+   *
+   * The ONE entry here with no `<cwd>/.arcturn` twin, and deliberately so.
+   * Every other pair below exists because a project may legitimately
+   * contribute to it; consent is the one thing a project may never contribute
+   * to, so there is no project spelling for a repository to write. Not a
+   * config layer either: never merged, never scoped, never tagged. See
+   * `project-trust.ts`, and the structural assertion in
+   * `security-review-5.test.ts` that keeps a future twin from appearing.
+   */
+  readonly trust: string;
   /** `<cwd>/.arcturn`. */
   readonly project: string;
   /** `<cwd>/.arcturn/config.json`. */
@@ -155,6 +167,7 @@ export function resolveArcturnPaths(options: ResolveArcturnPathsOptions = {}): A
     auth: join(home, "auth"),
     sessionsRoot,
     liveModelsCache: join(home, "live-models.json"),
+    trust: join(home, "trust.json"),
     project,
     projectConfig: join(project, "config.json"),
     projectMcp: join(project, "mcp.json"),

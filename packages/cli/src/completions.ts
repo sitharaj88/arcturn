@@ -250,6 +250,16 @@ export const DEFAULT_COMPLETION_SPEC: CompletionSpec = {
       takesValue: false,
       description: "Print every provider and preset endpoint, and exit.",
     },
+    {
+      long: "--trust-project",
+      takesValue: false,
+      description: "Run this project's own hooks, verify, extensions and MCP servers.",
+    },
+    {
+      long: "--no-project-code",
+      takesValue: false,
+      description: "Run none of them, and ask nothing.",
+    },
   ],
   subcommands: [
     {
@@ -273,6 +283,16 @@ export const DEFAULT_COMPLETION_SPEC: CompletionSpec = {
     {
       name: "doctor",
       description: "Probe every configured provider endpoint and print a verdict.",
+    },
+    {
+      name: "trust",
+      description: "Decide whether this directory's own .arcturn code may run.",
+      children: [
+        { name: "--list", description: "Print exactly what this project would run." },
+        { name: "--allow", description: "Approve this project's current contents." },
+        { name: "--deny", description: "Refuse them." },
+        { name: "--revoke", description: "Forget the recorded decision." },
+      ],
     },
     {
       name: "mcp",

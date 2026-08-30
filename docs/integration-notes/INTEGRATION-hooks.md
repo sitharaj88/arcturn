@@ -12,12 +12,12 @@ actually reachable. Nothing outside the two files above was touched.
 
 ```ts
 export type HookEvent = "preToolUse" | "postToolUse" | "sessionStart" | "runEnd";
-export interface HookDefinition { command: string; matcher?: string; timeoutMs?: number }
+export interface HookDefinition { command: string; matcher?: string; timeoutMs?: number; scope?: PermissionScope }
 export interface HookConfig { preToolUse: HookDefinition[]; postToolUse: HookDefinition[]; sessionStart: HookDefinition[]; runEnd: HookDefinition[] }
 export const EMPTY_HOOK_CONFIG: Readonly<HookConfig>;
 export const DEFAULT_HOOK_TIMEOUT_MS = 10_000;
 
-export function parseHookConfig(raw: unknown, where: string, warnings: string[]): HookConfig;
+export function parseHookConfig(raw: unknown, where: string, warnings: string[], scope?: PermissionScope): HookConfig;
 
 export interface HookPayload { toolName?: string; input?: unknown; resultText?: string; isError?: boolean; [key: string]: unknown }
 export interface PreToolUsePayload { toolName: string; input: unknown }

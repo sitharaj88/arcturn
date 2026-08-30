@@ -104,6 +104,21 @@ export interface ServeCommand {
   readonly kind: "serve";
 }
 
+/** What `arcturn trust` was asked to do. */
+export type TrustAction = "status" | "allow" | "deny" | "revoke" | "list";
+
+/** A parsed `trust [--allow|--deny|--revoke|--list]` command. */
+export interface TrustCommand {
+  /** Command family. */
+  readonly kind: "trust";
+  /**
+   * `status` (the default) reports whether this directory's own code may run;
+   * `list` also prints every command and file it would run; `allow`/`deny`
+   * record a decision against the CURRENT contents; `revoke` forgets one.
+   */
+  readonly action: TrustAction;
+}
+
 /**
  * The package-registry and authoring verbs `arcturn` exposes at the top level.
  *
@@ -166,6 +181,7 @@ export type CliCommand =
   | BlameCommand
   | BisectCommand
   | DoctorCommand
+  | TrustCommand
   | McpCliCommand
   | RegistryCliCommand;
 
@@ -242,6 +258,20 @@ export interface CliArgs {
    * grant in the user's config.
    */
   trustProviders: boolean;
+  /**
+   * `--no-project-code` runs nothing THIS PROJECT declares — its hooks,
+   * `verify` command, extensions and stdio MCP servers — and asks nothing.
+   * The `--no-providers` analogue: everything still parses and still lists.
+   * Your own `~/.arcturn` hooks and extensions are unaffected.
+   */
+  projectCode: boolean;
+  /**
+   * `--trust-project` runs everything THIS PROJECT declares without asking —
+   * for CI that already trusts the repository it checked out. Never persisted:
+   * a per-invocation trust decision must not become a standing grant.
+   * `ARCTURN_TRUST_PROJECT=1` is the environment spelling.
+   */
+  trustProject: boolean;
   /** A positional command (`arcturn replay …`), when one was given instead of a prompt. */
   command?: CliCommand;
 }
@@ -263,6 +293,8 @@ export function defaultArgs(): CliArgs {
     listProviders: false,
     configProviders: true,
     trustProviders: false,
+    projectCode: true,
+    trustProject: false,
   };
 }
 
@@ -292,6 +324,9 @@ export const ATTACH_COMMAND_NAME = "attach";
 
 /** First positional that switches into doctor-command parsing. */
 export const DOCTOR_COMMAND_NAME = "doctor";
+
+/** First positional that switches into trust-command parsing. */
+export const TRUST_COMMAND_NAME = "trust";
 
 /** Narrow an arbitrary word to a {@link RegistryVerb}. */
 export function isRegistryVerb(value: string): value is RegistryVerb {
@@ -579,6 +614,61 @@ export function parseArgs(
     return { ok: true, args };
   }
 
+  // `trust` owns its argument list for the same reason the registry verbs do:
+  // its switches (`--allow`, `--deny`, `--revoke`, `--list`) are verbs of this
+  // one command, and putting them in the global flag table would make
+  // `arcturn --allow "fix the build"` parse.
+  if (argv[0] === TRUST_COMMAND_NAME) {
+    const rest = argv.slice(1);
+    if (rest.includes("--help") || rest.includes("-h")) {
+      args.help = true;
+      return { ok: true, args };
+    }
+    let action: TrustAction | undefined;
+    for (let i = 0; i < rest.length; i++) {
+      const token = rest[i];
+      if (token === "--cwd") {
+        const value = rest[i + 1];
+        if (value === undefined) return { ok: false, error: "--cwd requires a value" };
+        args.cwd = value;
+        i++;
+        continue;
+      }
+      if (token?.startsWith("--cwd=")) {
+        args.cwd = token.slice("--cwd=".length);
+        continue;
+      }
+      const named =
+        token === "--allow"
+          ? "allow"
+          : token === "--deny"
+            ? "deny"
+            : token === "--revoke"
+              ? "revoke"
+              : token === "--list"
+                ? "list"
+                : token === "--status"
+                  ? "status"
+                  : undefined;
+      if (named === undefined) {
+        return {
+          ok: false,
+          error:
+            `unknown argument "${token}" for trust. ` +
+            "Usage: arcturn trust [--allow|--deny|--revoke|--list] [--cwd <dir>]. " +
+            'To send this as a prompt instead, quote it: arcturn "trust ..."',
+        };
+      }
+      if (action !== undefined && action !== named) {
+        return { ok: false, error: "trust takes at most one of --allow, --deny, --revoke, --list" };
+      }
+      action = named;
+    }
+    args.command = { kind: "trust", action: action ?? "status" };
+    args.prompt = "";
+    return { ok: true, args };
+  }
+
   const positional: string[] = [];
   // Tracks how many positionals were seen before `--`; only those can form a
   // command, so `arcturn -- replay abc` stays prompt text.
@@ -663,6 +753,15 @@ export function parseArgs(
         break;
       case "--trust-providers":
         args.trustProviders = boolValue;
+        break;
+      case "--project-code":
+        args.projectCode = boolValue;
+        break;
+      case "--no-project-code":
+        args.projectCode = false;
+        break;
+      case "--trust-project":
+        args.trustProject = boolValue;
         break;
       case "--model":
         args.model = value;
@@ -912,6 +1011,10 @@ Commands
   attach <url>                  Drive a session hosted by another arcturn serve.
   doctor [preset]               Probe each configured provider endpoint with its
                                 real key and print a verdict per endpoint.
+  trust [--allow|--deny]        Decide whether THIS directory's own .arcturn code —
+       [--revoke|--list]        hooks, verify, extensions, stdio MCP servers — may
+       [--cwd <dir>]            run. --list prints exactly what that is; with no
+                                switch it reports the current decision.
   mcp list                      Show configured MCP servers and where they're defined.
   mcp get <name>                Print one server's configuration.
   mcp add <name> -- <cmd> [...] Add a stdio MCP server; --scope user|project
@@ -962,6 +1065,12 @@ Options
                                 repository; not saved to your config.
       --no-providers            Register nothing from a config "providers" block.
                                 Entries still parse and still list.
+      --trust-project           Run the hooks, verify command, extensions and stdio
+                                MCP servers THIS PROJECT declares, without asking.
+                                For CI that already trusts the checkout; not saved.
+                                ARCTURN_TRUST_PROJECT=1 is the same switch.
+      --no-project-code         Run none of them, and ask nothing. Your own
+                                ~/.arcturn hooks and extensions are unaffected.
       --list-models             Print the model catalog and exit.
       --list-providers          Print every provider and preset endpoint, and exit.
   -h, --help                    Show this help.

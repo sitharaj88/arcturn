@@ -106,6 +106,11 @@ import { version } from "./meta.js";
 import { createOverlay, type Overlay, wrapToolsWithOverlay } from "./overlay.js";
 import { type ArcturnPaths, cwdHash, type EnvMap, resolveArcturnPaths } from "./paths.js";
 import { createPolicyLearner, type PolicyLearner } from "./policy-learn.js";
+import {
+  type ConfirmProjectTrust,
+  type ProjectTrustResult,
+  resolveProjectTrust,
+} from "./project-trust.js";
 import { createProvenanceStore, type ProvenanceStore, provenanceObserver } from "./provenance.js";
 import {
   type ConfiguredProviderStatus,
@@ -608,6 +613,8 @@ export interface ArcturnRuntimeInit {
   /** Session id for the first agent; minted by `buildRuntime`. */
   sessionId?: string;
   hookRunner: HookRunner;
+  /** Whether this project's own code may run. See {@link ArcturnRuntime.projectTrust}. */
+  projectTrust: ProjectTrustResult;
   lsp: LspManager | undefined;
   verifier: Verifier | undefined;
   overlay: Overlay | undefined;
@@ -695,6 +702,16 @@ export class ArcturnRuntime {
   readonly backgroundTasks: BackgroundTaskManager;
   /** Loaded extensions. */
   readonly extensions: ExtensionHost;
+  /**
+   * Whether this working directory's OWN `.arcturn` code was approved, and
+   * what it declares.
+   *
+   * `buildRuntime` already enforced this for hooks, `verify` and extensions
+   * before it returned. It is carried on the runtime because {@link connectMcp}
+   * runs afterwards and has to make the same decision about stdio servers, and
+   * because `/trust` reports it.
+   */
+  readonly projectTrust: ProjectTrustResult;
   /** Checkpoint store for the current session; replaced on session swaps. */
   checkpoints!: CheckpointStore;
   /** Language-server manager when `lsp: "on"`, else undefined. */
@@ -809,6 +826,7 @@ export class ArcturnRuntime {
     this.#preHookTools = init.preHookTools;
     this.#wrapAgentTools = init.wrapAgentTools ?? ((tools) => tools);
     this.#hookRunner = init.hookRunner;
+    this.projectTrust = init.projectTrust;
     this.lsp = init.lsp;
     this.verifier = init.verifier;
     this.overlay = init.overlay;
@@ -2180,6 +2198,27 @@ export interface BuildRuntimeOptions {
    * none of them, user layer included.
    */
   configProviders?: boolean;
+  /**
+   * Asks the user whether to run everything THIS PROJECT declares — its hooks,
+   * `verify` command, extensions and stdio MCP servers, as one decision.
+   *
+   * Absent means `() => false`: a hard refusal, not a prompt and not an
+   * assumption. Only a host that owns a real terminal may pass one; `--print`,
+   * `serve`, `acp`, `mcp-serve`, background agents and evals deliberately leave
+   * it unset and get "not approved" plus a loud warning. See `project-trust.ts`.
+   */
+  confirmProjectTrust?: ConfirmProjectTrust;
+  /**
+   * `--trust-project` / `ARCTURN_TRUST_PROJECT=1`: run this project's code
+   * without asking, for a pipeline that already trusts the checkout. Not
+   * persisted.
+   */
+  trustProject?: boolean;
+  /**
+   * `--no-project-code`: collect and list this project's declared code, run
+   * none of it, and ask nothing. The `--no-providers` analogue.
+   */
+  projectCode?: boolean;
 }
 
 /**
@@ -2214,6 +2253,48 @@ export async function buildRuntime(options: BuildRuntimeOptions = {}): Promise<A
     warnings.push(...loaded.warnings);
   }
 
+  // THE FIRST SIDE-EFFECTING STEP, deliberately ahead of everything below.
+  //
+  // A cloned repository can put executable code in front of a user who did
+  // nothing but `cd` into it, four ways: a `sessionStart` hook, an extension
+  // file, a `verify` command and a stdio MCP server. They are transitively
+  // equivalent (a hook can write the other three), so one consent decision
+  // covers all four — see `project-trust.ts` for why that is one checkbox and
+  // not three. This sits before `registerConfiguredProviders` and therefore
+  // long before extensions load, hooks are wired, the verifier is built,
+  // `sessionStart` fires, or `connectMcp` spawns anything.
+  //
+  // Deliberately NOT skipped for `replay: true`. A replay neutralises hooks
+  // and verify below, but `extensions: false` is a SEPARATE option its callers
+  // happen to pass, so exempting on `replay` alone would leave a way to
+  // `jiti.import` a cloned repo's extensions by asking for a replay. The
+  // probes pay one refusal each and print nothing, which is the right price.
+  const projectTrust = await resolveProjectTrust({
+    paths,
+    config,
+    env,
+    ...(options.confirmProjectTrust === undefined ? {} : { confirm: options.confirmProjectTrust }),
+    ...(options.trustProject === undefined ? {} : { trustProject: options.trustProject }),
+    ...(options.projectCode === undefined ? {} : { enable: options.projectCode }),
+  });
+  warnings.push(...projectTrust.warnings);
+  if (!projectTrust.allowed) {
+    // The project's contributions are dropped from the merged config here, so
+    // every consumer below — the hook runner, the verifier, the audit wrapper,
+    // `/hooks`, `/verify` — sees one already-filtered config rather than each
+    // having to remember to ask.
+    config = {
+      ...config,
+      hooks: {
+        preToolUse: config.hooks.preToolUse.filter((hook) => hook.scope !== "project"),
+        postToolUse: config.hooks.postToolUse.filter((hook) => hook.scope !== "project"),
+        sessionStart: config.hooks.sessionStart.filter((hook) => hook.scope !== "project"),
+        runEnd: config.hooks.runEnd.filter((hook) => hook.scope !== "project"),
+      },
+      ...(config.verify?.scope === "project" ? { verify: undefined } : {}),
+    };
+  }
+
   // Config-declared endpoints land in the catalog here: after the config is
   // known, and BEFORE extensions load, so an extension can still override an
   // entry a config file declared. Code outranks data, deliberately — the
@@ -2232,12 +2313,19 @@ export async function buildRuntime(options: BuildRuntimeOptions = {}): Promise<A
 
   // Extensions load before the model is resolved so an extension can call
   // registerModel() and have that model be selectable straight away.
+  // The project's extension directory is dropped from the scan list rather
+  // than filtered afterwards: `jiti.import` IS the side effect, so there is no
+  // "loaded but not enabled" state to have. The user's own directory is
+  // untouched — this gate is scoping, not a blanket off-switch.
+  const extensionDirs = projectTrust.allowed
+    ? [...new Set([paths.userExtensions, paths.projectExtensions])]
+    : [paths.userExtensions];
   const extensions =
     options.extensions === false
       ? new ExtensionHost()
       : (options.extensions ??
         (await loadExtensions({
-          directories: [...new Set([paths.userExtensions, paths.projectExtensions])],
+          directories: extensionDirs,
           config,
           cwd: paths.cwd,
           version: version(),
@@ -2555,6 +2643,7 @@ export async function buildRuntime(options: BuildRuntimeOptions = {}): Promise<A
     preHookTools: canariedTools,
     sessionId: initialSessionId,
     hookRunner,
+    projectTrust,
     lsp,
     verifier,
     overlay,
@@ -2778,6 +2867,29 @@ export async function connectMcp(
     // without configured servers should never pay for.
     const { loadMcpConfig, McpManager: Manager } = await import("@arcturn/mcp");
     const config = await loadMcpConfig(files);
+    // A `stdio` entry is a command line this process spawns — someone else's
+    // program with the user's full permissions — so a project-declared one is
+    // the fourth surface `project-trust.ts` gates, and `buildRuntime` has
+    // already made the decision this reads. Done per SERVER rather than by
+    // dropping the whole file: a project entry that shadows a user entry of
+    // the same name must fall back to the USER definition, not vanish.
+    //
+    // `http` entries are deliberately left alone. Egress to a URL is not a
+    // process on this machine — the line `registry.ts` draws for the same
+    // reason — and it is a real remaining gap, documented rather than quietly
+    // widened into this gate.
+    if (!runtime.projectTrust.allowed && runtime.projectTrust.surface.mcpServers.length > 0) {
+      const blocked = runtime.projectTrust.surface.mcpServers.map((server) => server.name);
+      const empty: Awaited<ReturnType<typeof loadMcpConfig>> = { servers: {} };
+      const userOnly = existsSync(runtime.paths.userMcp)
+        ? await loadMcpConfig([runtime.paths.userMcp]).catch(() => empty)
+        : empty;
+      for (const name of blocked) {
+        const fallback = userOnly.servers[name];
+        if (fallback) config.servers[name] = fallback;
+        else delete config.servers[name];
+      }
+    }
     if (Object.keys(config.servers).length === 0) return undefined;
     const usesOAuth = Object.values(config.servers).some(
       (server) => server.type === "http" && server.auth === "oauth",

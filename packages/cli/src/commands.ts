@@ -1023,6 +1023,95 @@ export function createBuiltInCommands(): SlashCommand[] {
       },
     },
     {
+      name: "trust",
+      description:
+        "Show or change whether this project's own code may run; also: allow, deny, revoke",
+      source: "built-in",
+      async run({ ui, runtime, args }) {
+        const {
+          describeProjectCodeCounts,
+          renderProjectCodeInventory,
+          revokeProjectTrust,
+          writeProjectTrustDecision,
+        } = await import("./project-trust.js");
+        const { surface, allowed, reason } = runtime.projectTrust;
+        const verb = args.trim().toLowerCase();
+
+        if (verb === "" || verb === "status" || verb === "list") {
+          const state = allowed
+            ? reason === "flag"
+              ? "running (--trust-project / ARCTURN_TRUST_PROJECT for this run only)"
+              : reason === "config-trusted-projects"
+                ? "running (matched trustedProjects in your user config)"
+                : reason === "nothing-declared" || reason === "no-project-layer"
+                  ? "nothing to run"
+                  : "running (approved for these exact contents)"
+            : reason === "disabled"
+              ? "not running (--no-project-code)"
+              : "NOT running";
+          ui.print([
+            `Project:  ${runtime.paths.cwd}`,
+            `Declares: ${describeProjectCodeCounts(surface.counts)}`,
+            `Status:   ${state}`,
+            ...(surface.empty ? [] : ["", ...renderProjectCodeInventory(surface)]),
+          ]);
+          return;
+        }
+
+        if (surface.empty) {
+          ui.notice(
+            "info",
+            "This project declares no hooks, verify command, extensions or MCP servers.",
+          );
+          return;
+        }
+
+        if (verb === "revoke") {
+          const removed = await revokeProjectTrust(runtime.paths.trust, runtime.paths.cwd);
+          ui.notice(
+            "info",
+            removed
+              ? "Forgot this project's recorded decision. It takes effect the NEXT time " +
+                  "arcturn starts here — nothing is unloaded from this session."
+              : "No decision was recorded for this project; nothing to forget.",
+          );
+          return;
+        }
+
+        if (verb !== "allow" && verb !== "deny") {
+          ui.notice("warn", "Usage: /trust [status|list|allow|deny|revoke]");
+          return;
+        }
+
+        try {
+          await writeProjectTrustDecision(runtime.paths.trust, runtime.paths.cwd, {
+            digest: surface.digest,
+            decision: verb,
+            decidedAt: new Date().toISOString(),
+            counts: surface.counts,
+          });
+        } catch (error) {
+          ui.notice(
+            "warn",
+            `Could not write ${runtime.paths.trust}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          return;
+        }
+        // "Saved" alone is the `/permissions suggest` mistake: nothing re-reads
+        // trust.json mid-session and no extension is imported into a process
+        // already running, so the change and when it lands are said together.
+        ui.notice(
+          "info",
+          verb === "allow"
+            ? `Approved, and saved to ${runtime.paths.trust}. This project's code starts running ` +
+                "the NEXT time arcturn launches here — not in this session. Changing a hook, the " +
+                "verify command, any extensions file or an MCP server asks again."
+            : `Refused, and saved to ${runtime.paths.trust}. It takes effect the NEXT time ` +
+                "arcturn launches here; use /trust revoke to forget the decision.",
+        );
+      },
+    },
+    {
       name: "mcp",
       description: "Show MCP server status",
       source: "built-in",

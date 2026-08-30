@@ -34,8 +34,21 @@
  *   is not itself subject to this drop — those are what the client is
  *   waiting on — but a socket that stays above the threshold for the whole
  *   sustained window is presumed stuck and terminated outright.
+ * - **Shutdown grace** (`shutdownGraceMs`, default 2s): {@link
+ *   ArcturnServer.stop} closes connections politely and then, past this
+ *   window, destroys whatever is left. Without it a peer decides when the
+ *   server may exit: `ws` waits thirty seconds for an answer to a close
+ *   frame, and `http.Server.close()` waits forever on a connection that
+ *   never sends a byte, so a single silent socket could keep `arcturn serve`
+ *   alive after Ctrl+C. See {@link ArcturnServer.stop}.
  */
 
+import {
+  createServer as createHttpServer,
+  type Server as HttpServer,
+  STATUS_CODES,
+} from "node:http";
+import type { Socket } from "node:net";
 import {
   ErrorCode,
   errorResponse,
@@ -95,6 +108,13 @@ export interface ArcturnServerOptions {
    * to {@link DEFAULT_BACKPRESSURE_SUSTAINED_MS}.
    */
   backpressureSustainedMs?: number;
+  /**
+   * How long, in ms, {@link ArcturnServer.stop} lets a peer wind its
+   * connection down before the socket is destroyed outright. Defaults to
+   * {@link DEFAULT_SHUTDOWN_GRACE_MS}. Injectable so a test can prove the
+   * escalation happens without waiting the real grace period out.
+   */
+  shutdownGraceMs?: number;
 }
 
 /** Options for {@link ArcturnServer.start}. */
@@ -115,6 +135,17 @@ export const DEFAULT_HEARTBEAT_INTERVAL_MS = 30_000;
 export const DEFAULT_BACKPRESSURE_THRESHOLD_BYTES = 1024 * 1024;
 /** See the module doc's "DoS limits" section. */
 export const DEFAULT_BACKPRESSURE_SUSTAINED_MS = 15_000;
+/**
+ * How long {@link ArcturnServer.stop} lets connections wind down gracefully
+ * before it destroys whatever is left. See that method for why shutting down
+ * cannot be something a peer gets a veto over.
+ *
+ * Two seconds is long enough for a healthy peer on any real link to answer a
+ * close frame, and short enough to sit well inside the grace period a
+ * supervisor allows between SIGTERM and SIGKILL (Docker's default is ten
+ * seconds).
+ */
+export const DEFAULT_SHUTDOWN_GRACE_MS = 2_000;
 
 interface ConnectionState {
   authenticated: boolean;
@@ -136,7 +167,18 @@ export class ArcturnServer {
   readonly #heartbeatIntervalMs: number;
   readonly #backpressureThresholdBytes: number;
   readonly #backpressureSustainedMs: number;
+  readonly #shutdownGraceMs: number;
   readonly #connections = new Map<WebSocket, ConnectionState>();
+  /**
+   * Every accepted TCP socket, upgraded or not.
+   *
+   * `#connections` only ever hears about a connection that became a
+   * WebSocket, and `stop()` has to be able to reach the ones that did not —
+   * see that method. Tracked from the HTTP server's own `connection` event,
+   * which is the only place a socket that never sends a byte is visible.
+   */
+  readonly #sockets = new Set<Socket>();
+  #httpServer: HttpServer | undefined;
   #wss: WebSocketServer | undefined;
   #heartbeatTimer: ReturnType<typeof setInterval> | undefined;
 
@@ -151,6 +193,7 @@ export class ArcturnServer {
       options.backpressureThresholdBytes ?? DEFAULT_BACKPRESSURE_THRESHOLD_BYTES;
     this.#backpressureSustainedMs =
       options.backpressureSustainedMs ?? DEFAULT_BACKPRESSURE_SUSTAINED_MS;
+    this.#shutdownGraceMs = options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS;
   }
 
   /**
@@ -170,15 +213,39 @@ export class ArcturnServer {
     // Origin header; browsers always do. Anything with an Origin is refused
     // unless the caller explicitly allowed it.
     const allowedOrigins = this.#allowedOrigins;
+    // The HTTP server is created here rather than left to `ws` (which makes an
+    // identical one when handed a host/port) for one reason: `stop()` needs to
+    // be able to reach a socket that never became a WebSocket, and `ws` keeps
+    // its internal server private. The 426 answer to a plain HTTP request is
+    // the one `ws` would have given, kept so nothing about this port's
+    // behaviour changes.
+    const httpServer = createHttpServer((_request, response) => {
+      const body = STATUS_CODES[426] ?? "Upgrade Required";
+      response.writeHead(426, {
+        "Content-Length": Buffer.byteLength(body),
+        "Content-Type": "text/plain",
+      });
+      response.end(body);
+    });
+    httpServer.on("connection", (socket) => {
+      this.#sockets.add(socket);
+      socket.on("close", () => this.#sockets.delete(socket));
+    });
     const wss = new WebSocketServer({
-      host,
-      port,
+      server: httpServer,
       maxPayload: this.#maxPayloadBytes,
       verifyClient: ({ origin }: { origin?: string }) => {
         if (origin === undefined || origin === "") return true;
         return allowedOrigins.includes(origin);
       },
     });
+    // Watched on the `WebSocketServer` rather than on the HTTP server it wraps,
+    // even though the HTTP server is the one that raises them: `ws` re-emits
+    // both events as its own, so a bind failure reaches an `error` listener
+    // here either way — but only this side has one. Listening on the HTTP
+    // server alone would leave `ws`'s re-emitted copy unhandled, and an
+    // unhandled `error` event is a thrown exception, which is how `arcturn
+    // serve` on a taken port turned "exit 2, EADDRINUSE" into a crash.
     await new Promise<void>((resolve, reject) => {
       const onError = (error: Error) => {
         wss.off("listening", onListening);
@@ -190,23 +257,49 @@ export class ArcturnServer {
       };
       wss.once("error", onError);
       wss.once("listening", onListening);
+      httpServer.listen(port, host);
     });
+    this.#httpServer = httpServer;
     this.#wss = wss;
     wss.on("connection", (ws) => this.#handleConnection(ws));
     this.#heartbeatTimer = setInterval(() => this.#heartbeatTick(), this.#heartbeatIntervalMs);
     this.#heartbeatTimer.unref?.();
 
-    const address = wss.address();
+    const address = httpServer.address();
     if (typeof address === "string" || address === null) {
       throw new Error("Expected a network address after binding ArcturnServer");
     }
     return address.port;
   }
 
-  /** Close every connection and stop accepting new ones. */
+  /**
+   * Close every connection and stop accepting new ones, in bounded time.
+   *
+   * The listening socket goes first and synchronously: from the moment
+   * `close()` is called nothing new is accepted and the port is free, whatever
+   * else this method is still waiting on.
+   *
+   * What it waits on is the connections that are already up, and the wait has
+   * a ceiling — `shutdownGraceMs` — because neither half of a graceful close
+   * is something this process controls. `ws.close()` sends a close frame and
+   * waits for the peer to answer, which `ws` will do for thirty seconds; and
+   * `http.Server.close()` resolves only once every accepted socket has ended,
+   * which a socket that never sends a byte never does. A wedged editor panel,
+   * a suspended laptop, or a bare TCP connection from a port scanner could
+   * therefore hold `arcturn serve` open indefinitely after Ctrl+C — a peer with
+   * a veto over the server's own shutdown. Past the grace period every
+   * surviving socket is destroyed outright, upgraded or not.
+   *
+   * Idempotent: the handles are dropped before the first `await`, so a second
+   * call (the common "stopped explicitly and swept by a teardown" pattern) is
+   * a no-op rather than a second `close()` on an already-closed server.
+   */
   async stop(): Promise<void> {
     const wss = this.#wss;
-    if (!wss) return;
+    const httpServer = this.#httpServer;
+    if (!wss || !httpServer) return;
+    this.#wss = undefined;
+    this.#httpServer = undefined;
     if (this.#heartbeatTimer) {
       clearInterval(this.#heartbeatTimer);
       this.#heartbeatTimer = undefined;
@@ -216,10 +309,23 @@ export class ArcturnServer {
       ws.close(1001, "Server is shutting down");
     }
     this.#connections.clear();
-    await new Promise<void>((resolve, reject) => {
-      wss.close((error) => (error ? reject(error) : resolve()));
+    // Detaches `ws`'s upgrade handling; the listener itself belongs to the
+    // HTTP server this class owns, and is closed below.
+    wss.close();
+    const drained = new Promise<void>((resolve) => {
+      httpServer.close(() => resolve());
     });
-    this.#wss = undefined;
+    const sockets = [...this.#sockets];
+    const escalate = setTimeout(() => {
+      for (const socket of sockets) socket.destroy();
+    }, this.#shutdownGraceMs);
+    escalate.unref?.();
+    try {
+      await drained;
+    } finally {
+      clearTimeout(escalate);
+      this.#sockets.clear();
+    }
   }
 
   /**

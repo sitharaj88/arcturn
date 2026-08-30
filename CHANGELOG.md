@@ -10,7 +10,54 @@ CLI, the SDK, or the wire protocol.
 
 ## [Unreleased]
 
+### Added
+
+- **A repository you cloned no longer runs its own code because you `cd`'d
+  into it.** `<repo>/.arcturn` can declare lifecycle hooks, a `verify`
+  command, extensions and stdio MCP servers — all of which run as you, and
+  a `sessionStart` hook ran inside startup before you had typed anything.
+  `arcturn --list-models`, a command whose whole job is printing a menu,
+  imported every file in the repository's extension directory. Arcturn now
+  asks once, in a prompt naming every command and file grouped by the file
+  that declared it, and refuses by default. One decision covers all four,
+  because they are the same decision: a `sessionStart` hook can write the
+  extensions directory, `mcp.json` and your own config, so approving any
+  one grants the rest anyway.
+- **The approval covers what the project *is*, not where it lives.**
+  Extension files are hashed recursively — an `index.ts` importing a
+  changed `helpers.ts` re-asks — while hooks, `verify` and MCP servers are
+  pinned by declaration. Editing `src/`, a README, a skill or your model
+  choice never re-asks; adding a hook, touching any file under
+  `extensions/`, or declaring a server does. A gate that re-asks for
+  nothing is a gate that gets clicked through.
+- **Off a terminal the answer is no, and the run still finishes.**
+  `--print`, CI, `serve`, `acp`, `mcp-serve`, background agents and evals
+  have nobody to ask, so project code stays off — never a hard exit, which
+  would turn "your repo has a hook" into "arcturn no longer starts in CI".
+  The warning is loud and unconditional, because a disabled project hook
+  may have been a *protective* `preToolUse` guard. `arcturn serve` printed
+  no startup warnings at all before this, and now prints them.
+- **`arcturn trust` and `/trust`.** `--list` prints exactly what would run;
+  `--allow`/`--deny`/`--revoke` record a decision in `~/.arcturn/trust.json`
+  — user-scope, with deliberately no project spelling for a repository to
+  write. Every verb says when the change takes effect in the same breath as
+  saying it was saved.
+- **`--trust-project` (`ARCTURN_TRUST_PROJECT=1`) for a pipeline that
+  already trusts its checkout**, never persisted; `--no-project-code` to
+  parse and list everything and run none of it; `trustedProjects` in your
+  *user* config for paths you always trust, documented as the weaker,
+  non-content-addressed thing it is and ignored outright from a project
+  file.
+
 ### Fixed
+
+- **`arcturn serve` now shuts down in bounded time.** A client that stopped
+  answering — a wedged editor panel, a suspended laptop, or a bare TCP
+  connection that never sends a byte — could hold the server open for
+  thirty seconds or, in the un-upgraded case, indefinitely, so Ctrl+C
+  printed "shutting down" and hung. Connections are now closed politely and
+  then destroyed after a two-second grace period, and `stop()` is
+  idempotent.
 
 - **Background agents ignored your permission rules entirely.** A `/bg`
   agent was built with an empty rule list, so a `deny read "**/.env"` in

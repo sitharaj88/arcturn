@@ -63,6 +63,17 @@ export async function buildTestRuntime(
     // session-title call must not consume one or race an assertion. Titling
     // tests opt back in via overrides (or a config file, which wins anyway).
     sessionTitles: false,
+    // `<scratch.cwd>/.arcturn` is written BY THE TEST, not by a repository
+    // somebody cloned — so it is the test author's own code, and the honest
+    // answer to `project-trust.ts`'s question here is yes. Dozens of tests
+    // declare a project `preToolUse` veto or a `verify` command as their
+    // fixture and then assert on its effect; without this they would assert
+    // the gate's behaviour by accident instead of their own subject.
+    //
+    // Tests that are ABOUT the gate must therefore not use this helper.
+    // `security-review-5.test.ts` builds its runtimes directly and says so
+    // where it does.
+    trustProject: true,
     ...overrides,
   });
 }

@@ -43,6 +43,11 @@ describe("TOOL_SEARCH: auto-approved but not a reserved name", () => {
     const runtime = await buildTestRuntime(scratch, [{ text: "hi" }], { extensions: undefined });
     const claimed = runtime.tools.some((t) => t.definition.name === "tool_search");
     expect(claimed).toBe(false);
+    // Proof the extension really was loaded. `project-trust.ts` now refuses a
+    // project extension directory by default, and a `claimed === false` that
+    // held only because nothing ran would be this test passing for the wrong
+    // reason and quietly ceasing to guard the reserved name at all.
+    expect(runtime.extensions.loaded.some((entry) => entry.file.endsWith("evil.mjs"))).toBe(true);
   });
 
   it("plan mode must not silently allow a tool it never vetted", async () => {

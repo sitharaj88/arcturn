@@ -20,7 +20,7 @@ import {
   resolveShell,
   terminateProcessTree,
 } from "@arcturn/tools";
-import type { Tool, ToolResult, ToolResultContent } from "@arcturn/types";
+import type { PermissionScope, Tool, ToolResult, ToolResultContent } from "@arcturn/types";
 
 /** Lifecycle points a hook can run at. */
 export type HookEvent = "preToolUse" | "postToolUse" | "sessionStart" | "runEnd";
@@ -48,6 +48,18 @@ export interface HookDefinition {
   matcher?: string;
   /** Timeout before the hook process (and its whole process tree) is killed. */
   timeoutMs?: number;
+  /**
+   * Which config layer declared this hook, when one did.
+   *
+   * Only {@link parseHookConfig} sets it, and `parseConfigFile` is the only
+   * caller that passes `"project"` — so a hook a cloned repository wrote is
+   * distinguishable from the user's own, which is what `project-trust.ts`
+   * gates on. Deliberately OPTIONAL, and an absent value reads as trusted: a
+   * hook built in code by an embedder or a test came from code that already
+   * had to be trusted to call `buildRuntime` at all. See `project-trust.ts`'s
+   * module doc, where that fail-open is argued rather than discovered.
+   */
+  scope?: PermissionScope;
 }
 
 /** Parsed `hooks` config: the commands to run at each lifecycle point. */
@@ -84,6 +96,7 @@ function parseHookDefinition(
   event: HookEvent,
   where: string,
   warnings: string[],
+  scope: PermissionScope | undefined,
 ): HookDefinition | undefined {
   if (!isRecord(raw)) {
     warnings.push(`${where}: hooks.${event} entry must be an object`);
@@ -94,7 +107,7 @@ function parseHookDefinition(
     warnings.push(`${where}: hooks.${event} entry needs a non-empty "command"`);
     return undefined;
   }
-  const def: HookDefinition = { command };
+  const def: HookDefinition = { command, ...(scope === undefined ? {} : { scope }) };
 
   if (raw.matcher !== undefined) {
     if (typeof raw.matcher === "string" && raw.matcher.length > 0) {
@@ -132,8 +145,20 @@ function parseHookDefinition(
  * @param raw - The value of the config file's `hooks` key.
  * @param where - Label used in warning messages (usually the file path).
  * @param warnings - Collector for non-fatal problems.
+ * @param scope - Layer that owns this file, stamped onto every hook it
+ *   declares. A file may NOT label its own hooks: `scope` is not a known key
+ *   on an entry, so writing one there is an ignored-key warning. That is the
+ *   whole point — a project file that could tag its hook `"user"` would be
+ *   granting itself the trust `project-trust.ts` exists to withhold, the same
+ *   trick `providers.ts` reads the user config directly to avoid. Omitted
+ *   leaves hooks untagged, i.e. trusted.
  */
-export function parseHookConfig(raw: unknown, where: string, warnings: string[]): HookConfig {
+export function parseHookConfig(
+  raw: unknown,
+  where: string,
+  warnings: string[],
+  scope?: PermissionScope,
+): HookConfig {
   const out: HookConfig = {
     preToolUse: [],
     postToolUse: [],
@@ -160,7 +185,7 @@ export function parseHookConfig(raw: unknown, where: string, warnings: string[])
       continue;
     }
     for (const entry of list) {
-      const def = parseHookDefinition(entry, event, where, warnings);
+      const def = parseHookDefinition(entry, event, where, warnings, scope);
       if (def) out[event].push(def);
     }
   }

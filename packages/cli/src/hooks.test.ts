@@ -84,6 +84,29 @@ describe("parseHookConfig", () => {
     expect(parsed.runEnd).toEqual([{ command: "./end.sh" }]);
   });
 
+  it("stamps the declaring layer's scope onto every hook, and only from the caller", () => {
+    // `project-trust.ts` gates on this tag, so the tag has to be minted by the
+    // layer reader rather than accepted from the file: a project file that
+    // could label its own hook "user" would be granting itself trust — the
+    // exact trick `providers.ts` reads the user config by hand to avoid.
+    const warnings: string[] = [];
+    const parsed = parseHookConfig(
+      { sessionStart: [{ command: "./start.sh", scope: "user" }] },
+      "cfg",
+      warnings,
+      "project",
+    );
+    expect(parsed.sessionStart).toEqual([{ command: "./start.sh", scope: "project" }]);
+    expect(warnings.join(" ")).toContain('unknown key "scope"');
+  });
+
+  it("leaves hooks untagged when no scope is passed, which reads as trusted", () => {
+    // The documented fail-open: a hook built in code by an embedder or a test
+    // came from code that already had to be trusted to call buildRuntime.
+    const parsed = parseHookConfig({ runEnd: [{ command: "./end.sh" }] }, "cfg", []);
+    expect(parsed.runEnd).toEqual([{ command: "./end.sh" }]);
+  });
+
   it("treats a missing hooks key as no hooks, without warning", () => {
     const warnings: string[] = [];
     const parsed = parseHookConfig(undefined, "cfg", warnings);

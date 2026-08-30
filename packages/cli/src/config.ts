@@ -270,6 +270,21 @@ export interface ArcturnConfig {
    * `registerConfiguredProviders` in `providers.ts` owns that gate.
    */
   providers?: Record<string, ConfiguredProvider>;
+  /**
+   * Directories whose own `.arcturn` code — hooks, `verify`, extensions, stdio
+   * MCP servers — runs without a consent prompt. An entry is either an exact
+   * directory or one ending in `/*`, which covers everything beneath it.
+   *
+   * **Honoured only from `~/.arcturn/config.json`.** A project file setting it
+   * would be granting itself the very trust the gate withholds, so the key is
+   * warned about and dropped from a project layer, and `project-trust.ts` reads
+   * it out of the user file directly rather than from the merged config.
+   *
+   * Deliberately the WEAKER opt-in: unlike a recorded approval it is not
+   * content-addressed, so it approves a path and whatever that path later
+   * comes to contain. Prefer answering the prompt once.
+   */
+  trustedProjects?: string[];
 }
 
 /** Result of {@link loadConfig}. */
@@ -351,6 +366,7 @@ const KNOWN_KEYS = new Set([
   "canary",
   "canaries",
   "consensus",
+  "trustedProjects",
 ]);
 
 /** Narrow an arbitrary string to a {@link PermissionMode}. */
@@ -836,7 +852,7 @@ export function parseConfigFile(
   }
   if (raw.verify !== undefined) {
     if (typeof raw.verify === "string" && raw.verify.trim() !== "") {
-      out.verify = { command: raw.verify.trim() };
+      out.verify = { command: raw.verify.trim(), scope };
     } else if (
       isRecord(raw.verify) &&
       typeof raw.verify.command === "string" &&
@@ -853,6 +869,7 @@ export function parseConfigFile(
       out.verify = {
         command: raw.verify.command.trim(),
         runOn,
+        scope,
         ...(globs === undefined ? {} : { globs }),
         ...(timeoutMs === undefined ? {} : { timeoutMs }),
       };
@@ -896,8 +913,34 @@ export function parseConfigFile(
     if (typeof raw.systemPromptAppend === "string") out.systemPromptAppend = raw.systemPromptAppend;
     else warnings.push(`${where}: "systemPromptAppend" must be a string`);
   }
+  if (raw.trustedProjects !== undefined) {
+    // A project file naming itself here would be self-granted consent, so the
+    // key is refused outright from any layer but the user's — and said out
+    // loud, because a repository trying it is worth seeing. `project-trust.ts`
+    // re-reads the user file directly regardless; this branch exists so the
+    // merged config never carries a project's entry and the attempt is visible.
+    if (scope !== "user") {
+      warnings.push(
+        `${where}: "trustedProjects" is ignored outside ~/.arcturn/config.json — a project ` +
+          "cannot grant itself permission to run its own code",
+      );
+    } else if (!Array.isArray(raw.trustedProjects)) {
+      warnings.push(`${where}: "trustedProjects" must be an array of directory paths`);
+    } else {
+      const entries = raw.trustedProjects.filter(
+        (entry): entry is string => typeof entry === "string" && entry.trim() !== "",
+      );
+      if (entries.length !== raw.trustedProjects.length) {
+        warnings.push(`${where}: "trustedProjects" entries must be non-empty strings`);
+      }
+      if (entries.length > 0) out.trustedProjects = entries;
+    }
+  }
   if (raw.hooks !== undefined) {
-    out.hooks = parseHookConfig(raw.hooks, where, warnings);
+    // The scope goes with them: a `sessionStart` hook runs `$SHELL -c` inside
+    // `buildRuntime` before the user types anything, so `project-trust.ts` has
+    // to be able to tell a cloned repository's hook from the user's own.
+    out.hooks = parseHookConfig(raw.hooks, where, warnings, scope);
   }
   if (raw.route !== undefined) {
     if (isRecord(raw.route)) {
@@ -1260,6 +1303,11 @@ export function mergeConfig(
       ? {}
       : { requestStallTimeoutMs: layer.requestStallTimeoutMs ?? base.requestStallTimeoutMs }),
     ...((layer.verify ?? base.verify) === undefined ? {} : { verify: layer.verify ?? base.verify }),
+    // Only a user layer can ever contribute one (see `parseConfigFile`), so
+    // this concatenation can never pick up a project's entry.
+    ...((layer.trustedProjects ?? base.trustedProjects) === undefined
+      ? {}
+      : { trustedProjects: [...(base.trustedProjects ?? []), ...(layer.trustedProjects ?? [])] }),
     // `route` overwrites wholesale per layer, same as `verify` above: a
     // project `.arcturn/config.json` that sets `route` fully replaces a
     // user-level `route` block rather than merging field-by-field (so a

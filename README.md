@@ -75,6 +75,30 @@ walk past a `**/.env` deny rule on macOS.
 }
 ```
 
+### 🔒 A cloned repo runs none of its own code until you say so
+
+`<repo>/.arcturn` can declare lifecycle hooks, a `verify` command, extensions and
+stdio MCP servers — all of which run **as you**, and a `sessionStart` hook runs before
+you have typed anything. Arcturn asks once, in a prompt that names every command and
+file, and refuses by default. Off a terminal — `--print`, CI, `serve`, `acp` — there is
+nobody to ask, so the answer is no: the run still completes, and says on stderr exactly
+what it did not run and the three ways to approve it.
+
+The approval covers the project's **contents**, not its path. Editing `src/`, a README
+or a skill never re-asks; adding a hook, changing any file under `extensions/`, or
+declaring an MCP server does. Your own `~/.arcturn` hooks and extensions are never
+gated — that is the difference between a gate and a nuisance.
+
+```console
+$ arcturn trust --list      # exactly what this project would run
+$ arcturn trust --allow     # approve it for these contents
+$ arcturn -p "..." --trust-project   # CI that already trusts the checkout
+```
+
+Known edges are documented rather than implied: a hook command is a pointer into your
+shell, so Arcturn cannot see what the files it invokes will contain later. See
+[`docs/integration-notes/INTEGRATION-project-trust.md`](docs/integration-notes/INTEGRATION-project-trust.md).
+
 ### ⏪ Checkpoints & `/rewind`
 
 Every edit is snapshotted before it lands. `/rewind` restores the files **and** forks the

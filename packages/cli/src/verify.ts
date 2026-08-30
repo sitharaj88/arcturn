@@ -21,7 +21,7 @@ import {
   resolveShell,
   terminateProcessTree,
 } from "@arcturn/tools";
-import type { Tool, ToolResult } from "@arcturn/types";
+import type { PermissionScope, Tool, ToolResult } from "@arcturn/types";
 
 /** Tool names whose successful result triggers a verify run. */
 const WRAPPED_TOOL_NAMES: ReadonlySet<string> = new Set(["write", "edit"]);
@@ -71,6 +71,16 @@ export interface VerifyConfig {
    * {@link Verifier.runNow}, e.g. from a `/verify` slash command.
    */
   runOn?: "edit" | "manual";
+  /**
+   * Which config layer declared this command, when one did.
+   *
+   * `parseConfigFile` is the only thing that sets it, so a `verify` a cloned
+   * repository wrote is distinguishable from the user's own — `verify` is a
+   * shell command run after every successful `write`/`edit`, and a project
+   * layer wins the merge, so this is one of the four surfaces
+   * `project-trust.ts` gates. Absent reads as trusted; see that module's doc.
+   */
+  scope?: PermissionScope;
 }
 
 /** Outcome of running a verify command once. */

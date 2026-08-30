@@ -237,6 +237,15 @@ interface Workspace {
  * extension loading, `registerModel`, config layering and model resolution
  * are all part of what these tests exercise.
  *
+ * The stub lives in the USER extension directory (`$ARCTURN_HOME/extensions`),
+ * not `<cwd>/.arcturn/extensions`. That is more faithful to what it is — test
+ * infrastructure standing in for the harness operator, not something the
+ * "repository" under test ships — and it is what keeps these tests meaningful
+ * now that `project-trust.ts` gates project extensions: every `-p` run here is
+ * off a TTY, so a project-layer stub would be refused and the model would
+ * simply vanish from all 34 workspaces. The refusal itself is asserted
+ * separately, by the "project code" test below.
+ *
  * @param baseUrl - The stub provider's base URL, or `undefined` for a
  *   workspace whose model is deliberately unreachable.
  * @param config - Extra keys merged into `.arcturn/config.json`.
@@ -249,10 +258,10 @@ async function workspace(
 ): Promise<Workspace> {
   const dir = await mkdtemp(join(tmpdir(), "arcturn-e2e-"));
   const home = join(dir, "home");
-  await mkdir(join(dir, ".arcturn", "extensions"), { recursive: true });
-  await mkdir(home, { recursive: true });
+  await mkdir(join(dir, ".arcturn"), { recursive: true });
+  await mkdir(join(home, "extensions"), { recursive: true });
   await writeFile(
-    join(dir, ".arcturn", "extensions", "stub.mjs"),
+    join(home, "extensions", "stub.mjs"),
     `import { registerModel } from "@arcturn/ai";
 registerModel({
   id: "stub/model",
@@ -681,6 +690,128 @@ describe("arcturn ceilings", () => {
 // --cwd
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Project code
+// ---------------------------------------------------------------------------
+
+describe("arcturn project code", () => {
+  it("runs none of a cloned repo's own code off a TTY, and says how to approve it", async () => {
+    // The whole threat in one spawn: a checkout you have not read declares a
+    // sessionStart hook and an extension, and `-p` is not a terminal, so
+    // nobody can be asked. Before this gate both ran, as you, before the
+    // first token left the model.
+    const provider = await stubProvider([{ text: "done" }]);
+    const ws = await workspace(provider.baseUrl);
+    const hookMarker = join(ws.dir, "hook-ran");
+    const extensionMarker = join(ws.dir, "extension-ran");
+    await writeFile(
+      join(ws.dir, ".arcturn", "config.json"),
+      JSON.stringify({
+        model: "stub/model",
+        permissionMode: "yolo",
+        ui: "inline",
+        hooks: { sessionStart: [{ command: `printf x > ${JSON.stringify(hookMarker)}` }] },
+      }),
+    );
+    await mkdir(join(ws.dir, ".arcturn", "extensions"), { recursive: true });
+    await writeFile(
+      join(ws.dir, ".arcturn", "extensions", "evil.mjs"),
+      `import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(extensionMarker)}, "x");
+export default function () {}
+`,
+    );
+
+    const refused = await run(["-p", "hi", "--no-mcp"], {
+      workspace: ws,
+      timeoutMs: DEFAULT_SPAWN_DEADLINE_MS,
+    });
+
+    expect(refused.code).toBe(0);
+    expect(existsSync(hookMarker)).toBe(false);
+    expect(existsSync(extensionMarker)).toBe(false);
+    // Never a hard exit: "your repo has a hook" must not become "arcturn no
+    // longer starts in CI". The run completes and explains itself instead.
+    expect(refused.stderr).toContain("NOT running");
+    expect(refused.stderr).toContain("--trust-project");
+    expect(refused.stderr).toContain("arcturn trust --list");
+    expect(provider.requests.length).toBeGreaterThan(0);
+
+    // And the documented way back in works from the same pipeline.
+    const trusted = await run(["-p", "hi", "--no-mcp", "--trust-project"], {
+      workspace: ws,
+      timeoutMs: DEFAULT_SPAWN_DEADLINE_MS,
+    });
+    expect(trusted.code).toBe(0);
+    expect(existsSync(hookMarker)).toBe(true);
+    expect(existsSync(extensionMarker)).toBe(true);
+  });
+
+  it("reports the same refusal from serve, the surface that stays up longest", async () => {
+    const provider = await stubProvider([{ text: "done" }]);
+    const ws = await workspace(provider.baseUrl);
+    const hookMarker = join(ws.dir, "serve-hook-ran");
+    await writeFile(
+      join(ws.dir, ".arcturn", "config.json"),
+      JSON.stringify({
+        model: "stub/model",
+        ui: "inline",
+        hooks: { sessionStart: [{ command: `printf x > ${JSON.stringify(hookMarker)}` }] },
+      }),
+    );
+
+    const serving = launch(["serve", "--host", "127.0.0.1", "--port", "0"], {
+      workspace: ws,
+      timeoutMs: 60_000,
+    });
+    await waitForStdout(serving, /arcturn serving on /);
+    const stderr = serving.stderrSoFar();
+    serving.child.kill("SIGINT");
+    await serving.done;
+
+    expect(existsSync(hookMarker)).toBe(false);
+    // `serve` printed no runtime warnings at all before this, so a project
+    // whose hooks were dropped went silent about it on the surface with the
+    // longest uptime and the fewest people watching.
+    expect(stderr).toContain("NOT running");
+  });
+
+  it("lists what would run, and records an approval, via `arcturn trust`", async () => {
+    const provider = await stubProvider([{ text: "done" }]);
+    const ws = await workspace(provider.baseUrl);
+    await writeFile(
+      join(ws.dir, ".arcturn", "config.json"),
+      JSON.stringify({
+        model: "stub/model",
+        ui: "inline",
+        hooks: { sessionStart: [{ command: "echo listed-command" }] },
+        verify: "pnpm listed-verify",
+      }),
+    );
+
+    const listed = await run(["trust", "--list"], {
+      workspace: ws,
+      timeoutMs: DEFAULT_SPAWN_DEADLINE_MS,
+    });
+    expect(listed.code).toBe(0);
+    expect(listed.stdout).toContain("echo listed-command");
+    expect(listed.stdout).toContain("pnpm listed-verify");
+    expect(listed.stdout).toContain("never asked");
+
+    const allowed = await run(["trust", "--allow"], {
+      workspace: ws,
+      timeoutMs: DEFAULT_SPAWN_DEADLINE_MS,
+    });
+    expect(allowed.code).toBe(0);
+    // "Saved" alone was the `/permissions suggest` mistake. When it takes
+    // effect is said in the same breath as that it was saved.
+    expect(allowed.stdout).toContain("NEXT time arcturn starts");
+
+    const after = await run(["trust"], { workspace: ws, timeoutMs: DEFAULT_SPAWN_DEADLINE_MS });
+    expect(after.stdout).toContain("allowed");
+  });
+});
+
 describe("arcturn --cwd", () => {
   it("refuses a directory that does not exist instead of running in a phantom tree", async () => {
     // What used to happen: the run was accepted, `write` created the whole
@@ -752,11 +883,8 @@ describe("arcturn --cwd", () => {
       join(sub, ".arcturn", "config.json"),
       JSON.stringify({ model: "stub/model", permissionMode: "yolo", ui: "inline" }),
     );
-    await mkdir(join(sub, ".arcturn", "extensions"), { recursive: true });
-    await writeFile(
-      join(sub, ".arcturn", "extensions", "stub.mjs"),
-      await readFile(join(ws.dir, ".arcturn", "extensions", "stub.mjs"), "utf8"),
-    );
+    // No extension copy is needed any more: the stub lives in the shared
+    // `$ARCTURN_HOME`, which `--cwd` does not move.
 
     const result = await run(["-p", "write landed.txt", "--no-mcp", "--cwd", sub], {
       workspace: ws,

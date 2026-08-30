@@ -1,3 +1,4 @@
+import { createConnection } from "node:net";
 import { Agent, MemorySessionStore } from "@arcturn/core";
 import type {
   AgentEvent,
@@ -856,5 +857,59 @@ describe("ArcturnServer: deleteSession over the wire", () => {
 
     llm.release();
     await waitFor(messages, (m) => responseFor(m, "3") !== undefined);
+  });
+});
+
+describe("stop() is bounded", () => {
+  it("does not let a silent, never-upgraded TCP connection hold the shutdown open", async () => {
+    const { server, url } = await startServer(buildSessionHost(createScriptedLLM([])), undefined, {
+      shutdownGraceMs: 250,
+    });
+    const port = Number(new URL(url).port);
+
+    // A connection that completes the TCP handshake and then says nothing:
+    // a port scanner, a half-open proxy, a client killed between connect and
+    // upgrade. It never becomes a WebSocket, so the server's own connection
+    // map has never heard of it — only the HTTP server holds it.
+    const socket = createConnection({ host: "127.0.0.1", port });
+    await new Promise<void>((resolve, reject) => {
+      socket.once("connect", resolve);
+      socket.once("error", reject);
+    });
+    // The client's `connect` fires when the kernel completes the handshake,
+    // which can be before the server has accepted the socket at all — and a
+    // connection the server never accepted costs its shutdown nothing. Settle
+    // long enough that the accept has certainly happened (it takes microseconds
+    // on loopback) so this measures the shutdown and not the race.
+    await new Promise((resolve) => setTimeout(resolve, 250));
+
+    const began = Date.now();
+    await server.stop();
+    servers.splice(servers.indexOf(server), 1);
+    socket.destroy();
+
+    // The decisive assertion. `http.Server.close()` waits for every existing
+    // connection to end, and this one never will: shutting down has to be
+    // something the server can do on its own, not something a peer consents
+    // to. Before the grace period existed this call did not return at all.
+    expect(Date.now() - began).toBeLessThan(5_000);
+  });
+
+  it("terminates a WebSocket peer that never answers the closing handshake", async () => {
+    const { server, url } = await startServer(buildSessionHost(createScriptedLLM([])), undefined, {
+      shutdownGraceMs: 250,
+    });
+    const ws = await connect(url);
+    // Stop reading: the close frame `stop()` sends is never seen, so the
+    // closing handshake is never completed. `ws` waits 30 seconds for that
+    // reply — longer than a supervisor's SIGTERM grace period, and longer
+    // than this suite's own timeout.
+    (ws as unknown as { _socket: { pause: () => void } })._socket.pause();
+
+    const began = Date.now();
+    await server.stop();
+    servers.splice(servers.indexOf(server), 1);
+
+    expect(Date.now() - began).toBeLessThan(5_000);
   });
 });

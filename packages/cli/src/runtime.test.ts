@@ -1009,6 +1009,10 @@ describe("buildRuntime", () => {
       env: scratch.env,
       llm: fakeLLM([{ text: "ok" }]),
       skipRepoLookup: true,
+      // A PROJECT extension directory, which `project-trust.ts` refuses to
+      // `jiti.import` without consent. This test is about the extension host,
+      // not the gate, so it says out loud that it trusts its own fixture.
+      trustProject: true,
     });
     expect(runtime.tools.map((tool) => tool.definition.name)).toContain("coin");
     await runtime.dispose();

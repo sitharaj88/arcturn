@@ -231,6 +231,17 @@ export interface McpServeOptions {
   configProviders?: boolean;
   /** `--trust-providers`: enable project-declared endpoints without asking. */
   trustProviders?: boolean;
+  /**
+   * `--no-project-code`: run nothing this project declares — hooks, `verify`,
+   * extensions, stdio MCP servers.
+   */
+  projectCode?: boolean;
+  /**
+   * `--trust-project`: run this project's own code without asking. No
+   * confirmer is ever wired for an unattended server, so without this a
+   * project's code stays off here and the refusal is reported as a diagnostic.
+   */
+  trustProject?: boolean;
   /** Injected LLM client. A test seam; production always builds its own. */
   llm?: LLMClient;
   /** Transport override. Defaults to stdio; tests pass an in-memory pair. */
@@ -499,7 +510,13 @@ export async function buildMcpServeHost(options: McpServeOptions = {}): Promise<
         ? {}
         : { configProviders: options.configProviders }),
       ...(options.trustProviders === undefined ? {} : { trustProviders: options.trustProviders }),
+      ...(options.projectCode === undefined ? {} : { projectCode: options.projectCode }),
+      ...(options.trustProject === undefined ? {} : { trustProject: options.trustProject }),
     });
+    // Nothing else here reads `runtime.warnings`, and a silently disabled
+    // project hook on an unattended server is exactly the thing an operator
+    // needs told. stderr, never stdout — stdout carries the protocol.
+    for (const warning of runtime.warnings) diagnosticSink(options)(`arcturn: ${warning}`);
   }
 
   const host: ArcturnMcpHost = {

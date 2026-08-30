@@ -57,6 +57,51 @@ afterEach(async () => {
   for (const server of servers.splice(0)) await server.stop();
 });
 
+/**
+ * Whether `port` still answers as *this* server.
+ *
+ * "Is the port refused?" is very nearly the right question, and the difference
+ * is what made this assertion load-sensitive. Once a server's listener is gone
+ * the port is free, and an unrelated listener may take it before the next line
+ * runs — on a platform whose ephemeral allocator hands ports back in random
+ * order (Linux) far sooner than on one that walks the range in order (macOS,
+ * which effectively never does). A stranger sitting on the port is not this
+ * server failing to stop, so answering the narrower question keeps the test
+ * honest on every runner: a refusal settles it outright, and anything that
+ * does answer is asked whether it speaks this server's protocol, which nothing
+ * but an `ArcturnServer` on the other end can do.
+ */
+async function stillServing(port: number): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const socket = createConnection({ host: "127.0.0.1", port });
+    let received = "";
+    const settle = (answer: boolean): void => {
+      clearTimeout(deadline);
+      socket.destroy();
+      resolve(answer);
+    };
+    // A stranger that accepts the connection and then says nothing must not
+    // hang the suite; nothing here sets a deadline of its own.
+    const deadline = setTimeout(() => settle(false), 2_000);
+    socket.once("error", () => settle(false));
+    socket.once("close", () => settle(false));
+    socket.on("connect", () => {
+      socket.write(`GET / HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nConnection: close\r\n\r\n`);
+    });
+    socket.on("data", (chunk) => {
+      received += chunk.toString("utf8");
+      if (!received.includes("\r\n\r\n")) return;
+      // 426 Upgrade Required is what this port answers a non-WebSocket request
+      // with, live. Asking for it rather than merely for a completed TCP
+      // handshake is what makes the probe sensitive to a *partly* stopped
+      // server: one that has detached its WebSocket handling but left the
+      // listener open still answers this, and a bare connect test would call
+      // that stopped.
+      settle(received.startsWith("HTTP/1.1 426"));
+    });
+  });
+}
+
 describe("generateServeToken", () => {
   it("produces a 32-character hex string", () => {
     const token = generateServeToken();
@@ -226,18 +271,19 @@ describe("createServeHost + ArcturnServer", () => {
       socket.once("error", reject);
     });
 
+    // Asked while the server is up as well as after it goes down: an
+    // "is it gone?" probe that could not see a running server would report
+    // every server as stopped, and this assertion would pass on a `stop()`
+    // that did nothing at all.
+    expect(await stillServing(port)).toBe(true);
+
     await server.stop();
     servers.pop();
 
-    await expect(
-      new Promise<void>((resolve, reject) => {
-        const socket = createConnection({ host: "127.0.0.1", port }, () => {
-          socket.end();
-          resolve();
-        });
-        socket.once("error", reject);
-      }),
-    ).rejects.toThrow();
+    // The decisive check, and the whole point of the name: a server that has
+    // been stopped serves nobody on the port it was using. See `stillServing`
+    // for why this is not spelled "the port refuses a connection".
+    expect(await stillServing(port)).toBe(false);
   });
 });
 

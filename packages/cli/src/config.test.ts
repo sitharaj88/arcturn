@@ -346,6 +346,57 @@ describe("parseConfigFile: providers", () => {
   });
 });
 
+describe("parseConfigFile: trust-bearing keys", () => {
+  it("tags hooks and verify with the layer that declared them", () => {
+    // The tag is what lets `project-trust.ts` tell a cloned repository's
+    // sessionStart hook from the user's own, without which the gate would
+    // have to be all-or-nothing.
+    const warnings: string[] = [];
+    const parsed = parseConfigFile(
+      { hooks: { sessionStart: [{ command: "./s.sh" }] }, verify: "pnpm test" },
+      "project",
+      "cfg",
+      warnings,
+    );
+    expect(parsed.hooks?.sessionStart).toEqual([{ command: "./s.sh", scope: "project" }]);
+    expect(parsed.verify).toEqual({ command: "pnpm test", scope: "project" });
+
+    const user = parseConfigFile({ verify: { command: "pnpm t" } }, "user", "cfg", []);
+    expect(user.verify?.scope).toBe("user");
+  });
+
+  it('honours "trustedProjects" from the user layer only, and says when a project tries', () => {
+    const userWarnings: string[] = [];
+    const user = parseConfigFile(
+      { trustedProjects: ["/work/repo", "/work/tree/*"] },
+      "user",
+      "cfg",
+      userWarnings,
+    );
+    expect(user.trustedProjects).toEqual(["/work/repo", "/work/tree/*"]);
+    expect(userWarnings).toEqual([]);
+
+    const projectWarnings: string[] = [];
+    const project = parseConfigFile(
+      { trustedProjects: ["/work/repo"] },
+      "project",
+      "cfg",
+      projectWarnings,
+    );
+    // Dropped, and said out loud: a repository trying this is worth seeing.
+    expect(project.trustedProjects).toBeUndefined();
+    expect(projectWarnings.join(" ")).toContain("cannot grant itself permission");
+  });
+
+  it('rejects a "trustedProjects" that is not an array of non-empty strings', () => {
+    const warnings: string[] = [];
+    expect(
+      parseConfigFile({ trustedProjects: "/work" }, "user", "cfg", warnings).trustedProjects,
+    ).toBeUndefined();
+    expect(warnings.join(" ")).toContain("array of directory paths");
+  });
+});
+
 describe("mergeConfig", () => {
   it("lets the later layer win and concatenates rules", () => {
     const base: ArcturnConfig = {

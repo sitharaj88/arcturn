@@ -20,6 +20,8 @@ import { runInteractive } from "./interactive/app.js";
 import type { BootScreen } from "./main.js";
 import { version } from "./meta.js";
 import { runPrint } from "./print.js";
+import type { ProjectCodeSurface } from "./project-trust.js";
+import { terminalProjectTrustConfirm } from "./project-trust.js";
 import { registerConfiguredProviders, terminalProviderConfirm } from "./providers.js";
 import {
   BUILT_IN_TOOL_NAMES,
@@ -58,6 +60,32 @@ function providerFlags(args: Pick<CliArgs, "configProviders" | "trustProviders">
 }
 
 /**
+ * The two `project code` flags, in the shape every runtime-building call site takes.
+ *
+ * Deliberately shaped like {@link providerFlags} and applied at the same five
+ * sites, because the regression it records — a documented switch that reached
+ * exactly one of them and was inert on the four that stay up longest — is
+ * cheaper to prevent than to find twice. `serve`, `acp`, `mcp-serve` and
+ * `replay` each build their own runtime, and a `--trust-project` that did
+ * nothing there would be worse than no flag at all: it would read as consent
+ * given and be consent withheld.
+ *
+ * None of those sites gets a confirmer, then or now: off a TTY there is nobody
+ * to ask, and refusal stands.
+ *
+ * @param args - The parsed command line.
+ */
+function projectCodeFlags(args: Pick<CliArgs, "projectCode" | "trustProject">): {
+  trustProject?: true;
+  projectCode?: false;
+} {
+  return {
+    ...(args.trustProject ? { trustProject: true as const } : {}),
+    ...(args.projectCode ? {} : { projectCode: false as const }),
+  };
+}
+
+/**
  * Fill the catalog the way a real run would, for a listing or a replay.
  *
  * Two side effects, in the order `buildRuntime` performs them: config-declared
@@ -68,16 +96,28 @@ function providerFlags(args: Pick<CliArgs, "configProviders" | "trustProviders">
  * still honoured, because it is an explicit gesture the user already made and
  * a listing that disagreed with the run it describes would be a lying menu.
  *
+ * A listing must never prompt, and it must never be the thing that runs a
+ * cloned repository's code. `arcturn --list-models` used to `jiti.import` every
+ * file in `<cwd>/.arcturn/extensions` — a command whose entire job is to print
+ * a menu, executing the repository, with no gate anywhere in its path. So the
+ * project's extension directory is scanned only when this checkout is already
+ * trusted, which `resolveProjectTrust` can establish without asking anyone: a
+ * recorded approval, `--trust-project`, `ARCTURN_TRUST_PROJECT=1`, or
+ * `trustedProjects`. With no confirmer it can never do more than that.
+ *
  * @param cwd - Working directory override from the command line.
- * @param args - `--no-providers` / `--trust-providers`, forwarded so a listing
- *   enumerates exactly what a run with the same flags would accept.
+ * @param args - `--no-providers` / `--trust-providers` / `--trust-project` /
+ *   `--no-project-code`, forwarded so a listing enumerates exactly what a run
+ *   with the same flags would accept.
  * @returns Warnings to report; failures here are never fatal to a listing.
  */
 async function fillCatalogFromConfig(
   cwd: string | undefined,
-  args: Pick<CliArgs, "configProviders" | "trustProviders"> = {
+  args: Pick<CliArgs, "configProviders" | "trustProviders" | "projectCode" | "trustProject"> = {
     configProviders: true,
     trustProviders: false,
+    projectCode: true,
+    trustProject: false,
   },
 ): Promise<string[]> {
   try {
@@ -88,14 +128,24 @@ async function fillCatalogFromConfig(
       ...(args.configProviders ? {} : { enable: false }),
       ...(args.trustProviders ? { trustProject: true } : {}),
     });
+    const { resolveProjectTrust } = await import("./project-trust.js");
+    // No `confirm`, ever: the default is a hard `() => false`.
+    const trust = await resolveProjectTrust({
+      paths,
+      config,
+      ...(args.trustProject ? { trustProject: true } : {}),
+      ...(args.projectCode ? {} : { enable: false }),
+    });
     const host = await loadExtensions({
-      directories: [...new Set([paths.userExtensions, paths.projectExtensions])],
+      directories: trust.allowed
+        ? [...new Set([paths.userExtensions, paths.projectExtensions])]
+        : [paths.userExtensions],
       config,
       cwd: paths.cwd,
       version: version(),
       reservedToolNames: BUILT_IN_TOOL_NAMES,
     });
-    return [...providers.warnings, ...host.warnings];
+    return [...providers.warnings, ...trust.warnings, ...host.warnings];
   } catch (error) {
     return [`could not load extensions: ${error instanceof Error ? error.message : error}`];
   }
@@ -238,6 +288,7 @@ export async function runCli(args: CliArgs, options: RunCliOptions = {}): Promis
         ...(args.maxTurns === undefined ? {} : { maxTurns: args.maxTurns }),
         ...(args.maxCostUsd === undefined ? {} : { maxCostUsd: args.maxCostUsd }),
         ...providerFlags(args),
+        ...projectCodeFlags(args),
       });
     }
   }
@@ -261,6 +312,14 @@ export async function runCli(args: CliArgs, options: RunCliOptions = {}): Promis
       ...(args.cwd === undefined ? {} : { cwd: args.cwd }),
       // `--model` narrows a single-preset probe to a specific wire model id.
       ...(args.model === undefined ? {} : { model: args.model }),
+    });
+  }
+
+  if (args.command?.kind === "trust") {
+    const { runTrustCommand } = await import("./project-trust.js");
+    return runTrustCommand({
+      action: args.command.action,
+      ...(args.cwd === undefined ? {} : { cwd: args.cwd }),
     });
   }
 
@@ -313,7 +372,21 @@ export async function runCli(args: CliArgs, options: RunCliOptions = {}): Promis
       ...(args.print || process.stdout.isTTY !== true
         ? {}
         : { confirmProvider: terminalProviderConfirm }),
+      // Same test, same reason, and the ONLY site allowed to ask whether this
+      // project's own code may run. The banner is erased before the first byte
+      // of the prompt: `runCli` takes it down only after `buildRuntime`
+      // returns (see below), so a dialog that painted from inside would paint
+      // over it.
+      ...(args.print || process.stdout.isTTY !== true
+        ? {}
+        : {
+            confirmProjectTrust: (surface: ProjectCodeSurface) =>
+              terminalProjectTrustConfirm(surface, {
+                erase: () => options.bootScreen?.erase(),
+              }),
+          }),
       ...providerFlags(args),
+      ...projectCodeFlags(args),
       continueSession: args.continueSession,
     });
 
@@ -569,6 +642,7 @@ async function runReplayCommand(target: string, args: CliArgs): Promise<number> 
       ...(cwd === undefined ? {} : { cwd }),
       ...(model === undefined ? {} : { model }),
       ...providerFlags(args),
+      ...projectCodeFlags(args),
     });
   } catch (error) {
     // A `--model` the catalog does not have is a usage error. Unguarded, it
@@ -722,12 +796,20 @@ async function runServeCommand(args: CliArgs): Promise<number> {
       ...(args.webPort === undefined ? {} : { webPort: args.webPort }),
       ...(args.webOrigins === undefined ? {} : { webOrigins: args.webOrigins }),
       ...providerFlags(args),
+      ...projectCodeFlags(args),
     });
   } catch (error) {
     process.stderr.write(`arcturn: ${error instanceof Error ? error.message : String(error)}\n`);
     return 2;
   }
 
+  // Every other long-lived entry point prints these; `serve` printed none,
+  // so a project whose code was refused (always, here — nobody is at a
+  // terminal to ask) went silent about it on the surface that stays up
+  // longest. See `RunServeResult.warnings`.
+  for (const startupWarning of server.warnings) {
+    process.stderr.write(`arcturn: ${startupWarning}\n`);
+  }
   process.stdout.write(`arcturn serving on ${server.url}\n`);
   const warning = nonLoopbackWarning(args.host ?? "127.0.0.1", isLoopbackHost);
   if (warning !== undefined) process.stderr.write(warning);
@@ -787,6 +869,7 @@ async function runAcpCommand(args: CliArgs): Promise<number> {
       // cost guard only ever watches `runtime.agent`, which `arcturn acp` never
       // prompts (see createAcpHost's `maxCostUsd` below for the real wiring).
       ...providerFlags(args),
+      ...projectCodeFlags(args),
     });
   } catch (error) {
     process.stderr.write(`arcturn: ${error instanceof Error ? error.message : String(error)}\n`);
