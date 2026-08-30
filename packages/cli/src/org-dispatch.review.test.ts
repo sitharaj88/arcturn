@@ -742,7 +742,12 @@ describe("refuted: probes that came back clean", () => {
       commands: {} as never,
     });
 
-    expect(notices.at(-1)?.text).toMatch(/plan mode has no write lane/);
+    // Search every notice rather than the last: a refused step now parks the
+    // run, which appends its own question after this refusal. Whether the
+    // park lands depends on the fake runtime's paths being writable, which
+    // differs by platform — the invariant under test is that plan mode
+    // refused the write lane at all, not that it spoke last.
+    expect(notices.map((n) => n.text).join("\n")).toMatch(/plan mode has no write lane/);
     expect(lane.created).toEqual([]);
   });
 
