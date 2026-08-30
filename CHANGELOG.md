@@ -10,9 +10,9 @@ CLI, the SDK, or the wire protocol.
 
 ## [Unreleased]
 
-## [0.5.7] — 2026-08-30
+## [0.5.8] — 2026-08-30
 
-The repository you cloned gets asked first.
+A run that ran out of rope now asks for more, instead of dying.
 
 ### Added
 
@@ -58,6 +58,11 @@ The repository you cloned gets asked first.
   which restarted at 0 on every resume, so a retry died with "a worktree
   already exists". The index now continues across resumes.
 
+## [0.5.7] — 2026-08-30
+
+The repository you cloned gets asked first.
+
+### Added
 
 - **A repository you cloned no longer runs its own code because you `cd`'d
   into it.** `<repo>/.arcturn` can declare lifecycle hooks, a `verify`

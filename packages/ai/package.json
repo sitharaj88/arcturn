@@ -1,6 +1,6 @@
 {
   "name": "@arcturn/ai",
-  "version": "0.5.7",
+  "version": "0.5.8",
   "description": "Unified multi-provider LLM streaming client for the Arcturn agent harness",
   "license": "Apache-2.0",
   "publishConfig": {
