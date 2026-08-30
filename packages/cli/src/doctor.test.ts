@@ -1,10 +1,17 @@
 import { join } from "node:path";
 import type { AIError, AssistantMessage, LLMClient, LLMRequest, StreamEvent } from "@arcturn/types";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import type { DoctorCommand } from "./args.js";
 import { parseArgs } from "./args.js";
 import { runDoctorCommand } from "./doctor.js";
+import { resetConfiguredProviders } from "./providers.js";
 import { makeScratch, writeFileAt } from "./test-helpers/scratch.js";
+
+// Not `resetCatalog()`: `registerBundledCatalog` is latched, so clearing the
+// whole catalog would leave the presets unregistered for every later test.
+afterEach(() => {
+  resetConfiguredProviders();
+});
 
 function parseDoctor(argv: string[]): DoctorCommand {
   const result = parseArgs(argv);
@@ -333,6 +340,38 @@ describe("runDoctorCommand: default scan", () => {
     expect(out).toContain("failover chain");
     const probed = requests.map((request) => request.model.id).sort();
     expect(probed).toEqual(["zai-api/glm-4.7", "zai-api/glm-5", "zai/glm-5.3"]);
+  });
+
+  it("probes a USER-declared provider endpoint, which is the user's own file and trusted", async () => {
+    const scratch = await makeScratch();
+    await writeFileAt(
+      join(scratch.home, "config.json"),
+      JSON.stringify({
+        providers: {
+          mycorp: {
+            baseUrl: "https://llm.corp.internal/v1",
+            apiKeyEnv: "MYCORP_LLM_KEY",
+            label: "MyCorp Gateway",
+          },
+        },
+        model: "mycorp/llama-70b",
+      }),
+    );
+    const { code, out, requests } = await runDoctor(
+      ["doctor"],
+      { ARCTURN_HOME: scratch.home, MYCORP_LLM_KEY: "k" },
+      {},
+      { cwd: scratch.cwd },
+    );
+    expect(code).toBe(0);
+    expect(requests.map((request) => request.model.id)).toEqual(["mycorp/llama-70b"]);
+    expect(requests[0]?.model.baseUrl).toBe("https://llm.corp.internal/v1");
+    // The Config section says what a session would talk to, including state.
+    expect(out).toContain("providers.mycorp");
+    expect(out).toContain("enabled");
+    // Never the key value, only the variable's name.
+    expect(out).toContain("MYCORP_LLM_KEY");
+    expect(out).not.toMatch(/\bkey k\b/);
   });
 
   it("fails when the session model's key is absent, without sending anything", async () => {

@@ -14,7 +14,15 @@
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
+import {
+  DEFAULT_API_KEY_ENV,
+  FALLBACK_API_KEY_ENV,
+  listProviderIds,
+  PROVIDER_PRESETS,
+} from "@arcturn/ai";
 import type {
+  ModelCapabilities,
+  ModelCost,
   PermissionMode,
   PermissionRule,
   PermissionScope,
@@ -32,6 +40,72 @@ import type { VerifyConfig } from "./verify.js";
 
 /** Lower rank wins when rules from different scopes disagree. */
 const SCOPE_RANK: Record<PermissionScope, number> = { session: 0, project: 1, user: 2 };
+
+/**
+ * Wire protocol a {@link ConfiguredProvider}'s endpoint speaks. Deliberately
+ * the same two words `@arcturn/ai`'s `PresetProtocol` uses, because a
+ * configured provider *is* a preset the user wrote down themselves.
+ */
+export type ProviderProtocol = "openai" | "anthropic";
+
+/** Facts about one model under a {@link ConfiguredProvider}. */
+export interface ConfiguredProviderModel {
+  /** Wire model name, passed through to the endpoint verbatim. */
+  readonly model: string;
+  readonly displayName?: string;
+  readonly contextWindow?: number;
+  readonly maxOutputTokens?: number;
+  readonly capabilities?: Partial<ModelCapabilities>;
+  /** Absent means "price unknown", never free — see `formatModelCatalog`. */
+  readonly cost?: ModelCost;
+}
+
+/**
+ * A provider endpoint declared in a config file rather than in code.
+ *
+ * The record mirrors `@arcturn/ai`'s `ProviderPreset` on purpose: `providerSpec`
+ * already knows how to turn exactly this shape into a `ModelSpec`, including
+ * the protocol→provider mapping, so a declared endpoint reaches the wire down
+ * the same path the 35 built-in presets do. Ids are namespaced the same way
+ * too — `<name>/<model>`.
+ *
+ * {@link scope} and {@link source} are not user-writable: they record WHICH
+ * FILE asked, which is what the consent gate in `providers.ts` is keyed on. A
+ * `user` declaration is the user's own file and is trusted; a `project` one
+ * is inert until consented, because a cloned repository is not consent.
+ */
+export interface ConfiguredProvider {
+  /** Short name; becomes the `<name>/<model>` id prefix. */
+  readonly name: string;
+  /** Human-readable name for listings; defaults to {@link name}. */
+  readonly label: string;
+  /**
+   * Endpoint root handed straight to the SDK's `baseURL`.
+   *
+   * Always the NORMALIZED form (`new URL(...).href`), never the string as
+   * written: this value is printed in the consent prompt, in
+   * `--list-providers`, in `arcturn doctor` and in the model-resolution hint.
+   */
+  readonly baseUrl: string;
+  /**
+   * Environment variable holding this endpoint's API key, and the ONLY
+   * credential it may ever be sent — specs built from this record set
+   * `apiKeyEnvExclusive`, so there is no fallback to a first-party key.
+   *
+   * Required for a remote endpoint. Absent only for a loopback one, which is
+   * then contacted with no credential at all — the keyless local runtime
+   * (Ollama, LM Studio, vLLM) this exemption exists for. See
+   * {@link parseConfigFile}'s provider block.
+   */
+  readonly apiKeyEnv?: string;
+  readonly protocol: ProviderProtocol;
+  /** Curated models. Absent means ids pass through verbatim. */
+  readonly models?: readonly ConfiguredProviderModel[];
+  /** Scope of the file that declared this entry. */
+  readonly scope: PermissionScope;
+  /** Absolute path of the file that declared this entry. */
+  readonly source: string;
+}
 
 /**
  * TUI theme name: `"dark"`, `"light"`, or the name of a custom theme file
@@ -182,6 +256,20 @@ export interface ArcturnConfig {
    * wholesale — see {@link mergeConfig}.
    */
   route?: RouterConfig;
+  /**
+   * Extra provider endpoints — an enterprise gateway, a vLLM cluster, Ollama
+   * on a non-default host — keyed by short name, reachable as
+   * `<name>/<model>`.
+   *
+   * Merged key-wise across layers with the USER layer winning, unlike
+   * `route`: a project file may ADD a name the user never declared, but may
+   * never repoint one the user did. See {@link mergeConfig}.
+   *
+   * Declaring is not enabling. A project-layer entry is parsed, validated and
+   * listed but never registered and never contacted until the user consents;
+   * `registerConfiguredProviders` in `providers.ts` owns that gate.
+   */
+  providers?: Record<string, ConfiguredProvider>;
 }
 
 /** Result of {@link loadConfig}. */
@@ -258,6 +346,7 @@ const KNOWN_KEYS = new Set([
   "speculation",
   "sessionTitles",
   "route",
+  "providers",
   "taint",
   "canary",
   "canaries",
@@ -318,6 +407,367 @@ function parseRule(
     scope: ruleScope,
     ...(typeof specifier === "string" ? { specifier } : {}),
   };
+}
+
+/**
+ * Whether a base URL points at this machine.
+ *
+ * The one place the loopback exemption is written down, shared by the
+ * `providers` cleartext rule below and by `arcturn doctor` (local runtimes —
+ * Ollama, LM Studio, vLLM — need no key, and probing one during the default
+ * scan would report "network" for a server that was simply never started).
+ */
+export function isLocalEndpoint(baseUrl: string): boolean {
+  try {
+    const host = new URL(baseUrl).hostname;
+    return host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Environment variables a PROJECT file may not name as a provider's key.
+ *
+ * Derived from the catalog's own tables so it cannot drift, and the derivation
+ * is the whole point: the set is every provider default (`ANTHROPIC_API_KEY`,
+ * `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `AZURE_OPENAI_API_KEY`, …), every
+ * per-provider fallback (`ANTHROPIC_AUTH_TOKEN`, `GEMINI_API_KEY`,
+ * `GOOGLE_GENAI_API_KEY`), **and every `PROVIDER_PRESETS` entry's
+ * `apiKeyEnv`** — the last of which was the hole: `DEFAULT_API_KEY_ENV` and
+ * `FALLBACK_API_KEY_ENV` are keyed by `ProviderId`, so not one of the presets'
+ * variables (`ZAI_API_KEY`, `GROQ_API_KEY`, `OPENROUTER_API_KEY`, `HF_TOKEN`,
+ * …) was in it and a project file could name any of them. Add a preset and its
+ * variable joins this set with no edit here.
+ *
+ * Names are compared UPPERCASED. `process.env` is case-insensitive on Windows,
+ * where an exact-case `Set.has` would have let `"openai_api_key"` through to
+ * resolve the real key. Anything beginning `AWS_` is refused by prefix, since
+ * the AWS credential chain reads a family of names rather than one.
+ *
+ * The rule is scoped to the project layer on purpose. A user-layer file
+ * proxying Anthropic through LiteLLM is a real, legitimate setup and stays
+ * allowed; no cloned repository has a reason to ask that a key YOU hold for
+ * somebody else be sent to ITS gateway.
+ */
+const FIRST_PARTY_KEY_ENV: ReadonlySet<string> = new Set(
+  [
+    ...Object.values(DEFAULT_API_KEY_ENV),
+    ...Object.values(FALLBACK_API_KEY_ENV).flat(),
+    ...Object.values(PROVIDER_PRESETS).map((preset) => preset.apiKeyEnv),
+    "GEMINI_API_KEY",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "OPENAI_BASE_URL",
+    "ANTHROPIC_BASE_URL",
+    // Not a model credential, but a repository asking for it is asking for a
+    // token you hold for somebody else, which is the same rule.
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+  ].map((name) => name.toUpperCase()),
+);
+
+/** Whether a project file naming this variable would be borrowing a credential of yours. */
+function isFirstPartyKeyEnv(name: string): boolean {
+  const upper = name.toUpperCase();
+  return FIRST_PARTY_KEY_ENV.has(upper) || upper.startsWith("AWS_");
+}
+
+/**
+ * Whether `value` holds a character a `baseUrl` may never contain: a C0
+ * control, DEL, or a C1 control.
+ *
+ * `new URL` is not a filter here. It strips tab, LF and CR before parsing and
+ * percent-encodes ESC and BEL into the path, so a URL that validates can still
+ * carry an escape sequence back out through the string the config stores. That
+ * string is printed into the terminal prompt asking whether to trust the
+ * endpoint, where a cursor-movement or erase-line sequence repaints the prompt
+ * — a fully spoofed dialog naming a trusted host, and claiming a prior
+ * approval, was demonstrated with newlines alone. Refusing the characters at
+ * parse time is cheaper than teaching four separate printers to sanitise, and
+ * no real endpoint URL contains one.
+ */
+function hasControlCharacter(value: string): boolean {
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    if (code <= 0x1f || (code >= 0x7f && code <= 0x9f)) return true;
+  }
+  return false;
+}
+
+/** Names that already mean something to `--model`, and so may never be shadowed. */
+function isReservedProviderName(name: string): boolean {
+  if (PROVIDER_PRESETS[name] !== undefined) return true;
+  return (listProviderIds() as string[]).includes(name);
+}
+
+/**
+ * Validate one declared model's `cost`.
+ *
+ * Both rates must be finite and non-negative. A negative rate is not a typo
+ * with a harmless outcome: `--max-cost` sums these, so a model priced at
+ * `-1000` per million tokens *earns* budget on every turn and the ceiling
+ * never trips, and the same figure lands in the session stats and the cost
+ * readout. Absent (or refused) means "price unknown", which those surfaces
+ * already print honestly.
+ */
+function parseModelCost(raw: unknown): ModelCost | undefined {
+  if (!isRecord(raw)) return undefined;
+  const rate = (value: unknown): number | undefined =>
+    typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+  const input = rate(raw.input);
+  const output = rate(raw.output);
+  if (input === undefined || output === undefined) return undefined;
+  const cacheRead = rate(raw.cacheRead);
+  const cacheWrite = rate(raw.cacheWrite);
+  return {
+    input,
+    output,
+    ...(cacheRead === undefined ? {} : { cacheRead }),
+    ...(cacheWrite === undefined ? {} : { cacheWrite }),
+  };
+}
+
+/** Boolean capability flags, and the one enumerated field. */
+const CAPABILITY_FLAGS = ["tools", "vision", "thinking", "caching"] as const;
+const THINKING_STYLES = ["budget", "adaptive"] as const;
+
+/**
+ * Validate a declared model's `capabilities` field by field.
+ *
+ * It used to be an unchecked cast, so `{ thinkingStyle: "bogus", extra: "x" }`
+ * reached the adapters as a `ModelCapabilities`: an invented `thinkingStyle`
+ * decides the shape of the thinking parameter an adapter sends, and an unknown
+ * key rides along into every consumer that spreads the record. Each field is
+ * dropped on its own, with a warning naming it — a bad `vision` flag must not
+ * cost the entry its correct `tools` flag.
+ */
+function parseModelCapabilities(
+  raw: Record<string, unknown>,
+  where: string,
+  name: string,
+  warnings: string[],
+): Partial<ModelCapabilities> {
+  const out: Partial<ModelCapabilities> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if ((CAPABILITY_FLAGS as readonly string[]).includes(key)) {
+      if (typeof value === "boolean") out[key as (typeof CAPABILITY_FLAGS)[number]] = value;
+      else {
+        warnings.push(
+          `${where}: "providers.${name}.models[].capabilities.${key}" must be true or false (ignored)`,
+        );
+      }
+      continue;
+    }
+    if (key === "thinkingStyle") {
+      if ((THINKING_STYLES as readonly string[]).includes(value as string)) {
+        out.thinkingStyle = value as ModelCapabilities["thinkingStyle"];
+      } else {
+        warnings.push(
+          `${where}: "providers.${name}.models[].capabilities.thinkingStyle" must be ` +
+            `"budget" or "adaptive" (ignored)`,
+        );
+      }
+      continue;
+    }
+    warnings.push(
+      `${where}: unknown "providers.${name}.models[].capabilities" key "${key}" (ignored)`,
+    );
+  }
+  return out;
+}
+
+function parseProviderModels(
+  raw: unknown,
+  where: string,
+  name: string,
+  warnings: string[],
+): ConfiguredProviderModel[] | undefined {
+  if (!Array.isArray(raw)) {
+    warnings.push(`${where}: "providers.${name}.models" must be an array`);
+    return undefined;
+  }
+  const models: ConfiguredProviderModel[] = [];
+  for (const entry of raw) {
+    if (!isRecord(entry) || typeof entry.model !== "string" || entry.model.trim() === "") {
+      warnings.push(`${where}: "providers.${name}.models" entries need a non-empty "model"`);
+      continue;
+    }
+    const model: ConfiguredProviderModel = { model: entry.model.trim() };
+    const numbers: Partial<Record<"contextWindow" | "maxOutputTokens", number>> = {};
+    for (const key of ["contextWindow", "maxOutputTokens"] as const) {
+      const value = entry[key];
+      if (value === undefined) continue;
+      if (typeof value === "number" && Number.isInteger(value) && value > 0) numbers[key] = value;
+      else
+        warnings.push(`${where}: "providers.${name}.models[].${key}" must be a positive integer`);
+    }
+    const cost = parseModelCost(entry.cost);
+    if (entry.cost !== undefined && cost === undefined) {
+      warnings.push(
+        `${where}: "providers.${name}.models[].cost" must be { input, output } with ` +
+          "non-negative rates in USD per million tokens",
+      );
+    }
+    models.push({
+      ...model,
+      ...numbers,
+      ...(typeof entry.displayName === "string" && entry.displayName.trim() !== ""
+        ? { displayName: entry.displayName.trim() }
+        : {}),
+      ...(isRecord(entry.capabilities)
+        ? { capabilities: parseModelCapabilities(entry.capabilities, where, name, warnings) }
+        : {}),
+      ...(cost === undefined ? {} : { cost }),
+    });
+  }
+  return models;
+}
+
+/**
+ * Validate the `providers` block of one config file.
+ *
+ * Every rule below is `warnings.push` + drop that one entry — never a throw,
+ * never a whole-file rejection, exactly like the rest of this module. In
+ * order:
+ *
+ * 1. The name must be usable as an id prefix and must not already mean
+ *    something: a collision with a `PROVIDER_PRESETS` name or a registered
+ *    provider id is dropped rather than allowed to shadow it.
+ * 2. `baseUrl` must parse, must not still carry a `{placeholder}`, must carry
+ *    no control character (see {@link hasControlCharacter}), and must be
+ *    `https:` — `http:` only for a loopback host. A cleartext remote endpoint
+ *    is a credential on the wire. What is STORED is `parsedUrl.href`, the
+ *    normalized form, never the string as typed: four surfaces print this
+ *    value (the consent dialog, `--list-providers`, `arcturn doctor` and the
+ *    model-resolution hint) and normalizing once here fixes all four.
+ * 3. `apiKeyEnv` is REQUIRED for a remote endpoint, and this is the subtlest
+ *    rule here. A spec built from configuration is registered with
+ *    `apiKeyEnvExclusive`, so the variable it names is the ONLY credential it
+ *    can ever receive — but a spec naming NO variable would be a keyless
+ *    endpoint, which is a real thing only for a local runtime. So: a loopback
+ *    `baseUrl` may omit it and is then contacted with no credential at all
+ *    (the Ollama/LM Studio/vLLM case); anything remote must name one, which
+ *    also makes the credential choice visible in the file and reviewable in a
+ *    diff.
+ * 4. From the PROJECT layer only, `apiKeyEnv` may not name a variable holding
+ *    a credential you keep for someone else — see {@link FIRST_PARTY_KEY_ENV}.
+ */
+function parseProviders(
+  raw: unknown,
+  scope: PermissionScope,
+  where: string,
+  warnings: string[],
+): Record<string, ConfiguredProvider> | undefined {
+  if (!isRecord(raw)) {
+    warnings.push(`${where}: "providers" must be an object keyed by provider name`);
+    return undefined;
+  }
+  const providers: Record<string, ConfiguredProvider> = {};
+  for (const [name, entry] of Object.entries(raw)) {
+    const at = `"providers.${name}"`;
+    if (name.trim() === "" || /[^A-Za-z0-9._-]/.test(name)) {
+      warnings.push(
+        `${where}: ${at} name must be letters, digits, dot, dash or underscore ` +
+          "(it becomes the <name>/<model> id prefix)",
+      );
+      continue;
+    }
+    if (isReservedProviderName(name)) {
+      warnings.push(
+        `${where}: ${at} collides with a built-in provider or preset of the same name — ` +
+          "dropped rather than allowed to shadow it; pick another name",
+      );
+      continue;
+    }
+    if (!isRecord(entry)) {
+      warnings.push(`${where}: ${at} must be an object`);
+      continue;
+    }
+    const baseUrl = typeof entry.baseUrl === "string" ? entry.baseUrl.trim() : "";
+    if (baseUrl === "") {
+      warnings.push(`${where}: ${at} needs a non-empty "baseUrl"`);
+      continue;
+    }
+    if (baseUrl.includes("{")) {
+      warnings.push(
+        `${where}: ${at} baseUrl still contains a placeholder (${baseUrl}) — ` +
+          "fill in your ids before it can be used",
+      );
+      continue;
+    }
+    // Before `new URL`, which is not a filter: it strips tab/LF/CR and encodes
+    // ESC and BEL rather than refusing them, so a "valid" URL could still carry
+    // an escape sequence into the consent dialog it is printed in.
+    if (hasControlCharacter(baseUrl)) {
+      warnings.push(
+        `${where}: ${at} baseUrl contains a control character — refused, because this ` +
+          "URL is printed in the prompt that asks whether to trust the endpoint, and " +
+          "an escape sequence there can repaint that prompt to say anything",
+      );
+      continue;
+    }
+    let parsedUrl: URL;
+    try {
+      parsedUrl = new URL(baseUrl);
+    } catch {
+      warnings.push(`${where}: ${at} baseUrl is not a valid URL (${baseUrl})`);
+      continue;
+    }
+    if (parsedUrl.protocol !== "https:") {
+      if (parsedUrl.protocol !== "http:" || !isLocalEndpoint(baseUrl)) {
+        warnings.push(
+          `${where}: ${at} baseUrl must be https: (${baseUrl}) — ` +
+            "plain http is accepted only for a loopback host, because an API key " +
+            "sent in the clear to a remote host is a leaked credential",
+        );
+        continue;
+      }
+    }
+    // The normalized form, so every printer shows the URL that will actually be
+    // dialled rather than the characters the file happened to contain.
+    const normalizedUrl = parsedUrl.href;
+    const apiKeyEnv = typeof entry.apiKeyEnv === "string" ? entry.apiKeyEnv.trim() : "";
+    if (apiKeyEnv === "" && !isLocalEndpoint(normalizedUrl)) {
+      warnings.push(
+        `${where}: ${at} needs "apiKeyEnv" naming the environment variable holding its key — ` +
+          "only a loopback endpoint may omit it (a local runtime that needs no credential). " +
+          "A declared endpoint is sent the variable it names and nothing else: it never falls " +
+          "back to OPENAI_API_KEY or ANTHROPIC_API_KEY, so an entry that omits it has no way " +
+          "to authenticate at all",
+      );
+      continue;
+    }
+    if (scope === "project" && apiKeyEnv !== "" && isFirstPartyKeyEnv(apiKeyEnv)) {
+      warnings.push(
+        `${where}: ${at} names the credential "${apiKeyEnv}", which you hold for another ` +
+          "service — a project file may not point one of your vendor keys at its own " +
+          "endpoint; declare it in ~/.arcturn/config.json if this is really what you want",
+      );
+      continue;
+    }
+    const rawProtocol = entry.protocol ?? "openai";
+    if (rawProtocol !== "openai" && rawProtocol !== "anthropic") {
+      warnings.push(`${where}: ${at} "protocol" must be "openai" or "anthropic"`);
+      continue;
+    }
+    const label =
+      typeof entry.label === "string" && entry.label.trim() !== "" ? entry.label.trim() : name;
+    const models =
+      entry.models === undefined
+        ? undefined
+        : parseProviderModels(entry.models, where, name, warnings);
+    providers[name] = {
+      name,
+      label,
+      baseUrl: normalizedUrl,
+      ...(apiKeyEnv === "" ? {} : { apiKeyEnv }),
+      protocol: rawProtocol,
+      ...(models === undefined ? {} : { models }),
+      scope,
+      source: where,
+    };
+  }
+  return providers;
 }
 
 /**
@@ -477,6 +927,10 @@ export function parseConfigFile(
     } else {
       warnings.push(`${where}: "route" must be an object of model ids`);
     }
+  }
+  if (raw.providers !== undefined) {
+    const providers = parseProviders(raw.providers, scope, where, warnings);
+    if (providers !== undefined) out.providers = providers;
   }
   if (raw.audit !== undefined) {
     if (typeof raw.audit === "boolean") out.audit = raw.audit;
@@ -698,13 +1152,61 @@ export function parseConfigFile(
 }
 
 /**
+ * Key-wise union of two `providers` blocks with the BASE winning collisions.
+ *
+ * Note the direction, which is the opposite of every other key here and is
+ * the whole point. {@link mergeConfig} is called with the USER layer as
+ * `base` and the PROJECT layer as `layer`, so "base wins" means "the user's
+ * declaration of a name is the one that stands". A project file may ADD a
+ * name the user never declared — subject to the consent gate in
+ * `providers.ts` — but it may never REPOINT one the user did. That is
+ * `matchRules`' "a project allow cannot cancel a user deny" written for a
+ * keyed map.
+ *
+ * The two alternatives were both attacks. Wholesale replacement (what `route`
+ * does) would let a project file DELETE the user's endpoints; a naive
+ * `{...base, ...layer}` would let it SHADOW a user name — point `mycorp` at
+ * its own host and inherit whatever trust the name had.
+ *
+ * A dropped project entry is warned about by name, with both files quoted:
+ * silence here is what made the `route` layering confusing enough to need a
+ * paragraph of `/model route` output explaining it.
+ */
+function mergeProviders(
+  base: ArcturnConfig["providers"],
+  layer: Partial<ArcturnConfig>["providers"],
+  warnings: string[],
+): Record<string, ConfiguredProvider> | undefined {
+  if (base === undefined && layer === undefined) return undefined;
+  for (const [name, entry] of Object.entries(layer ?? {})) {
+    const existing = base?.[name];
+    if (existing === undefined) continue;
+    warnings.push(
+      `${entry.source}: provider "${name}" is already declared in ${existing.source} ` +
+        `(pointing at ${existing.baseUrl}) — the user-level declaration wins and this one ` +
+        "is ignored; rename it to add a second endpoint",
+    );
+  }
+  return { ...layer, ...base };
+}
+
+/**
  * Merge a config layer over a base, concatenating permission rules.
  *
  * @param base - Lower-priority config.
  * @param layer - Higher-priority partial config.
+ * @param warnings - Collector for merge-time drops (currently `providers`
+ *   collisions). Optional: a caller that only wants the merged value can omit
+ *   it, and `loadConfig` passes its own so the drop reaches the user.
  */
-export function mergeConfig(base: ArcturnConfig, layer: Partial<ArcturnConfig>): ArcturnConfig {
+export function mergeConfig(
+  base: ArcturnConfig,
+  layer: Partial<ArcturnConfig>,
+  warnings: string[] = [],
+): ArcturnConfig {
+  const providers = mergeProviders(base.providers, layer.providers, warnings);
   return {
+    ...(providers === undefined ? {} : { providers }),
     model: layer.model ?? base.model,
     permissionMode: layer.permissionMode ?? base.permissionMode,
     permissions: [...base.permissions, ...(layer.permissions ?? [])],
@@ -829,7 +1331,11 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Loade
     permissions: [],
     hooks: { preToolUse: [], postToolUse: [], sessionStart: [], runEnd: [] },
   };
-  config = mergeConfig(config, await readLayer(paths.userConfig, "user", sources, warnings));
+  config = mergeConfig(
+    config,
+    await readLayer(paths.userConfig, "user", sources, warnings),
+    warnings,
+  );
   // When arcturn runs from the user root itself (cwd is `~`), `<cwd>/.arcturn` *is*
   // `~/.arcturn` and the "project" file is the user file — reading it again would
   // load every rule twice, so the project layer is skipped.
@@ -837,6 +1343,7 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Loade
     config = mergeConfig(
       config,
       await readLayer(paths.projectConfig, "project", sources, warnings),
+      warnings,
     );
   }
   config = applyEnv(config, env);

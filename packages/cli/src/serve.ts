@@ -938,6 +938,18 @@ export interface RunServeOptions {
    * {@link webClientOrigins}.
    */
   webOrigins?: readonly string[];
+  /**
+   * `--no-providers`: parse and list every `providers` block, register nothing.
+   * Forwarded to {@link buildRuntime}. A served runtime never gets a confirmer
+   * — nobody is at a terminal — so a project-declared endpoint is inert here
+   * either way; this switch is what also turns off a USER-declared one.
+   */
+  configProviders?: boolean;
+  /**
+   * `--trust-providers`: enable project-declared endpoints without asking, for
+   * a pipeline that already trusts the repository it checked out.
+   */
+  trustProviders?: boolean;
 }
 
 /** What {@link runServe} hands back to its caller (`main.ts`). */
@@ -973,6 +985,8 @@ export async function runServe(options: RunServeOptions = {}): Promise<RunServeR
   const runtime: ArcturnRuntime = await buildRuntime({
     ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
     ...(options.model === undefined ? {} : { model: options.model }),
+    ...(options.configProviders === undefined ? {} : { configProviders: options.configProviders }),
+    ...(options.trustProviders === undefined ? {} : { trustProviders: options.trustProviders }),
   });
 
   const sessionHost = createServeHost(

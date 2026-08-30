@@ -88,7 +88,12 @@ import {
   createCheckpointStore,
   wrapToolsWithCheckpoints,
 } from "./checkpoints.js";
-import { type ArcturnConfig, loadConfig, persistPermissionRule } from "./config.js";
+import {
+  type ArcturnConfig,
+  isLocalEndpoint,
+  loadConfig,
+  persistPermissionRule,
+} from "./config.js";
 import { createCostGuard } from "./cost-guard.js";
 import { type ExtensionCommand, ExtensionHost, loadExtensions } from "./extensions.js";
 import { createHookRunner, type HookRunner, wrapToolsWithHooks } from "./hooks.js";
@@ -101,6 +106,15 @@ import { createOverlay, type Overlay, wrapToolsWithOverlay } from "./overlay.js"
 import { type ArcturnPaths, cwdHash, type EnvMap, resolveArcturnPaths } from "./paths.js";
 import { createPolicyLearner, type PolicyLearner } from "./policy-learn.js";
 import { createProvenanceStore, type ProvenanceStore, provenanceObserver } from "./provenance.js";
+import {
+  type ConfiguredProviderStatus,
+  type ConfirmProvider,
+  configuredProviderSpec,
+  configuredProviderStatuses,
+  declaredProviderHint,
+  enabledConfiguredProvider,
+  registerConfiguredProviders,
+} from "./providers.js";
 import { createModelRouter, type ModelRouter } from "./router.js";
 import {
   createTitleGenerator,
@@ -215,6 +229,33 @@ export function registerBundledCatalog(): boolean {
 }
 
 /**
+ * Whether {@link resolveModelSpec} insists on finding a key for this spec.
+ *
+ * The `openai-compatible` exemption exists for KEYLESS LOCALHOST RUNTIMES —
+ * Ollama, LM Studio, a vLLM server on this machine — which legitimately need
+ * no credential at all. It is deliberately NOT extended to a remote endpoint
+ * declared in a `providers` config block: those authenticate, they were given
+ * an `apiKeyEnv` precisely so the credential choice is explicit, and letting
+ * one start a session with no key would send an empty bearer to a corporate
+ * gateway and report the resulting 401 as the gateway's fault.
+ *
+ * The waiver is about the ENDPOINT, not about the credential. A declared
+ * loopback entry that does name an `apiKeyEnv` and does not have it set still
+ * resolves here — and then fails at adapter construction with `No API key for
+ * <id>; set <VAR>`, because a spec that names a variable expects one. It no
+ * longer borrows `OPENAI_API_KEY` on the way there. The genuinely keyless
+ * local runtime is declared with NO `apiKeyEnv` at all (`parseProviders`
+ * permits that for a loopback host only), and reaches the wire with the
+ * adapters' `not-required` placeholder, as it always did.
+ */
+function requiresApiKey(spec: ModelSpec): boolean {
+  if (spec.provider !== "openai-compatible") return true;
+  const declared = enabledConfiguredProvider(spec.id);
+  if (declared === undefined) return false;
+  return !isLocalEndpoint(declared.baseUrl);
+}
+
+/**
  * Resolve a model id against the catalog and verify its API key is present.
  *
  * @param id - Catalog id (`anthropic/claude-sonnet-4-5`) or bare wire name.
@@ -222,17 +263,35 @@ export function registerBundledCatalog(): boolean {
  * @throws {ModelResolutionError} When the id is unknown or no key is set.
  */
 export function resolveModelSpec(id: string, env: EnvMap = process.env): ModelSpec {
-  const spec = getModel(id);
+  // A configured provider that curates no `models` list passes ids through to
+  // the wire verbatim, so `<name>/<anything>` resolves — but only for a
+  // provider that is actually ENABLED. A project-declared one nobody
+  // consented to resolves to nothing, exactly as if it were never written.
+  const spec = getModel(id) ?? configuredProviderSpec(id);
   if (!spec) {
+    const hint = declaredProviderHint(id);
     throw new ModelResolutionError(
-      `Unknown model "${id}".\n\n${formatModelCatalog()}\n\n` +
-        "Register extra models from an extension with registerModel() from @arcturn/ai.",
+      `Unknown model "${id}".\n\n${hint === undefined ? "" : `${hint}\n\n`}` +
+        `${formatModelCatalog()}\n\n` +
+        'Add an endpoint of your own with a "providers" block in ~/.arcturn/config.json ' +
+        "(arcturn --list-providers shows the ones you have), or register a model from an " +
+        "extension with registerModel() from @arcturn/ai.",
     );
   }
-  if (spec.provider !== "openai-compatible" && !resolveApiKey(spec, { env })) {
+  if (requiresApiKey(spec) && !resolveApiKey(spec, { env })) {
     const envVar = spec.apiKeyEnv ?? "the provider API key environment variable";
+    // A config-declared endpoint's credential is exactly the variable its file
+    // named — there is no fallback to borrow — so the file is half the answer
+    // to "which one do I set, and where did this provider come from?".
+    const declared = enabledConfiguredProvider(spec.id);
+    const declaredIn =
+      declared === undefined
+        ? ""
+        : `Provider "${declared.name}" is declared in ${declared.source}, and ` +
+          `${envVar} is the only credential it may be sent.\n`;
     throw new ModelResolutionError(
       `No API key found for ${spec.displayName} (${spec.id}).\n` +
+        declaredIn +
         `Set ${envVar} in your environment, or pick another model with --model.`,
     );
   }
@@ -289,6 +348,11 @@ function toCatalogEntry(spec: ModelSpec, env: EnvMap): ModelCatalogEntry {
  * skips the key check for exactly that provider. Reporting either as
  * `"absent"` would tell a user they cannot use a model they can.
  *
+ * The second bucket is narrower than "every openai-compatible spec": a REMOTE
+ * endpoint from a `providers` config block is reported `"absent"`, because
+ * {@link requiresApiKey} makes `resolveModelSpec` refuse it. The two read the
+ * same predicate so they cannot drift.
+ *
  * Bedrock and Vertex are *not* in that bucket: their specs do name a variable
  * (`AWS_BEARER_TOKEN_BEDROCK`, `GOOGLE_APPLICATION_CREDENTIALS`), and
  * `resolveModelSpec` refuses to start a session without it, so an unset one
@@ -297,7 +361,7 @@ function toCatalogEntry(spec: ModelSpec, env: EnvMap): ModelCatalogEntry {
  */
 function credentialStatus(spec: ModelSpec, env: EnvMap): ModelCredentialStatus {
   if (resolveApiKey(spec, { env })) return "present";
-  if (spec.provider === "openai-compatible" || spec.apiKeyEnv === undefined) return "unknown";
+  if (spec.apiKeyEnv === undefined || !requiresApiKey(spec)) return "unknown";
   return "absent";
 }
 
@@ -331,11 +395,52 @@ const KEY_ABSENT = "✗";
  * variable is set right now, so a user can tell "not configured" from
  * "misconfigured" without reading any docs.
  *
+ * Endpoints declared in a `providers` config block get their own section, and
+ * it prints STATE as well as facts: a project-layer entry nobody has consented
+ * to shows as `declared (not enabled)` with the file that declared it, because
+ * "I put it in the config and nothing happened" is otherwise unanswerable.
+ *
  * @param env - Environment consulted for key presence. Defaults to `process.env`.
+ * @param configured - Declared providers to render. Defaults to whatever the
+ *   last `registerConfiguredProviders` call saw, which is what every CLI
+ *   listing surface wants; tests pass their own.
  */
-export function formatProviderCatalog(env: EnvMap = process.env): string {
+export function formatProviderCatalog(
+  env: EnvMap = process.env,
+  configured: readonly ConfiguredProviderStatus[] = configuredProviderStatuses(),
+): string {
   const lines: string[] = ["Registered providers (model spec `provider` field):", ""];
   for (const id of listProviderIds()) lines.push(`  ${id}`);
+
+  if (configured.length > 0) {
+    lines.push("", "Configured providers (from your config `providers` block):", "");
+    const width = configured.reduce((max, entry) => Math.max(max, entry.name.length), 0);
+    for (const entry of configured) {
+      // A keyless loopback endpoint names no variable, so there is no key to
+      // report present or absent — saying "no key" of one would read as broken.
+      const credential =
+        entry.apiKeyEnv === undefined
+          ? "(no credential)"
+          : `${entry.apiKeyEnv} ${env[entry.apiKeyEnv] ? KEY_PRESENT : KEY_ABSENT}`;
+      const state = entry.enabled ? "enabled" : "declared (not enabled)";
+      lines.push(
+        `  ${entry.name.padEnd(width)}  ${entry.label}  ${entry.protocol}  ` +
+          `${entry.baseUrl}  ${credential}  ${state}`,
+      );
+      lines.push(
+        `  ${" ".repeat(width)}  declared in ${entry.source}` +
+          (entry.enabled || entry.reason === undefined ? "" : ` · ${entry.reason}`),
+      );
+    }
+    if (configured.some((entry) => !entry.enabled)) {
+      lines.push(
+        "",
+        "A provider from a project config is never contacted until you approve it: run " +
+          "arcturn interactively once and answer the prompt, move the declaration to " +
+          "~/.arcturn/config.json, or pass --trust-providers in CI that already trusts this repo.",
+      );
+    }
+  }
 
   const presets = listPresets(env);
   const nameWidth = presets.reduce((max, preset) => Math.max(max, preset.name.length), 0);
@@ -350,11 +455,11 @@ export function formatProviderCatalog(env: EnvMap = process.env): string {
         `${preset.keyPresent ? KEY_PRESENT : KEY_ABSENT}`,
     );
   }
-  const configured = presets.filter((preset) => preset.keyPresent).length;
+  const keyed = presets.filter((preset) => preset.keyPresent).length;
   lines.push(
     "",
     `${KEY_PRESENT} = the API key variable is set in this environment ` +
-      `(${configured} of ${presets.length}).`,
+      `(${keyed} of ${presets.length}).`,
   );
 
   lines.push("", "Models registered right now are listed by --list-models.");
@@ -911,7 +1016,7 @@ export class ArcturnRuntime {
       // would hold for the runtime and lose for the agent the runtime is
       // about to install — the two would disagree about one session, which is
       // the exact failure this whole path exists to remove.
-      ...(this.modelPinned ? {} : { resolveModel: (id: string) => getModel(id) ?? undefined }),
+      ...(this.modelPinned ? {} : { resolveModel: (id: string) => this.#restoreModel(id) }),
       // Speculation only has anything to shelter if a second tool call can
       // run while the first one's permission prompt is open — with strictly
       // sequential tools the whole feature is inert.
@@ -940,8 +1045,34 @@ export class ArcturnRuntime {
    */
   async #adoptStoredModel(sessionId: string): Promise<void> {
     if (this.modelPinned) return;
-    const spec = await this.#storedSessionModel(sessionId, (id) => getModel(id) ?? undefined);
+    const spec = await this.#storedSessionModel(sessionId, (id) => this.#restoreModel(id));
     if (spec !== undefined && spec.id !== this.model.id) this.model = spec;
+  }
+
+  /**
+   * A stored model id, resolved the way a freshly picked one would be.
+   *
+   * The same resolver, catalog and environment `setModel` uses — `serve`'s
+   * `storedModelResolver` already had this shape and the terminal did not: it
+   * went through a bare `getModel`, which skips the credential check entirely.
+   * Nothing repo-reachable came of that (a session store lives under
+   * `~/.arcturn/sessions`, and an unconsented provider is not registered for
+   * `getModel` to find), but resuming onto a declared gateway whose variable
+   * is no longer set adopted the model anyway and then put an empty bearer on
+   * the wire. It refuses now, which for a *restore* means `undefined`: an id
+   * this build no longer registers, or one whose key is gone, must not make a
+   * stored session unopenable — it stays on the runtime's own model, exactly
+   * as `Agent.resume` and `arcturn serve` treat it.
+   *
+   * @param modelId - The id recorded in the session.
+   * @returns The spec, or `undefined` when it will not resolve today.
+   */
+  #restoreModel(modelId: string): ModelSpec | undefined {
+    try {
+      return resolveModelSpec(modelId, this.#env);
+    } catch {
+      return undefined;
+    }
   }
 
   /**
@@ -1964,6 +2095,25 @@ export interface BuildRuntimeOptions {
   extensions?: ExtensionHost | false;
   /** Skip the git and `ARCTURN.md` lookups when building the system prompt. */
   skipRepoLookup?: boolean;
+  /**
+   * Asks the user whether to enable a PROJECT-declared provider endpoint.
+   *
+   * Absent means `() => false` — a hard refusal, not a prompt and not an
+   * assumption. Only a host that owns a real terminal may pass one: `--print`,
+   * `serve`, `acp`, `mcp-serve`, background agents and evals deliberately
+   * leave it unset, and a declared endpoint stays inert there.
+   */
+  confirmProvider?: ConfirmProvider;
+  /**
+   * `--trust-providers`: enable project-declared endpoints without asking.
+   * For CI that already trusts the repository it checked out; not persisted.
+   */
+  trustProviders?: boolean;
+  /**
+   * `--no-providers`: parse and list config-declared endpoints but register
+   * none of them, user layer included.
+   */
+  configProviders?: boolean;
 }
 
 /**
@@ -1997,6 +2147,22 @@ export async function buildRuntime(options: BuildRuntimeOptions = {}): Promise<A
     paths = loaded.paths;
     warnings.push(...loaded.warnings);
   }
+
+  // Config-declared endpoints land in the catalog here: after the config is
+  // known, and BEFORE extensions load, so an extension can still override an
+  // entry a config file declared. Code outranks data, deliberately — the
+  // reverse would let a config file silently repoint a model an extension
+  // owns. The consent gate lives inside; the default confirmer is a hard
+  // `() => false`, so a project-declared endpoint stays inert unless a host
+  // that owns a terminal passed one.
+  const providerRun = await registerConfiguredProviders({
+    config,
+    paths,
+    ...(options.confirmProvider === undefined ? {} : { confirm: options.confirmProvider }),
+    ...(options.trustProviders === undefined ? {} : { trustProject: options.trustProviders }),
+    ...(options.configProviders === undefined ? {} : { enable: options.configProviders }),
+  });
+  warnings.push(...providerRun.warnings);
 
   // Extensions load before the model is resolved so an extension can call
   // registerModel() and have that model be selectable straight away.

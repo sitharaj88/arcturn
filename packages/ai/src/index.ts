@@ -92,6 +92,7 @@ export {
   type PresetProtocol,
   type ProviderPreset,
   presetSpec,
+  providerSpec,
   registerPresetModels,
   subscriptionPlanFor,
 } from "./presets.js";

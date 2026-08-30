@@ -63,12 +63,26 @@ function processEnv(): EnvSource {
  *
  * Precedence: explicit per-provider key, explicit shared key,
  * `spec.apiKeyEnv`, the provider's default env var, then provider fallbacks.
+ *
+ * Unless the spec sets {@link ModelSpec.apiKeyEnvExclusive}, in which case
+ * there is no precedence at all: `spec.apiKeyEnv` is consulted and nothing
+ * else. That is the contract a configuration-declared endpoint is registered
+ * under — the file named one variable, so one variable is what it gets, and an
+ * unset one resolves to `undefined` rather than to the user's first-party key.
+ * The two explicit options are skipped too: a shared `apiKey`, or an `apiKeys`
+ * entry keyed on `openai-compatible`, spans every endpoint speaking that
+ * protocol and was never chosen for this one.
  */
 export function resolveApiKey(
   spec: ModelSpec,
   options: CreateClientOptions = {},
 ): string | undefined {
   const env = options.env ?? processEnv();
+  if (spec.apiKeyEnvExclusive === true) {
+    if (spec.apiKeyEnv === undefined) return undefined;
+    // Empty counts as unset, exactly as the fallback loop below reads it.
+    return env[spec.apiKeyEnv] || undefined;
+  }
   const perProvider = options.apiKeys?.[spec.provider];
   if (perProvider) return perProvider;
   if (options.apiKey) return options.apiKey;

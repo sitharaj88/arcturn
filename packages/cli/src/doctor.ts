@@ -31,8 +31,14 @@ import {
 } from "@arcturn/ai";
 import type { AIError, LLMClient, ModelSpec } from "@arcturn/types";
 import type { DoctorCommand } from "./args.js";
-import { type ArcturnConfig, loadConfig } from "./config.js";
+import { type ArcturnConfig, isLocalEndpoint, loadConfig } from "./config.js";
 import type { EnvMap } from "./paths.js";
+import {
+  configuredProviderSpec,
+  configuredProviderStatuses,
+  declaredProvider,
+  registerConfiguredProviders,
+} from "./providers.js";
 import { ROUTE_KINDS } from "./router.js";
 import { registerBundledCatalog } from "./runtime.js";
 
@@ -190,6 +196,17 @@ export async function runDoctorCommand(
       env,
     });
     for (const warning of loaded.warnings) err(`arcturn: ${warning}\n`);
+    // Config-declared endpoints join the catalog so a `mycorp/…` id in this
+    // config resolves to a real spec. No confirmer is passed and none may
+    // ever be: doctor sends the real key with real credentials by design, so
+    // a run against a freshly cloned hostile repo must not be the thing that
+    // delivers it. A project-declared endpoint therefore stays inert and gets
+    // the "not enabled" pre-verdict below instead of a probe.
+    const providerRun = await registerConfiguredProviders({
+      config: loaded.config,
+      paths: loaded.paths,
+    });
+    for (const warning of providerRun.warnings) err(`arcturn: ${warning}\n`);
     for (const line of configLines(loaded.config, loaded.sources, env)) out(`${line}\n`);
 
     const refs = collectConfigRefs(loaded.config);
@@ -289,6 +306,16 @@ function configLines(config: ArcturnConfig, sources: string[], env: EnvMap): str
   if (config.consensus !== undefined) {
     entries.push(["consensus", config.consensus.models.join(", ")]);
   }
+  // Declared endpoints, with their state. A provider nobody has enabled is
+  // invisible in the probe table unless some id references it, and "I added
+  // it and nothing happened" is exactly the question doctor exists to answer.
+  for (const status of configuredProviderStatuses()) {
+    entries.push([
+      `providers.${status.name}`,
+      `${status.baseUrl} · ${status.apiKeyEnv === undefined ? "no credential" : `key ${status.apiKeyEnv}`} · ` +
+        `${status.enabled ? "enabled" : `declared (not enabled) — ${status.reason ?? ""}`}`.trim(),
+    ]);
+  }
 
   const width = entries.reduce((max, [key]) => Math.max(max, key.length), 0);
   const lines = ["Config:", ...entries.map(([key, value]) => `  ${key.padEnd(width)}  ${value}`)];
@@ -326,6 +353,26 @@ function collectConfigRefs(config: ArcturnConfig): Map<string, string[]> {
 
 /** Build the target for one config-referenced model id. */
 function configTarget(id: string, labels: string[], env: EnvMap): ProbeTarget {
+  // Asked BEFORE the catalog lookup, and answered without a network
+  // round-trip. An endpoint a project config declared but nobody consented to
+  // is not a broken configuration to diagnose — it is a configuration that is
+  // deliberately switched off, and the one thing doctor must not do is send a
+  // key to it to find out.
+  const declared = declaredProvider(id);
+  if (declared !== undefined) {
+    return {
+      name: id,
+      labels,
+      pre: {
+        word: "not enabled",
+        detail:
+          `provider "${declared.name}" is declared in ${declared.source} ` +
+          `(${declared.baseUrl}) but not enabled — nothing was sent`,
+        hint: "approve it in an interactive arcturn session, or declare it in ~/.arcturn/config.json",
+        failed: false,
+      },
+    };
+  }
   const spec = resolveConfigSpec(id);
   if (spec === undefined) {
     return {
@@ -370,6 +417,11 @@ function configTarget(id: string, labels: string[], env: EnvMap): ProbeTarget {
 function resolveConfigSpec(id: string): ModelSpec | undefined {
   const direct = getModel(id);
   if (direct !== undefined) return direct;
+  // Same pass-through rule for an ENABLED config-declared provider that
+  // curates no `models` list. Returns undefined for a declared-but-not-enabled
+  // one, which `configTarget` has already caught above.
+  const configured = configuredProviderSpec(id);
+  if (configured !== undefined) return configured;
   const slash = id.indexOf("/");
   if (slash > 0) {
     const preset = id.slice(0, slash);
@@ -650,8 +702,16 @@ function keyFacts(spec: ModelSpec | undefined, env: EnvMap): string | undefined 
  * The variable that supplies `spec`'s key, walking the same precedence
  * `resolveApiKey` does (own variable, provider default, provider fallbacks).
  * `resolveApiKey` returns only the value; this report needs the *name*.
+ *
+ * A key-exclusive spec — every endpoint declared in a `providers` config block
+ * — has no precedence to walk: its own variable is the whole chain, so an unset
+ * one supplies nothing. Reporting "sent the key from OPENAI_API_KEY" for one of
+ * those would describe a borrow that no longer happens.
  */
 function keySourceVar(spec: ModelSpec, env: EnvMap): string | undefined {
+  if (spec.apiKeyEnvExclusive === true) {
+    return spec.apiKeyEnv !== undefined && env[spec.apiKeyEnv] ? spec.apiKeyEnv : undefined;
+  }
   const providerDefault = DEFAULT_API_KEY_ENV[spec.provider];
   const names = [
     ...(spec.apiKeyEnv === undefined ? [] : [spec.apiKeyEnv]),
@@ -674,20 +734,6 @@ function placeholderVerdict(baseUrl: string): Verdict {
 function presetOf(id: string): string | undefined {
   const prefix = id.split("/")[0] ?? "";
   return PROVIDER_PRESETS[prefix] === undefined ? undefined : prefix;
-}
-
-/**
- * Whether a base URL points at this machine. Local runtimes (Ollama, LM
- * Studio, vLLM) need no key, and probing them during the default scan would
- * report "network" for a server that was simply never started.
- */
-function isLocalEndpoint(baseUrl: string): boolean {
-  try {
-    const host = new URL(baseUrl).hostname;
-    return host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
-  } catch {
-    return false;
-  }
 }
 
 /**

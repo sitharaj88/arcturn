@@ -39,8 +39,10 @@ an inherited stdin open that never closes; waiting for EOF there would hang fore
 | `--max-cost <usd>` | Abort the run once it has cost this much — see [Cost & audit](/docs/audit-cost) |
 | `--dry-run` | Send file edits to a shadow copy; review with `/diff` — see [Dry run](/docs/dry-run) |
 | `--trace` | Write one JSON line per finished telemetry span to stderr — see [Telemetry](/docs/telemetry) |
+| `--trust-providers` | Enable provider endpoints declared by **this project's** config without asking. For CI that already trusts the repository; not saved — see [Permissions](/docs/permissions#provider-endpoints-from-a-project-config) |
+| `--no-providers` | Register nothing from a config `providers` block; entries still parse and still list. Both flags apply to `serve`, `acp`, `mcp-serve` and `replay` as well as to an ordinary run |
 | `--list-models` | Print the model catalog and exit |
-| `--list-providers` | Print every provider and preset endpoint, and exit |
+| `--list-providers` | Print every provider and preset endpoint — including the ones your config declares, with their state — and exit |
 | `-h`, `--help` · `-v`, `--version` | Usage, version |
 
 `--host`, `--port` and `--token` apply to `arcturn serve`; `--cassette` applies to
@@ -81,7 +83,7 @@ The same table is in `arcturn --help`.
 | `arcturn mcp-serve` | Expose Arcturn *as* an MCP server — see [MCP server](/docs/mcp-server) |
 | `arcturn serve` | WebSocket server over the NDJSON protocol — see [Server mode](/docs/server-mode) |
 | `arcturn completions <shell>` | Print a bash, zsh or fish completion script |
-| `arcturn doctor [preset]` | Probe each configured provider endpoint with its real key (a one-token completion) and print a per-endpoint verdict — auth failed, no balance, rate limited, network |
+| `arcturn doctor [preset]` | Probe each configured provider endpoint with its real key (a one-token completion) and print a per-endpoint verdict — auth failed, no balance, rate limited, network. An endpoint declared by a project config you have not approved is reported `not enabled` and never probed |
 | `arcturn blame` · `arcturn replay` · `arcturn bisect` | Provenance and replay — see [Provenance](/docs/provenance) and [Replay & bisect](/docs/replay-bisect) |
 
 **`arcturn add` never links a package's executable code without being told to.** A package

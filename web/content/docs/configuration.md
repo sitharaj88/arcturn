@@ -57,6 +57,7 @@ Every key `.arcturn/config.json` accepts, in both user and project files:
 | `dryRun` | `boolean` | `false` | Route file mutations to a shadow copy for review instead of the real tree. Same as `--dry-run`. See [Dry-run mode](/docs/dry-run). |
 | `speculation` | `boolean` | `false` | Keep editing speculatively while a permission prompt is open. |
 | `route` | `RouterConfig` | `{}` | Per-role model overrides (`main`, `subagent`, `compaction`, `title`). See below. |
+| `providers` | `Record<string, ProviderEntry>` | `{}` | Extra provider endpoints — a gateway, a vLLM cluster, Ollama elsewhere — reachable as `<name>/<model>`. Merged key-wise with the **user** layer winning, unlike `route`. A project-declared entry is inert until approved. See below and [Providers](/docs/providers#from-configuration). |
 | `sessionTitles` | `boolean` | `true` | Generate a session title with one small LLM call (on the `title` route) after an interactive session's first completed run. `false` turns the call off. See [Sessions](/docs/sessions#session-titles). |
 | `taint` | `"off" \| "warn" \| "confirm" \| "deny"` | `"warn"` | How to treat a mutating call that echoes untrusted fetched content. See [Injection defense](/docs/injection-defense). |
 | `canary` | `"off" \| "warn" \| "deny"` | `"off"` | How to treat an outbound call carrying a planted canary token. See [Injection defense](/docs/injection-defense). |
@@ -140,6 +141,12 @@ Arcturn resolves an API key for a model in this order:
 4. The provider's default environment variable.
 5. Provider-specific fallback variables.
 
+**A model declared in a `providers` config block skips that ladder entirely.** Such a spec
+is registered *key-exclusive*: its `apiKeyEnv` is the only variable consulted, and an unset
+one means no key rather than a fall-through to `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` or to
+an explicit client-wide key. A file that names an endpoint and a credential gets exactly
+the credential it named.
+
 The default variables per provider:
 
 | Provider | Default env var | Fallbacks |
@@ -184,12 +191,42 @@ catalog and exits; `arcturn --list-providers` prints every provider and preset e
 ## OpenAI-compatible endpoints
 
 Any endpoint that speaks the OpenAI chat-completions wire format — a local model server,
-a self-hosted gateway, a third-party router — works as an `openai-compatible` provider.
-This is registered from code, via `openaiCompatible({ model, baseUrl, apiKeyEnv })` in
-`@arcturn/ai`, rather than a config file key — see
-[Embedding with the SDK](/docs/sdk) for how to register a spec and hand it to
-`createAgent`. Once registered it behaves like any other catalog entry: selectable by id,
-with the same cost/context-window bookkeeping.
+a self-hosted gateway, a third-party router — works as an `openai-compatible` provider,
+and an Anthropic-Messages endpoint works as `anthropic-compatible`.
+
+Declare one in the `providers` config key:
+
+```jsonc
+{
+  "providers": {
+    "mycorp": {
+      "baseUrl": "https://llm.corp.internal/v1",
+      "apiKeyEnv": "MYCORP_LLM_KEY",
+      "protocol": "openai",
+      "label": "MyCorp Gateway",
+      "models": [{ "model": "llama-70b", "contextWindow": 128000 }]
+    }
+  }
+}
+```
+
+Ids are namespaced `<name>/<model>`, so `arcturn --model mycorp/llama-70b` works and the
+entry shows up in `--list-models`, `--list-providers`, `/model` and `arcturn doctor`.
+Omitting `models` is fine: ids then pass through to the wire verbatim.
+
+`apiKeyEnv` is **required for a remote endpoint** (a loopback one may omit it and is then
+contacted with no credential), `baseUrl` must be `https:` (or loopback `http:`) and free of
+control characters, and a project file may not name a variable holding a credential you
+keep for another service — including any built-in preset's, compared case-insensitively. A
+project-declared endpoint is also parsed-but-inert until you approve it once.
+[Providers](/docs/providers#from-configuration) has the full rule list, and
+[Permissions](/docs/permissions#provider-endpoints-from-a-project-config) has the consent
+model.
+
+Registering from code still works and still wins: `openaiCompatible({ model, baseUrl,
+apiKeyEnv })` in `@arcturn/ai` — see [Embedding with the SDK](/docs/sdk) — runs after the
+config block, so an extension can override a config entry. Once registered, either way
+behaves like any other catalog entry, with the same cost/context-window bookkeeping.
 
 ## Command-line flags
 

@@ -223,6 +223,14 @@ export interface McpServeOptions {
   maxTurns?: number;
   /** `--max-cost` ceiling for each `ask_arcturn` run, in USD. */
   maxCostUsd?: number;
+  /**
+   * `--no-providers`: parse and list every `providers` block, register nothing.
+   * A project-declared endpoint is inert here regardless (no confirmer is ever
+   * wired for an unattended server); this also disables a USER-declared one.
+   */
+  configProviders?: boolean;
+  /** `--trust-providers`: enable project-declared endpoints without asking. */
+  trustProviders?: boolean;
   /** Injected LLM client. A test seam; production always builds its own. */
   llm?: LLMClient;
   /** Transport override. Defaults to stdio; tests pass an in-memory pair. */
@@ -483,7 +491,14 @@ export async function buildMcpServeHost(options: McpServeOptions = {}): Promise<
       // Always explicit, so a `permissionMode` in a config file cannot decide
       // what an unattended server runs as. See the module header.
       permissionMode: options.permissionMode,
-      // No `onPermissionAsk`: an unmatched check must deny, not hang.
+      // No `onPermissionAsk`: an unmatched check must deny, not hang. No
+      // `confirmProvider` either, for the same reason — nobody is watching this
+      // connection — but the two `providers` switches are honoured, or the
+      // documented kill switch would be inert on the surface that stays up.
+      ...(options.configProviders === undefined
+        ? {}
+        : { configProviders: options.configProviders }),
+      ...(options.trustProviders === undefined ? {} : { trustProviders: options.trustProviders }),
     });
   }
 

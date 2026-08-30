@@ -424,6 +424,15 @@ The provider surface is exported too — `formatProviderCatalog(env)` and
 `registerBundledCatalog()` (idempotent: registers the preset models) — whose environment and
 filesystem dependencies are injectable.
 
+`registerConfiguredProviders({ config, paths, confirm })` applies a config file's
+`providers` block to the catalog, so an embedder gets the same config-declared endpoints
+the CLI does. It is **not** latched: a second call with a different config replaces the
+first call's registrations rather than adding to them, which is what `serve` and background
+agents running several working directories in one process need. `confirm` gates
+project-layer declarations and defaults to a hard `() => false`; pass
+`terminalProviderConfirm` only from a host that owns a real terminal, and nothing else.
+See [Permissions](https://arcturn.dev/docs/permissions#provider-endpoints-from-a-project-config).
+
 ---
 
 ## Development

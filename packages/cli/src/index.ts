@@ -39,12 +39,16 @@ export {
 export {
   type ArcturnConfig,
   type ArcturnThemeName,
+  type ConfiguredProvider,
+  type ConfiguredProviderModel,
   DEFAULT_CONFIG,
   DEFAULT_MODEL,
+  isLocalEndpoint,
   type LoadConfigOptions,
   type LoadedConfig,
   loadConfig,
   mergeConfig,
+  type ProviderProtocol,
   parseConfigFile,
   parsePermissionMode,
   permissionModes,
@@ -103,6 +107,24 @@ export {
   resolveArcturnPaths,
 } from "./paths.js";
 export { type PrintResult, type RunPrintOptions, runPrint } from "./print.js";
+export {
+  type ConfiguredProviderStatus,
+  type ConfirmProvider,
+  configuredProviderSpec,
+  configuredProviderStatuses,
+  declaredProvider,
+  declaredProviderHint,
+  enabledConfiguredProvider,
+  PROVIDER_PERMISSION_TOOL,
+  type ProviderConsentRequest,
+  providerConsentRule,
+  providerConsentSpecifier,
+  type RegisterConfiguredProvidersOptions,
+  type RegisterConfiguredProvidersResult,
+  registerConfiguredProviders,
+  resetConfiguredProviders,
+  terminalProviderConfirm,
+} from "./providers.js";
 export {
   ArcturnRuntime,
   type ArcturnRuntimeInit,

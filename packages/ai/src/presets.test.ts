@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { getModel, resetCatalog } from "./catalog.js";
-import { listPresets, PROVIDER_PRESETS, presetSpec, registerPresetModels } from "./presets.js";
+import {
+  listPresets,
+  PROVIDER_PRESETS,
+  presetSpec,
+  providerSpec,
+  registerPresetModels,
+} from "./presets.js";
 
 afterEach(() => {
   resetCatalog();
@@ -85,6 +91,36 @@ describe("presetSpec", () => {
   it("throws a helpful error naming valid presets for an unknown preset", () => {
     expect(() => presetSpec("not-a-real-preset", "m")).toThrow(/Unknown provider preset/);
     expect(() => presetSpec("not-a-real-preset", "m")).toThrow(/groq/);
+  });
+});
+
+describe("providerSpec", () => {
+  // The CLI's `providers` config block builds through this, so a preset the
+  // user wrote down themselves gets the id shape, the protocol mapping and the
+  // display name the built-in table gets — from one function, not two.
+  it("is the path presetSpec takes, for a record that is not in the table", () => {
+    const fromTable = presetSpec("groq", "llama-3.3-70b-versatile");
+    const byHand = providerSpec("groq", PROVIDER_PRESETS.groq!, "llama-3.3-70b-versatile");
+    expect(byHand).toEqual(fromTable);
+  });
+
+  it("namespaces the id and maps the protocol for an endpoint of one's own", () => {
+    const spec = providerSpec(
+      "mycorp",
+      {
+        label: "MyCorp Gateway",
+        baseUrl: "https://llm.corp.internal/v1",
+        apiKeyEnv: "MYCORP_LLM_KEY",
+        protocol: "anthropic",
+      },
+      "llama-70b",
+    );
+    expect(spec.id).toBe("mycorp/llama-70b");
+    expect(spec.provider).toBe("anthropic-compatible");
+    expect(spec.model).toBe("llama-70b");
+    expect(spec.displayName).toBe("MyCorp Gateway llama-70b");
+    expect(spec.apiKeyEnv).toBe("MYCORP_LLM_KEY");
+    expect(getModel("mycorp/llama-70b")).toBeUndefined();
   });
 });
 

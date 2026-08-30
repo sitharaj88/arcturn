@@ -194,6 +194,48 @@ describe("formatProviderCatalog", () => {
     expect(catalog).not.toContain("set-in-this-env");
     expect(catalog).toContain("(1 of 35)");
   });
+
+  it("renders config-declared endpoints with their state, and only when there are any", () => {
+    expect(formatProviderCatalog({})).not.toContain("Configured providers");
+
+    const catalog = formatProviderCatalog({ MYCORP_LLM_KEY: "set-in-this-env" }, [
+      {
+        name: "mycorp",
+        label: "MyCorp Gateway",
+        baseUrl: "https://llm.corp.internal/v1",
+        apiKeyEnv: "MYCORP_LLM_KEY",
+        protocol: "openai",
+        scope: "user",
+        source: "/home/u/.arcturn/config.json",
+        enabled: true,
+        modelIds: ["mycorp/llama-70b"],
+      },
+      {
+        name: "repo-gw",
+        label: "repo-gw",
+        baseUrl: "https://gw.example/v1",
+        apiKeyEnv: "GW_KEY",
+        protocol: "anthropic",
+        scope: "project",
+        source: "/repo/.arcturn/config.json",
+        enabled: false,
+        reason: "not approved for this project",
+        modelIds: [],
+      },
+    ]);
+    expect(catalog).toContain("Configured providers");
+    const mine = catalog.split("\n").find((line) => line.trimStart().startsWith("mycorp "));
+    expect(mine).toContain("https://llm.corp.internal/v1");
+    expect(mine).toContain("MYCORP_LLM_KEY ✓");
+    expect(mine).toContain("enabled");
+    const theirs = catalog.split("\n").find((line) => line.trimStart().startsWith("repo-gw "));
+    expect(theirs).toContain("declared (not enabled)");
+    expect(theirs).toContain("GW_KEY ✗");
+    expect(catalog).toContain("declared in /repo/.arcturn/config.json · not approved");
+    expect(catalog).toContain("--trust-providers");
+    // The key value itself is never echoed back.
+    expect(catalog).not.toContain("set-in-this-env");
+  });
 });
 
 describe("registerBundledCatalog", () => {

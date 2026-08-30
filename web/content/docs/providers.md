@@ -177,7 +177,90 @@ arcturn --model zai-api/glm-5.2    # general API
 Z.AI is split deliberately: `zai` is the coding-plan path and `zai-api` the general
 pay-as-you-go API. They are different URLs, and the wrong one 404s.
 
-Nothing here is a gate. Any endpoint works without a preset:
+Nothing here is a gate. Any endpoint works without a preset, from configuration or from
+code.
+
+### From configuration
+
+A `providers` block in `~/.arcturn/config.json` declares an endpoint of your own — an
+enterprise gateway (LiteLLM, a vLLM cluster, an internal proxy), Ollama on a non-default
+host. It is the same `{ baseUrl, apiKeyEnv, protocol }` triple a preset is, and it builds
+its specs through the same function, so ids are namespaced `<name>/<model>` exactly as
+presets are:
+
+```jsonc
+{
+  "providers": {
+    "mycorp": {
+      "baseUrl": "https://llm.corp.internal/v1",
+      "apiKeyEnv": "MYCORP_LLM_KEY",   // REQUIRED
+      "protocol": "openai",            // "openai" | "anthropic", default "openai"
+      "label": "MyCorp Gateway",
+      "models": [                      // optional; absent = ids pass through verbatim
+        { "model": "llama-70b", "contextWindow": 128000, "maxOutputTokens": 8192,
+          "capabilities": { "tools": true }, "cost": { "input": 0, "output": 0 } }
+      ]
+    }
+  }
+}
+```
+
+```bash
+arcturn --model mycorp/llama-70b
+```
+
+Every rule below drops the offending entry with a warning; nothing throws, and a bad entry
+never takes its siblings with it.
+
+- **The variable it names is the only credential it gets.** A spec built from a `providers`
+  block is registered *key-exclusive*: `apiKeyEnv` is resolved and nothing else — no
+  `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` provider default, no per-provider alternate, no
+  client-wide key. Name a variable you do not have set and the session refuses, naming the
+  provider, the variable and the file that declared it. It never starts on a borrowed key,
+  and that holds for both protocols and for your own file as much as for a project's.
+- **`apiKeyEnv` is required for a remote endpoint**, so the credential choice is visible in
+  the file and reviewable in a diff. **A loopback endpoint may omit it**, and is then
+  contacted with no credential at all — that is how you declare Ollama, LM Studio or a
+  local vLLM:
+
+  ```jsonc
+  { "providers": { "ollama-host": { "baseUrl": "http://localhost:11434/v1" } } }
+  ```
+
+  A loopback entry that *does* name a variable is held to it: the endpoint expects a key,
+  so an unset one is an error naming the variable rather than a silent substitute.
+- **`https:` only**, except `http://localhost` (and `127.0.0.1`, `::1`) for a local
+  runtime. An API key sent in the clear to a remote host is a leaked credential.
+- **The name may not collide** with a preset or a registered provider id — no shadowing.
+- **A base URL still carrying a `{placeholder}`** is dropped rather than dialled.
+- **A base URL containing a control character is refused** (C0, DEL, C1), and what is
+  stored is the normalized `new URL(...).href`, not the string as typed. `URL` is not a
+  filter here — it strips tab/LF/CR and percent-encodes ESC — and this value is printed
+  into the terminal prompt that asks whether to trust the endpoint.
+- **A project file may not name a variable holding a credential you keep for someone
+  else.** The rule is the set, not a list: every first-party default and alternate, every
+  one of the built-in provider presets' `apiKeyEnv` values (derived from the preset table,
+  so adding a preset extends the rule automatically), the ambient-credential variables, and
+  anything beginning `AWS_`. Comparison is case-insensitive, because `process.env` is
+  case-insensitive on Windows. Your own `~/.arcturn/config.json` may name any of them —
+  proxying Anthropic through LiteLLM is a real setup — but no repository you cloned has a
+  reason to ask for a key you hold for somebody else.
+- **Declared `models[]` entries are validated, not trusted.** `cost.input`/`cost.output`
+  must be finite and non-negative — `--max-cost` sums them, and a negative rate would earn
+  budget on every turn — and each `capabilities` field is checked by name and type, with a
+  bad or unknown one dropped and warned about rather than cast through.
+
+A declaration in `~/.arcturn/config.json` is your own file and is trusted. **A declaration
+in a project's `.arcturn/config.json` is inert until you approve it** — see
+[Provider endpoints from a project config](/docs/permissions#provider-endpoints-from-a-project-config),
+including [what that gate is not](/docs/permissions#what-this-gate-is-not): it stops a
+repository that declares an endpoint in *data*, and is not a boundary against one that can
+execute code, since project hooks and project extensions run with no gate today.
+
+`arcturn --list-providers` shows every declared endpoint with its state; `arcturn doctor`
+reports one you have not enabled as `not enabled` and never probes it.
+
+### From code
 
 ```ts
 import { openaiCompatible } from "@arcturn/ai";
@@ -187,6 +270,9 @@ openaiCompatible("https://my-endpoint.example/v1", "my-model", {
   register: true,
 });
 ```
+
+An extension's `registerModel` runs *after* the config block is applied, so code can
+override an entry a config file declared. Data never overrides code.
 
 ## Resolving a model id
 

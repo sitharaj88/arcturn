@@ -20,6 +20,7 @@ import { runInteractive } from "./interactive/app.js";
 import type { BootScreen } from "./main.js";
 import { version } from "./meta.js";
 import { runPrint } from "./print.js";
+import { registerConfiguredProviders, terminalProviderConfirm } from "./providers.js";
 import {
   BUILT_IN_TOOL_NAMES,
   buildRuntime,
@@ -31,14 +32,62 @@ import {
 } from "./runtime.js";
 
 /**
- * Load extensions purely for their side effect of registering models.
+ * The two `providers` flags, in the shape every runtime-building call site takes.
+ *
+ * One helper because there are five such sites and the flags reached exactly
+ * one of them: `serve`, `acp`, `mcp-serve` and `replay` each built a runtime of
+ * their own and silently ignored both switches, so the documented kill switch
+ * did nothing on the surfaces that stay up longest. (It failed *safe* for a
+ * project-declared endpoint — no confirmer is ever wired there — but a
+ * user-layer declaration still registered under `--no-providers`, and
+ * `--trust-providers` did nothing at all.)
+ *
+ * None of those sites gets a confirmer, then or now: off a TTY there is nobody
+ * to ask, and refusal stands.
+ *
+ * @param args - The parsed command line.
+ */
+function providerFlags(args: Pick<CliArgs, "configProviders" | "trustProviders">): {
+  trustProviders?: true;
+  configProviders?: false;
+} {
+  return {
+    ...(args.trustProviders ? { trustProviders: true as const } : {}),
+    ...(args.configProviders ? {} : { configProviders: false as const }),
+  };
+}
+
+/**
+ * Fill the catalog the way a real run would, for a listing or a replay.
+ *
+ * Two side effects, in the order `buildRuntime` performs them: config-declared
+ * provider endpoints first, extensions second, so an extension can still
+ * override a config entry. No confirmer is passed and none may be — a listing
+ * must never prompt, so a project-declared endpoint is parsed and reported as
+ * "declared (not enabled)" rather than registered. `--trust-providers` is
+ * still honoured, because it is an explicit gesture the user already made and
+ * a listing that disagreed with the run it describes would be a lying menu.
  *
  * @param cwd - Working directory override from the command line.
+ * @param args - `--no-providers` / `--trust-providers`, forwarded so a listing
+ *   enumerates exactly what a run with the same flags would accept.
  * @returns Warnings to report; failures here are never fatal to a listing.
  */
-async function loadExtensionsForCatalog(cwd: string | undefined): Promise<string[]> {
+async function fillCatalogFromConfig(
+  cwd: string | undefined,
+  args: Pick<CliArgs, "configProviders" | "trustProviders"> = {
+    configProviders: true,
+    trustProviders: false,
+  },
+): Promise<string[]> {
   try {
     const { config, paths } = await loadConfig(cwd === undefined ? {} : { cwd });
+    const providers = await registerConfiguredProviders({
+      config,
+      paths,
+      ...(args.configProviders ? {} : { enable: false }),
+      ...(args.trustProviders ? { trustProject: true } : {}),
+    });
     const host = await loadExtensions({
       directories: [...new Set([paths.userExtensions, paths.projectExtensions])],
       config,
@@ -46,7 +95,7 @@ async function loadExtensionsForCatalog(cwd: string | undefined): Promise<string
       version: version(),
       reservedToolNames: BUILT_IN_TOOL_NAMES,
     });
-    return host.warnings;
+    return [...providers.warnings, ...host.warnings];
   } catch (error) {
     return [`could not load extensions: ${error instanceof Error ? error.message : error}`];
   }
@@ -144,10 +193,10 @@ export async function runCli(args: CliArgs, options: RunCliOptions = {}): Promis
     // The preset models are registered here for the same reason `buildRuntime`
     // registers them: a listing must show exactly what `--model` will accept.
     registerBundledCatalog();
-    // Extensions register models, so they must load before the catalog is
-    // printed — otherwise a model that `--model` accepts is missing from the
-    // very list that is supposed to enumerate the valid values.
-    const warnings = await loadExtensionsForCatalog(args.cwd);
+    // Extensions and config-declared providers register models, so both must
+    // land before the catalog is printed — otherwise a model that `--model`
+    // accepts is missing from the very list that enumerates the valid values.
+    const warnings = await fillCatalogFromConfig(args.cwd, args);
     for (const warning of warnings) process.stderr.write(`arcturn: ${warning}\n`);
     process.stdout.write(`${args.listModels ? formatModelCatalog() : formatProviderCatalog()}\n`);
     return 0;
@@ -188,6 +237,7 @@ export async function runCli(args: CliArgs, options: RunCliOptions = {}): Promis
         ...(args.permissionMode === undefined ? {} : { permissionMode: args.permissionMode }),
         ...(args.maxTurns === undefined ? {} : { maxTurns: args.maxTurns }),
         ...(args.maxCostUsd === undefined ? {} : { maxCostUsd: args.maxCostUsd }),
+        ...providerFlags(args),
       });
     }
   }
@@ -235,7 +285,7 @@ export async function runCli(args: CliArgs, options: RunCliOptions = {}): Promis
   }
 
   if (args.command?.kind === "replay") {
-    return runReplayCommand(args.command.target, args.cwd, args.model);
+    return runReplayCommand(args.command.target, args);
   }
 
   try {
@@ -255,6 +305,15 @@ export async function runCli(args: CliArgs, options: RunCliOptions = {}): Promis
       ...(args.resume === undefined ? {} : { resume: args.resume }),
       ...(recorder === undefined ? {} : { wrapLlm: recorder.wrapLlm }),
       ...(recorder === undefined ? {} : { wrapAgentTools: recorder.wrapTools }),
+      // The ONLY call site allowed to hand `buildRuntime` a real confirmer,
+      // and only for a run that owns a terminal to ask on. `--print` and a
+      // non-TTY stdout get nothing, so a project-declared endpoint stays
+      // inert there — same test `connectMcp`'s `interactive` flag makes for
+      // an OAuth browser hop, for the same reason.
+      ...(args.print || process.stdout.isTTY !== true
+        ? {}
+        : { confirmProvider: terminalProviderConfirm }),
+      ...providerFlags(args),
       continueSession: args.continueSession,
     });
 
@@ -477,14 +536,12 @@ async function runAuditCommand(sessionId: string | undefined, cwd?: string): Pro
  * Re-run a stored session's prompts, optionally against a different model.
  *
  * @param target - Session id, or a path to a session JSONL file.
- * @param cwd - Working-directory override.
- * @param model - Model override for the replay.
+ * @param args - Parsed command line, for `--cwd`, `--model` and the two
+ *   `providers` flags. A replay builds a real runtime and can therefore reach a
+ *   declared endpoint, so the kill switch has to reach it too.
  */
-async function runReplayCommand(
-  target: string,
-  cwd?: string,
-  model?: string | string[],
-): Promise<number> {
+async function runReplayCommand(target: string, args: CliArgs): Promise<number> {
+  const { cwd, model } = args;
   const [{ JsonlSessionStore }, { extractPrompts, replaySession }] = await Promise.all([
     import("@arcturn/core"),
     import("./replay.js"),
@@ -511,6 +568,7 @@ async function runReplayCommand(
     runtime = await buildRuntime({
       ...(cwd === undefined ? {} : { cwd }),
       ...(model === undefined ? {} : { model }),
+      ...providerFlags(args),
     });
   } catch (error) {
     // A `--model` the catalog does not have is a usage error. Unguarded, it
@@ -663,6 +721,7 @@ async function runServeCommand(args: CliArgs): Promise<number> {
       ...(args.web === true ? { web: true } : {}),
       ...(args.webPort === undefined ? {} : { webPort: args.webPort }),
       ...(args.webOrigins === undefined ? {} : { webOrigins: args.webOrigins }),
+      ...providerFlags(args),
     });
   } catch (error) {
     process.stderr.write(`arcturn: ${error instanceof Error ? error.message : String(error)}\n`);
@@ -727,6 +786,7 @@ async function runAcpCommand(args: CliArgs): Promise<number> {
       // `--max-cost` is deliberately NOT forwarded here: `buildRuntime`'s own
       // cost guard only ever watches `runtime.agent`, which `arcturn acp` never
       // prompts (see createAcpHost's `maxCostUsd` below for the real wiring).
+      ...providerFlags(args),
     });
   } catch (error) {
     process.stderr.write(`arcturn: ${error instanceof Error ? error.message : String(error)}\n`);
@@ -902,7 +962,7 @@ async function runBisectCommand(target: string, args: CliArgs): Promise<number> 
   // what `--list-models` already does for the same reason — and the probes
   // keep their empty `ExtensionHost`.
   registerBundledCatalog();
-  for (const warning of await loadExtensionsForCatalog(args.cwd)) {
+  for (const warning of await fillCatalogFromConfig(args.cwd, args)) {
     process.stderr.write(`arcturn: ${warning}\n`);
   }
 

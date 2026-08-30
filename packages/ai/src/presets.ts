@@ -9,9 +9,12 @@
  *
  * Presets are a convenience, not a gate: any endpoint the reference harness (or anyone else)
  * supports still works without an entry here, by calling
- * {@link openaiCompatible} directly, or by hand-building a `ModelSpec` with
- * `provider: "anthropic-compatible"` for an Anthropic-Messages endpoint. This
- * table exists purely so the well-known ones are reachable by short name.
+ * {@link openaiCompatible} directly, by hand-building a `ModelSpec` with
+ * `provider: "anthropic-compatible"` for an Anthropic-Messages endpoint, or —
+ * without writing any code at all — by declaring a `providers` block in
+ * `~/.arcturn/config.json`, which builds its specs through
+ * {@link providerSpec}, the same function {@link presetSpec} uses. This table
+ * exists purely so the well-known ones are reachable by short name.
  *
  * Model ids passed to {@link presetSpec} (and the ones curated by
  * {@link registerPresetModels}) are passed through to the wire verbatim —
@@ -391,10 +394,41 @@ export function presetSpec(
     const valid = Object.keys(PROVIDER_PRESETS).sort().join(", ");
     throw new Error(`Unknown provider preset: "${preset}". Valid presets: ${valid}`);
   }
+  return providerSpec(preset, entry, model, options);
+}
 
+/**
+ * {@link presetSpec} for a preset record that is not in {@link PROVIDER_PRESETS}.
+ *
+ * The table is a convenience, not a gate (see the module doc), and an endpoint
+ * declared in a user's own configuration is exactly the same `{ baseUrl,
+ * apiKeyEnv, protocol }` triple under a different name. Rather than grow a
+ * second spec builder that could drift on the protocol→provider mapping, the
+ * namespacing rule or the display name, both paths land here: `presetSpec`
+ * looks the record up in the table, the CLI's `providers` config block hands
+ * one straight in.
+ *
+ * The one thing a config-declared endpoint does differently is pass
+ * `apiKeyEnvExclusive: true` in `options`: a preset's credential may fall back
+ * to the provider default, a credential a *file* named may not. See
+ * {@link ModelSpec.apiKeyEnvExclusive}.
+ *
+ * @param name - Short name; becomes the `<name>/<model>` id prefix.
+ * @param entry - The endpoint record, in {@link ProviderPreset} shape. An
+ *   empty `apiKeyEnv` means "this endpoint names no variable", which only a
+ *   keyless local runtime declares.
+ * @param model - Wire model name, passed through verbatim.
+ * @param options - Same overrides {@link presetSpec} accepts.
+ */
+export function providerSpec(
+  name: string,
+  entry: ProviderPreset,
+  model: string,
+  options: OpenAICompatibleOptions = {},
+): ModelSpec {
   const { register, ...rest } = options;
   const built = openaiCompatible(entry.baseUrl, model, {
-    id: `${preset}/${model}`,
+    id: `${name}/${model}`,
     apiKeyEnv: entry.apiKeyEnv,
     displayName: `${entry.label} ${model}`,
     ...rest,

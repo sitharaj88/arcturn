@@ -230,6 +230,18 @@ export interface CliArgs {
   listModels: boolean;
   /** `--list-providers`. */
   listProviders: boolean;
+  /**
+   * `--no-providers` registers nothing from a config `providers` block; the
+   * entries still parse and still list, marked "declared (not enabled)".
+   */
+  configProviders: boolean;
+  /**
+   * `--trust-providers` enables a PROJECT-declared provider endpoint without
+   * asking — for CI that already trusts the repository it checked out. Never
+   * persisted: a per-invocation trust decision must not become a standing
+   * grant in the user's config.
+   */
+  trustProviders: boolean;
   /** A positional command (`arcturn replay …`), when one was given instead of a prompt. */
   command?: CliCommand;
 }
@@ -249,6 +261,8 @@ export function defaultArgs(): CliArgs {
     version: false,
     listModels: false,
     listProviders: false,
+    configProviders: true,
+    trustProviders: false,
   };
 }
 
@@ -641,6 +655,15 @@ export function parseArgs(
       case "--no-mcp":
         args.mcp = false;
         break;
+      case "--providers":
+        args.configProviders = boolValue;
+        break;
+      case "--no-providers":
+        args.configProviders = false;
+        break;
+      case "--trust-providers":
+        args.trustProviders = boolValue;
+        break;
       case "--model":
         args.model = value;
         break;
@@ -934,6 +957,11 @@ Options
       --cassette <file>         With bisect: the VCR recording to compare against.
       --record <file>           Record this run's model and tool calls to a cassette,
                                 so "arcturn bisect --cassette <file>" has one to read.
+      --trust-providers         Enable provider endpoints declared by THIS PROJECT's
+                                config without asking. For CI that already trusts the
+                                repository; not saved to your config.
+      --no-providers            Register nothing from a config "providers" block.
+                                Entries still parse and still list.
       --list-models             Print the model catalog and exit.
       --list-providers          Print every provider and preset endpoint, and exit.
   -h, --help                    Show this help.

@@ -10,6 +10,65 @@ CLI, the SDK, or the wire protocol.
 
 ## [Unreleased]
 
+### Added
+
+- **Point Arcturn at your own endpoint from configuration, not from code.**
+  A `providers` block declares a gateway — LiteLLM, a vLLM cluster, an
+  internal proxy, Ollama on another host — as the same
+  `{ baseUrl, apiKeyEnv, protocol }` triple the built-in presets are, and it
+  builds its specs through the same function, so ids namespace
+  `<name>/<model>` and the entry appears in `--list-models`,
+  `--list-providers`, `/model` and `arcturn doctor` exactly as a preset
+  does. Shipping an extension that calls `openaiCompatible(...)` was the
+  only way to do this before, and for a company with a gateway that is not
+  a plugin problem — it is a config line. Registering from code still
+  works and still wins: config is applied before extensions load.
+- **A project config cannot point your credential at a host you did not
+  choose.** Project config outranks user config by design, so a cloned
+  repository could otherwise declare an endpoint, name it as the model,
+  and put a real key on its socket with the first message you typed. A
+  declaration in your own `~/.arcturn/config.json` is trusted. One in a
+  project's config parses, validates, and lists as *declared (not
+  enabled)* — never registered, never resolved, never contacted until you
+  approve it once. `--model x/y` fails naming the file that declared it,
+  and `arcturn doctor` reports it `not enabled` and sends nothing, because
+  doctor probes with your real key by design and must not be the thing
+  that delivers it. Approving writes a per-(origin, name, variable)
+  `provider` rule to your user file, so approving in one clone does not
+  approve a same-named entry in another, and re-pointing an approved URL
+  at a different credential asks again. Off a TTY the answer is always no.
+  The gate is defence in depth against a repository that declares an
+  endpoint in *data*; it is not a boundary against one that can execute
+  code, since project hooks and project extensions still run ungated —
+  [Permissions](/docs/permissions) says so plainly.
+- **`--trust-providers` and `--no-providers`**, mirroring `arcturn add`'s
+  `--yes` and `--skills-only`: the first enables project-declared
+  endpoints without asking, for CI that already trusts the repository it
+  checked out (and deliberately saves nothing); the second registers
+  nothing from any `providers` block, user layer included, while
+  everything still parses and still lists.
+
+### Changed
+
+- **A declared provider is sent the variable it names, and nothing else.**
+  `resolveApiKey` treats a spec's `apiKeyEnv` as the first name in a
+  chain, falling back to the provider default — so a declared endpoint
+  naming a variable you do not have set would have been handed your real
+  `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`, and the consent prompt would
+  have named the variable you lack while the wire carried the one you
+  have. A config-declared spec now resolves its named variable
+  exclusively: no provider default, no alternates, no client-level
+  override. If that variable is unset the session refuses and says which
+  variable and which file. Only a loopback endpoint may omit `apiKeyEnv`,
+  and omitting it means no credential at all — the local-runtime case.
+- **`providers` merges with the user layer winning**, unlike `route`. A
+  project file may add a name you never declared (still gated) but may
+  never repoint one you did; the dropped entry warns, quoting both files.
+- **A declared `baseUrl` is stored and shown normalised**, and one
+  containing a control character is refused — that URL is printed in the
+  prompt asking whether to trust it, and an escape sequence there can
+  repaint the prompt to say anything.
+
 ### Fixed
 
 - **Pasting into the prompt could interrupt the session and mangle the

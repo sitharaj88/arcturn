@@ -556,6 +556,13 @@ export interface OpenAICompatibleOptions {
   capabilities?: Partial<ModelCapabilities>;
   /** Environment variable holding the API key. */
   apiKeyEnv?: string;
+  /**
+   * Make {@link apiKeyEnv} the only credential this spec may receive — no
+   * provider default, no fallback, no client-wide key. See
+   * {@link ModelSpec.apiKeyEnvExclusive}; the CLI sets it for every endpoint
+   * declared in a configuration file.
+   */
+  apiKeyEnvExclusive?: boolean;
   /** Register the resulting spec in the catalog. */
   register?: boolean;
 }
@@ -599,6 +606,10 @@ export function openaiCompatible(
   };
   if (options.cost) entry.cost = options.cost;
   if (options.apiKeyEnv) entry.apiKeyEnv = options.apiKeyEnv;
+  // Carried even when no variable was named: for a config-declared endpoint
+  // that is the "keyless by declaration" case, and it must not fall back to
+  // the provider default either.
+  if (options.apiKeyEnvExclusive) entry.apiKeyEnvExclusive = true;
   if (options.register) registerModel(entry);
   return entry;
 }

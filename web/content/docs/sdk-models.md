@@ -95,7 +95,17 @@ const model = openaiCompatible("https://my-vllm-host:8000/v1", "my-local-model",
 
 For an Anthropic-Messages-compatible endpoint (some providers speak this instead of
 Chat Completions — Fireworks, MiniMax, OpenCode), hand-build a `ModelSpec` with
-`provider: "anthropic-compatible"` and a `baseUrl` instead.
+`provider: "anthropic-compatible"` and a `baseUrl` instead — or call `providerSpec(name,
+{ label, baseUrl, apiKeyEnv, protocol: "anthropic" }, model)`, which is `presetSpec` for a
+record that is not in the preset table and does the protocol→provider mapping and
+`<name>/<model>` namespacing for you.
+
+**If you are not embedding, you do not need any of this.** A `providers` block in
+`~/.arcturn/config.json` declares the same endpoint from configuration and reaches the
+wire down this same `providerSpec` path — see
+[Providers § From configuration](/docs/providers#from-configuration). The SDK path stays
+for hosts that build their catalog in code, and it still wins: the CLI applies the config
+block *before* it loads extensions, so a `registerModel` call can override a config entry.
 
 ## Failover chains
 
