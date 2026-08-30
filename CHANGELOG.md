@@ -10,6 +10,10 @@ CLI, the SDK, or the wire protocol.
 
 ## [Unreleased]
 
+## [0.5.7] — 2026-08-30
+
+The repository you cloned gets asked first.
+
 ### Added
 
 - **A repository you cloned no longer runs its own code because you `cd`'d
