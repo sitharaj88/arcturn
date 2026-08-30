@@ -125,7 +125,10 @@ dual-index cutover a model change actually requires.
 `budgetUsd:` is 40 for `rag-setup` and 20 for `rag-review`. **Raise it, or
 delete the line for no cap** — `0` and absent both mean unlimited. These are
 ceilings set to catch a runaway loop, not measurements: run once, read the
-real spend off `/workflow status`, and set your own.
+real spend off `/workflow status`, and set your own. `rag-setup` also carries
+`budgetTokens: 60000000` — a 60,000,000-token run ceiling that still fires on
+a model with no published pricing (a coding-plan endpoint, a local server),
+where a dollar ceiling never can.
 
 ---
 

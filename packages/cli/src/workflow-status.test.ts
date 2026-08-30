@@ -241,6 +241,10 @@ describe("foldJournal + formatRunsTable", () => {
     const table = formatRunsTable([run], lastTs(lines)).join("\n");
     expect(table).not.toContain("$");
     expect(table).not.toContain("turns");
+    // Tokens are the one figure an unpriced run still reports — the same sum
+    // a `budgetTokens:` ceiling compares against (10 input + 400 output).
+    expect(run.spentTokens).toBe(410);
+    expect(table).toContain("410 tok");
   });
 
   it("marks a run stalled when its open step went quiet past the step deadline", async () => {
@@ -298,15 +302,16 @@ describe("foldJournal + formatRunsTable", () => {
     expect(table).toContain("1 turns");
   });
 
-  it("renders a stop reason — READER TOLERANCE ONLY: nothing emits `stop` lines yet", async () => {
-    // The `stop` line is the one part of the journal schema with NO producer:
-    // no run-level cost-ceiling / turn-ceiling / run-deadline enforcement
-    // exists in the engine, so `stop: cost-ceiling` cannot appear in a real
-    // run's journal today. This test therefore asserts only that the reader
-    // *tolerates and renders* such a line if a writer ever emits one — it is
-    // explicitly NOT evidence that a stopped run is reported anywhere. The
-    // hand-written line below is labelled rather than hidden precisely because
-    // an unlabelled one is what let the spend column ship blank.
+  it("renders a stop reason — reader tolerance for vocabulary no writer produces yet", async () => {
+    // The engine now writes `stop` lines for its own ceilings (`cost-ceiling`
+    // from `budgetUsd:`, `token-ceiling` from `budgetTokens:` — both proved
+    // against real engine output in `orchestration-effects.test.ts` and the
+    // token test below), but the rest of the `WorkflowStopReason` vocabulary
+    // (`turn-ceiling`, `run-deadline`, …) still has no producer. This test
+    // keeps the reader's promise for the whole vocabulary: it *tolerates and
+    // renders* any stop line a future writer emits. The hand-appended line is
+    // labelled rather than hidden precisely because an unlabelled one is what
+    // let the spend column ship blank.
     const lines = await engineJournal({
       source: [FRONT, "1. @developer patch it"].join("\n"),
       runStep: async (request) => spendTurns(request, 1, 0.5, 100),
@@ -318,6 +323,46 @@ describe("foldJournal + formatRunsTable", () => {
     const run = foldJournal("run-stopped", withStop);
     expect(run.stopReason).toBe("cost-ceiling");
     expect(formatRunsTable([run], lastTs(lines) + 100).join("\n")).toContain("stop: cost-ceiling");
+  });
+
+  it("folds and renders a token-ceiling stop, from real engine output on an unpriced run", async () => {
+    // The engine's own `budgetTokens:` enforcement writes this stop line — no
+    // hand-written fixture. The runner reports raw token counts and no price,
+    // which is the run this ceiling exists for: stage 1 alone consumes 2,010
+    // tokens (10 input + 2,000 output), exceeding the 1,000-token ceiling, so
+    // stage 2 never starts.
+    const lines = await engineJournal({
+      source: [
+        "---",
+        "name: ship-fix",
+        "description: ship a fix",
+        `stepTimeoutMs: ${STEP_TIMEOUT}`,
+        "budgetTokens: 1000",
+        "---",
+        "1. @architect design it",
+        "2. @developer patch it {{prev}}",
+      ].join("\n"),
+      runStep: async () => ({ text: "x", usage: usage(2000), isError: false }),
+    });
+
+    const run = foldJournal("run-tokens", lines);
+    expect(run.stopReason).toBe("token-ceiling");
+    expect(run.spentTokens).toBe(2010);
+    expect(run.spentUsd).toBeUndefined();
+
+    const summary = summariseRun(run, lastTs(lines) + 100);
+    expect(summary.stopReason).toBe("token-ceiling");
+    expect(summary.spentTokens).toBe(2010);
+
+    // Grouped like the ceiling's own abort message, so the operator compares
+    // the two figures in one notation.
+    const table = formatRunsTable([run], lastTs(lines) + 100).join("\n");
+    expect(table).toContain("stop: token-ceiling");
+    expect(table).toContain("2,010 tok");
+
+    const detail = formatRunDetail(run, lastTs(lines) + 100).join("\n");
+    expect(detail).toContain("stopped: token-ceiling");
+    expect(detail).toContain("2,010 tokens");
   });
 
   it("prints a friendly note when no runs exist", () => {

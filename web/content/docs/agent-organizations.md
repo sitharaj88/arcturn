@@ -114,21 +114,25 @@ work resumable.
 
 ## Bounding a run
 
-Two frontmatter keys cap the two things that actually run away:
+Three frontmatter keys cap the things that actually run away:
 
 ```markdown
 ---
 name: feature-build
 stepTimeoutMs: 1800000   # 30 minutes per step
 budgetUsd: 25            # for the whole run
+budgetTokens: 60000000   # for the whole run, counted in tokens
 ---
 ```
 
 `stepTimeoutMs` aborts a single stuck step and records it `failed` like any other failure.
 `budgetUsd` tracks cumulative spend across every step and stops the run when it crosses the
-ceiling — so a loop that keeps paying for the same failure stops on your terms. A role's
-`maxTurns:` is enforced too, clamped to the session's own ceiling: a role file can narrow
-the turn budget, never raise it.
+ceiling — so a loop that keeps paying for the same failure stops on your terms.
+`budgetTokens` is the same run-scope stop counted in tokens (input, output and both cache
+buckets) — the ceiling that still fires on a model with no published pricing, where cost is
+unknowable and `budgetUsd` never trips; frontmatter-only for now, not settable over the
+wire. A role's `maxTurns:` is enforced too, clamped to the session's own ceiling: a role
+file can narrow the turn budget, never raise it.
 
 ## Remembering what the last fifty runs cost you
 

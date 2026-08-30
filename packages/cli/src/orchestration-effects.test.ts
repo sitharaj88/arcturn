@@ -573,6 +573,138 @@ describe("budgetUsd, proved by exceeding it", () => {
   });
 });
 
+// ============================================================ run token budget
+
+describe("budgetTokens, proved by exceeding it", () => {
+  /**
+   * The `spender` above, with the price knocked off: every turn reports raw
+   * token counts and NO `costUsd` — the exact shape an unpriced model (a
+   * coding-plan endpoint, Ollama, vLLM) produces, and the run `budgetUsd`
+   * can never stop because the spend it compares against never moves.
+   *
+   * @param outputTokens - Tokens each turn reports as output; input and cache
+   *   are pinned to zero so the run's total is exactly turns × outputTokens.
+   */
+  const tokenSpender = (outputTokens: number): FakeLLM =>
+    fakeLLM(
+      [1, 2, 3].flatMap((stage) => [
+        {
+          toolCalls: [
+            {
+              id: `c${stage}`,
+              name: "bash",
+              arguments: { command: `printf ${stage} > stage${stage}.txt` },
+            },
+          ],
+          usage: { inputTokens: 0, outputTokens, cacheReadTokens: 0, cacheWriteTokens: 0 },
+        },
+        {
+          text: `stage ${stage} complete`,
+          usage: { inputTokens: 0, outputTokens, cacheReadTokens: 0, cacheWriteTokens: 0 },
+        },
+      ]),
+    );
+
+  /**
+   * The same three-stage write-lane pipeline as the dollar-budget suite,
+   * bounded by `budgetTokens:` instead, against a real journal on disk.
+   *
+   * @param outputTokens - Per-turn output tokens the scripted model reports.
+   * @param budgetTokens - The `budgetTokens:` frontmatter line, or `undefined` for none.
+   */
+  async function threeStages(
+    outputTokens: number,
+    budgetTokens: number | undefined,
+  ): Promise<{
+    scratch: Scratch;
+    journalDir: string;
+    result: Awaited<ReturnType<typeof runWorkflow>>;
+  }> {
+    const scratch = await gitScratch();
+    const llm = tokenSpender(outputTokens);
+    const runtime = await runtimeWith(scratch, llm);
+    const journalDir = join(scratch.home, "journal");
+    const developer = role("developer", ["read", "write", "edit", "bash"]);
+    const workflow = parseOk(
+      [
+        "---",
+        "name: pipeline",
+        ...(budgetTokens === undefined ? [] : [`budgetTokens: ${budgetTokens}`]),
+        "---",
+        "1. @developer stage one",
+        "2. @developer stage two",
+        "3. @developer stage three",
+        "",
+      ].join("\n"),
+    );
+    const result = await runWorkflow(workflow, {
+      resolveAgent: () => developer,
+      agentNames: () => ["developer"],
+      journal: createFileRunJournal(journalDir),
+      runStep: createRuntimeRunStep(runtime, {
+        resolveAgent: () => developer,
+        writeLane: laneFor(runtime, `run-token-budget-${budgetTokens ?? "none"}`),
+      }),
+    });
+    return { scratch, journalDir, result };
+  }
+
+  /** Every step id that reached a terminal journal line. */
+  async function journalledSteps(dir: string): Promise<string[]> {
+    const lines = await readJournalLines(dir);
+    return lines
+      .filter((line): line is Extract<typeof line, { kind: "stepEnd" }> => line.kind === "stepEnd")
+      .map((line) => line.id);
+  }
+
+  itPosix(
+    "stops the pipeline on tokens alone, where budgetUsd could never have fired: no turn carried a price",
+    async () => {
+      // 400 output tokens per turn, two turns per stage: stage one alone is
+      // 800 tokens (under the 1,000 ceiling), and stage two's total of 1,600
+      // exceeds it.
+      const { scratch, journalDir, result } = await threeStages(400, 1_000);
+
+      expect(result.status).toBe("failed");
+      expect(result.error).toMatch(/exceeded its 1,000-token run budget/);
+
+      // The effect, not the report: stage three never reached the journal…
+      const stepIds = await journalledSteps(journalDir);
+      expect(stepIds).toEqual(["1", "2"]);
+      // …and its artefact was never created, while the stages that did run
+      // left theirs behind.
+      expect(await exists(join(scratch.cwd, "stage1.txt"))).toBe(true);
+      expect(await exists(join(scratch.cwd, "stage2.txt"))).toBe(true);
+      expect(await exists(join(scratch.cwd, "stage3.txt"))).toBe(false);
+
+      // The journal names the reason, and the status fold carries it through.
+      const stopLines = (await readJournalLines(journalDir)).filter(
+        (line): line is Extract<typeof line, { kind: "stop" }> => line.kind === "stop",
+      );
+      expect(stopLines.map((line) => line.reason)).toEqual(["token-ceiling"]);
+      const summary = summariseRun(foldJournal("run", await readJournalLines(journalDir)));
+      expect(summary.stopReason).toBe("token-ceiling");
+      // THE POINT: nothing here could ever be priced, so the dollar ceiling
+      // had no number to compare — the token one is what actually stopped it.
+      expect(summary.spentUsd).toBeUndefined();
+      expect(result.usage.costUsd).toBeUndefined();
+    },
+  );
+
+  itPosix("runs every stage when the same pipeline stays under its token budget", async () => {
+    // The control: identical pipeline, a ceiling it cannot cross, and stage
+    // three both journals and lands its artefact.
+    const { scratch, journalDir, result } = await threeStages(400, 60_000_000);
+
+    expect(result.status).toBe("done");
+    expect(await journalledSteps(journalDir)).toEqual(["1", "2", "3"]);
+    expect(await exists(join(scratch.cwd, "stage3.txt"))).toBe(true);
+    expect(
+      summariseRun(foldJournal("run", await readJournalLines(journalDir))).stopReason,
+    ).toBeUndefined();
+  });
+});
+
 // ============================================================== org memory
 
 describe("org memory reaches a role's prompt only after a person approves it", () => {

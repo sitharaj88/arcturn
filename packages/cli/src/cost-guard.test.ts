@@ -1,6 +1,11 @@
 import type { AgentEvent, Usage } from "@arcturn/types";
 import { describe, expect, it, vi } from "vitest";
-import { costLimitMessage, createCostGuard, shouldAbortForCost } from "./cost-guard.js";
+import {
+  costLimitMessage,
+  createCostGuard,
+  shouldAbortForCost,
+  shouldAbortForTokens,
+} from "./cost-guard.js";
 
 const emptyUsage: Usage = {
   inputTokens: 0,
@@ -40,6 +45,30 @@ describe("shouldAbortForCost", () => {
 
   it("treats a non-finite spend as not-over-limit", () => {
     expect(shouldAbortForCost(Number.NaN, 1)).toBe(false);
+  });
+});
+
+describe("shouldAbortForTokens", () => {
+  it("is false below and exactly at the limit — a count equal to its ceiling has not exceeded it", () => {
+    expect(shouldAbortForTokens(999, 1_000)).toBe(false);
+    expect(shouldAbortForTokens(1_000, 1_000)).toBe(false);
+  });
+
+  it("is true above the limit", () => {
+    expect(shouldAbortForTokens(1_001, 1_000)).toBe(true);
+    expect(shouldAbortForTokens(60_000_001, 60_000_000)).toBe(true);
+  });
+
+  it("is false when the limit is 0, undefined, negative or non-finite (disabled)", () => {
+    expect(shouldAbortForTokens(1_000_000, 0)).toBe(false);
+    expect(shouldAbortForTokens(1_000_000, undefined)).toBe(false);
+    expect(shouldAbortForTokens(1_000_000, -1)).toBe(false);
+    expect(shouldAbortForTokens(1_000_000, Number.NaN)).toBe(false);
+    expect(shouldAbortForTokens(1_000_000, Number.POSITIVE_INFINITY)).toBe(false);
+  });
+
+  it("treats a non-finite spend as not-over-limit", () => {
+    expect(shouldAbortForTokens(Number.NaN, 1_000)).toBe(false);
   });
 });
 

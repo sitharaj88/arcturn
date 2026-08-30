@@ -65,6 +65,7 @@ export const RUN_MANIFEST_FILE = "manifest.json";
  */
 export type WorkflowStopReason =
   | "cost-ceiling"
+  | "token-ceiling"
   | "turn-ceiling"
   | "run-deadline"
   | "repeated-transient"

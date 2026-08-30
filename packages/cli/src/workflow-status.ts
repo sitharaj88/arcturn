@@ -19,7 +19,7 @@
 
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
-import { formatDuration, formatTokens } from "./format.js";
+import { formatDuration, formatTokens, totalTokens } from "./format.js";
 import { FANCY_GLYPHS, type GlyphSet } from "./glyphs.js";
 import type { WorkflowRunStatus, WorkflowStepStatus } from "./workflow.js";
 import { type JournalLine, readJournalLines, type WorkflowStopReason } from "./workflow-run.js";
@@ -62,6 +62,14 @@ export interface JournalRun {
   readonly stages: JournalStage[];
   /** Last-known running spend, from the newest `budget` line. */
   spentUsd?: number;
+  /**
+   * Last-known running token total, from the newest `budget` line's `usage` —
+   * input + output + cache read + cache write, the same sum the engine's
+   * `budgetTokens:` ceiling compares against. Unlike {@link spentUsd} it is
+   * known for every model, priced or not, which is exactly why the token
+   * ceiling exists.
+   */
+  spentTokens?: number;
   /** Last-known running turn count, from the newest `budget` line. */
   turns?: number;
   /** A `stop` line's reason, when the run halted for a named condition. */
@@ -121,6 +129,7 @@ export interface RunSummary {
   readonly stepsDone: number;
   readonly stepsTotal: number;
   readonly spentUsd?: number;
+  readonly spentTokens?: number;
   readonly turns?: number;
   readonly stopReason?: WorkflowStopReason;
   readonly startedAt?: number;
@@ -245,6 +254,9 @@ export function foldJournal(runId: string, lines: readonly JournalLine[]): Journ
       case "budget":
         if (line.spentUsd !== undefined) run.spentUsd = line.spentUsd;
         if (line.turns !== undefined) run.turns = line.turns;
+        // Guarded although the writer always sets `usage`: the fold's contract
+        // is to tolerate any line that survived `readJournalLines`.
+        if (line.usage !== undefined) run.spentTokens = totalTokens(line.usage);
         bumpWrite(run, line.ts);
         break;
       case "stop":
@@ -314,6 +326,7 @@ export function summariseRun(run: JournalRun, now: number = Date.now()): RunSumm
     stepsDone: done,
     stepsTotal: steps.length,
     ...(run.spentUsd === undefined ? {} : { spentUsd: run.spentUsd }),
+    ...(run.spentTokens === undefined ? {} : { spentTokens: run.spentTokens }),
     ...(run.turns === undefined ? {} : { turns: run.turns }),
     ...(run.stopReason === undefined ? {} : { stopReason: run.stopReason }),
     ...(run.startedAt === undefined ? {} : { startedAt: run.startedAt }),
@@ -364,6 +377,12 @@ export function formatRunsTable(
       `${row.stepsDone}/${row.stepsTotal} steps`,
     ];
     if (row.spentUsd !== undefined) facts.push(`$${row.spentUsd.toFixed(2)}`);
+    // `en-US` grouping, not `formatTokens`'s compact form: this is the figure
+    // an operator compares against a `budgetTokens:` ceiling (and the ceiling's
+    // own abort message), so the two must read in the same notation.
+    if (row.spentTokens !== undefined) {
+      facts.push(`${row.spentTokens.toLocaleString("en-US")} tok`);
+    }
     if (row.turns !== undefined) facts.push(`${row.turns} turns`);
     if (row.startedAt !== undefined) facts.push(formatDuration(Math.max(0, now - row.startedAt)));
     if ((row.state === "stalled" || row.state === "running") && row.lastWriteTs !== undefined) {
@@ -406,6 +425,9 @@ export function formatRunDetail(
   if (run.source) lines.push(`  source: ${run.source}`);
   const facts: string[] = [];
   if (run.spentUsd !== undefined) facts.push(`spend $${run.spentUsd.toFixed(2)}`);
+  if (run.spentTokens !== undefined) {
+    facts.push(`${run.spentTokens.toLocaleString("en-US")} tokens`);
+  }
   if (run.turns !== undefined) facts.push(`${run.turns} turns`);
   if (run.startedAt !== undefined) {
     facts.push(`elapsed ${formatDuration(Math.max(0, now - run.startedAt))}`);

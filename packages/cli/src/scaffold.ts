@@ -20,7 +20,8 @@
  * 2. **The comments teach the format, not the product.** Each file explains
  *    the rules that will bite: that `tools:` decides which *lane* the workflow
  *    engine dispatches a role on (`roleDispatch` in `workflow.ts`), that
- *    `budgetUsd:` caps what a whole run may spend, that a skill body is a
+ *    `budgetUsd:` caps what a whole run may spend (and `budgetTokens:` caps it
+ *    in tokens, for the model no dollar ceiling can see), that a skill body is a
  *    prompt template expanded on every invocation. Those comments live inside
  *    the frontmatter (where every loader ignores an unrecognised key) or, for a
  *    workflow, above the first numbered line (the one region its parser treats
@@ -156,7 +157,10 @@ it. Run this file with "/workflow ${name} <your input>".
 
 budgetUsd caps what the whole run may spend in US dollars, across every step and
 every retry, and the run aborts the moment that ceiling is crossed. Delete the
-line and there is no ceiling at all.
+line and there is no ceiling at all. On a model with no published pricing that
+dollar ceiling can never fire, because cost stays unknown; add a "budgetTokens:"
+line to cap the run by total tokens consumed instead (input + output + cache) —
+the one number every model reports.
 
 A step is exactly one numbered line, numbered consecutively from 1; there are no
 continuation lines. {{input}} is the text typed after the workflow name, and

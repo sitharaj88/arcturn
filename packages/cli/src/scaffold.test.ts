@@ -74,6 +74,9 @@ describe("scaffold", () => {
     // The teaching comments live above the first numbered line, which is the
     // only place the parser treats as documentation.
     expect(raw).toMatch(/budgetUsd:.*(whole run|run may spend)/is);
+    // …and they name the token ceiling too — the only one that can fire on a
+    // model with no published pricing, where budgetUsd never trips.
+    expect(raw).toMatch(/budgetTokens:.*total tokens/is);
   });
 
   it("writes a skill the real loader accepts", async () => {

@@ -4,6 +4,7 @@ description: Build a retrieval system on the organization's own stack — survey
 continueOnError: false
 stepTimeoutMs: 2400000
 budgetUsd: 40
+budgetTokens: 60000000
 ---
 Run it as `/workflow rag-setup <what the system must answer, for whom, over which data>`.
 

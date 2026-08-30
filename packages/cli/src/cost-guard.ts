@@ -34,6 +34,36 @@ export function shouldAbortForCost(spentUsd: number, limitUsd: number): boolean 
 }
 
 /**
+ * Run-level token threshold check — {@link shouldAbortForCost}'s sibling for
+ * the one ceiling that can still bite on a model with no published pricing.
+ * On such a model (a coding-plan endpoint, Ollama, vLLM) `costUsd` is never
+ * minted, so a dollar ceiling compares against a spend that never moves;
+ * token counts, by contrast, arrive on every turn. Same conventions as the
+ * cost check: a limit of `0`/`undefined` (or a negative/non-finite value)
+ * disables the guard, and a non-finite spend never trips it.
+ *
+ * The comparison is strict (`>`) where the cost check's is `>=`: tokens are
+ * a discrete count, and a run that consumed *exactly* its ceiling has not
+ * exceeded it — which is what the abort message will say it did.
+ *
+ * @param spentTokens - Total tokens consumed so far: input + output + cache
+ *   read + cache write. Thinking tokens are a subset of output and must never
+ *   be added separately (see `Usage.thinkingTokens` in `@arcturn/types`).
+ * @param limitTokens - Configured ceiling, in tokens. `undefined` or `0`
+ *   disables the guard.
+ * @returns Whether the run should be aborted for exceeding its token ceiling.
+ */
+export function shouldAbortForTokens(
+  spentTokens: number,
+  limitTokens: number | undefined,
+): boolean {
+  const limit = limitTokens ?? 0;
+  if (!Number.isFinite(limit) || limit <= 0) return false;
+  if (!Number.isFinite(spentTokens)) return false;
+  return spentTokens > limit;
+}
+
+/**
  * Render the message shown to the user when the guard fires.
  *
  * Exported so the CLI (and its tests) can assert on the exact wording

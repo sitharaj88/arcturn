@@ -240,8 +240,8 @@ import type {
 } from "@arcturn/types";
 import type { AgentDef } from "./agents.js";
 import type { CommandContext, CommandUi, SlashCommand } from "./commands.js";
-import { shouldAbortForCost } from "./cost-guard.js";
-import { formatDuration, oneLine } from "./format.js";
+import { shouldAbortForCost, shouldAbortForTokens } from "./cost-guard.js";
+import { formatDuration, oneLine, totalTokens } from "./format.js";
 import { loadOrgMemoryInjector, orgMemoryPath, renderRunJournalDigest } from "./org-memory.js";
 import { createWorktree } from "./scouts.js";
 import {
@@ -371,6 +371,18 @@ export interface Workflow {
    * `budgetUsd:` line runs exactly as it always has. See {@link runWorkflow}.
    */
   readonly budgetUsd?: number;
+  /**
+   * Token ceiling for the *whole run*, from the `budgetTokens:` frontmatter
+   * key — the one run ceiling that can still fire on a model with no
+   * published pricing (a coding-plan endpoint, Ollama, vLLM), where
+   * {@link budgetUsd} compares against a `costUsd` that is never minted.
+   * Counted as ALL tokens the run consumed: input + output + cache read +
+   * cache write (thinking tokens are a subset of output and are never added
+   * separately). `undefined` or `0` disables it, mirroring `budgetUsd`.
+   * Frontmatter-only in v1: unlike `budgetUsd` it is not settable or
+   * overridable over the wire. See {@link runWorkflow}.
+   */
+  readonly budgetTokens?: number;
   /** Stages in execution order; always at least one. */
   readonly stages: readonly WorkflowStage[];
   /** Absolute path of the file it was loaded from; empty for an inline parse. */
@@ -891,6 +903,8 @@ interface Frontmatter {
   maxStepRetries?: string;
   /** Raw `budgetUsd:` value, validated and parsed by {@link parseWorkflow}. */
   budgetUsd?: string;
+  /** Raw `budgetTokens:` value, validated and parsed by {@link parseWorkflow}. */
+  budgetTokens?: string;
 }
 
 /**
@@ -947,6 +961,7 @@ function parseFrontmatter(raw: string): {
     else if (key === "stepTimeoutMs") frontmatter.stepTimeoutMs = value;
     else if (key === "maxStepRetries") frontmatter.maxStepRetries = value;
     else if (key === "budgetUsd") frontmatter.budgetUsd = value;
+    else if (key === "budgetTokens") frontmatter.budgetTokens = value;
     else continue;
     // Line 1 is the opening fence, so the first body-of-frontmatter line (i=0
     // within the slice) is file line 2.
@@ -1167,6 +1182,26 @@ export function parseWorkflow(
     budgetUsd = parsed;
   }
 
+  // The run-level TOKEN ceiling — the one budget that can still bite on a
+  // model with no published pricing, where `budgetUsd` above compares against
+  // a `costUsd` that is never minted. Same `>= 0` floor as `budgetUsd` (`0`
+  // is "disabled", matching `shouldAbortForTokens`'s own convention), but a
+  // whole number: tokens are counted, not measured.
+  let budgetTokens: number | undefined;
+  if (frontmatter.budgetTokens !== undefined) {
+    const line = keyLines.get("budgetTokens");
+    const prefix = line === undefined ? "" : `line ${line}: `;
+    const parsed = Number(frontmatter.budgetTokens.trim());
+    if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed < 0) {
+      return {
+        error:
+          `${prefix}budgetTokens must be a non-negative whole number of tokens, got ` +
+          `"${frontmatter.budgetTokens}"`,
+      };
+    }
+    budgetTokens = parsed;
+  }
+
   // --- scan the body into stage drafts -----------------------------------
   const drafts: StageDraft[] = [];
   const lines = body.split(/\r?\n/);
@@ -1289,6 +1324,7 @@ export function parseWorkflow(
     ...(stepTimeoutMs === undefined ? {} : { stepTimeoutMs }),
     ...(maxStepRetries === undefined ? {} : { maxStepRetries }),
     ...(budgetUsd === undefined ? {} : { budgetUsd }),
+    ...(budgetTokens === undefined ? {} : { budgetTokens }),
     stages,
     source: defaults.source ?? "",
   };
@@ -1626,6 +1662,33 @@ function workflowBudgetExceededError(name: string, spentUsd: number, limitUsd: n
     `workflow "${name}" exceeded its $${limitUsd.toFixed(2)} run budget ` +
     `(spent $${spentUsd.toFixed(2)}); run aborted. No further stage will start. Raise it with ` +
     '"budgetUsd:" in the workflow\'s own frontmatter.'
+  );
+}
+
+/**
+ * The message a run fails with when its own `budgetTokens:` ceiling is
+ * crossed — {@link workflowBudgetExceededError}'s sibling for the ceiling
+ * that can still fire when the dollar one cannot: a model with no published
+ * pricing never mints a `costUsd`, but tokens are counted on every turn.
+ *
+ * `en-US` grouping on both numbers, deliberately: a 60000000-token ceiling
+ * is unreadable, and this message is the moment the operator compares the
+ * two figures.
+ *
+ * @param name - The workflow's name.
+ * @param spentTokens - Total tokens the run consumed (input + output + cache
+ *   read + cache write) at the moment the ceiling tripped.
+ * @param limitTokens - The `budgetTokens:` ceiling that was crossed.
+ */
+function workflowTokenBudgetExceededError(
+  name: string,
+  spentTokens: number,
+  limitTokens: number,
+): string {
+  return (
+    `workflow "${name}" exceeded its ${limitTokens.toLocaleString("en-US")}-token run budget ` +
+    `(spent ${spentTokens.toLocaleString("en-US")} tokens); run aborted. No further stage will ` +
+    'start. Raise it with "budgetTokens:" in the workflow\'s own frontmatter.'
   );
 }
 
@@ -2491,7 +2554,8 @@ export async function runWorkflow(
   let cancelled = controller.signal.aborted;
   /**
    * ENFORCED PER-ROLE BUDGETS' run-level backstop (RFC 0001 §7.4): set once
-   * the workflow's own `budgetUsd:` ceiling is crossed. Short-circuits every
+   * the workflow's own `budgetUsd:` — or `budgetTokens:` — ceiling is
+   * crossed. Short-circuits every
    * later stage unconditionally, `continueOnError` included — like `pending`
    * below, a money ceiling is not the kind of per-step failure that flag
    * exists to paper over. `failure` is still set alongside it (see the check
@@ -3126,6 +3190,30 @@ export async function runWorkflow(
             workflow.budgetUsd,
           );
         }
+        // TOKEN CEILING (`budgetTokens:`): the same run-scope backstop for
+        // the model `budgetUsd` above cannot police — one with no published
+        // pricing, whose `usage.costUsd` stays `undefined` forever while its
+        // token counts arrive on every turn. All four buckets count (input,
+        // output, cache read, cache write; thinking tokens are already inside
+        // output). Checked *after* the dollar ceiling on purpose: when one
+        // settled result crosses both, `budgetExhausted` is already set and
+        // the run deterministically reports `cost-ceiling`.
+        // One bind for guard and message alike: the number the error reports
+        // is by construction the number the ceiling compared.
+        const tokensSpent = totalTokens(usage);
+        if (
+          !budgetExhausted &&
+          workflow.budgetTokens !== undefined &&
+          shouldAbortForTokens(tokensSpent, workflow.budgetTokens)
+        ) {
+          budgetExhausted = true;
+          recordStop("token-ceiling");
+          failure ??= workflowTokenBudgetExceededError(
+            workflow.name,
+            tokensSpent,
+            workflow.budgetTokens,
+          );
+        }
         // The human-question gate: EVERY paused step of this stage arms the
         // run-level pause, in branch order. Capturing only the first is what
         // made a parallel stage's second question invisible to the resume that
@@ -3192,9 +3280,10 @@ export async function runWorkflow(
     return finish("cancelled", results, prev, usage, "Workflow cancelled.");
   }
   if (failure !== undefined) {
-    // `cost-ceiling` was already recorded at the crossing above, and
-    // `recordStop` keeps the first reason: a budget breach that also leaves a
-    // failed step must not be relabelled as a plain error on the way out.
+    // `cost-ceiling` / `token-ceiling` was already recorded at the crossing
+    // above, and `recordStop` keeps the first reason: a budget breach that
+    // also leaves a failed step must not be relabelled as a plain error on
+    // the way out.
     recordStop("error");
     return finish("failed", results, prev, usage, failure);
   }

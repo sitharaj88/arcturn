@@ -5581,6 +5581,78 @@ describe("runWorkflow — enforced per-role and run budgets", () => {
     expect(result.status).toBe("done");
     expect(result.steps.map((step) => step.status)).toEqual(["done", "done"]);
   });
+
+  it("stops the pipeline once budgetTokens is exceeded — on steps that carry no price at all", async () => {
+    const workflow = parseOk(
+      [
+        "---",
+        "name: demo",
+        "budgetTokens: 25",
+        "---",
+        "1. a",
+        "2. b {{prev}}",
+        "3. c {{prev}}",
+      ].join("\n"),
+    );
+    const result = await runWorkflow(workflow, {
+      // Raw token counts, no costUsd: the run `budgetUsd` can never see.
+      // 5 input + 10 output = 15 tokens per step; stage 2's total of 30
+      // crosses the 25-token ceiling.
+      runStep: async (request) => ({
+        text: `<${request.step.id}>`,
+        usage: usage(5, 10),
+        isError: false,
+      }),
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.steps.map((step) => step.status)).toEqual(["done", "done", "skipped"]);
+    expect(result.error).toMatch(/exceeded its 25-token run budget \(spent 30 tokens\)/);
+  });
+
+  it("does not stop a run that consumes exactly budgetTokens — a count equal to its ceiling has not exceeded it", async () => {
+    const workflow = parseOk(
+      ["---", "name: demo", "budgetTokens: 30", "---", "1. a", "2. b {{prev}}"].join("\n"),
+    );
+    const result = await runWorkflow(workflow, {
+      runStep: async (request) => ({
+        text: `<${request.step.id}>`,
+        usage: usage(5, 10),
+        isError: false,
+      }),
+    });
+
+    expect(result.status).toBe("done");
+    expect(result.steps.map((step) => step.status)).toEqual(["done", "done"]);
+  });
+
+  it("reports cost-ceiling, not token-ceiling, when one settled stage crosses both", async () => {
+    // The deterministic ordering the engine promises: the dollar check runs
+    // first, so a result that trips both ceilings at once always halts the
+    // run with the cost message.
+    const workflow = parseOk(
+      [
+        "---",
+        "name: demo",
+        "budgetUsd: 1.00",
+        "budgetTokens: 5",
+        "---",
+        "1. a",
+        "2. b {{prev}}",
+      ].join("\n"),
+    );
+    const result = await runWorkflow(workflow, {
+      runStep: async (request) => ({
+        text: `<${request.step.id}>`,
+        usage: priced(10, 1.4),
+        isError: false,
+      }),
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.error).toMatch(/exceeded its \$1\.00 run budget/);
+    expect(result.error).not.toMatch(/token run budget/);
+  });
 });
 
 describe("parseWorkflow — maxStepRetries frontmatter", () => {
@@ -5631,6 +5703,35 @@ describe("parseWorkflow — budgetUsd frontmatter (ENFORCED PER-ROLE BUDGETS' ru
     );
     expect(parseErr(["---", "name: demo", "budgetUsd: lots", "---", "1. a"].join("\n"))).toMatch(
       /budgetUsd must be a non-negative number of US dollars, got "lots"/,
+    );
+  });
+});
+
+describe("parseWorkflow — budgetTokens frontmatter (the run ceiling for unpriced models)", () => {
+  it("parses a valid non-negative whole token count", () => {
+    const wf = parseOk(["---", "name: demo", "budgetTokens: 60000000", "---", "1. a"].join("\n"));
+    expect(wf.budgetTokens).toBe(60_000_000);
+  });
+
+  it("accepts 0 (disables the run-level token ceiling)", () => {
+    const wf = parseOk(["---", "name: demo", "budgetTokens: 0", "---", "1. a"].join("\n"));
+    expect(wf.budgetTokens).toBe(0);
+  });
+
+  it("defaults to undefined when unset (no token ceiling applies)", () => {
+    const wf = parseOk([FRONT, "1. a"].join("\n"));
+    expect(wf.budgetTokens).toBeUndefined();
+  });
+
+  it("rejects a negative, fractional or non-numeric value, line-numbered", () => {
+    expect(parseErr(["---", "name: demo", "budgetTokens: -5", "---", "1. a"].join("\n"))).toMatch(
+      /^line 3: budgetTokens must be a non-negative whole number of tokens, got "-5"/,
+    );
+    expect(parseErr(["---", "name: demo", "budgetTokens: 1.5", "---", "1. a"].join("\n"))).toMatch(
+      /budgetTokens must be a non-negative whole number of tokens, got "1\.5"/,
+    );
+    expect(parseErr(["---", "name: demo", "budgetTokens: lots", "---", "1. a"].join("\n"))).toMatch(
+      /budgetTokens must be a non-negative whole number of tokens, got "lots"/,
     );
   });
 });

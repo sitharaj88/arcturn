@@ -37,6 +37,7 @@ description: Reproduce, patch and review one bug report
 continueOnError: false
 stepTimeoutMs: 1800000
 budgetUsd: 15
+budgetTokens: 60000000
 ---
 Optional prose here is documentation only and is ignored by the parser.
 
@@ -71,8 +72,8 @@ The grammar is strict, by design — a workflow is meant to be predictable, not 
 Step ids are positional: `"2"` for a lone step in stage 2, `"2.1"`/`"2.2"` for its two
 branches. Those are the ids `WorkflowStepResult.id` and the progress notices use.
 
-Two optional frontmatter keys bound a run in the two dimensions that actually run away —
-time and money:
+Three optional frontmatter keys bound a run in the dimensions that actually run away —
+time, money, and, where money cannot be counted, tokens:
 
 - **`stepTimeoutMs`** is a per-step deadline, defaulting to 10 minutes. When a step reaches
   it the engine aborts that step's agent and records it `failed` with the deadline named in
@@ -83,9 +84,20 @@ time and money:
   across every step and aborts the run when it crosses the number, so a loop that keeps
   paying for the same failure stops on your terms rather than on your invoice. Omit the key
   and the run is unbounded, which is the pre-existing behaviour.
+- **`budgetTokens`** is the same run-scope ceiling counted in *tokens* rather than dollars.
+  It exists because `budgetUsd` has a blind spot: on a model that publishes no pricing — a
+  coding-plan endpoint, Ollama, vLLM, an in-house gateway — the run's cost is never computed,
+  so a dollar ceiling can never fire, however much the run consumes. Token counts, by
+  contrast, are reported on every turn, priced or not. All four buckets count toward the
+  total: input, output (thinking tokens are already inside it) and both cache buckets, cache
+  reads and cache writes alike — everything the run consumed. It must be a whole number; `0`
+  and absent both mean no token ceiling. In this first version it is frontmatter-only: unlike
+  `budgetUsd` it cannot be set or lowered over the wire, and there are no per-stage or
+  per-role token caps.
 
-Both are validated at parse time: a non-numeric or negative value is a parse error naming
-the line, not a silently ignored key.
+All three are validated at parse time: a non-numeric or negative value — or, for
+`budgetTokens`, a fractional one — is a parse error naming the line, not a silently
+ignored key.
 
 ## Model tags
 
@@ -256,8 +268,9 @@ Three things are worth knowing before you build on them, and all three are cover
   lane is genuinely unknowable and both mean the run will fail before it spends anything.
 - **A wire budget may only lower the file's ceiling.** `runWorkflow` takes an optional
   `budgetUsd` that must be *smaller* than the workflow's own `budgetUsd:`; a larger one is
-  refused, naming both numbers, rather than clamped. Nothing else — `stepTimeoutMs`, a
-  role's `maxTurns`, a role's `tools:`, the permission engine — has a parameter at all.
+  refused, naming both numbers, rather than clamped. Nothing else — `budgetTokens`,
+  `stepTimeoutMs`, a role's `maxTurns`, a role's `tools:`, the permission engine — has a
+  parameter at all.
 - **A run is followed on the session's own event stream.** `runWorkflow` answers as soon as
   the run is *accepted* (a pipeline outlives every sane request deadline), and its progress
   arrives as the same `notice` events the terminal prints, plus each step's child agent
