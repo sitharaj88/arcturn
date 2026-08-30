@@ -6,6 +6,13 @@
  * buffered until they are complete. Bracketed paste is surfaced as a single
  * `paste` event carrying the full pasted text.
  *
+ * A paste is held in its own accumulator rather than in the escape-sequence
+ * buffer, which matters twice over. {@link KeyDecoder.flush} — the "the terminal
+ * has gone quiet, resolve the dangling ESC" resolver — then cannot tear a paste
+ * still in flight into an `escape` key plus a literal `[200~`, and appending a
+ * chunk costs the length of the chunk rather than the length of the paste so
+ * far, so a several-hundred-kilobyte paste stays linear.
+ *
  * @packageDocumentation
  */
 
@@ -204,6 +211,24 @@ function firstGrapheme(input: string): string {
 type Step = { key?: Key; consumed: number } | null;
 
 /**
+ * Most pasted bytes the decoder holds before it hands over what it has as a
+ * `paste` key and starts a fresh accumulator, still inside the same paste.
+ *
+ * This bounds memory without ever changing what the bytes *mean*: a paste
+ * larger than the cap arrives as several `paste` events whose contents
+ * concatenate to the original, so it is still literal text and still never a
+ * key binding. Real pastes are orders of magnitude below this.
+ */
+const MAX_PASTE_BYTES = 4 * 1024 * 1024;
+
+/**
+ * Bytes held back from the accumulator so an `ESC[201~` split across two
+ * chunks is still recognised: any occurrence straddling a chunk boundary is
+ * fully contained in `tail + nextChunk`.
+ */
+const PASTE_TAIL = PASTE_END.length - 1;
+
+/**
  * Incremental decoder turning raw terminal input into {@link Key} events.
  *
  * Feed every stdin chunk to {@link KeyDecoder.push}. Incomplete escape sequences are
@@ -219,15 +244,53 @@ type Step = { key?: Key; consumed: number } | null;
  */
 export class KeyDecoder {
   private buffer = "";
+  /** Pasted content collected so far; `undefined` outside a bracketed paste. */
+  private pasteParts: string[] | undefined;
+  /** Trailing pasted bytes withheld so a split `ESC[201~` is still spotted. */
+  private pasteTail = "";
+  /** Length of {@link KeyDecoder.pasteParts}, tracked to avoid re-joining it. */
+  private pasteSize = 0;
 
-  /** Input received so far that does not yet form a complete sequence. */
+  /**
+   * Input received so far that does not yet form a complete sequence.
+   *
+   * Always `""` inside a bracketed paste: pasted bytes live in their own
+   * accumulator, so the host's escape timer never fires against them.
+   */
   get pending(): string {
     return this.buffer;
   }
 
-  /** Discards any buffered partial sequence. */
+  /** `true` between an `ESC[200~` and its `ESC[201~`. */
+  get pasting(): boolean {
+    return this.pasteParts !== undefined;
+  }
+
+  /** Discards any buffered partial sequence and abandons an open paste. */
   reset(): void {
     this.buffer = "";
+    this.pasteParts = undefined;
+    this.pasteTail = "";
+    this.pasteSize = 0;
+  }
+
+  /**
+   * Ends a bracketed paste whose `ESC[201~` never arrived, handing back what
+   * did arrive as a `paste` key.
+   *
+   * {@link KeyDecoder.flush} deliberately leaves a paste alone — a terminal
+   * pacing a paste in chunks goes quiet for far longer than the escape timeout,
+   * and resolving it there is exactly what turned a paste into an `escape` key
+   * plus a literal `[200~`. A host arms a much longer watchdog and calls this
+   * instead, so a terminal that dies mid-paste costs at most a truncated
+   * paste, never a wedged decoder.
+   *
+   * @returns The `paste` key, or an empty array when no paste is open.
+   */
+  endPaste(): Key[] {
+    if (this.pasteParts === undefined) return [];
+    if (this.pasteTail !== "") this.pasteParts.push(this.pasteTail);
+    return [this.closePaste(false)];
   }
 
   /**
@@ -246,6 +309,7 @@ export class KeyDecoder {
    *
    * A dangling `ESC` becomes an `escape` key press; anything else that cannot be
    * parsed is emitted as an `unknown` key so input is never silently swallowed.
+   * An in-flight paste is *not* resolved — see {@link KeyDecoder.endPaste}.
    */
   flush(): Key[] {
     const keys: Key[] = [];
@@ -254,6 +318,12 @@ export class KeyDecoder {
       keys.push(...this.drain());
       if (this.buffer.length === 0) break;
       if (this.buffer === before) {
+        // A half-arrived paste marker is a sequence in flight, not a stuck one:
+        // terminals pace long pastes, so `ESC[20` can easily sit here for
+        // longer than the escape timeout. Resolving it is what turned the
+        // marker into an interrupt plus a literal "[200~", so it waits — only
+        // a bare ESC, which really can be the escape key, resolves.
+        if (this.buffer.length > 1 && PASTE_START.startsWith(this.buffer)) break;
         // An incomplete SGR mouse report has no meaningful literal reading — drop
         // it rather than degrade into escape + garbage text.
         if (this.buffer.startsWith(`${CSI}<`) && /^[0-9;]*$/.test(this.buffer.slice(3))) {
@@ -276,6 +346,12 @@ export class KeyDecoder {
   private drain(): Key[] {
     const keys: Key[] = [];
     while (this.buffer.length > 0) {
+      // Inside a paste every byte is content until the end marker, so the whole
+      // buffer moves into the accumulator and never accrues here.
+      if (this.pasteParts !== undefined) {
+        this.buffer = this.buffer.slice(this.consumePaste(this.buffer, keys));
+        continue;
+      }
       const step = this.step(this.buffer);
       if (step === null) break;
       if (step.consumed <= 0) break;
@@ -285,17 +361,59 @@ export class KeyDecoder {
     return keys;
   }
 
+  /**
+   * Takes pasted bytes off the front of `text`, emitting a `paste` key once the
+   * end marker lands (or once the memory cap is reached).
+   *
+   * @returns How many characters of `text` were consumed — always at least one,
+   *   so {@link KeyDecoder.drain} cannot spin.
+   */
+  private consumePaste(text: string, out: Key[]): number {
+    const parts = this.pasteParts;
+    if (parts === undefined) return 0;
+    const tailLength = this.pasteTail.length;
+    // Only the withheld tail is re-scanned, so the cost is the chunk's length
+    // rather than the paste's — no rescan of everything received so far.
+    const haystack = this.pasteTail + text;
+    const end = haystack.indexOf(PASTE_END);
+    if (end !== -1) {
+      parts.push(haystack.slice(0, end));
+      out.push(this.closePaste(true));
+      return end + PASTE_END.length - tailLength;
+    }
+    const keep = Math.max(0, haystack.length - PASTE_TAIL);
+    if (keep > 0) {
+      parts.push(haystack.slice(0, keep));
+      this.pasteSize += keep;
+    }
+    this.pasteTail = haystack.slice(keep);
+    if (this.pasteSize >= MAX_PASTE_BYTES) {
+      const content = parts.join("");
+      parts.length = 0;
+      this.pasteSize = 0;
+      out.push(makeKey("paste", `${PASTE_START}${content}`, {}, { paste: content }));
+    }
+    return text.length;
+  }
+
+  /** Leaves paste mode, returning the collected content as one `paste` key. */
+  private closePaste(terminated: boolean): Key {
+    const content = (this.pasteParts ?? []).join("");
+    this.pasteParts = undefined;
+    this.pasteTail = "";
+    this.pasteSize = 0;
+    const sequence = `${PASTE_START}${content}${terminated ? PASTE_END : ""}`;
+    return makeKey("paste", sequence, {}, { paste: content });
+  }
+
   private step(buf: string): Step {
-    // Bracketed paste: buffer until the terminating marker arrives.
+    // Bracketed paste: the marker opens paste mode, and everything after it is
+    // content collected by consumePaste until the terminator arrives.
     if (buf.startsWith(PASTE_START)) {
-      const end = buf.indexOf(PASTE_END, PASTE_START.length);
-      if (end === -1) return null;
-      const content = buf.slice(PASTE_START.length, end);
-      const consumed = end + PASTE_END.length;
-      return {
-        key: makeKey("paste", buf.slice(0, consumed), {}, { paste: content }),
-        consumed,
-      };
+      this.pasteParts = [];
+      this.pasteTail = "";
+      this.pasteSize = 0;
+      return { consumed: PASTE_START.length };
     }
     if (PASTE_START.startsWith(buf)) return null;
 

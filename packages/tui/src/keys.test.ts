@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createKey, isPrintable, type Key, KeyDecoder, keyToString, matchesKey } from "./keys.js";
 
 const ESC = "\u001b";
+const CTRL_C = "\u0003";
 
 function decode(...chunks: string[]): Key[] {
   const decoder = new KeyDecoder();
@@ -293,6 +294,151 @@ describe("bracketed paste", () => {
   it("continues decoding keys typed after the paste", () => {
     const keys = decode(`${ESC}[200~hi${ESC}[201~\r`);
     expect(names(keys)).toEqual(["paste", "enter"]);
+  });
+
+  it("buffers a paste whose end marker is split", () => {
+    const decoder = new KeyDecoder();
+    expect(decoder.push(`${ESC}[200~hi${ESC}[20`)).toEqual([]);
+    const keys = decoder.push("1~");
+    expect(names(keys)).toEqual(["paste"]);
+    expect(keys[0]?.paste).toBe("hi");
+  });
+
+  it("reassembles a paste split at every single byte", () => {
+    const decoder = new KeyDecoder();
+    const keys: Key[] = [];
+    for (const ch of `${ESC}[200~/workflow rag-setup${ESC}[201~`) keys.push(...decoder.push(ch));
+    expect(names(keys)).toEqual(["paste"]);
+    expect(keys[0]?.paste).toBe("/workflow rag-setup");
+  });
+
+  it("keeps a slash command pasted in pieces byte-exact", () => {
+    // The reported bug: this line reached the editor as an interrupt plus a
+    // literal "[200~", so it could never dispatch as a slash command.
+    const line = "/workflow rag-setup Build a small question-answering RAG app over ./corpus";
+    const decoder = new KeyDecoder();
+    const keys: Key[] = [];
+    keys.push(...decoder.push(`${ESC}[200~${line.slice(0, 12)}`));
+    keys.push(...decoder.push(line.slice(12, 40)));
+    keys.push(...decoder.push(`${line.slice(40)}${ESC}[201~`));
+    expect(names(keys)).toEqual(["paste"]);
+    expect(keys[0]?.paste).toBe(line);
+  });
+
+  it("treats keys that would normally act as content while inside a paste", () => {
+    // ESC, Enter, Ctrl+C, Tab and an arrow sequence are all *text* here.
+    const payload = `a${ESC}b\r\nc${CTRL_C}d\te${ESC}[Af`;
+    const keys = decode(`${ESC}[200~${payload}${ESC}[201~`);
+    expect(names(keys)).toEqual(["paste"]);
+    expect(keys[0]?.paste).toBe(payload);
+  });
+
+  it("decodes those same keys normally again right after the end marker", () => {
+    const keys = decode(`${ESC}[200~x${ESC}[201~\r${CTRL_C}\t${ESC}[A`);
+    expect(names(keys)).toEqual(["paste", "enter", "ctrl+c", "tab", "up"]);
+  });
+
+  it("reports nothing pending while a paste is in flight", () => {
+    // The host's escape timer is armed off `pending`; pasted bytes must never
+    // arm it, or a 30ms lull mid-paste resolves the leading ESC as a key press.
+    const decoder = new KeyDecoder();
+    decoder.push(`${ESC}[200~half a line`);
+    expect(decoder.pending).toBe("");
+    expect(decoder.pasting).toBe(true);
+    decoder.push(`${ESC}[201~`);
+    expect(decoder.pasting).toBe(false);
+  });
+
+  it("does not let flush tear an in-flight paste into escape plus literal text", () => {
+    const decoder = new KeyDecoder();
+    decoder.push(`${ESC}[200~/workflow rag-setup`);
+    expect(decoder.flush()).toEqual([]);
+    const keys = decoder.push(`${ESC}[201~`);
+    expect(names(keys)).toEqual(["paste"]);
+    expect(keys[0]?.paste).toBe("/workflow rag-setup");
+  });
+
+  it("does not let flush resolve a half-arrived start marker", () => {
+    // `ESC[20` is a paste marker mid-flight, not a stuck escape key: a terminal
+    // pacing a paste can leave it sitting here for longer than the escape
+    // timeout, and resolving it is what produced the interrupt plus "[200~".
+    const decoder = new KeyDecoder();
+    for (const partial of [`${ESC}[`, `${ESC}[2`, `${ESC}[20`, `${ESC}[200`]) {
+      decoder.reset();
+      decoder.push(partial);
+      expect(decoder.flush()).toEqual([]);
+      expect(decoder.pending).toBe(partial);
+    }
+    // The rest arrives and the paste completes as if it were never split.
+    expect(names(decoder.push(`~hi${ESC}[201~`))).toEqual(["paste"]);
+  });
+
+  it("still resolves a bare ESC on flush", () => {
+    const decoder = new KeyDecoder();
+    decoder.push(ESC);
+    expect(names(decoder.flush())).toEqual(["escape"]);
+  });
+
+  it("resolves a held partial marker once the next byte rules a paste out", () => {
+    const decoder = new KeyDecoder();
+    decoder.push(`${ESC}[2`);
+    expect(decoder.flush()).toEqual([]);
+    // CSI 2 ~ is Insert — the held bytes were a real sequence all along.
+    expect(names(decoder.push("~"))).toEqual(["insert"]);
+  });
+
+  it("hands over an unterminated paste on endPaste and resumes normal decoding", () => {
+    const decoder = new KeyDecoder();
+    decoder.push(`${ESC}[200~half a line`);
+    const ended = decoder.endPaste();
+    expect(names(ended)).toEqual(["paste"]);
+    expect(ended[0]?.paste).toBe("half a line");
+    expect(decoder.pasting).toBe(false);
+    // A late end marker is an unknown CSI, not text; typing works immediately.
+    expect(names(decoder.push(`${ESC}[201~`))).toEqual(["unknown"]);
+    expect(names(decoder.push("x\r"))).toEqual(["x", "enter"]);
+  });
+
+  it("keeps the tail of an unterminated paste that was withheld for marker matching", () => {
+    const decoder = new KeyDecoder();
+    // "ab" is shorter than the withheld tail, so it lives only in the tail.
+    decoder.push(`${ESC}[200~ab`);
+    expect(decoder.endPaste()[0]?.paste).toBe("ab");
+  });
+
+  it("endPaste is a no-op outside a paste", () => {
+    const decoder = new KeyDecoder();
+    expect(decoder.endPaste()).toEqual([]);
+  });
+
+  it("abandons an open paste on reset", () => {
+    const decoder = new KeyDecoder();
+    decoder.push(`${ESC}[200~abandoned`);
+    decoder.reset();
+    expect(decoder.pasting).toBe(false);
+    expect(names(decoder.push("x"))).toEqual(["x"]);
+  });
+
+  it("stays linear, and bounded in memory, as a very large paste arrives in chunks", () => {
+    // The old decoder re-scanned everything received so far on every chunk, so
+    // this 8MB paste burned over five seconds of pure string search before a
+    // single byte could reach the editor. The bound is loose on purpose: the
+    // point is the shape of the curve, not a benchmark.
+    const chunk = "x".repeat(1024);
+    const chunks = 8192;
+    const decoder = new KeyDecoder();
+    const keys: Key[] = [];
+    const started = performance.now();
+    keys.push(...decoder.push(`${ESC}[200~${chunk}`));
+    for (let i = 1; i < chunks; i++) keys.push(...decoder.push(chunk));
+    keys.push(...decoder.push(`${ESC}[201~`));
+    const elapsed = performance.now() - started;
+    expect(elapsed).toBeLessThan(2000);
+    expect(names(keys).every((name) => name === "paste")).toBe(true);
+    expect(keys.map((key) => key.paste ?? "").join("")).toHaveLength(chunks * chunk.length);
+    // Past the accumulator's cap the content is handed over in more than one
+    // paste event — still literal text, never key presses.
+    expect(keys.length).toBeGreaterThan(1);
   });
 });
 

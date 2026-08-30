@@ -1,13 +1,21 @@
 import { EventEmitter } from "node:events";
 import { describe, expect, it } from "vitest";
-import { ENABLE_BRACKETED_PASTE, HIDE_CURSOR, SHOW_CURSOR } from "./ansi.js";
+import {
+  DISABLE_BRACKETED_PASTE,
+  ENABLE_BRACKETED_PASTE,
+  HIDE_CURSOR,
+  SHOW_CURSOR,
+} from "./ansi.js";
 import { ProcessTerminal, TestTerminal } from "./terminal.js";
 
 /** A minimal non-TTY stand-in for `process.stdout`/`process.stdin`. */
-function fakeStream(): NodeJS.WriteStream & NodeJS.ReadStream {
+function fakeStream(written?: string[]): NodeJS.WriteStream & NodeJS.ReadStream {
   const stream = new EventEmitter() as unknown as NodeJS.WriteStream & NodeJS.ReadStream;
   stream.isTTY = false;
-  stream.write = () => true;
+  stream.write = ((data: string) => {
+    written?.push(data);
+    return true;
+  }) as NodeJS.WriteStream["write"];
   stream.setEncoding = () => stream;
   stream.resume = () => stream;
   stream.pause = () => stream;
@@ -122,6 +130,38 @@ describe("ProcessTerminal signal cleanup", () => {
     term.dispose();
     const after = signals.map((s) => process.listenerCount(s));
     expect(after).toEqual(before);
+  });
+
+  it("turns bracketed paste back off on the process-exit restore path", () => {
+    // Every teardown that is not an ordinary stop() — a crash, `process.exit`,
+    // SIGINT, SIGTERM, SIGHUP, SIGQUIT — arrives through this one listener.
+    // Leaving ?2004h set corrupts every later shell prompt, so it has to be
+    // as reliable as the alt-screen and raw-mode restore beside it.
+    const written: string[] = [];
+    const before = new Set(process.listeners("exit"));
+    const term = new ProcessTerminal({ stdout: fakeStream(written), stdin: fakeStream() });
+    const onExit = process.listeners("exit").find((listener) => !before.has(listener));
+    term.enableBracketedPaste();
+    term.enterAltScreen();
+    written.length = 0;
+
+    onExit?.call(process, 0);
+    expect(written.join("")).toContain(DISABLE_BRACKETED_PASTE);
+    expect(written.join("")).toContain("[?1049l");
+    term.dispose();
+  });
+
+  it("turns bracketed paste back off on dispose", () => {
+    const written: string[] = [];
+    const term = new ProcessTerminal({ stdout: fakeStream(written), stdin: fakeStream() });
+    term.enableBracketedPaste();
+    written.length = 0;
+    term.dispose();
+    expect(written.join("")).toContain(DISABLE_BRACKETED_PASTE);
+    // …and only once: a second teardown must not re-emit it.
+    written.length = 0;
+    term.dispose();
+    expect(written).toEqual([]);
   });
 
   it("does not register signal handlers when handleSignals is false", () => {

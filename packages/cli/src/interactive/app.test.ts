@@ -33,6 +33,8 @@ const DOWN = "\u001b[B";
 const CTRL_A = "\u0001";
 const CTRL_C = "\u0003";
 const CTRL_D = "\u0004";
+const PASTE_START = `${ESCAPE}[200~`;
+const PASTE_END = `${ESCAPE}[201~`;
 
 /** Yield to the event loop so queued microtasks and timers run. */
 async function tick(ms = 0): Promise<void> {
@@ -249,6 +251,59 @@ describe("InteractiveApp", () => {
     const h = await harness();
     h.terminal.injectInput(`/definitelynot${ENTER}`);
     await waitFor(() => h.text().includes("Unknown command"));
+  });
+
+  it("dispatches a slash command that was pasted, not typed", async () => {
+    // Reported live: a long `/workflow …` line pasted into the prompt came
+    // back as "⊘ Interrupted." plus a literal "[200~", with the command word
+    // gone — the paste markers were being read as key presses.
+    const h = await harness();
+    h.terminal.injectInput(`${PASTE_START}/help${PASTE_END}`);
+    await tick();
+    expect(h.app.editor.text).toBe("/help");
+    expect(h.text()).not.toContain("[200~");
+    h.terminal.injectInput(ENTER);
+    await waitFor(() => h.text().includes("/compact"));
+    expect(h.text()).toContain("Commands");
+  });
+
+  it("keeps a paste whole when the terminal paces it across chunks", async () => {
+    const h = await harness();
+    const line =
+      "/workflow rag-setup Build a small question-answering RAG app over the markdown " +
+      "corpus in ./corpus (45 public Arcturn docs, ~640KB).";
+    // Split inside ESC[200~ and inside ESC[201~, with gaps far longer than the
+    // escape timeout — exactly the shape that used to tear the paste apart.
+    h.terminal.injectInput(`${ESCAPE}[20`);
+    await tick(60);
+    h.terminal.injectInput(`0~${line.slice(0, 30)}`);
+    await tick(60);
+    h.terminal.injectInput(`${line.slice(30)}${ESCAPE}[20`);
+    await tick(60);
+    h.terminal.injectInput("1~");
+    await tick();
+
+    expect(h.app.editor.text).toBe(line);
+    expect(h.text()).not.toContain("Interrupted");
+    expect(h.text()).not.toContain("[200~");
+    expect(h.runtime.agent.isRunning).toBe(false);
+  });
+
+  it("treats keys inside a paste as content, and honours them again after it", async () => {
+    const h = await harness();
+    // A newline in pasted text is a line break, never a submit; ESC is not an
+    // interrupt; Ctrl+C does not quit; Tab opens nothing.
+    h.terminal.injectInput(`${PASTE_START}line one\r\nline two\t|${CTRL_C}${ESCAPE}[A${PASTE_END}`);
+    await tick();
+    expect(h.app.editor.text).toBe("line one\nline two    |");
+    expect(h.app.editor.isAutocompleteOpen).toBe(false);
+    expect(h.text()).not.toContain("Press Ctrl+C again");
+
+    // The same bytes act normally the moment the paste is over: a lone ESC
+    // resolves into the escape key once the terminal goes quiet, and clears
+    // the buffer it just refused to touch.
+    h.terminal.injectInput(ESCAPE);
+    await waitFor(() => h.app.editor.text === "", { label: "editor cleared by escape" });
   });
 
   it("offers command completions while typing a slash", async () => {

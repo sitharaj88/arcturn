@@ -141,6 +141,17 @@ export interface TUIOptions {
   /** Milliseconds to wait before a lone `ESC` is reported as an escape key (default `30`). */
   readonly escapeTimeout?: number;
   /**
+   * Milliseconds an unterminated bracketed paste waits for its `ESC[201~`
+   * before the text that did arrive is delivered anyway (default `2000`).
+   *
+   * The bound exists for the terminal that dies mid-paste; it is two orders of
+   * magnitude above {@link TUIOptions.escapeTimeout} because a live terminal
+   * paces a long paste in chunks and does go quiet between them. Whatever
+   * arrived is delivered as pasted text, never as key presses, and normal key
+   * decoding resumes — so the worst case is a truncated paste, not a wedged UI.
+   */
+  readonly pasteTimeout?: number;
+  /**
    * Rendering mode (default `"inline"`).
    *
    * `"inline"` renders a block at the bottom of the normal screen, keeping
@@ -216,6 +227,7 @@ export class TUI {
   private frameTimer: ReturnType<typeof setTimeout> | undefined;
   private running = false;
   private escapeTimer: ReturnType<typeof setTimeout> | undefined;
+  private pasteTimer: ReturnType<typeof setTimeout> | undefined;
   private resizeTimer: ReturnType<typeof setTimeout> | undefined;
   private unsubscribers: Unsubscribe[] = [];
 
@@ -251,6 +263,7 @@ export class TUI {
       autoResize: options.autoResize ?? true,
       overflow: options.overflow ?? "truncate",
       escapeTimeout: options.escapeTimeout ?? 30,
+      pasteTimeout: options.pasteTimeout ?? 2000,
       resizeSettleMs: options.resizeSettleMs ?? 80,
     };
   }
@@ -444,6 +457,7 @@ export class TUI {
   feedInput(data: string): void {
     for (const key of this.decoder.push(data)) this.dispatchKey(key);
     this.armEscapeTimer();
+    this.armPasteTimer();
   }
 
   private armEscapeTimer(): void {
@@ -457,6 +471,27 @@ export class TUI {
       for (const key of this.decoder.flush()) this.dispatchKey(key);
     }, this.options.escapeTimeout);
     this.escapeTimer.unref?.();
+  }
+
+  /**
+   * The watchdog for a bracketed paste whose `ESC[201~` never arrives.
+   *
+   * Re-armed on every chunk, so it only fires once the terminal has been silent
+   * for {@link TUIOptions.pasteTimeout} — long enough that a live terminal
+   * pacing a long paste never trips it, and short enough that one that dies
+   * mid-paste does not leave the UI treating the next keystroke as content.
+   */
+  private armPasteTimer(): void {
+    if (this.pasteTimer !== undefined) {
+      clearTimeout(this.pasteTimer);
+      this.pasteTimer = undefined;
+    }
+    if (!this.decoder.pasting) return;
+    this.pasteTimer = setTimeout(() => {
+      this.pasteTimer = undefined;
+      for (const key of this.decoder.endPaste()) this.dispatchKey(key);
+    }, this.options.pasteTimeout);
+    this.pasteTimer.unref?.();
   }
 
   /* ---------------------------------------------------------------------- */
@@ -501,6 +536,10 @@ export class TUI {
     if (this.escapeTimer !== undefined) {
       clearTimeout(this.escapeTimer);
       this.escapeTimer = undefined;
+    }
+    if (this.pasteTimer !== undefined) {
+      clearTimeout(this.pasteTimer);
+      this.pasteTimer = undefined;
     }
     if (this.resizeTimer !== undefined) {
       clearTimeout(this.resizeTimer);

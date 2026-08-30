@@ -319,6 +319,18 @@ describe("bracketed paste", () => {
     expect(editor.state).toMatchObject({ cursorLine: 1, cursorCol: 3 });
   });
 
+  it("submits nothing until the user presses Enter after the paste", () => {
+    // The newlines inside a paste are line breaks, not submits: a multi-line
+    // paste is one multi-line prompt the user then sends deliberately.
+    const submitted: string[] = [];
+    const editor = new Editor({ onSubmit: (text) => submitted.push(text) });
+    editor.handleInput(pasteKey("/workflow rag-setup\r\nover ./corpus"));
+    expect(submitted).toEqual([]);
+    expect(editor.text).toBe("/workflow rag-setup\nover ./corpus");
+    press(editor, "enter");
+    expect(submitted).toEqual(["/workflow rag-setup\nover ./corpus"]);
+  });
+
   it("is a single undo unit", () => {
     const editor = new Editor();
     type(editor, "x");

@@ -512,6 +512,81 @@ describe("KeyDecoder integration", () => {
   });
 });
 
+describe("bracketed paste", () => {
+  /** A TUI wired to a recorder, with both input timers tuned for the test. */
+  function pasteTui(options: { escapeTimeout?: number; pasteTimeout?: number } = {}) {
+    const terminal = new TestTerminal({ columns: 40, rows: 6 });
+    const tui = new TUI(terminal, {
+      manageCursor: false,
+      escapeTimeout: options.escapeTimeout ?? 1,
+      pasteTimeout: options.pasteTimeout ?? 10_000,
+    });
+    const recorder = new Recorder("rec");
+    tui.add(recorder);
+    tui.focus(recorder);
+    tui.start();
+    return { terminal, tui, recorder };
+  }
+
+  const settle = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+  it("announces the mode on start and turns it off again on stop", () => {
+    const terminal = new TestTerminal();
+    const tui = new TUI(terminal, { manageCursor: false });
+    tui.add(new Lines(["x"]));
+    tui.start();
+    expect(terminal.output).toContain(`${ESC}[?2004h`);
+    terminal.clearWrites();
+    tui.stop();
+    // Leaving ?2004h set would corrupt the shell the session exits back into.
+    expect(terminal.output).toContain(`${ESC}[?2004l`);
+  });
+
+  it("survives the escape timer firing between the chunks of one paste", async () => {
+    // The reported bug: the escape resolver fired during a paste the terminal
+    // was still pacing, so the marker's ESC became an interrupt and "[200~"
+    // became text. A paste is one paste however long the terminal takes.
+    const { recorder, tui } = pasteTui({ escapeTimeout: 1 });
+    const line = "/workflow rag-setup Build a small RAG app over ./corpus";
+    tui.feedInput(`${ESC}[200~${line.slice(0, 20)}`);
+    await settle(30);
+    expect(recorder.seen).toEqual([]);
+    tui.feedInput(line.slice(20));
+    await settle(30);
+    expect(recorder.seen).toEqual([]);
+    tui.feedInput(`${ESC}[201~`);
+    expect(recorder.seen.map((key) => key.name)).toEqual(["paste"]);
+    expect(recorder.seen[0]?.paste).toBe(line);
+    tui.stop();
+  });
+
+  it("delivers an unterminated paste once the watchdog fires, and keeps decoding", async () => {
+    const { recorder, tui } = pasteTui({ escapeTimeout: 1, pasteTimeout: 20 });
+    tui.feedInput(`${ESC}[200~half a line`);
+    await settle(5);
+    expect(recorder.seen).toEqual([]);
+    await settle(60);
+    expect(recorder.seen.map((key) => key.name)).toEqual(["paste"]);
+    expect(recorder.seen[0]?.paste).toBe("half a line");
+    // Recovered, not wedged: the very next keystroke is a keystroke again.
+    tui.feedInput("\r");
+    expect(recorder.seen.map((key) => key.name)).toEqual(["paste", "enter"]);
+    tui.stop();
+  });
+
+  it("keeps the watchdog off the clock while a paste is still arriving", async () => {
+    const { recorder, tui } = pasteTui({ escapeTimeout: 1, pasteTimeout: 40 });
+    for (let i = 0; i < 5; i++) {
+      tui.feedInput(i === 0 ? `${ESC}[200~chunk${i} ` : `chunk${i} `);
+      await settle(25);
+      expect(recorder.seen).toEqual([]);
+    }
+    tui.feedInput(`${ESC}[201~`);
+    expect(recorder.seen[0]?.paste).toBe("chunk0 chunk1 chunk2 chunk3 chunk4 ");
+    tui.stop();
+  });
+});
+
 describe("ground ownership", () => {
   it("stops painting per-cell grounds once the terminal owns the canvas", () => {
     setColorLevel(ColorLevel.TrueColor);

@@ -10,6 +10,24 @@ CLI, the SDK, or the wire protocol.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Pasting into the prompt could interrupt the session and mangle the
+  line.** Arcturn has always asked for bracketed paste and always
+  understood the markers — but an unfinished paste was parked in the same
+  buffer as an unfinished escape sequence, and that buffer has a 30ms
+  resolver behind it. Terminals pace a long paste in chunks, so any lull
+  past 30ms handed the paste to the resolver, which read the marker's
+  leading `ESC` as the escape key and everything after it as typing: an
+  interrupt, a literal `[200~` in the buffer, and a `/workflow …` line
+  that could no longer dispatch. Pasted bytes now accumulate on their own,
+  where neither timer reaches them; a marker split across chunks is
+  reassembled at either end; and an `ESC[201~` that never arrives is given
+  two seconds before what did arrive is delivered as text — never as key
+  presses. The decoder is no longer quadratic in the size of a paste
+  either: a few hundred kilobytes used to cost half a second of pure
+  string search before one byte reached the editor.
+
 ## [0.5.6] — 2026-08-30
 
 A ceiling that stops you dead is a worse ceiling than one that asks — and
