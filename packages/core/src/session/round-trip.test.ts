@@ -373,6 +373,67 @@ describe("two writers on one session file", () => {
     expect(new Set(entries.map((entry) => entry.id)).size).toBe(24);
   });
 
+  /**
+   * The test above with the one detail that made its Linux flake reachable:
+   * an entry over `kWriteFileMaxChunkSize`. `fs.appendFile` writes anything
+   * larger in several `write` calls, so the file is *visibly* half a line for
+   * as long as it takes to finish — and the store's torn-tail repair used to
+   * take that as proof the writer had died and truncate the other writer's
+   * finished entry away. Silently: no throw, just a shorter session.
+   *
+   * At 20 KB the window is a scheduling accident (Linux updates the file's
+   * size as each page lands, so a reader can catch a single `write`
+   * mid-flight; macOS rarely lets you). Above 512 KiB it is not an accident
+   * at all, which is what makes this the same bug with the luck taken out:
+   * before the fix it lost entries on every run, on every platform.
+   */
+  it("keeps every entry when the lines are too big for one write", async () => {
+    const mine = new JsonlSessionStore({ dir });
+    const theirs = new JsonlSessionStore({ dir });
+    await mine.create({ sessionId: "s", cwd: "/work" });
+    const bulk = "x".repeat(600_000);
+
+    await Promise.all([
+      ...Array.from({ length: 6 }, (_, i) =>
+        mine.append("s", messageEntry(`a${i}`, null, `mine ${i} ${bulk}`)),
+      ),
+      ...Array.from({ length: 6 }, (_, i) =>
+        theirs.append("s", messageEntry(`b${i}`, null, `theirs ${i} ${bulk}`)),
+      ),
+    ]);
+
+    const entries = await theirs.entries("s");
+    expect(entries).toHaveLength(12);
+    expect(new Set(entries.map((entry) => entry.id)).size).toBe(12);
+    // Every line whole, not merely every line parseable: a splice that landed
+    // on a JSON boundary would still be an entry with someone else's text in
+    // it.
+    for (const entry of entries) {
+      const text = contentText((entry as { message: Message }).message.content);
+      expect(text).toMatch(/^(mine|theirs) \d x{600000}$/);
+    }
+  });
+
+  it("says so when a read has to drop a line a crash left half-written", async () => {
+    const warnings: { sessionId: string; kind: string }[] = [];
+    const store = new JsonlSessionStore({ dir, onWarning: (warning) => warnings.push(warning) });
+    await store.create({ sessionId: "s", cwd: "/work" });
+    await store.append("s", messageEntry("a", null, "first"));
+    await store.append("s", messageEntry("b", "a", "torn"));
+    await tearLastLine(join(dir, "s.jsonl"));
+
+    // Same recovery as before — the value is that it is no longer invisible.
+    // An entry that was lost and an entry that was never written used to look
+    // identical from up here, which is exactly how a multi-writer bug spent
+    // several releases being filed as a flaky test.
+    expect((await store.entries("s")).map((entry) => entry.id)).toEqual(["a"]);
+    expect(warnings).toMatchObject([{ sessionId: "s", kind: "tornTail" }]);
+
+    // Once per session, however often a UI re-reads it.
+    await store.entries("s");
+    expect(warnings).toHaveLength(1);
+  });
+
   it("a title rewrite does not swallow an entry appended while it runs", async () => {
     const store = new JsonlSessionStore({ dir });
     await store.create({ sessionId: "s", cwd: "/work" });

@@ -307,21 +307,30 @@ describe("routedCompactionOptions", () => {
 });
 
 describe("session titles (runtime wiring)", () => {
-  /** Poll the store until the fire-and-forget title write lands. */
-  async function waitForTitle(
+  /**
+   * Read the header once the fire-and-forget title attempt has finished.
+   *
+   * This used to poll for a title against a deadline, which made every way
+   * the attempt could fail — a rejected header rewrite above all — report as
+   * the same thing: "the session was never titled", after fifteen seconds of
+   * a loaded Windows runner. The generator now says when it is done, so the
+   * wait is a completion signal rather than a guess, and a failed write shows
+   * up as a missing title *and* a warn notice instead of a hang.
+   */
+  async function titledHeader(
     runtime: Awaited<ReturnType<typeof buildTestRuntime>>,
   ): Promise<SessionHeader> {
-    // Titling is fire-and-forget by design, so the wait has to be generous:
-    // a loaded Windows runner overran a 3s budget and failed this suite for
-    // the release. The deadline sits under vitest's 20s so a genuine failure
-    // still reports as "never titled" rather than as a timeout.
-    const deadline = Date.now() + 15_000;
-    while (Date.now() < deadline) {
-      const header = await runtime.store.open(runtime.agent.sessionId);
-      if (header.title !== undefined) return header;
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-    throw new Error("the session was never titled");
+    await runtime.sessionTitleSettled();
+    return runtime.store.open(runtime.agent.sessionId);
+  }
+
+  /** Every warn notice the runtime emitted from now on. */
+  function warnings(runtime: Awaited<ReturnType<typeof buildTestRuntime>>): string[] {
+    const seen: string[] = [];
+    runtime.subscribe((event) => {
+      if (event.type === "notice" && event.level === "warn") seen.push(event.text);
+    });
+    return seen;
   }
 
   it("titles the session after the first completed run, using the title route's model", async () => {
@@ -341,7 +350,7 @@ describe("session titles (runtime wiring)", () => {
     runtime.sessionTitlesEligible = true;
     await runtime.agent.prompt("please fix the login bug");
 
-    const header = await waitForTitle(runtime);
+    const header = await titledHeader(runtime);
     expect(header.title).toBe("Fixing the login bug");
 
     const llm = runtime.llm as FakeLLM;
@@ -354,13 +363,52 @@ describe("session titles (runtime wiring)", () => {
     await runtime.dispose();
   });
 
+  it("warns when the header rewrite fails, rather than leaving a title that never appears", async () => {
+    const scratch = await makeScratch();
+    const runtime = await buildTestRuntime(scratch, [{ text: "done" }, { text: "A Small Title" }], {
+      sessionTitles: true,
+    });
+    runtime.sessionTitlesEligible = true;
+    const seen = warnings(runtime);
+    // What a Windows rename losing to an antivirus scanner looks like from
+    // here — and what the release-blocking Windows failure most likely was.
+    const refused: NodeJS.ErrnoException = new Error(
+      "EPERM: operation not permitted, rename 's.jsonl.tmp' -> 's.jsonl'",
+    );
+    refused.code = "EPERM";
+    runtime.store.setTitle = () => Promise.reject(refused);
+
+    await runtime.agent.prompt("name me");
+    await runtime.sessionTitleSettled();
+
+    // Still best-effort: the run finished, the session is untitled, nothing
+    // threw. The difference is that it is now sayable.
+    expect((await runtime.store.open(runtime.agent.sessionId)).title).toBeUndefined();
+    expect(seen.join("\n")).toContain("Could not name this session");
+    expect(seen.join("\n")).toContain("EPERM");
+    await runtime.dispose();
+  });
+
+  it("stays quiet when the title lands", async () => {
+    const scratch = await makeScratch();
+    const runtime = await buildTestRuntime(scratch, [{ text: "done" }, { text: "A Small Title" }], {
+      sessionTitles: true,
+    });
+    runtime.sessionTitlesEligible = true;
+    const seen = warnings(runtime);
+    await runtime.agent.prompt("name me");
+    expect((await titledHeader(runtime)).title).toBe("A Small Title");
+    expect(seen).toEqual([]);
+    await runtime.dispose();
+  });
+
   it("fires once per session: a second completed run makes no second call", async () => {
     const scratch = await makeScratch();
     const runtime = await buildTestRuntime(scratch, [{ text: "done" }], { sessionTitles: true });
     // Stand in for the interactive app, the one host that arms titling.
     runtime.sessionTitlesEligible = true;
     await runtime.agent.prompt("first");
-    await waitForTitle(runtime);
+    await runtime.sessionTitleSettled();
     const llm = runtime.llm as FakeLLM;
     const after = llm.requests.length;
     await runtime.agent.prompt("second");
@@ -382,7 +430,7 @@ describe("session titles (runtime wiring)", () => {
     // Stand in for the interactive app, the one host that arms titling.
     runtime.sessionTitlesEligible = true;
     await runtime.agent.prompt("name me");
-    const header = await waitForTitle(runtime);
+    const header = await titledHeader(runtime);
     expect(header.title).toBe("A Small Title");
     await runtime.dispose();
   });

@@ -12,7 +12,37 @@ CLI, the SDK, or the wire protocol.
 
 ## [0.5.6] — 2026-08-30
 
-A ceiling that stops you dead is a worse ceiling than one that asks.
+A ceiling that stops you dead is a worse ceiling than one that asks — and
+a release that refused to go out until we read what it was telling us.
+
+### Fixed
+
+- **Session entries could be silently lost when two writers shared one
+  session file** — a served session beside a terminal one, a background
+  agent beside its parent. Three defects compounded: the write queue was
+  per-store rather than per-file, so two stores never serialized against
+  each other; `appendFile` splits above 512 KiB, so large entries could be
+  spliced into one another; and crash recovery truncated any tail that did
+  not end in a newline — which is equally a writer that has not *finished*
+  writing, so a healthy line was waited for and then deleted, with no
+  throw and no trace. Appends are now serialized per file across the
+  process, written as one `write`, and a damaged tail is repaired only
+  once it is proven dead. This is the "flaky test" that failed two release
+  matrices; it was never flaky, and it was losing data.
+- **Session titling could fail permanently and silently on Windows**,
+  where the header rewrite's `rename` loses to an antivirus scanner or the
+  search indexer holding the target. The rewrite now retries `EPERM`,
+  `EACCES` and `EBUSY` with a short backoff.
+
+### Changed
+
+- **A session damaged by an interrupted write now says so once**, instead
+  of quietly returning one entry fewer. `JsonlSessionStoreOptions.onWarning`
+  (core) carries it; the CLI surfaces it as a warning notice.
+- **A title that cannot be written now reports a warning notice** instead
+  of vanishing. Titling stays best-effort — it never breaks, slows or
+  retries a run — but a failure is now something you can see.
+  `ArcturnRuntime.sessionTitleSettled()` lets a host wait for the attempt.
 
 ### Added
 

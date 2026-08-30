@@ -106,6 +106,7 @@ import {
   createTitleGenerator,
   TITLE_MAX_OUTPUT_TOKENS,
   TITLE_SYSTEM_PROMPT,
+  type TitleGenerator,
   titleRequestPrompt,
 } from "./session-title.js";
 import { createSkillTool } from "./skill-tool.js";
@@ -557,6 +558,8 @@ export class ArcturnRuntime {
    * human later browses in `/sessions`, where a title earns its cost.
    */
   sessionTitlesEligible = false;
+  /** The title generator `buildRuntime` wired up, if it got that far. */
+  #titles: TitleGenerator | undefined;
   /** Running token/cost totals for the live session. */
   metrics: SessionMetrics = { turns: 0, usage: emptyUsage(), costUsd: 0, unpricedTurns: 0 };
 
@@ -1789,6 +1792,32 @@ export class ArcturnRuntime {
    * @param level - Severity.
    * @param text - Message to show.
    */
+  /**
+   * Install the session-title generator and subscribe it to the event
+   * stream. Called once by `buildRuntime`; a runtime built without it simply
+   * never titles anything.
+   *
+   * @param generator - The generator to drive.
+   */
+  setTitleGenerator(generator: TitleGenerator): void {
+    this.#titles = generator;
+    this.subscribe((event) => generator.onEvent(event));
+  }
+
+  /**
+   * Resolves once the fire-and-forget session-title attempt for the last
+   * completed run has finished — succeeded, been declined, or failed.
+   * Resolves immediately when no attempt was ever made, and never rejects.
+   *
+   * Titling stays fire-and-forget: nothing here makes a run wait for it. This
+   * is for whoever wants to know when it is over — a UI refreshing the names
+   * in `/sessions`, or a test that would otherwise have to poll the header
+   * against a deadline and call a hung write "never titled".
+   */
+  sessionTitleSettled(): Promise<void> {
+    return this.#titles?.settled() ?? Promise.resolve();
+  }
+
   notify(level: "info" | "warn" | "error", text: string): void {
     for (const listener of [...this.#listeners]) {
       try {
@@ -2072,11 +2101,20 @@ export async function buildRuntime(options: BuildRuntimeOptions = {}): Promise<A
   const permissionMode = options.permissionMode ?? config.permissionMode;
 
   await mkdir(paths.sessions, { recursive: true });
-  const store = new JsonlSessionStore({ dir: paths.sessions });
-
   // The sub-agent factory needs the runtime, which needs the tools: close over
   // a slot filled in once construction finishes.
   let runtimeRef: ArcturnRuntime | undefined;
+  const store = new JsonlSessionStore({
+    dir: paths.sessions,
+    // A session that lost its last entry to an interrupted write is a thing
+    // the user should hear about once, not something to quietly paper over —
+    // it is the difference between "the model never said that" and "it did
+    // and we dropped it". Same routing as the failover notice below.
+    onWarning: (warning) => {
+      if (runtimeRef) runtimeRef.notify("warn", warning.message);
+      else warnings.push(warning.message);
+    },
+  });
   const defaults = createDefaultTools({ cwd: paths.cwd, sandbox: config.sandbox });
   // The first session's id is minted here so the audit trail (keyed by
   // session) can exist before the Agent does. Later sessions from
@@ -2406,8 +2444,18 @@ export async function buildRuntime(options: BuildRuntimeOptions = {}): Promise<A
         .trim();
     },
     setTitle: (titleSessionId, title) => store.setTitle(titleSessionId, title),
+    // The failure that made this necessary: on Windows a header rewrite's
+    // rename loses to whatever else has the file open, and the old bare
+    // `catch` meant a user whose titles never worked had nothing anywhere to
+    // look at. Still non-fatal, still never retried — but said out loud, on
+    // the same channel the cost guard and the turn ceiling use.
+    onError: (error) =>
+      runtime.notify(
+        "warn",
+        `Could not name this session: ${error instanceof Error ? error.message : String(error)}`,
+      ),
   });
-  runtime.subscribe((event) => titles.onEvent(event));
+  runtime.setTitleGenerator(titles);
 
   let sessionId = options.resume;
   if (!sessionId && options.continueSession) {

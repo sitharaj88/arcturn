@@ -114,6 +114,19 @@ export interface TitleGeneratorDeps {
    * @param title - Cleaned, non-empty title.
    */
   setTitle(sessionId: string, title: string): Promise<void>;
+  /**
+   * Report an attempt that failed — the model call, or (the one that bit us)
+   * the header rewrite. Optional, and the generator carries on regardless:
+   * the point is not to change what happens to the run, it is that a user
+   * whose titles never appear gets told why instead of watching `/sessions`
+   * stay full of bare ids forever.
+   *
+   * A title is best-effort; a title that *silently* fails is a bug report
+   * nobody can file.
+   *
+   * @param error - Whatever the failing step threw.
+   */
+  onError?(error: unknown): void;
 }
 
 /** Handle returned by {@link createTitleGenerator}. */
@@ -128,6 +141,19 @@ export interface TitleGenerator {
    * that swap without a fresh `runStart` in between.
    */
   reset(): void;
+  /**
+   * Resolves once the title attempt this session triggered has finished, one
+   * way or the other; resolves immediately when none was ever triggered.
+   * Never rejects — a caller awaiting a nicety must not inherit its failure.
+   *
+   * The attempt is scheduled synchronously from the `runEnd` that triggers
+   * it, so a caller that has awaited the run has already seen it start: this
+   * is a completion signal, not a race. It exists so a host can refresh
+   * whatever shows session names once the title lands, instead of polling the
+   * header — and so a test can assert on the result of the fire-and-forget
+   * path without a deadline standing in for one.
+   */
+  settled(): Promise<void>;
 }
 
 /** The user-visible text of a message, or `""` for non-user shapes. */
@@ -143,8 +169,15 @@ function textOf(message: Message): string {
  * Build a title generator over injected deps. See the module doc for the
  * state machine's contract; the one behavior worth restating is that the
  * whole title path is fire-and-forget — `onEvent` returns before any dep
- * resolves, and every failure is swallowed, because a missing title must
- * never break (or even slow) a run.
+ * resolves, and no failure can reach the run, because a missing title must
+ * never break (or even slow) one.
+ *
+ * "Cannot reach the run" is not the same as "is never mentioned again",
+ * which is what this used to do: a bare `.catch(() => undefined)` meant a
+ * header rewrite that always failed (a Windows rename losing to an antivirus
+ * scanner, say) looked exactly like a feature that had never been switched
+ * on. Failures now go to {@link TitleGeneratorDeps.onError} and completion is
+ * observable through {@link TitleGenerator.settled}.
  *
  * @param deps - Host hooks; see {@link TitleGeneratorDeps}.
  */
@@ -153,12 +186,16 @@ export function createTitleGenerator(deps: TitleGeneratorDeps): TitleGenerator {
   let promptText = "";
   let replyText = "";
   let attempted = false;
+  let inFlight: Promise<void> = Promise.resolve();
 
   function reset(): void {
     sessionId = undefined;
     promptText = "";
     replyText = "";
     attempted = false;
+    // `inFlight` deliberately survives a reset: a swap does not un-start the
+    // attempt already running for the session being left behind, and a caller
+    // waiting on it is waiting for that one.
   }
 
   return {
@@ -194,13 +231,21 @@ export function createTitleGenerator(deps: TitleGeneratorDeps): TitleGenerator {
       const id = sessionId;
       const prompt = promptText.slice(0, TITLE_INPUT_CAP_CHARS);
       const reply = replyText.slice(0, TITLE_INPUT_CAP_CHARS);
-      void (async () => {
+      inFlight = (async () => {
         if (!(await deps.shouldTitle(id))) return;
         const title = cleanTitle(await deps.generate(prompt, reply));
         if (title === "") return;
         await deps.setTitle(id, title);
-      })().catch(() => undefined);
+      })().catch((error: unknown) => {
+        try {
+          deps.onError?.(error);
+        } catch {
+          // A reporter that throws must not turn a swallowed failure into an
+          // unhandled rejection.
+        }
+      });
     },
     reset,
+    settled: () => inFlight,
   };
 }

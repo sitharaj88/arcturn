@@ -183,6 +183,49 @@ describe("createTitleGenerator", () => {
     expect(titles).toHaveLength(0);
   });
 
+  it("reports a failing setTitle instead of dropping it on the floor", async () => {
+    // The Windows shape: the model answered, the header rewrite did not land.
+    // Swallowing this is what let a user's titles never work with nothing in
+    // any log to say why.
+    const refused: NodeJS.ErrnoException = new Error("EPERM: operation not permitted, rename");
+    refused.code = "EPERM";
+    const reported: unknown[] = [];
+    const { deps } = recordedDeps({
+      setTitle: async () => {
+        throw refused;
+      },
+      onError: (error) => reported.push(error),
+    });
+    const generator = createTitleGenerator(deps);
+    generator.onEvent(runStart("s1", "hello"));
+    expect(() => generator.onEvent(runEnd("completed"))).not.toThrow();
+
+    // ...and the run still does not learn about it.
+    await expect(generator.settled()).resolves.toBeUndefined();
+    expect(reported).toEqual([refused]);
+  });
+
+  it("settles for a caller whether the attempt worked, was declined, or never ran", async () => {
+    const idle = createTitleGenerator(recordedDeps().deps);
+    // Nothing triggered: a caller must not be left waiting on a run that was
+    // never going to be titled.
+    await expect(idle.settled()).resolves.toBeUndefined();
+
+    const declined = createTitleGenerator(recordedDeps({ shouldTitle: () => false }).deps);
+    declined.onEvent(runStart("s1", "hello"));
+    declined.onEvent(runEnd("completed"));
+    await expect(declined.settled()).resolves.toBeUndefined();
+
+    const worked = recordedDeps();
+    const generator = createTitleGenerator(worked.deps);
+    generator.onEvent(runStart("s1", "hello"));
+    generator.onEvent(runEnd("completed"));
+    // The attempt is scheduled synchronously from `runEnd`, so awaiting this
+    // once is enough — no flush, no deadline.
+    await generator.settled();
+    expect(worked.titles).toEqual([{ sessionId: "s1", title: "Fixing the login bug" }]);
+  });
+
   it("skips a run with no user text, staying armed for the first that has some", async () => {
     const { deps, titles } = recordedDeps();
     const generator = createTitleGenerator(deps);
