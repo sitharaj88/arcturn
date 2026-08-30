@@ -575,10 +575,18 @@ describe("bracketed paste", () => {
   });
 
   it("keeps the watchdog off the clock while a paste is still arriving", async () => {
-    const { recorder, tui } = pasteTui({ escapeTimeout: 1, pasteTimeout: 40 });
+    // Two constraints hold this test together, and both must survive any
+    // retuning: each gap must be shorter than the timeout (or the watchdog
+    // fires and the test is meaningless), and the gaps must SUM to more than
+    // the timeout (or an implementation that never re-arms would pass). The
+    // slack between them is what a loaded runner eats — at 25ms against 40ms
+    // there was 15ms of it, and windows-latest/node22 ate that during a
+    // release. 60ms against 200ms across five chunks keeps both properties
+    // with 140ms of room: a non-re-arming build still fires on chunk four.
+    const { recorder, tui } = pasteTui({ escapeTimeout: 1, pasteTimeout: 200 });
     for (let i = 0; i < 5; i++) {
       tui.feedInput(i === 0 ? `${ESC}[200~chunk${i} ` : `chunk${i} `);
-      await settle(25);
+      await settle(60);
       expect(recorder.seen).toEqual([]);
     }
     tui.feedInput(`${ESC}[201~`);
