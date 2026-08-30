@@ -148,6 +148,19 @@ describe("parseArgs: positional commands", () => {
     expect(args.prompt).toBe("completions zsh is broken, explain it");
   });
 
+  it("parses doctor with and without a preset", () => {
+    const bare = ok(["doctor"]);
+    expect(bare.command).toEqual({ kind: "doctor" });
+    expect(bare.prompt).toBe("");
+    const scoped = ok(["doctor", "zai"]);
+    expect(scoped.command).toEqual({ kind: "doctor", preset: "zai" });
+    expect(scoped.prompt).toBe("");
+  });
+
+  it("rejects doctor with more than one preset", () => {
+    expect(fail(["doctor", "zai", "extra"])).toContain("doctor takes at most one preset");
+  });
+
   it("no longer recognises `auth` as a command", () => {
     // The subscription sign-in it drove never worked and was removed; the
     // words must fall through to the prompt rather than resolve to a command.
@@ -183,6 +196,7 @@ describe("helpText", () => {
   it("documents the positional commands", () => {
     const help = helpText();
     expect(help).toContain("completions <shell>");
+    expect(help).toContain("doctor [preset]");
     expect(help).toContain("mcp auth <name>");
     expect(help).toContain("mcp logout <name>");
   });

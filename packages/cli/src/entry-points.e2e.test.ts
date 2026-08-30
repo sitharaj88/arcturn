@@ -1412,6 +1412,7 @@ describe("arcturn completions", () => {
       "serve",
       "acp",
       "attach",
+      "doctor",
       "mcp",
       "add",
       "inspect",

@@ -271,6 +271,10 @@ export const DEFAULT_COMPLETION_SPEC: CompletionSpec = {
     { name: "acp", description: "Speak the Agent Client Protocol on stdio (for editors)." },
     { name: "attach", description: "Drive a session hosted by another arcturn serve." },
     {
+      name: "doctor",
+      description: "Probe every configured provider endpoint and print a verdict.",
+    },
+    {
       name: "mcp",
       description: "Manage MCP servers.",
       children: [

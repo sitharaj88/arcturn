@@ -7,8 +7,9 @@
  * token) is treated as prompt text.
  *
  * *Positional commands* exist alongside the flags: when the first word before
- * `--` is `completions`, `replay`, `audit`, `blame`, `bisect`, `serve`, `acp`
- * or `attach`, the whole invocation is that command rather than a prompt.
+ * `--` is `completions`, `replay`, `audit`, `blame`, `bisect`, `serve`, `acp`,
+ * `doctor` or `attach`, the whole invocation is that command rather than a
+ * prompt.
  * Quoting still wins — `arcturn "replay explained"` is a single positional and
  * stays a prompt — and anything after `--` is always prompt text.
  *
@@ -89,6 +90,14 @@ export interface AcpCommand {
   readonly kind: "acp";
 }
 
+/** A parsed `doctor [preset]` command. */
+export interface DoctorCommand {
+  /** Command family. */
+  readonly kind: "doctor";
+  /** Probe only this preset; every configured endpoint when omitted. */
+  readonly preset?: string;
+}
+
 /** A parsed `serve` command. */
 export interface ServeCommand {
   /** Command family. */
@@ -156,6 +165,7 @@ export type CliCommand =
   | AttachCommand
   | BlameCommand
   | BisectCommand
+  | DoctorCommand
   | McpCliCommand
   | RegistryCliCommand;
 
@@ -265,6 +275,9 @@ export const BISECT_COMMAND_NAME = "bisect";
 
 /** First positional that switches into attach-command parsing. */
 export const ATTACH_COMMAND_NAME = "attach";
+
+/** First positional that switches into doctor-command parsing. */
+export const DOCTOR_COMMAND_NAME = "doctor";
 
 /** Narrow an arbitrary word to a {@link RegistryVerb}. */
 export function isRegistryVerb(value: string): value is RegistryVerb {
@@ -776,6 +789,21 @@ export function parseArgs(
     return { ok: true, args };
   }
 
+  if (positional[0] === DOCTOR_COMMAND_NAME && commandCandidates > 0) {
+    if (positional.length > 2) {
+      return {
+        ok: false,
+        error:
+          "doctor takes at most one preset name (arcturn doctor [preset]). " +
+          'To send this as a prompt instead, quote it: arcturn "doctor ..."',
+      };
+    }
+    const preset = positional[1];
+    args.command = { kind: "doctor", ...(preset === undefined ? {} : { preset }) };
+    args.prompt = "";
+    return { ok: true, args };
+  }
+
   if (positional[0] === SERVE_COMMAND_NAME && commandCandidates > 0) {
     if (positional.length > 1) {
       return {
@@ -859,6 +887,8 @@ Commands
   serve                         Host sessions over WebSocket for remote attach.
   acp                           Speak the Agent Client Protocol on stdio (for editors).
   attach <url>                  Drive a session hosted by another arcturn serve.
+  doctor [preset]               Probe each configured provider endpoint with its
+                                real key and print a verdict per endpoint.
   mcp list                      Show configured MCP servers and where they're defined.
   mcp get <name>                Print one server's configuration.
   mcp add <name> -- <cmd> [...] Add a stdio MCP server; --scope user|project

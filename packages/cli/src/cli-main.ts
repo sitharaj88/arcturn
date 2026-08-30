@@ -205,6 +205,15 @@ export async function runCli(args: CliArgs, options: RunCliOptions = {}): Promis
     return runMcpCommand(args.command, args.cwd === undefined ? {} : { cwd: args.cwd });
   }
 
+  if (args.command?.kind === "doctor") {
+    const { runDoctorCommand } = await import("./doctor.js");
+    return runDoctorCommand(args.command, {
+      ...(args.cwd === undefined ? {} : { cwd: args.cwd }),
+      // `--model` narrows a single-preset probe to a specific wire model id.
+      ...(args.model === undefined ? {} : { model: args.model }),
+    });
+  }
+
   if (args.command?.kind === "acp") {
     return runAcpCommand(args);
   }
