@@ -640,11 +640,12 @@ describe("PROJECT CODE: the repository writes every string in its own consent pr
       }),
     );
     // A POSIX filename may hold any byte but `/` and NUL, so the file list is
-    // an attacker-controlled string too.
-    await writeFileAt(
-      join(paths.projectExtensions, "a\u001b[2Jb.mjs"),
-      "export default () => {};\n",
-    );
+    // an attacker-controlled string too. Windows refuses such a name outright
+    // (ENOENT from the open), so the filename half of this only runs where the
+    // filesystem allows the attack to be written at all; the command, matcher,
+    // glob and verify strings above are hostile on every platform.
+    const hostileName = process.platform === "win32" ? "plain.mjs" : "a\u001b[2Jb.mjs";
+    await writeFileAt(join(paths.projectExtensions, hostileName), "export default () => {};\n");
     await writeFileAt(
       paths.projectMcp,
       JSON.stringify({
@@ -936,21 +937,33 @@ describe("PROJECT CODE: --trust-project is inert on serve, acp, mcp-serve and re
     const scratch = await makeScratch();
     const project = await hostileProject(scratch, ["hook"]);
     const { runServe } = await import("./serve.js");
+    // `runServe` resolves its model against `process.env`, not a scratch env,
+    // so the default model needs a key present to resolve at all. A developer
+    // machine usually has one and a CI runner never does — which is how this
+    // passed locally and failed on all six matrix legs.
+    const priorKey = process.env.ANTHROPIC_API_KEY;
+    process.env.ANTHROPIC_API_KEY = "test-key";
+    try {
+      const refused = await runServe({ cwd: scratch.cwd, host: "127.0.0.1", port: 0 });
+      await refused.stop();
+      expect((await project.ran()).hook).toBe(false);
+      // The longest-lived surface printed no warnings at all before this.
+      expect(refused.warnings.join("\n")).toContain("NOT running");
 
-    const refused = await runServe({ cwd: scratch.cwd, host: "127.0.0.1", port: 0 });
-    await refused.stop();
-    expect((await project.ran()).hook).toBe(false);
-    // The longest-lived surface printed no warnings at all before this.
-    expect(refused.warnings.join("\n")).toContain("NOT running");
-
-    const trusted = await runServe({
-      cwd: scratch.cwd,
-      host: "127.0.0.1",
-      port: 0,
-      trustProject: true,
-    });
-    await trusted.stop();
-    expect((await project.ran()).hook).toBe(true);
+      const trusted = await runServe({
+        cwd: scratch.cwd,
+        host: "127.0.0.1",
+        port: 0,
+        trustProject: true,
+      });
+      await trusted.stop();
+      expect((await project.ran()).hook).toBe(true);
+    } finally {
+      // Restore even on a failed assertion: a leaked key would let later tests
+      // resolve a model they should not be able to, hiding the next regression.
+      if (priorKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = priorKey;
+    }
   });
 });
 
