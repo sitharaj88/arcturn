@@ -10,6 +10,43 @@ CLI, the SDK, or the wire protocol.
 
 ## [Unreleased]
 
+### Added
+
+- **A budget checkpoint you can answer, instead of a corpse with a patch.**
+  A run that crossed `budgetUsd:`/`budgetTokens:` used to die: the ceiling
+  stop writes `runEnd{failed}`, and a failed run can never be resumed. Now,
+  at the first stage boundary where either ceiling is 80% consumed and
+  stages remain, the run parks itself resumably and asks. Reply `continue`
+  to run on to the hard stop, or `raise <new-limit>` to lift the ceiling —
+  for that run only, never written back to the workflow file. It asks once
+  per ceiling; a raise re-arms it against the new limit. Consent has to be
+  spoken: a bare `/workflow resume <id>` re-surfaces the question rather
+  than acknowledging it, so a script that routinely resumes stalled runs
+  cannot spend your budget on your behalf. Raises are terminal-only — the
+  wire refuses them, and a run started under a client-lowered ceiling keeps
+  that ceiling through every resume.
+- **The turn ceiling is announced before it bites.** A run used to learn
+  about `maxTurns` only by hitting it — an agent at turn 50 of 50, still
+  polishing work it never got to report, failing with the work done but
+  undelivered. When remaining turns first drop to
+  `turnWarningThreshold(maxTurns)` (now exported from `@arcturn/core`), the
+  loop injects one message telling the model to finish and deliver, riding
+  the next request without spending a turn of its own. A run that finishes
+  well under budget never hears about the ceiling, and a tight leash of one
+  or two turns is left alone entirely.
+
+### Changed
+
+- **A step that runs out of turns says so.** Turn exhaustion used to reach
+  the workflow as the same anonymous error a dead socket produces: the step
+  failed, its text was discarded, and the run's stop reason was `error`.
+  Now the failure names the cause and the fix (`raise maxTurns in the role
+  file or narrow the step`), the run records `stop: turn-ceiling` — the
+  reason the vocabulary declared and nothing had ever written — and the
+  agent's last words are kept on the step record instead of thrown away.
+  `@arcturn/core` exports `isTurnCeilingError(message)` so a host can tell
+  "ran out of rope" from "broke".
+
 ## [0.5.5] — 2026-08-30
 
 Four features from one bad afternoon: the endpoint that lied about its

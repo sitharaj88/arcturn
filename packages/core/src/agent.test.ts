@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
   AgentEvent,
+  LLMRequest,
   Message,
   PermissionDecision,
   StreamEvent,
@@ -13,6 +14,7 @@ import type {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Agent, createAgent } from "./agent.js";
 import type { AgentHooks } from "./hooks.js";
+import { isTurnCeilingError, turnWarningThreshold } from "./loop.js";
 import { JsonlSessionStore } from "./session/jsonl-store.js";
 import { MemorySessionStore } from "./session/memory-store.js";
 import { createTodoTool } from "./state-tools.js";
@@ -248,6 +250,169 @@ describe("Agent run loop", () => {
     const running = agent.prompt("first");
     await expect(agent.prompt("second")).rejects.toThrow(/already running/);
     await running;
+  });
+});
+
+describe("the turn budget, announced before it runs out", () => {
+  /** The turn-budget warnings a request actually carried to the provider. */
+  const budgetNotes = (request: LLMRequest): Message[] =>
+    request.messages.filter(
+      (message) =>
+        message.role === "user" && contentText(message.content).startsWith("Turn budget:"),
+    );
+
+  it("injects one wrap-up warning while there is still room to act on it", async () => {
+    const tool = echoTool();
+    // A model that would happily burn every turn, so only the ceiling stops it.
+    const script = Array.from({ length: 5 }, (_, i) =>
+      toolCallTurn([{ id: `c${i}`, name: "echo", arguments: { value: String(i) } }]),
+    );
+    const llm = createScriptedLLM(script);
+    const agent = new Agent({
+      llm,
+      model: TEST_MODEL,
+      systemPrompt: "You are Arcturn.",
+      tools: [tool],
+      cwd: "/work",
+      permissions: { mode: "yolo" },
+      maxTurns: 4,
+    });
+    const events = record(agent);
+
+    await agent.prompt("loop");
+
+    // maxTurns 4 → threshold max(2, floor(0.6)) = 2 remaining, so the warning
+    // boards the third request — not the first two — and, being conversation
+    // history rather than a nag, rides the final request exactly once too.
+    expect(llm.requests).toHaveLength(4);
+    expect(budgetNotes(llm.requests[0]!)).toHaveLength(0);
+    expect(budgetNotes(llm.requests[1]!)).toHaveLength(0);
+    expect(budgetNotes(llm.requests[2]!)).toHaveLength(1);
+    expect(budgetNotes(llm.requests[3]!)).toHaveLength(1);
+
+    // It is the *last* message of the request it boards: injected after the
+    // previous turn's tool results, where the model reads it as current.
+    const last = llm.requests[2]!.messages.at(-1);
+    expect(last?.role).toBe("user");
+    expect(contentText(last?.content ?? [])).toBe(
+      "Turn budget: 2 of 4 turns remain. Finish the work and emit your final deliverable " +
+        "now — an unfinished run at the ceiling fails with its work uncommitted.",
+    );
+
+    // Hosts see it too, once — and the ceiling itself still ends the run.
+    const notices = events.filter(
+      (event) => event.type === "notice" && event.text.startsWith("Turn budget:"),
+    );
+    expect(notices).toHaveLength(1);
+    expect(tool.calls).toHaveLength(4);
+    expect(events.at(-1)).toMatchObject({ type: "runEnd", reason: "error" });
+  });
+
+  it("never warns a run that finishes well under its ceiling", async () => {
+    const tool = echoTool();
+    const llm = createScriptedLLM([
+      toolCallTurn([{ id: "c1", name: "echo", arguments: { value: "a" } }]),
+      textTurn("done"),
+    ]);
+    // Default maxTurns (200): the ≤-threshold trigger means a short run must
+    // never hear about a ceiling it was nowhere near.
+    const agent = new Agent({ ...baseOptions([], [tool]), llm });
+    const events = record(agent);
+
+    await agent.prompt("quick job");
+
+    expect(events.at(-1)).toMatchObject({ type: "runEnd", reason: "completed" });
+    for (const request of llm.requests) expect(budgetNotes(request)).toHaveLength(0);
+    expect(events.some((event) => event.type === "notice")).toBe(false);
+  });
+
+  it.each([1, 2])("says nothing at all on a leash of %i turn(s)", async (maxTurns) => {
+    const tool = echoTool();
+    const script = Array.from({ length: maxTurns + 1 }, (_, i) =>
+      toolCallTurn([{ id: `c${i}`, name: "echo", arguments: { value: String(i) } }]),
+    );
+    const llm = createScriptedLLM(script);
+    const agent = new Agent({ ...baseOptions([], [tool]), llm, maxTurns });
+    const events = record(agent);
+
+    await agent.prompt("one shot");
+
+    // A ceiling this tight has no room to spend advice about spending it: the
+    // warning would board the *first* request, ahead of the model acting on
+    // the user's prompt at all, skewing a one-shot run toward truncated work.
+    expect(llm.requests).toHaveLength(maxTurns);
+    for (const request of llm.requests) expect(budgetNotes(request)).toHaveLength(0);
+    expect(
+      events.filter((event) => event.type === "notice" && event.text.startsWith("Turn budget:")),
+    ).toHaveLength(0);
+
+    // The ceiling itself is unchanged — it still stops the run, and still says so.
+    const runEnd = events.at(-1);
+    expect(runEnd).toMatchObject({ type: "runEnd", reason: "error" });
+    const minted = runEnd?.type === "runEnd" ? runEnd.errorMessage : undefined;
+    expect(minted).toMatch(new RegExp(`^Reached the maximum of ${maxTurns} turns\\.`));
+    expect(isTurnCeilingError(minted)).toBe(true);
+  });
+
+  it("warns on the second request of a three-turn leash — the first budget to spend", async () => {
+    const tool = echoTool();
+    const script = Array.from({ length: 4 }, (_, i) =>
+      toolCallTurn([{ id: `c${i}`, name: "echo", arguments: { value: String(i) } }]),
+    );
+    const llm = createScriptedLLM(script);
+    const agent = new Agent({ ...baseOptions([], [tool]), llm, maxTurns: 3 });
+    const events = record(agent);
+
+    await agent.prompt("loop");
+
+    // maxTurns 3 → threshold 2, strictly below the ceiling, so one turn has
+    // been taken by the time it trips: request 0 is clean, requests 1 and 2
+    // carry the note as history.
+    expect(llm.requests).toHaveLength(3);
+    expect(budgetNotes(llm.requests[0]!)).toHaveLength(0);
+    expect(budgetNotes(llm.requests[1]!)).toHaveLength(1);
+    expect(budgetNotes(llm.requests[2]!)).toHaveLength(1);
+    expect(contentText(budgetNotes(llm.requests[1]!)[0]!.content)).toBe(
+      "Turn budget: 2 of 3 turns remain. Finish the work and emit your final deliverable " +
+        "now — an unfinished run at the ceiling fails with its work uncommitted.",
+    );
+    expect(
+      events.filter((event) => event.type === "notice" && event.text.startsWith("Turn budget:")),
+    ).toHaveLength(1);
+  });
+
+  it("thresholds a tight ceiling out of the warning entirely", () => {
+    // The published formula, and the guard that keeps it off the first request:
+    // a threshold at or above the ceiling means no warning can ever be timely.
+    expect(turnWarningThreshold(1)).toBe(0);
+    expect(turnWarningThreshold(2)).toBe(0);
+    expect(turnWarningThreshold(3)).toBe(2);
+    expect(turnWarningThreshold(50)).toBe(7);
+    expect(turnWarningThreshold(64)).toBe(9);
+    expect(turnWarningThreshold(200)).toBe(30);
+  });
+
+  it("isTurnCeilingError recognises the minted message and nothing else", async () => {
+    const tool = echoTool();
+    const script = Array.from({ length: 3 }, (_, i) =>
+      toolCallTurn([{ id: `c${i}`, name: "echo", arguments: { value: String(i) } }]),
+    );
+    const agent = new Agent({ ...baseOptions(script, [tool]), maxTurns: 2 });
+    const events = record(agent);
+
+    await agent.prompt("loop");
+
+    const runEnd = events.at(-1);
+    const minted = runEnd?.type === "runEnd" ? runEnd.errorMessage : undefined;
+    expect(minted).toMatch(/Reached the maximum of 2 turns/);
+    expect(isTurnCeilingError(minted)).toBe(true);
+
+    // Exactly the minted message — anything else is some other failure, and
+    // must not be reported to a host as "ran out of rope".
+    expect(isTurnCeilingError(undefined)).toBe(false);
+    expect(isTurnCeilingError("socket hang up")).toBe(false);
+    expect(isTurnCeilingError(`wrapped: ${minted}`)).toBe(false);
+    expect(isTurnCeilingError(`${minted} (retried)`)).toBe(false);
   });
 });
 

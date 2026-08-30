@@ -1653,6 +1653,28 @@ Nothing else here can be raised either, and none of it has a parameter. The file
 `stepTimeoutMs`, each role's `maxTurns`, each role's declared `tools:` and the engine's
 permission rules all bind exactly as they do for the person at the terminal.
 
+The rule follows the run all the way to a resume, in two ways.
+
+**The lowered ceiling is durable.** A run started with a `budgetUsd` of its own is enforced
+against a bounded *copy* of the parsed workflow, and that copy lives only in memory — a
+resume rediscovers the workflow from disk, with the file's full ceiling restored. So the
+figure the client asked for is journalled on the run's header, a resume enforces
+`min(file, that)`, and no raise may lift the run above it. Without that, "may lower, never
+raise" would have meant "may lower until somebody resumes".
+
+**The parked run needs a real answer.** When the engine parks a run at its stage-boundary
+budget ask (80% of a ceiling consumed with stages remaining), `resumeWorkflow` accepts
+exactly one reply over the wire: `answer: "continue"`, which acknowledges the checkpoint and
+lets the run continue to the hard stop the file (or the client's own lower cap) set. A bare
+`resumeWorkflow` with no answer is **refused** — the same "an answer, not a nudge" line the
+`ORG-ASK` gate holds, and for the same reason: the acknowledgement is a durable record that
+a person consented, and a client that resumes every stalled run must not be able to mint it.
+An `answer` of `raise <n>` is **refused with an error naming the contract**, not threaded
+through as free text: a run's ceiling cannot be raised over the wire; resume from the
+terminal, or edit the workflow file. The question the wire hands back says so itself — it
+offers `continue` and never advertises `raise`, because a question that tells a client to
+send the one reply it will always be refused for is an instruction to loop.
+
 ### Following a run: no second channel
 
 A run narrates onto **the session's own event stream** — the one the client already

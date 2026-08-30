@@ -32,6 +32,24 @@
  * that own them; the only number crossing this boundary is
  * {@link WorkflowRunRequest.budgetUsd}, and its contract is that it may lower
  * the file's ceiling and may never raise it.
+ *
+ * That contract binds the **run**, not merely the request that started it. The
+ * implementation journals the lowered figure on the run's own header, because
+ * the bounded workflow it enforces is an in-memory copy and a resume
+ * rediscovers the file — with its full ceiling — from disk. A resume therefore
+ * enforces the lower of the two, and no raise can lift a run past the ceiling
+ * it was commissioned under.
+ *
+ * The same rule holds for the *answers* a resume may carry. A run parked at the
+ * engine's stage-boundary budget ask accepts one reply over this seam —
+ * `"continue"`, the acknowledgement that lets the run proceed to its hard stop.
+ * A bare resume with no answer is refused exactly as it is for an unanswered
+ * `ORG-ASK` (the acknowledgement is a durable record of a person's consent, and
+ * a nudge is not one), and a `raise <n>` answer is refused with an error naming
+ * this contract rather than threaded through as free text. Raising a parked
+ * run's ceiling is terminal-only, or an edit to the workflow file itself — and
+ * the question this seam hands back says so, offering `continue` and never
+ * advertising the one reply it would always refuse.
  */
 
 import type {

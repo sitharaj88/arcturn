@@ -134,6 +134,21 @@ unknowable and `budgetUsd` never trips; frontmatter-only for now, not settable o
 wire. A role's `maxTurns:` is enforced too, clamped to the session's own ceiling: a role
 file can narrow the turn budget, never raise it.
 
+Both run ceilings ask before they kill. A hard stop ends the run `failed` — permanently
+unresumable, every finished stage's spend sunk — so once a run has consumed 80% of a
+ceiling at a stage boundary with stages still to go, it parks `paused` instead, on the same
+durable question machinery `ORG-ASK` uses. The question states the spend, the limit and the
+stages remaining; `/workflow resume <run-id> raise <new-limit>` lifts the ceiling *for that
+run only* (the file is never rewritten), and `/workflow resume <run-id> continue`
+acknowledges it, after which that ceiling never asks again and hard-stops exactly as
+before. Both replies are words: a bare resume re-states the question instead, because the
+acknowledgement is recorded as a person's consent and a nudge is not one. A ceiling you can
+answer beats a dead pipeline you can only re-buy. When a role
+does run out of turns, the failure now says so honestly: the step's error names the
+`maxTurns` ceiling it hit (not the core loop's "send another message" advice), `/workflow
+status` records `stop: turn-ceiling`, and the agent's final words are journalled so you can
+see how far it got before the rope ran out.
+
 ## Remembering what the last fifty runs cost you
 
 An org that runs the same pipeline fifty times should be better at it on the fiftieth

@@ -22,7 +22,17 @@ import { join } from "node:path";
 import { formatDuration, formatTokens, totalTokens } from "./format.js";
 import { FANCY_GLYPHS, type GlyphSet } from "./glyphs.js";
 import type { WorkflowRunStatus, WorkflowStepStatus } from "./workflow.js";
-import { type JournalLine, readJournalLines, type WorkflowStopReason } from "./workflow-run.js";
+import {
+  BUDGET_ASK_STEP_ID,
+  type BudgetAskAudience,
+  type BudgetCeilingKind,
+  budgetAskFacts,
+  budgetAskQuestion,
+  budgetAskResumeHint,
+  type JournalLine,
+  readJournalLines,
+  type WorkflowStopReason,
+} from "./workflow-run.js";
 
 /** Default step wall-clock ceiling, mirrored from the engine for staleness. */
 const DEFAULT_STEP_TIMEOUT_MS = 10 * 60 * 1000;
@@ -154,10 +164,23 @@ function bumpWrite(run: JournalRun, ts: number | undefined): void {
  *
  * @param runId - The run directory's id (used when no `run` header was written).
  * @param lines - The journal, in append order.
+ * @param audience - What the origin this view is rendered for may do about a
+ *   budget checkpoint. The wire passes `{ allowRaise: false }`, because the
+ *   question text travels verbatim to a client the seam forbids from raising
+ *   anything; the terminal takes the default.
  */
-export function foldJournal(runId: string, lines: readonly JournalLine[]): JournalRun {
+export function foldJournal(
+  runId: string,
+  lines: readonly JournalLine[],
+  audience: BudgetAskAudience = {},
+): JournalRun {
   const stages = new Map<number, JournalStage>();
   const run: JournalRun = { runId, stages: [], pendingQuestions: [] };
+  // Which ceiling the pending budget ask names, so an ack or raise retires it
+  // only when it answers THAT ceiling — the rule `buildResumeState` already
+  // follows. Two folds of one journal disagreeing about whether a question is
+  // still owed is how status says "answered" while resume asks again.
+  let askedCeiling: BudgetCeilingKind | undefined;
   // Every step whose latest terminal is a `paused` one, in the order the journal
   // first saw it — insertion order is what makes `pendingQuestions` stable and
   // `pendingQuestion` the *first* question rather than whichever branch of a
@@ -257,6 +280,33 @@ export function foldJournal(runId: string, lines: readonly JournalLine[]): Journ
         // Guarded although the writer always sets `usage`: the fold's contract
         // is to tolerate any line that survived `readJournalLines`.
         if (line.usage !== undefined) run.spentTokens = totalTokens(line.usage);
+        bumpWrite(run, line.ts);
+        break;
+      case "budgetAsk": {
+        // The stage-boundary budget ask is a *run*-level pending question,
+        // keyed under its sentinel step id so the same "latest wins" retiring
+        // the step questions use applies. Rendered here from the recorded
+        // numbers by the writer's own renderer, so status and resume restate
+        // one identical question — and validated first, because these numbers
+        // came off disk and a torn line must not throw the whole view away.
+        const facts = budgetAskFacts(line);
+        if (facts !== undefined) {
+          askedCeiling = facts.ceiling;
+          pending.set(BUDGET_ASK_STEP_ID, budgetAskQuestion(facts, audience));
+        }
+        bumpWrite(run, line.ts);
+        break;
+      }
+      case "budgetAck":
+      case "budgetRaise":
+        // Either reply settles the ask — but only the ask it answers: an ack
+        // runs that ceiling to the hard stop, a raise continues under the new
+        // one (and may ask again later, which appends a fresh `budgetAsk`
+        // after this line). A reply naming the *other* ceiling settles nothing.
+        if (askedCeiling !== undefined && askedCeiling === line.ceiling) {
+          pending.delete(BUDGET_ASK_STEP_ID);
+          askedCeiling = undefined;
+        }
         bumpWrite(run, line.ts);
         break;
       case "stop":
@@ -400,7 +450,16 @@ export function formatRunsTable(
         const count = more > 1 ? ` (${more} questions — see /workflow status ${row.runId})` : "";
         lines.push(`    asks: ${row.pendingQuestion}${count}`);
       }
-      lines.push(`    answer with /workflow resume ${row.runId} <answer>`);
+      // A budget checkpoint takes a different pair of replies than a role's
+      // question, so the hint says so — telling the operator "<answer>" here
+      // would invite prose the engine can only bounce back. One shared
+      // renderer with the detail view below: two copies of the valid replies
+      // is one copy too many.
+      if (row.pendingQuestions[0]?.stepId === BUDGET_ASK_STEP_ID) {
+        lines.push(`    ${budgetAskResumeHint(row.runId)}`);
+      } else {
+        lines.push(`    answer with /workflow resume ${row.runId} <answer>`);
+      }
     } else if (row.state === "stalled" || row.state === "resumable") {
       lines.push(`    resume with /workflow resume ${row.runId}`);
     }
@@ -464,7 +523,11 @@ export function formatRunDetail(
       lines.push(`Awaiting ${run.pendingQuestions.length} human answers:`);
       for (const q of run.pendingQuestions) lines.push(`  ${q.stepId}: ${q.question}`);
     }
-    lines.push(`Answer with /workflow resume ${run.runId} <answer>`);
+    if (run.pendingQuestions[0]?.stepId === BUDGET_ASK_STEP_ID) {
+      lines.push(budgetAskResumeHint(run.runId));
+    } else {
+      lines.push(`Answer with /workflow resume ${run.runId} <answer>`);
+    }
   } else if (state === "stalled" || state === "resumable") {
     lines.push("");
     lines.push(`Resume with /workflow resume ${run.runId}`);
@@ -494,10 +557,21 @@ function stepMark(status: JournalStep["status"], glyphs: GlyphSet): string {
  * being set up) yields no lines and is skipped — the reader is best-effort by
  * contract, exactly as the writer is.
  *
+ * One run's fold is also isolated from the others. The fold is written to
+ * tolerate anything `readJournalLines` let through, but "written to" is not
+ * "proven to" — and the blast radius of getting that wrong here is the whole
+ * view: an unguarded `Promise.all` turns one torn line in one run's journal
+ * into "`/workflow status` is broken" for every run on the machine. A run that
+ * cannot be folded is dropped, exactly as a run with no readable journal is.
+ *
  * @param root - The `~/.arcturn/workflow-runs` directory.
+ * @param audience - Forwarded to {@link foldJournal}.
  * @returns Folded runs, in no particular order (the formatter sorts them).
  */
-export async function readWorkflowRuns(root: string): Promise<JournalRun[]> {
+export async function readWorkflowRuns(
+  root: string,
+  audience: BudgetAskAudience = {},
+): Promise<JournalRun[]> {
   let entries: string[];
   try {
     entries = await readdir(root);
@@ -507,9 +581,13 @@ export async function readWorkflowRuns(root: string): Promise<JournalRun[]> {
   const runs: JournalRun[] = [];
   await Promise.all(
     entries.map(async (name) => {
-      const lines = await readJournalLines(join(root, name));
-      if (lines.length === 0) return;
-      runs.push(foldJournal(name, lines));
+      try {
+        const lines = await readJournalLines(join(root, name));
+        if (lines.length === 0) return;
+        runs.push(foldJournal(name, lines, audience));
+      } catch {
+        // One unreadable run costs that row, never the listing.
+      }
     }),
   );
   return runs;
@@ -520,12 +598,14 @@ export async function readWorkflowRuns(root: string): Promise<JournalRun[]> {
  *
  * @param root - The `~/.arcturn/workflow-runs` directory.
  * @param runId - The run id (directory name).
+ * @param audience - Forwarded to {@link foldJournal}.
  */
 export async function readWorkflowRun(
   root: string,
   runId: string,
+  audience: BudgetAskAudience = {},
 ): Promise<JournalRun | undefined> {
   const lines = await readJournalLines(join(root, runId));
   if (lines.length === 0) return undefined;
-  return foldJournal(runId, lines);
+  return foldJournal(runId, lines, audience);
 }

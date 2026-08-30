@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   costLimitMessage,
   createCostGuard,
+  nearingCeiling,
   shouldAbortForCost,
   shouldAbortForTokens,
 } from "./cost-guard.js";
@@ -69,6 +70,69 @@ describe("shouldAbortForTokens", () => {
 
   it("treats a non-finite spend as not-over-limit", () => {
     expect(shouldAbortForTokens(Number.NaN, 1_000)).toBe(false);
+  });
+});
+
+describe("nearingCeiling", () => {
+  it("is false below the fraction and true above it", () => {
+    expect(nearingCeiling(0.79, 1, 0.8)).toBe(false);
+    expect(nearingCeiling(0.81, 1, 0.8)).toBe(true);
+    expect(nearingCeiling(79_999, 100_000, 0.8)).toBe(false);
+    expect(nearingCeiling(80_001, 100_000, 0.8)).toBe(true);
+  });
+
+  it("fires at exactly the boundary — 80% consumed IS nearing", () => {
+    // Neither `spent >= ceiling * fraction` nor `spent / ceiling >= fraction`
+    // gets this on its own: the first rounds UP (`100 * 0.8` is not `80` in
+    // IEEE doubles), the second rounds DOWN on decimal dollars (see below).
+    expect(nearingCeiling(80, 100, 0.8)).toBe(true);
+    expect(nearingCeiling(0.8, 1, 0.8)).toBe(true);
+    expect(nearingCeiling(48_000_000, 60_000_000, 0.8)).toBe(true);
+  });
+
+  it("fires at the boundary for DECIMAL dollars, where one rounded division lands a ulp low", () => {
+    // FAIL-FIRST: `2.4 / 3` is 0.7999999999999999, not 0.8 — a bare `>=`
+    // against the ratio misses the exact boundary this predicate exists to
+    // catch, for the most ordinary money there is ($2.40 of a $3.00 budget).
+    expect(nearingCeiling(2.4, 3, 0.8)).toBe(true);
+    expect(nearingCeiling(4.8, 6, 0.8)).toBe(true);
+    expect(nearingCeiling(0.72, 0.9, 0.8)).toBe(true);
+    expect(nearingCeiling(0.16, 0.2, 0.8)).toBe(true);
+    // The pairs whose division happens to land exactly on (or a ulp above)
+    // the boundary must keep firing too.
+    expect(nearingCeiling(0.24, 0.3, 0.8)).toBe(true);
+    expect(nearingCeiling(0.56, 0.7, 0.8)).toBe(true);
+  });
+
+  it("does not round a genuine near-miss up to the boundary", () => {
+    // The tolerance is a few ulps of one division, not a fudge factor: a cent
+    // under 80% of a $3.00 budget is still under it.
+    expect(nearingCeiling(2.39, 3, 0.8)).toBe(false);
+    expect(nearingCeiling(0.799, 1, 0.8)).toBe(false);
+    expect(nearingCeiling(0.15, 0.2, 0.8)).toBe(false);
+  });
+
+  it("never nears a disabled limit — 0, undefined, negative or non-finite", () => {
+    expect(nearingCeiling(1_000_000, 0, 0.8)).toBe(false);
+    expect(nearingCeiling(1_000_000, undefined, 0.8)).toBe(false);
+    expect(nearingCeiling(1_000_000, -5, 0.8)).toBe(false);
+    expect(nearingCeiling(1_000_000, Number.NaN, 0.8)).toBe(false);
+    expect(nearingCeiling(1_000_000, Number.POSITIVE_INFINITY, 0.8)).toBe(false);
+  });
+
+  it("treats a non-finite or negative spend as not-nearing", () => {
+    expect(nearingCeiling(Number.NaN, 100, 0.8)).toBe(false);
+    expect(nearingCeiling(Number.POSITIVE_INFINITY, 100, 0.8)).toBe(false);
+    expect(nearingCeiling(-1, 100, 0.8)).toBe(false);
+  });
+
+  it("ignores a nonsensical fraction rather than arming at zero", () => {
+    expect(nearingCeiling(50, 100, 0)).toBe(false);
+    expect(nearingCeiling(50, 100, Number.NaN)).toBe(false);
+  });
+
+  it("still fires past 100% — over the ceiling is certainly near it", () => {
+    expect(nearingCeiling(150, 100, 0.8)).toBe(true);
   });
 });
 

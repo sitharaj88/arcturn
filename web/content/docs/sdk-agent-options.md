@@ -58,7 +58,7 @@ const agent = createAgent({ ...base, sessionStore: store, sessionId: "release-no
 
 | Field | Type | Default | Behavior |
 |---|---|---|---|
-| `maxTurns` | `number` | `200` | Ceiling on tool-call turns within one `prompt()` call. This is a runaway-loop backstop, not a budget — it's set high on purpose so a genuinely long task finishes. Lower it per run for a tight leash (e.g. in a sandboxed eval). |
+| `maxTurns` | `number` | `200` | Ceiling on tool-call turns within one `prompt()` call. This is a runaway-loop backstop, not a budget — it's set high on purpose so a genuinely long task finishes. Lower it per run for a tight leash (e.g. in a sandboxed eval). Exhaustion ends the run as `runEnd { reason: "error" }`; `isTurnCeilingError(errorMessage)` from `@arcturn/core` tells that ending apart from a real failure. The ceiling is announced before it bites — see [The wrap-up warning](#the-wrap-up-warning). |
 | `thinking` | `ThinkingLevel` (`"off" \| "low" \| "medium" \| "high"`) | `"off"` | Extended-thinking level, changeable at runtime with `agent.setThinking(level)`. |
 | `compaction` | `CompactionOptions` | see below | Automatic-compaction tuning — full table in [Sessions & persistence](/docs/sdk-sessions#forcing-compaction). |
 | `signal` | `AbortSignal` | none | An external signal; aborting it aborts the agent's current run the same way `agent.abort()` does. Useful when the host already has one abort controller per request. |
@@ -68,6 +68,29 @@ const controller = new AbortController();
 const agent = createAgent({ ...base, signal: controller.signal, maxTurns: 12 });
 setTimeout(() => controller.abort(), 30_000); // hard 30s ceiling on one prompt() call
 ```
+
+### The wrap-up warning
+
+The turn ceiling is invisible from inside a run, so the loop announces it. When a run's
+remaining turns first drop to `turnWarningThreshold(maxTurns)` — exported from
+`@arcturn/core`, so you can compute the trip point rather than restate the formula — the
+loop appends one engine-authored user message telling the model to finish and emit its
+final deliverable now, and emits a matching `warn` notice for the host. It fires at most
+once per run, rides the next request without spending a turn of its own, and a run that
+finishes well under its ceiling never sees it at all.
+
+A very tight leash gets no warning: `turnWarningThreshold` returns `0` for
+`maxTurns <= 2`. The threshold has a floor of 2, which for a ceiling that small would sit
+at or above the ceiling itself and board the warning on the *first* request — telling a
+one-shot classifier to wrap up before it has even read the prompt. So `maxTurns` of 1 or
+2 behaves exactly as it always did: request 0 carries the user's prompt and nothing else.
+The warning only ever fires once at least one turn has been spent, which is what makes
+"remaining turns first drop to" a true description of it.
+
+The injected note is a real `user` message on the same append path as anything you pass
+to `prompt()`, so it is persisted to the `SessionStore` and replayed on resume. A host
+that renders stored history will therefore show a `user` message the user never typed;
+its text always begins `Turn budget:` if you want to style or filter it.
 
 ## What isn't here
 

@@ -668,6 +668,9 @@ The `maxTurns=N` values were revised twice after live runs: first the verificati
 went up from 15 (not enough to finish a fail-before/pass-after loop), then the operator
 flattened every role to `maxTurns: 50` — comfortably inside the session's 64-turn
 `subagentMaxTurns` ceiling, so the clamp never bites and no role runs out mid-task.
+The engine also warns a role in-conversation when 7 of those 50 turns remain, so a role
+that would have spent turn 50 polishing work it never got to report instead lands its
+deliverable; the warning costs no turn of its own.
 `retro` is the one exception at 30: it reads a digest that is already in its prompt and
 greps a handful of role files, so its budget is for drafting a diff, not for exploring.
 A uniform number trades some cost discipline for zero budget surprises; tighten

@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, stat, symlink, utimes, writeFile } from "
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
-import { PermissionEngine } from "@arcturn/core";
+import { isTurnCeilingError, PermissionEngine } from "@arcturn/core";
 import type {
   AgentEvent,
   ModelSpec,
@@ -29,10 +29,12 @@ import {
   DEFAULT_WORKFLOW_STEP_TIMEOUT_MS,
   discoverWorkflows,
   expandStepPrompt,
+  finalWordsExcerpt,
   formatWriteLaneTrailer,
   isDevicePath,
   isSystemPath,
   isWorkflowParseError,
+  parseBudgetRaiseAnswer,
   parseWorkflow,
   parseWriteLaneTrailer,
   parseWriteLaneTrailers,
@@ -102,6 +104,11 @@ function parseErr(raw: string, name = "wf"): string {
 
 function usage(inputTokens = 1, outputTokens = 2): Usage {
   return { inputTokens, outputTokens, cacheReadTokens: 0, cacheWriteTokens: 0 };
+}
+
+/** A usage record with an explicit cost, as a priced provider turn carries. */
+function priced(outputTokens: number, costUsd: number): Usage {
+  return { inputTokens: 0, outputTokens, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd };
 }
 
 const FRONT = ["---", "name: demo", "description: A demo", "---"].join("\n");
@@ -5200,11 +5207,6 @@ describe("runWorkflow — self-healing retry", () => {
 describe("runWorkflow — cost telemetry", () => {
   const fastRetry = { maxRetries: 2, sleep: async () => {}, computeDelay: () => 0 };
 
-  /** A usage record with an explicit cost, as a priced provider turn carries. */
-  function priced(outputTokens: number, costUsd: number): Usage {
-    return { inputTokens: 0, outputTokens, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd };
-  }
-
   /** Fails transient `failures` times, burning `perAttempt[n]` tokens each try. */
   function flakySpender(failures: number, perAttempt: number[]) {
     let n = 0;
@@ -5405,11 +5407,6 @@ describe("runWorkflow — cost telemetry", () => {
 // instead of a real provider bill.
 // ===========================================================================
 describe("runWorkflow — enforced per-role and run budgets", () => {
-  /** A usage record with an explicit cost, as a priced provider turn carries. */
-  function priced(outputTokens: number, costUsd: number): Usage {
-    return { inputTokens: 0, outputTokens, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd };
-  }
-
   /**
    * A step runner that reports each of `cumulativeUsd`'s totals via
    * `onUsage`, in order — mirroring `driveAgent`'s convention that `onUsage`
@@ -5652,6 +5649,790 @@ describe("runWorkflow — enforced per-role and run budgets", () => {
     expect(result.status).toBe("failed");
     expect(result.error).toMatch(/exceeded its \$1\.00 run budget/);
     expect(result.error).not.toMatch(/token run budget/);
+  });
+});
+
+// ===========================================================================
+// STAGE-BOUNDARY BUDGET ASK — pause and ask BEFORE a hard ceiling kills the run.
+//
+// FAIL-FIRST: before this change a run that crossed 80% of its ceiling with
+// stages remaining simply kept going, crossed the ceiling in a later stage and
+// hard-failed — writing `runEnd{failed}`, which both resume entry points
+// refuse permanently. The first test's `paused` expectation therefore read
+// `failed` against pre-change `workflow.ts`, and `budgetAsk` was not a journal
+// line kind at all.
+// ===========================================================================
+describe("runWorkflow — the stage-boundary budget ask", () => {
+  const THREE_STAGES = parseOk(
+    ["---", "name: demo", "budgetUsd: 1.00", "---", "1. a", "2. b {{prev}}", "3. c {{prev}}"].join(
+      "\n",
+    ),
+  );
+
+  /** A runner spending $0.45 a step, recording which steps actually ran. */
+  function spendyRunner(calls: string[]): WorkflowStepRunner {
+    return async (request) => {
+      calls.push(request.step.id);
+      return { text: `<${request.step.id}>`, usage: priced(10, 0.45), isError: false };
+    };
+  }
+
+  /** Run to the park, returning the journal and the folded resume state. */
+  async function parkedRun(): Promise<{
+    sink: RunJournal;
+    lines: JournalLine[];
+    state: ReturnType<typeof buildResumeState>;
+  }> {
+    const { sink, lines } = memoryJournal();
+    const calls: string[] = [];
+    const result = await runWorkflow(THREE_STAGES, { journal: sink, runStep: spendyRunner(calls) });
+    expect(result.status).toBe("paused");
+    return { sink, lines, state: buildResumeState(lines) };
+  }
+
+  it("parks the run `paused` at 80% with stages remaining, instead of running into the hard stop", async () => {
+    const { sink, lines } = memoryJournal();
+    const calls: string[] = [];
+    const result = await runWorkflow(THREE_STAGES, { journal: sink, runStep: spendyRunner(calls) });
+
+    // Pre-change, stage 3 ran, crossed $1.00 and the run hard-failed — dead
+    // and unresumable. Now it parks at the stage boundary, resumable.
+    expect(result.status).toBe("paused");
+    expect(calls).toEqual(["1", "2"]);
+    expect(result.steps.map((step) => step.status)).toEqual(["done", "done", "skipped"]);
+    expect(result.pause?.stepId).toBe("budget");
+    // The question names spent, limit, percentage, stages remaining and both
+    // valid replies — everything the operator needs to answer without digging.
+    expect(result.pause?.question).toContain("$0.90 of its $1.00 run budget");
+    expect(result.pause?.question).toContain("(90%)");
+    expect(result.pause?.question).toContain("1 of 3 stage(s) still to go");
+    expect(result.pause?.question).toContain('"raise <new-limit>"');
+    // Both replies are WORDS. An empty resume is not one of them: see the
+    // nudge test below.
+    expect(result.pause?.question).toContain('Reply "continue"');
+    expect(result.error).toContain("budget checkpoint");
+
+    const ask = lines.find(
+      (line): line is Extract<JournalLine, { kind: "budgetAsk" }> => line.kind === "budgetAsk",
+    );
+    expect(ask).toMatchObject({
+      ceiling: "usd",
+      spent: 0.9,
+      limit: 1,
+      stagesDone: 2,
+      stagesTotal: 3,
+    });
+    // A park is not a stop: no `stop` reason, and the end is the soft `paused`.
+    expect(lines.some((line) => line.kind === "stop")).toBe(false);
+    expect(lines.find((line) => line.kind === "runEnd")).toMatchObject({ status: "paused" });
+  });
+
+  it("continues under a valid `raise` and finishes below the new ceiling, reusing finished steps", async () => {
+    const { sink, lines, state } = await parkedRun();
+    expect(state.budgetAsk).toMatchObject({ ceiling: "usd", spent: 0.9, limit: 1 });
+
+    const calls: string[] = [];
+    const resumed = await runWorkflow(THREE_STAGES, {
+      journal: sink,
+      runStep: spendyRunner(calls),
+      resumeFrom: { ...state, budgetAnswer: { text: "raise 5" } },
+    });
+
+    expect(resumed.status).toBe("done");
+    // Stages 1–2 were replayed from the journal, never re-executed.
+    expect(calls).toEqual(["3"]);
+    expect(
+      lines.find(
+        (line): line is Extract<JournalLine, { kind: "budgetRaise" }> =>
+          line.kind === "budgetRaise",
+      ),
+    ).toMatchObject({ ceiling: "usd", value: 5 });
+    // The workflow object itself was never mutated — the file stays authority.
+    expect(THREE_STAGES.budgetUsd).toBe(1);
+  });
+
+  it('acknowledges an explicit "continue" and lets the hard ceiling fire later, exactly as today', async () => {
+    const { sink, lines, state } = await parkedRun();
+
+    const calls: string[] = [];
+    const resumed = await runWorkflow(THREE_STAGES, {
+      journal: sink,
+      runStep: spendyRunner(calls),
+      resumeFrom: { ...state, budgetAnswer: { text: "continue" } },
+    });
+
+    // Stage 3 ran with consent on record, crossed $1.00 and the hard stop
+    // fired — the ask changed the *conversation*, never the ceiling.
+    expect(calls).toEqual(["3"]);
+    expect(resumed.status).toBe("failed");
+    expect(resumed.error).toMatch(/exceeded its \$1\.00 run budget/);
+    expect(lines.some((line) => line.kind === "budgetAck")).toBe(true);
+    expect(
+      lines
+        .filter((line): line is Extract<JournalLine, { kind: "stop" }> => line.kind === "stop")
+        .map((line) => line.reason),
+    ).toEqual(["cost-ceiling"]);
+    // Ask-once: the acknowledged ceiling never asked a second time.
+    expect(lines.filter((line) => line.kind === "budgetAsk")).toHaveLength(1);
+  });
+
+  it("takes an EMPTY resume as no answer at all — a nudge cannot fabricate consent", async () => {
+    // FAIL-FIRST: a plain resume used to write the durable `budgetAck` the
+    // engine describes as "the operator's consent on record", including when
+    // nobody had ever seen the question. That is precisely the gesture the
+    // role-pause gate refuses ("an answer, not a nudge"), and it is reachable
+    // without a person at all: a client that routinely resumes stalled runs,
+    // or a crash between the durable ask and the `runEnd{paused}` that would
+    // have surfaced it. The two possible replies are both words now.
+    const { sink, lines, state } = await parkedRun();
+    const calls: string[] = [];
+    const resumed = await runWorkflow(THREE_STAGES, {
+      journal: sink,
+      runStep: spendyRunner(calls),
+      resumeFrom: { ...state, budgetAnswer: { text: "" } },
+    });
+
+    expect(resumed.status).toBe("paused");
+    expect(calls).toEqual([]);
+    expect(resumed.pause?.stepId).toBe("budget");
+    expect(resumed.pause?.question).toContain("$0.90 of its $1.00 run budget");
+    expect(resumed.pause?.question).toMatch(/needs an answer, not a nudge/);
+    expect(lines.some((line) => line.kind === "budgetAck")).toBe(false);
+    expect(lines.some((line) => line.kind === "budgetRaise")).toBe(false);
+  });
+
+  it("does not fabricate consent for a run that crashed before anyone saw the question", async () => {
+    // The ask reached disk; the `runEnd{paused}` never did, so no operator was
+    // ever shown anything. A resume that says nothing must not answer for them.
+    const { sink, lines } = memoryJournal();
+    const calls: string[] = [];
+    await runWorkflow(THREE_STAGES, { journal: sink, runStep: spendyRunner(calls) });
+    const askIndex = lines.findIndex((line) => line.kind === "budgetAsk");
+    expect(askIndex).toBeGreaterThan(-1);
+    const crashed = buildResumeState(lines.slice(0, askIndex + 1));
+    expect(crashed.ended).toBe(false);
+    expect(crashed.budgetAsk).toBeDefined();
+
+    calls.length = 0;
+    const resumed = await runWorkflow(THREE_STAGES, {
+      journal: sink,
+      runStep: spendyRunner(calls),
+      resumeFrom: { ...crashed, budgetAnswer: { text: "" } },
+    });
+    expect(resumed.status).toBe("paused");
+    expect(calls).toEqual([]);
+    expect(lines.some((line) => line.kind === "budgetAck")).toBe(false);
+  });
+
+  it("re-surfaces the ask with the reason on a bad raise — nothing runs, nothing fails", async () => {
+    const { sink, lines, state } = await parkedRun();
+
+    const calls: string[] = [];
+    const resumed = await runWorkflow(THREE_STAGES, {
+      journal: sink,
+      runStep: spendyRunner(calls),
+      resumeFrom: { ...state, budgetAnswer: { text: "raise 0.5" } },
+    });
+
+    expect(resumed.status).toBe("paused");
+    expect(calls).toEqual([]);
+    expect(resumed.pause?.stepId).toBe("budget");
+    expect(resumed.pause?.question).toMatch(
+      /must exceed both the current \$1\.00 ceiling and the \$0\.90 already spent; \$0\.50 does not/,
+    );
+    expect(lines.some((line) => line.kind === "budgetRaise")).toBe(false);
+
+    // A raise-shaped reply with an unparseable value is a bad raise too — it
+    // must never quietly become an acknowledgement.
+    const gibberish = await runWorkflow(THREE_STAGES, {
+      journal: sink,
+      runStep: spendyRunner(calls),
+      resumeFrom: {
+        ...buildResumeState(lines),
+        budgetAnswer: { text: "raise fifty" },
+      },
+    });
+    expect(gibberish.status).toBe("paused");
+    expect(gibberish.pause?.question).toMatch(/needs a positive number/);
+    expect(calls).toEqual([]);
+    expect(lines.some((line) => line.kind === "budgetAck")).toBe(false);
+  });
+
+  it("re-surfaces on a reply that is neither a raise nor an acknowledgement", async () => {
+    const { sink, state } = await parkedRun();
+    const calls: string[] = [];
+    const resumed = await runWorkflow(THREE_STAGES, {
+      journal: sink,
+      runStep: spendyRunner(calls),
+      resumeFrom: { ...state, budgetAnswer: { text: "sounds good, keep going" } },
+    });
+    expect(resumed.status).toBe("paused");
+    expect(resumed.pause?.question).toMatch(/was not understood, so nothing was spent/);
+    expect(calls).toEqual([]);
+  });
+
+  it("refuses a raise from an origin without raise authority — the wire contract, engine-side", async () => {
+    const { sink, lines, state } = await parkedRun();
+    const calls: string[] = [];
+    const resumed = await runWorkflow(THREE_STAGES, {
+      journal: sink,
+      runStep: spendyRunner(calls),
+      allowBudgetRaise: false,
+      resumeFrom: { ...state, budgetAnswer: { text: "raise 999" } },
+    });
+    expect(resumed.status).toBe("paused");
+    expect(resumed.pause?.question).toMatch(
+      /cannot be raised over the wire; resume from the terminal/,
+    );
+    expect(calls).toEqual([]);
+    expect(lines.some((line) => line.kind === "budgetRaise")).toBe(false);
+  });
+
+  it("journals the starter's cap and enforces it on every later resume", async () => {
+    // FAIL-FIRST: the lowered ceiling lived only in the bounded workflow copy
+    // the starter handed the engine. A resume rediscovers the workflow from
+    // disk — full ceiling restored — so the cap evaporated at the first
+    // resume, and the ask's own "resume to continue" was the resume that did
+    // it. The cap goes on the run header, and a resumed run enforces
+    // min(file, cap).
+    const { sink, lines } = memoryJournal();
+    const calls: string[] = [];
+    // The file says $1.00; the starter commissioned this run at $0.50, so the
+    // bounded copy it hands the engine says $0.50 too.
+    const bounded = { ...THREE_STAGES, budgetUsd: 0.5 };
+    const parked = await runWorkflow(bounded, {
+      journal: sink,
+      runStep: spendyRunner(calls),
+      budgetCapUsd: 0.5,
+      allowBudgetRaise: false,
+    });
+    expect(parked.status).toBe("paused");
+    // One stage in: $0.45 of $0.50, not of $1.00.
+    expect(parked.pause?.question).toContain("$0.45 of its $0.50 run budget");
+    expect(lines.find((line) => line.kind === "run")).toMatchObject({ budgetCapUsd: 0.5 });
+    const state = buildResumeState(lines);
+    expect(state.budgetCapUsd).toBe(0.5);
+
+    // THE RESUME. The workflow it is handed is the FILE's — $1.00 — exactly as
+    // a rediscovery produces. The cap must still bind.
+    calls.length = 0;
+    const resumed = await runWorkflow(THREE_STAGES, {
+      journal: sink,
+      runStep: spendyRunner(calls),
+      allowBudgetRaise: false,
+      resumeFrom: { ...state, budgetAnswer: { text: "continue" } },
+    });
+    expect(calls).toEqual(["2"]);
+    expect(resumed.status).toBe("failed");
+    expect(resumed.error).toMatch(/exceeded its \$0\.50 run budget/);
+    expect(resumed.error).not.toContain("$1.00");
+  });
+
+  it("refuses even a terminal raise above the cap the run was commissioned under", async () => {
+    const { sink, lines } = memoryJournal();
+    const calls: string[] = [];
+    await runWorkflow(
+      { ...THREE_STAGES, budgetUsd: 0.5 },
+      { journal: sink, runStep: spendyRunner(calls), budgetCapUsd: 0.5, allowBudgetRaise: false },
+    );
+    calls.length = 0;
+    // A person at the terminal, with full raise authority — and still bounded
+    // by what this run was commissioned for. A fresh run is the way to spend
+    // more; otherwise the acknowledged resume becomes the raise the wire was
+    // refused at run start.
+    const refused = await runWorkflow(THREE_STAGES, {
+      journal: sink,
+      runStep: spendyRunner(calls),
+      resumeFrom: { ...buildResumeState(lines), budgetAnswer: { text: "raise 5" } },
+    });
+    expect(refused.status).toBe("paused");
+    expect(refused.pause?.question).toMatch(
+      /started with a \$0\.50 cap of its own, which no resume may lift; \$5\.00 is above it/,
+    );
+    expect(calls).toEqual([]);
+    expect(lines.some((line) => line.kind === "budgetRaise")).toBe(false);
+
+    // And the cap check does not swallow the ordinary one: a raise at (rather
+    // than above) the cap is still refused for the reason it always was —
+    // $0.50 does not exceed the $0.50 already in force.
+    const atTheCap = await runWorkflow(THREE_STAGES, {
+      journal: sink,
+      runStep: spendyRunner(calls),
+      resumeFrom: { ...buildResumeState(lines), budgetAnswer: { text: "raise 0.5" } },
+    });
+    expect(atTheCap.pause?.question).toMatch(/must exceed both the current \$0\.50 ceiling/);
+  });
+
+  it("never offers a reply the origin is forbidden to send", async () => {
+    // FAIL-FIRST: the question was rendered from the recorded numbers alone,
+    // so a wire client — which the seam forbids from raising anything — was
+    // told to "Reply \"raise <new-limit>\"" and would loop on refusals
+    // forever. One renderer, one sentence chosen by what the reader may do.
+    const { sink, lines } = memoryJournal();
+    const calls: string[] = [];
+    const parked = await runWorkflow(THREE_STAGES, {
+      journal: sink,
+      runStep: spendyRunner(calls),
+      allowBudgetRaise: false,
+    });
+    expect(parked.status).toBe("paused");
+    expect(parked.pause?.question).not.toContain("raise <new-limit>");
+    expect(parked.pause?.question).toContain('Reply "continue"');
+    expect(parked.pause?.question).toContain("the wire cannot raise a ceiling");
+
+    // The same holds for the re-surfaced copy: an unanswered wire resume gets
+    // the wire's wording back, not the terminal's.
+    const again = await runWorkflow(THREE_STAGES, {
+      journal: sink,
+      runStep: spendyRunner(calls),
+      allowBudgetRaise: false,
+      resumeFrom: { ...buildResumeState(lines), budgetAnswer: { text: "" } },
+    });
+    expect(again.pause?.question).not.toContain("raise <new-limit>");
+  });
+
+  it("validates a token raise as a whole number in decimal notation, as the frontmatter does", async () => {
+    // FAIL-FIRST: `Number("1000.5")` and `Number("0x400")` both sailed through,
+    // granting this run a token ceiling `budgetTokens:` would have rejected as
+    // a parse error — the file and the resume disagreeing about what a token
+    // budget even is.
+    const workflow = parseOk(
+      ["---", "name: demo", "budgetTokens: 100", "---", "1. a", "2. b {{prev}}"].join("\n"),
+    );
+    const { sink, lines } = memoryJournal();
+    const runStep: WorkflowStepRunner = async () => ({
+      text: "x",
+      usage: usage(40, 50),
+      isError: false,
+    });
+    const parked = await runWorkflow(workflow, { journal: sink, runStep });
+    expect(parked.status).toBe("paused");
+
+    const state = buildResumeState(lines);
+    for (const bad of ["raise 1000.5", "raise 0x400", "raise 1e3"]) {
+      const refused = await runWorkflow(workflow, {
+        journal: sink,
+        runStep,
+        resumeFrom: { ...buildResumeState(lines), budgetAnswer: { text: bad } },
+      });
+      expect(refused.status).toBe("paused");
+      expect(refused.pause?.question).toMatch(/whole number of tokens, written in digits/);
+    }
+    expect(lines.some((line) => line.kind === "budgetRaise")).toBe(false);
+
+    // A whole number still goes through — and the dollar ceiling stays decimal.
+    const granted = await runWorkflow(workflow, {
+      journal: sink,
+      runStep,
+      resumeFrom: { ...state, budgetAnswer: { text: "raise 1000" } },
+    });
+    expect(granted.status).toBe("done");
+    expect(
+      lines.find(
+        (line): line is Extract<JournalLine, { kind: "budgetRaise" }> =>
+          line.kind === "budgetRaise",
+      ),
+    ).toMatchObject({ ceiling: "tokens", value: 1000 });
+  });
+
+  it("reports one stage locator for a pause, whether it is fresh or re-surfaced", async () => {
+    // NOT a divergence, and the parser is why: `parseWorkflow` refuses a file
+    // whose steps are not numbered consecutively from 1, so a stage's authored
+    // `index` and its position in the list are the same number by
+    // construction, and the fresh park and the re-surfaced copy could only
+    // ever agree. The engine now derives both from the position anyway, so the
+    // agreement no longer rests on a rule enforced three thousand lines away —
+    // and this test is what says so if that rule ever relaxes.
+    const { sink, lines } = memoryJournal();
+    const calls: string[] = [];
+    const fresh = await runWorkflow(THREE_STAGES, { journal: sink, runStep: spendyRunner(calls) });
+    expect(fresh.status).toBe("paused");
+    const resurfaced = await runWorkflow(THREE_STAGES, {
+      journal: sink,
+      runStep: spendyRunner(calls),
+      resumeFrom: { ...buildResumeState(lines), budgetAnswer: { text: "" } },
+    });
+    expect(resurfaced.status).toBe("paused");
+    expect(resurfaced.pause?.stageIndex).toBe(fresh.pause?.stageIndex);
+    expect(fresh.pause?.stageIndex).toBe(2);
+    // And the summary a human reads never names a step for it either way.
+    expect(fresh.error).toContain("paused at a budget checkpoint");
+    expect(resurfaced.error).toContain("paused at a budget checkpoint");
+  });
+
+  it('threads "raise 40" through as an ordinary answer to a role\'s ORG-ASK', async () => {
+    const workflow = parseOk([FRONT, "1. spec it", "2. build {{prev}}"].join("\n"));
+    const { sink, lines } = memoryJournal();
+    let n = 0;
+    const runStep: WorkflowStepRunner = async () => {
+      n += 1;
+      return n === 1
+        ? {
+            text: "ORG-ASK: what turn limit should the role get?",
+            usage: usage(1, 1),
+            isError: false,
+          }
+        : { text: "built with 40", usage: usage(1, 1), isError: false };
+    };
+    const first = await runWorkflow(workflow, { journal: sink, runStep });
+    expect(first.status).toBe("paused");
+    expect(first.pause?.stepId).toBe("1");
+
+    const state = buildResumeState(lines);
+    // A role's question is NOT a budget ask, so the raise grammar never applies.
+    expect(state.budgetAsk).toBeUndefined();
+    const second = await runWorkflow(workflow, {
+      journal: sink,
+      runStep,
+      resumeFrom: { ...state, answer: { stepId: "1", text: "raise 40" } },
+    });
+    expect(second.status).toBe("done");
+    expect(second.steps[0]?.text).toBe("raise 40");
+    expect(lines.some((line) => line.kind === "budgetRaise")).toBe(false);
+  });
+
+  it("does not ask on the final stage — there is nothing left to save", async () => {
+    const workflow = parseOk(["---", "name: demo", "budgetUsd: 1.00", "---", "1. a"].join("\n"));
+    const { sink, lines } = memoryJournal();
+    const result = await runWorkflow(workflow, {
+      journal: sink,
+      runStep: async () => ({ text: "x", usage: priced(10, 0.9), isError: false }),
+    });
+    expect(result.status).toBe("done");
+    expect(lines.some((line) => line.kind === "budgetAsk")).toBe(false);
+  });
+
+  it("does not ask over a role's own pause — one question at a time, and the role's came first", async () => {
+    const workflow = parseOk(
+      ["---", "name: demo", "budgetUsd: 1.00", "---", "1. a", "2. b {{prev}}"].join("\n"),
+    );
+    const { sink, lines } = memoryJournal();
+    const result = await runWorkflow(workflow, {
+      journal: sink,
+      runStep: async () => ({
+        text: "ORG-ASK: postgres or sqlite?",
+        usage: priced(10, 0.9),
+        isError: false,
+      }),
+    });
+    expect(result.status).toBe("paused");
+    expect(result.pauses.map((pause) => pause.stepId)).toEqual(["1"]);
+    expect(lines.some((line) => line.kind === "budgetAsk")).toBe(false);
+  });
+
+  it("does not ask when the ceiling is already exhausted — the hard stop owns that", async () => {
+    const workflow = parseOk(
+      ["---", "name: demo", "budgetUsd: 1.00", "---", "1. a", "2. b {{prev}}"].join("\n"),
+    );
+    const { sink, lines } = memoryJournal();
+    const result = await runWorkflow(workflow, {
+      journal: sink,
+      runStep: async () => ({ text: "x", usage: priced(10, 1.5), isError: false }),
+    });
+    expect(result.status).toBe("failed");
+    expect(result.error).toMatch(/exceeded its \$1\.00 run budget/);
+    expect(lines.some((line) => line.kind === "budgetAsk")).toBe(false);
+  });
+
+  it("asks about the tighter ceiling when both are near — the one the next stage hits first", async () => {
+    const workflow = parseOk(
+      [
+        "---",
+        "name: demo",
+        "budgetUsd: 10",
+        "budgetTokens: 100",
+        "---",
+        "1. a",
+        "2. b {{prev}}",
+      ].join("\n"),
+    );
+    const { sink, lines } = memoryJournal();
+    const result = await runWorkflow(workflow, {
+      // 90 tokens (90% of 100) and $8.50 (85% of $10): both near, tokens tighter.
+      runStep: async () => ({
+        text: "x",
+        usage: {
+          inputTokens: 40,
+          outputTokens: 50,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          costUsd: 8.5,
+        },
+        isError: false,
+      }),
+      journal: sink,
+    });
+    expect(result.status).toBe("paused");
+    const ask = lines.find(
+      (line): line is Extract<JournalLine, { kind: "budgetAsk" }> => line.kind === "budgetAsk",
+    );
+    expect(ask?.ceiling).toBe("tokens");
+    expect(result.pause?.question).toContain("90 of its 100-token run budget");
+  });
+
+  it("round-trips `resume <id> raise 90000000` through the slash command", async () => {
+    const home = await mkdtemp(join(tmpdir(), "arcturn-budget-cmd-"));
+    // Stage 1 lands the run at exactly 80% of its 20-token ceiling; stage 2
+    // would cross it. Each fake turn burns 16 tokens (7 in + 9 out).
+    const front = ["---", "name: ship", "description: d", "budgetTokens: 20", "---"].join("\n");
+    let subCall = 0;
+    const budgetRuntime = {
+      paths: { home, project: join(home, "proj") },
+      createSubagent: () => {
+        subCall += 1;
+        return fakeAgent({
+          events: [
+            { type: "turnEnd", turnIndex: 0, usage: usage(7, 9) },
+            { type: "runEnd", reason: "completed" },
+          ],
+          text: subCall === 1 ? "the spec" : "shipped",
+        });
+      },
+    };
+    const printed: string[] = [];
+    const notices: { level: string; text: string }[] = [];
+    const setInputs: string[] = [];
+    const budgetUi = {
+      print: (c: string | readonly string[]) =>
+        printed.push(...(typeof c === "string" ? [c] : [...c])),
+      notice: (level: string, text: string) => notices.push({ level, text }),
+      select: async <T>(_t: string, options: readonly { data: T }[]) => options[0]?.data,
+      setInput: (text: string) => setInputs.push(text),
+      clear: () => {},
+      exit: () => {},
+    };
+    const [command] = createWorkflowCommands({
+      discover: async () => [parseOk(`${front}\n1. spec {{input}}\n2. build {{prev}}`)],
+    });
+    const run = (args: string) =>
+      command?.run({
+        args,
+        runtime: budgetRuntime as never,
+        ui: budgetUi as never,
+        commands: {} as never,
+      });
+
+    // ROUND 1: the run parks at the checkpoint, and the human is prompted.
+    await run("ship do the thing");
+    expect(printed.join("\n")).toMatch(/Workflow ship: paused/);
+    const prefill = setInputs.at(-1) ?? "";
+    const runId = prefill.match(/resume (\S+)/)?.[1] ?? "";
+    expect(runId).not.toBe("");
+    expect(subCall).toBe(1);
+    const parked = buildResumeState(await readJournalLines(join(home, "workflow-runs", runId)));
+    expect(parked.budgetAsk).toMatchObject({ ceiling: "tokens", spent: 16, limit: 20 });
+
+    // ROUND 2: a bare `resume <id>` is a nudge, not an answer. It re-states
+    // the checkpoint, pre-fills the command, spends nothing and — the point —
+    // journals no consent on the operator's behalf.
+    printed.length = 0;
+    notices.length = 0;
+    await run(`resume ${runId}`);
+    expect(notices.some((n) => n.level === "warn" && /budget checkpoint/.test(n.text))).toBe(true);
+    expect(notices.some((n) => n.text.includes(`/workflow resume ${runId} continue`))).toBe(true);
+    expect(setInputs.at(-1)).toBe(`/workflow resume ${runId} `);
+    expect(subCall).toBe(1);
+    expect(
+      (await readJournalLines(join(home, "workflow-runs", runId))).some(
+        (line) => line.kind === "budgetAck",
+      ),
+    ).toBe(false);
+
+    // ROUND 3: the raise goes through the same resume command an answer does;
+    // the ENGINE validates and grants it, and only stage 2 runs.
+    printed.length = 0;
+    await run(`resume ${runId} raise 90000000`);
+    expect(printed.join("\n")).toMatch(/Workflow ship: done/);
+    expect(printed.join("\n")).toContain("shipped");
+    expect(subCall).toBe(2);
+    const after = await readJournalLines(join(home, "workflow-runs", runId));
+    expect(
+      after.find(
+        (line): line is Extract<JournalLine, { kind: "budgetRaise" }> =>
+          line.kind === "budgetRaise",
+      ),
+    ).toMatchObject({ ceiling: "tokens", value: 90000000 });
+    expect(buildResumeState(after).budgetAsk).toBeUndefined();
+
+    await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+  });
+});
+
+describe("parseBudgetRaiseAnswer", () => {
+  it("parses the raise grammar, tolerating the notations the ask itself renders", () => {
+    expect(parseBudgetRaiseAnswer("raise 5")?.value).toBe(5);
+    expect(parseBudgetRaiseAnswer("RAISE 90000000")?.value).toBe(90000000);
+    expect(parseBudgetRaiseAnswer("  raise $2.50 ")?.value).toBe(2.5);
+    expect(parseBudgetRaiseAnswer("raise 1,000,000")?.value).toBe(1_000_000);
+  });
+
+  it("returns undefined for anything not raise-shaped — those are ordinary answers", () => {
+    expect(parseBudgetRaiseAnswer("")).toBeUndefined();
+    expect(parseBudgetRaiseAnswer("use postgres")).toBeUndefined();
+    expect(parseBudgetRaiseAnswer("raise")).toBeUndefined();
+    expect(parseBudgetRaiseAnswer("raise 40 please")).toBeUndefined();
+    expect(parseBudgetRaiseAnswer("praise 40")).toBeUndefined();
+  });
+
+  it("keeps a raise-shaped reply with a bad value as a BAD raise, never an ack", () => {
+    const parsed = parseBudgetRaiseAnswer("raise fifty");
+    expect(parsed).toBeDefined();
+    expect(Number.isNaN(parsed?.value ?? 0)).toBe(true);
+  });
+});
+
+// ===========================================================================
+// HONEST TURN-EXHAUSTION FAILURES — preserve the final words and the reason.
+//
+// FAIL-FIRST: before this change a step whose child exhausted `maxTurns`
+// failed with the loop's own message ("Reached the maximum of N turns. Send
+// another message to continue…" — advice for a session the operator is not
+// in), the `stop` line was never written (`turn-ceiling` was declared with no
+// writer), and `run.text` was discarded on every errored lane. Each assertion
+// below on the rewritten error, the stop reason and `finalText` failed.
+// ===========================================================================
+describe("runWorkflow — honest turn-exhaustion failures", () => {
+  // Built to the core loop's exact template and sanity-checked against the
+  // real discriminator, so this fixture can never drift from `@arcturn/core`.
+  const TURN_MESSAGE =
+    "Reached the maximum of 40 turns. Send another message to continue, or raise the ceiling: " +
+    "--max-turns for this session, or maxTurns: in the role file (subagentMaxTurns in config) " +
+    "for a delegated agent.";
+
+  it("names the real cause, records stop turn-ceiling, journals the final words — and never retries", async () => {
+    expect(isTurnCeilingError(TURN_MESSAGE)).toBe(true);
+    const workflow = parseOk([FRONT, "1. @rag-builder build the indexes"].join("\n"));
+    const { sink, lines } = memoryJournal();
+    const words = "Index 3 of 5 is built; starting the reranker next.";
+    let built = 0;
+    const resolve: AgentRoleResolver = () => role("rag-builder", ["read", "grep"]);
+    const runStep = createRuntimeRunStep(
+      {
+        createSubagent: () => {
+          built += 1;
+          return fakeAgent({
+            events: [{ type: "runEnd", reason: "error", errorMessage: TURN_MESSAGE }],
+            text: words,
+          });
+        },
+      },
+      { resolveAgent: resolve, agentNames: () => ["rag-builder"] },
+    );
+    const result = await runWorkflow(workflow, {
+      journal: sink,
+      runStep,
+      resolveAgent: resolve,
+      agentNames: () => ["rag-builder"],
+    });
+
+    expect(result.status).toBe("failed");
+    // The error names the real condition and the real levers — not "send
+    // another message" into a session the operator cannot reach.
+    expect(result.steps[0]?.error).toMatch(
+      /role "rag-builder" hit its 40-turn ceiling before finishing; raise maxTurns in the role file or narrow the step/,
+    );
+    // The agent's final words survive: on the failure message a human reads…
+    expect(result.steps[0]?.error).toContain("Index 3 of 5 is built");
+    expect(result.error).toContain("Index 3 of 5 is built");
+    // …and on the result + durable terminal — while the pipe stays clean.
+    expect(result.steps[0]?.finalText).toContain("Index 3 of 5 is built");
+    expect(result.steps[0]?.text).toBe("");
+    const end = lines.find(
+      (line): line is Extract<JournalLine, { kind: "stepEnd" }> => line.kind === "stepEnd",
+    );
+    expect(end?.finalText).toContain("Index 3 of 5 is built");
+    // The declared-but-never-emitted stop reason finally has its writer.
+    expect(
+      lines
+        .filter((line): line is Extract<JournalLine, { kind: "stop" }> => line.kind === "stop")
+        .map((line) => line.reason),
+    ).toEqual(["turn-ceiling"]);
+    // Deterministic, exactly as before: the same ceiling yields the same
+    // exhaustion, so the self-healing retry never touches it.
+    expect(built).toBe(1);
+  });
+
+  /** A step that reports turn exhaustion, having burned `costUsd`. */
+  function outOfTurns(costUsd: number): WorkflowStepOutcome {
+    return {
+      text: "",
+      usage: priced(10, costUsd),
+      isError: true,
+      error: "hit its 40-turn ceiling before finishing",
+      failureKind: "turn-ceiling",
+    };
+  }
+
+  it("does not relabel a budget-halted run as turn-ceiling when an earlier step ran out of turns", async () => {
+    // FAIL-FIRST: `recordStop` keeps the FIRST reason, and the per-step
+    // turn-ceiling record fired inside the step loop — before the stage
+    // boundary's cost/token checks. Under `continueOnError` a run genuinely
+    // killed by its ceiling therefore reported `stop: turn-ceiling`, which
+    // contradicts this engine's own rule that a budget breach must not be
+    // relabelled, and misdirects the one question `/workflow status` answers.
+    const workflow = parseOk(
+      ["---", "name: demo", "budgetUsd: 1.00", "continueOnError: true", "---", "1. a", "2. b"].join(
+        "\n",
+      ),
+    );
+    const { sink, lines } = memoryJournal();
+    const result = await runWorkflow(workflow, {
+      journal: sink,
+      runStep: async (request) =>
+        request.step.id === "1"
+          ? outOfTurns(0.1)
+          : { text: "x", usage: priced(10, 1.5), isError: false },
+    });
+
+    expect(result.status).toBe("failed");
+    expect(
+      lines
+        .filter((line): line is Extract<JournalLine, { kind: "stop" }> => line.kind === "stop")
+        .map((line) => line.reason),
+    ).toEqual(["cost-ceiling"]);
+    // The step's own honest report is untouched — only the RUN's label moved.
+    expect(result.steps[0]?.error).toContain("40-turn ceiling");
+    expect(result.steps[0]?.status).toBe("failed");
+  });
+
+  it("reports the ceiling, not the turn count, when one step does both", async () => {
+    const workflow = parseOk(["---", "name: demo", "budgetUsd: 1.00", "---", "1. a"].join("\n"));
+    const { sink, lines } = memoryJournal();
+    const result = await runWorkflow(workflow, {
+      journal: sink,
+      runStep: async () => outOfTurns(1.5),
+    });
+    expect(result.status).toBe("failed");
+    expect(
+      lines
+        .filter((line): line is Extract<JournalLine, { kind: "stop" }> => line.kind === "stop")
+        .map((line) => line.reason),
+    ).toEqual(["cost-ceiling"]);
+  });
+
+  it("still reports turn-ceiling when that is what actually ended the run", async () => {
+    const workflow = parseOk([FRONT, "1. a", "2. b {{prev}}"].join("\n"));
+    const { sink, lines } = memoryJournal();
+    const result = await runWorkflow(workflow, {
+      journal: sink,
+      runStep: async () => outOfTurns(0),
+    });
+    expect(result.status).toBe("failed");
+    expect(
+      lines
+        .filter((line): line is Extract<JournalLine, { kind: "stop" }> => line.kind === "stop")
+        .map((line) => line.reason),
+    ).toEqual(["turn-ceiling"]);
+  });
+
+  it("caps the preserved final words, keeping the tail where the progress report lives", () => {
+    expect(finalWordsExcerpt("")).toBeUndefined();
+    expect(finalWordsExcerpt("  \n ")).toBeUndefined();
+    expect(finalWordsExcerpt("short words")).toBe("short words");
+    const excerpt = finalWordsExcerpt(`${"x".repeat(600)}THE-END`) ?? "";
+    expect(excerpt.length).toBe(501);
+    expect(excerpt.startsWith("…")).toBe(true);
+    expect(excerpt.endsWith("THE-END")).toBe(true);
   });
 });
 

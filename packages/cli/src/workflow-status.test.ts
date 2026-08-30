@@ -365,6 +365,145 @@ describe("foldJournal + formatRunsTable", () => {
     expect(detail).toContain("2,010 tokens");
   });
 
+  it("folds and renders a turn-ceiling stop, from real engine output", async () => {
+    // FAIL-FIRST: `turn-ceiling` was declared in `WorkflowStopReason` with no
+    // writer at all, so no engine journal could carry it and this render was
+    // unreachable. The engine now records it when a step's outcome carries
+    // `failureKind: "turn-ceiling"` — the lanes mint that from the core
+    // loop's own turn-exhaustion message.
+    const lines = await engineJournal({
+      source: [FRONT, "1. @developer build it", "2. @reviewer read it {{prev}}"].join("\n"),
+      runStep: async () => ({
+        text: "",
+        usage: usage(50),
+        isError: true,
+        error:
+          'step 1 (@developer): role "developer" hit its 40-turn ceiling before finishing; ' +
+          "raise maxTurns in the role file or narrow the step.",
+        failureKind: "turn-ceiling",
+        finalText: "Index 3 of 5 is built; starting the reranker next.",
+      }),
+    });
+    const run = foldJournal("run-turns", lines);
+    expect(run.stopReason).toBe("turn-ceiling");
+    expect(deriveRunState(run, lastTs(lines) + 100)).toBe("failed");
+    expect(formatRunsTable([run], lastTs(lines) + 100).join("\n")).toContain("stop: turn-ceiling");
+    expect(formatRunDetail(run, lastTs(lines) + 100).join("\n")).toContain("stopped: turn-ceiling");
+  });
+
+  it("shows a budget-ask park as paused with its question and the continue/raise hint", async () => {
+    // Real engine output: stage 1 spends 90% of the $1.00 ceiling with a stage
+    // remaining, so the engine parks the run at its stage-boundary budget ask.
+    const lines = await engineJournal({
+      source: [
+        "---",
+        "name: ship-fix",
+        "description: ship a fix",
+        `stepTimeoutMs: ${STEP_TIMEOUT}`,
+        "budgetUsd: 1.00",
+        "---",
+        "1. @architect design it",
+        "2. @developer patch it {{prev}}",
+      ].join("\n"),
+      runStep: async (request) => spendTurns(request, 1, 0.9, 100),
+    });
+    const run = foldJournal("run-ask", lines);
+    expect(run.endStatus).toBe("paused");
+    expect(run.pendingQuestions.map((question) => question.stepId)).toEqual(["budget"]);
+    expect(run.pendingQuestion).toContain("$0.90 of its $1.00 run budget");
+    expect(deriveRunState(run, lastTs(lines) + 100)).toBe("paused");
+
+    // Both valid replies are named, and the affirmative one is a WORD: an
+    // empty resume is not consent, so the question never offers it as one.
+    expect(run.pendingQuestion).toContain('Reply "continue" to run on to the hard stop');
+    expect(run.pendingQuestion).not.toContain("resume with no answer");
+
+    const table = formatRunsTable([run], lastTs(lines) + 100).join("\n");
+    expect(table).toContain("paused");
+    expect(table).toContain("asks: This run has spent $0.90");
+    // The hint names the two replies a budget checkpoint actually takes —
+    // "<answer>" would invite prose the engine can only bounce back — and it
+    // is ONE renderer, so the table and the detail view cannot drift apart.
+    const hint =
+      "/workflow resume run-ask continue runs on to the hard stop, " +
+      "/workflow resume run-ask raise <new-limit> lifts it";
+    expect(table).toContain(hint);
+    expect(table).not.toContain("resume run-ask <answer>");
+
+    const detail = formatRunDetail(run, lastTs(lines) + 100).join("\n");
+    expect(detail).toContain("Awaiting a human answer: This run has spent $0.90");
+    expect(detail).toContain(hint);
+
+    // An acknowledgement retires the question, and the stale `runEnd{paused}`
+    // reads as an ordinary resumable cut point — nothing left to answer. The
+    // ack is appended by hand here (like the stop-reason vocabulary test
+    // above) because it is the RESUMED engine that writes it; the write path
+    // is proved end-to-end in `workflow.test.ts`'s budget-ask round-trips.
+    const acked = foldJournal("run-ask", [
+      ...lines,
+      { kind: "budgetAck", ceiling: "usd", ts: lastTs(lines) + 1 },
+    ]);
+    expect(acked.pendingQuestions).toEqual([]);
+    expect(deriveRunState(acked, lastTs(lines) + 100)).toBe("resumable");
+  });
+
+  it("tolerates a torn budgetAsk line instead of taking every other run down with it", async () => {
+    // FAIL-FIRST: the `budgetAsk` arm rendered `ask.spent.toFixed(2)` on
+    // unvalidated disk data — `parseJournalLine` only checks that `kind` is a
+    // string — so one half-written line threw a TypeError out of `foldJournal`,
+    // and `readWorkflowRuns` (no per-run guard) turned that into "/workflow
+    // status is broken" for EVERY run on the machine. The neighbouring
+    // `budget` arm guards each field for exactly this reason.
+    const good = await engineJournal({
+      source: [FRONT, "1. @developer build it"].join("\n"),
+      runStep: async (request) => spendTurns(request, 1, 0.25, 100),
+    });
+    const torn = [
+      ...good,
+      // A crash between `{"kind":"budgetAsk","ceiling":"usd"` and the rest.
+      { kind: "budgetAsk", ceiling: "usd" } as unknown as JournalLine,
+    ];
+    const run = foldJournal("run-torn", torn);
+    // The line is dropped, not rendered: an ask nobody can restate is not an
+    // ask, and the rest of the run still folds.
+    expect(run.pendingQuestions).toEqual([]);
+    expect(run.stages).toHaveLength(1);
+    // And the healthy run beside it still renders.
+    const table = formatRunsTable([run, foldJournal("run-ok", good)], lastTs(good) + 100).join(
+      "\n",
+    );
+    expect(table).toContain("run-ok");
+    expect(table).toContain("run-torn");
+  });
+
+  it("retires the pending ask only for the ceiling that was answered", async () => {
+    // FAIL-FIRST: this fold deleted the pending ask on ANY `budgetAck`/
+    // `budgetRaise`, while `buildResumeState` (which has its own test for it)
+    // only clears an ask whose ceiling matches. Two folds of one journal
+    // disagreeing about whether a question is still owed is the bug: status
+    // said "answered", resume re-asked.
+    const lines = await engineJournal({
+      source: [
+        "---",
+        "name: ship-fix",
+        "description: ship a fix",
+        `stepTimeoutMs: ${STEP_TIMEOUT}`,
+        "budgetUsd: 1.00",
+        "---",
+        "1. @architect design it",
+        "2. @developer patch it {{prev}}",
+      ].join("\n"),
+      runStep: async (request) => spendTurns(request, 1, 0.9, 100),
+    });
+    // The dollar ask is pending; an ack for the TOKEN ceiling settles nothing.
+    const other = foldJournal("run-ask", [
+      ...lines,
+      { kind: "budgetAck", ceiling: "tokens", ts: lastTs(lines) + 1 },
+    ]);
+    expect(other.pendingQuestions.map((question) => question.stepId)).toEqual(["budget"]);
+    expect(deriveRunState(other, lastTs(lines) + 100)).toBe("paused");
+  });
+
   it("prints a friendly note when no runs exist", () => {
     expect(formatRunsTable([], 0).join("\n")).toContain("No workflow runs recorded yet");
   });

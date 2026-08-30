@@ -111,7 +111,12 @@ parent:
 
 Everything else about a child follows the same shape as the ad-hoc case above:
 `maxTurns` defaults to `SUBAGENT_MAX_TURNS` (64), overridable via `subagentMaxTurns` in
-config; the child shares the parent's `SessionStore` and working directory; and its cost
+config — and the ceiling is announced, not sprung: with 9 turns left of the default 64,
+the loop injects one user message telling the model to finish and deliver now, so a child
+wraps up and reports instead of dying at the ceiling with its work done but undelivered
+(the trip point, and the tight ceilings that get no warning, are in
+[The wrap-up warning](/docs/sdk-agent-options#the-wrap-up-warning)). The child
+shares the parent's `SessionStore` and working directory; and its cost
 folds into the parent's running total the moment its `turnEnd` events arrive (via
 `calculateCostUsd`), so `/cost` on the parent reflects everything its sub-agents spent too.
 

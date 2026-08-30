@@ -4,6 +4,8 @@ import { join } from "node:path";
 import type { Usage } from "@arcturn/types";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  budgetAskFacts,
+  budgetAskQuestion,
   buildResumeState,
   classifyFailureKind,
   createFileRunJournal,
@@ -662,5 +664,221 @@ describe("createFileRunJournal — durable appends", () => {
     await expect(journal.append({ kind: "runEnd", status: "failed", ts: 3 })).resolves.toBe(
       undefined,
     );
+  });
+});
+
+// ===========================================================================
+// STAGE-BOUNDARY BUDGET ASK — the journal fold behind pause/ack/raise.
+//
+// FAIL-FIRST: before this change `budgetAsk`/`budgetAck`/`budgetRaise` were
+// not `JournalLine` kinds at all — every line below fell into the fold's
+// `default` arm and `ResumeState` had no `budgetAsk`/`budgetAcks`/
+// `budgetRaises` fields, so each assertion on them read `undefined`.
+// ===========================================================================
+describe("buildResumeState — the budget-ask gate", () => {
+  const header: JournalLine = {
+    kind: "run",
+    v: 1,
+    runId: "R9",
+    workflow: "spendy",
+    source: "/wf/spendy.md",
+    input: "",
+    stepTimeoutMs: 600000,
+    maxStepRetries: 2,
+    startedAt: 1,
+  };
+  const ask: JournalLine = {
+    kind: "budgetAsk",
+    ceiling: "usd",
+    spent: 0.9,
+    limit: 1,
+    stagesDone: 2,
+    stagesTotal: 3,
+    ts: 10,
+  };
+
+  it("folds a pending budgetAsk, and a paused end leaves it answerable", () => {
+    const state = buildResumeState([header, ask, { kind: "runEnd", status: "paused", ts: 11 }]);
+    expect(state.budgetAsk).toEqual({
+      ceiling: "usd",
+      spent: 0.9,
+      limit: 1,
+      stagesDone: 2,
+      stagesTotal: 3,
+    });
+    // A budget ask is a run-level question: the step-keyed pending stays empty.
+    expect(state.pending).toBeUndefined();
+    // A `"paused"` end is the soft stop both resume entry points accept.
+    expect(state.ended).toBe(true);
+    expect(state.endedStatus).toBe("paused");
+  });
+
+  it("retires the ask on a budgetAck and remembers the ceiling as acknowledged", () => {
+    const state = buildResumeState([header, ask, { kind: "budgetAck", ceiling: "usd", ts: 12 }]);
+    expect(state.budgetAsk).toBeUndefined();
+    expect(state.budgetAcks?.has("usd")).toBe(true);
+    expect(state.budgetRaises).toBeUndefined();
+  });
+
+  it("retires the ask on a budgetRaise and carries the granted ceiling, latest wins", () => {
+    const state = buildResumeState([
+      header,
+      ask,
+      { kind: "budgetRaise", ceiling: "usd", value: 2, ts: 12 },
+      { kind: "budgetRaise", ceiling: "usd", value: 5, ts: 13 },
+    ]);
+    expect(state.budgetAsk).toBeUndefined();
+    expect(state.budgetRaises?.get("usd")).toBe(5);
+    expect(state.budgetAcks).toBeUndefined();
+  });
+
+  it("re-arms: a fresh ask after a raise pends again against the new limit", () => {
+    const state = buildResumeState([
+      header,
+      ask,
+      { kind: "budgetRaise", ceiling: "usd", value: 2, ts: 12 },
+      {
+        kind: "budgetAsk",
+        ceiling: "usd",
+        spent: 1.7,
+        limit: 2,
+        stagesDone: 3,
+        stagesTotal: 4,
+        ts: 20,
+      },
+    ]);
+    expect(state.budgetAsk?.limit).toBe(2);
+    expect(state.budgetAsk?.spent).toBe(1.7);
+    expect(state.budgetRaises?.get("usd")).toBe(2);
+  });
+
+  it("an ack for one ceiling does not retire the other ceiling's ask", () => {
+    const tokenAsk: JournalLine = {
+      kind: "budgetAsk",
+      ceiling: "tokens",
+      spent: 48_000_000,
+      limit: 60_000_000,
+      stagesDone: 1,
+      stagesTotal: 2,
+      ts: 30,
+    };
+    const state = buildResumeState([
+      header,
+      tokenAsk,
+      { kind: "budgetAck", ceiling: "usd", ts: 31 },
+    ]);
+    expect(state.budgetAsk?.ceiling).toBe("tokens");
+    expect(state.budgetAcks?.has("usd")).toBe(true);
+  });
+
+  it("survives a torn tail: the durable prefix still folds the ask", async () => {
+    const dir = await scratch();
+    const journal = createFileRunJournal(dir);
+    await journal.appendDurable?.(header);
+    await journal.appendDurable?.(ask);
+    // A crash mid-append leaves a half-written ack; the prefix — and with it
+    // the still-pending ask — is what a resume may trust.
+    await writeFile(join(dir, RUN_JOURNAL_FILE), '{"kind":"budgetAck","ceiling":', { flag: "a" });
+    const state = buildResumeState(await readJournalLines(dir));
+    expect(state.budgetAsk?.ceiling).toBe("usd");
+    expect(state.budgetAcks).toBeUndefined();
+  });
+});
+
+describe("budgetAskQuestion", () => {
+  it("names spent, limit, percentage, stages remaining and both replies, in dollars", () => {
+    const q = budgetAskQuestion({
+      ceiling: "usd",
+      spent: 0.9,
+      limit: 1,
+      stagesDone: 2,
+      stagesTotal: 3,
+    });
+    expect(q).toContain("$0.90 of its $1.00 run budget");
+    expect(q).toContain("(90%)");
+    expect(q).toContain("1 of 3 stage(s) still to go");
+    expect(q).toContain('"raise <new-limit>"');
+    // The affirmative is a WORD. An empty resume is a nudge, and a nudge must
+    // never be able to mint the durable "the operator consented" record.
+    expect(q).toContain('Reply "continue" to run on to the hard stop');
+    expect(q).not.toContain("resume with no answer");
+  });
+
+  it("offers only the reply the origin may actually send", () => {
+    const ask = {
+      ceiling: "usd",
+      spent: 0.9,
+      limit: 1,
+      stagesDone: 2,
+      stagesTotal: 3,
+    } as const;
+    const overTheWire = budgetAskQuestion(ask, { allowRaise: false });
+    // A question that travels to a client the seam forbids from raising must
+    // not tell it to raise — an automation following that instruction loops
+    // on refusals forever.
+    expect(overTheWire).not.toContain("raise <new-limit>");
+    expect(overTheWire).toContain('Reply "continue" to run on');
+    expect(overTheWire).toContain("the wire cannot raise a ceiling");
+    // …and it still fits inside the wire's own description cap, so the half
+    // that says what this reader may do is not the half that gets truncated.
+    expect(overTheWire.length).toBeLessThanOrEqual(160);
+    // The facts are identical either way; only the answer options move.
+    expect(overTheWire.split("Reply")[0]).toBe(budgetAskQuestion(ask).split("Reply")[0]);
+  });
+
+  it("keeps a sub-cent spend honest rather than rendering it as free", () => {
+    // `toFixed(2)` printed "$0.00" here — the one answer certainly wrong, and
+    // exactly the drift `formatCost`'s own doc warns about.
+    const q = budgetAskQuestion({
+      ceiling: "usd",
+      spent: 0.004,
+      limit: 0.005,
+      stagesDone: 1,
+      stagesTotal: 2,
+    });
+    expect(q).toContain("$0.0040 of its $0.0050 run budget");
+    expect(q).not.toContain("$0.00 of");
+  });
+
+  it("drops a torn ask line rather than throwing the whole status view away", () => {
+    // `readJournalLines` only promises an object with a string `kind`, and
+    // both folds used to hand whatever survived straight to the renderer.
+    const torn = (line: unknown): unknown => budgetAskFacts(line as never);
+    expect(torn({ kind: "budgetAsk", ceiling: "usd" })).toBeUndefined();
+    expect(torn({ kind: "budgetAsk", ceiling: "usd", spent: 1, limit: 0 })).toBeUndefined();
+    expect(torn({ kind: "budgetAsk", ceiling: "eur", spent: 1, limit: 2 })).toBeUndefined();
+    expect(
+      torn({
+        kind: "budgetAsk",
+        ceiling: "usd",
+        spent: "1",
+        limit: 2,
+        stagesDone: 1,
+        stagesTotal: 2,
+      }),
+    ).toBeUndefined();
+    expect(
+      torn({
+        kind: "budgetAsk",
+        ceiling: "usd",
+        spent: 1,
+        limit: 2,
+        stagesDone: 1,
+        stagesTotal: 2,
+      }),
+    ).toEqual({ ceiling: "usd", spent: 1, limit: 2, stagesDone: 1, stagesTotal: 2 });
+  });
+
+  it("renders a token ceiling in en-US grouping — the notation the abort message uses", () => {
+    const q = budgetAskQuestion({
+      ceiling: "tokens",
+      spent: 48_000_000,
+      limit: 60_000_000,
+      stagesDone: 1,
+      stagesTotal: 4,
+    });
+    expect(q).toContain("48,000,000 of its 60,000,000-token run budget");
+    expect(q).toContain("(80%)");
+    expect(q).toContain("3 of 4 stage(s) still to go");
   });
 });

@@ -64,6 +64,49 @@ export function shouldAbortForTokens(
 }
 
 /**
+ * Forward-looking sibling of the two abort checks above: is a spend close
+ * enough to its ceiling that the operator should be asked *before* the hard
+ * stop kills the run?
+ *
+ * The abort checks fire after the money is gone; by then the only artifact is
+ * a failed run. The workflow engine uses this predicate at stage boundaries
+ * to park a run (`paused`, resumable) once a ceiling is `fraction` consumed
+ * and stages remain — a ceiling you can answer beats a corpse with a patch.
+ *
+ * Same disable conventions as its siblings: a limit of `0`/`undefined` (or a
+ * negative/non-finite value) never nears, and a non-finite spend never trips.
+ *
+ * @param spent - Cumulative spend so far, in whatever unit `limit` is in.
+ * @param limit - The configured ceiling. `0`/`undefined` disables the check.
+ * @param fraction - The consumed fraction that arms the ask (e.g. `0.8`).
+ * @returns Whether `spent` has consumed at least `fraction` of `limit`.
+ */
+export function nearingCeiling(
+  spent: number,
+  limit: number | undefined,
+  fraction: number,
+): boolean {
+  const ceiling = limit ?? 0;
+  if (!Number.isFinite(ceiling) || ceiling <= 0) return false;
+  if (!Number.isFinite(spent) || spent < 0) return false;
+  if (!Number.isFinite(fraction) || fraction <= 0) return false;
+  // The boundary case — *exactly* `fraction` consumed — must fire, and in IEEE
+  // doubles neither obvious spelling gets there on its own. `spent >= ceiling *
+  // fraction` rounds the product UP (`100 * 0.8` is not `80`); `spent / ceiling
+  // >= fraction` rounds the quotient DOWN on the most ordinary money there is
+  // (`2.4 / 3` is 0.7999999999999999, so $2.40 of a $3.00 budget read as *not*
+  // 80% consumed). Scaling both sides by 100 just re-loses it the other way.
+  //
+  // So the comparison carries an explicit tolerance of a few ulps of the
+  // fraction — 4 units in the last place, which at 0.8 is ~7e-16. That is far
+  // finer than any budget an operator can express (it cannot pull a spend a
+  // millionth of a cent under the line over it) and wide enough to absorb the
+  // single rounded division above.
+  const tolerance = fraction * 4 * Number.EPSILON;
+  return spent / ceiling >= fraction - tolerance;
+}
+
+/**
  * Render the message shown to the user when the guard fires.
  *
  * Exported so the CLI (and its tests) can assert on the exact wording

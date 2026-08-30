@@ -228,6 +228,7 @@ import {
   type ExplainedPermissionRule,
   emptyUsage,
   errorText,
+  isTurnCeilingError,
   shellSegments,
 } from "@arcturn/core";
 import type {
@@ -240,11 +241,16 @@ import type {
 } from "@arcturn/types";
 import type { AgentDef } from "./agents.js";
 import type { CommandContext, CommandUi, SlashCommand } from "./commands.js";
-import { shouldAbortForCost, shouldAbortForTokens } from "./cost-guard.js";
-import { formatDuration, oneLine, totalTokens } from "./format.js";
+import { nearingCeiling, shouldAbortForCost, shouldAbortForTokens } from "./cost-guard.js";
+import { formatCost, formatDuration, oneLine, totalTokens } from "./format.js";
 import { loadOrgMemoryInjector, orgMemoryPath, renderRunJournalDigest } from "./org-memory.js";
 import { createWorktree } from "./scouts.js";
 import {
+  BUDGET_ACK_ANSWER,
+  BUDGET_ASK_STEP_ID,
+  type BudgetCeilingKind,
+  budgetAskQuestion,
+  budgetAskResumeHint,
   buildResumeState,
   classifyFailureKind,
   createFileRunJournal,
@@ -258,6 +264,7 @@ import {
   isGitLockError,
   type JournalLine,
   type PatchPresence,
+  type PendingBudgetAsk,
   type ResumeState,
   RUN_JOURNAL_SCHEMA_VERSION,
   type RunJournal,
@@ -562,10 +569,21 @@ export interface WorkflowStepOutcome {
    *
    * A stalled LLM socket surfaces as `network`, a git index-lock as `git-lock`;
    * these retry. A refused patch (`patch-refused`), a config/plan refusal
-   * (`config`) or an otherwise unidentified agent error (`agent-error`) do not.
+   * (`config`), a child that ran out of turns (`turn-ceiling`) or an otherwise
+   * unidentified agent error (`agent-error`) do not.
    * Only meaningful when `isError` is `true`. See {@link WorkflowFailureKind}.
    */
   readonly failureKind?: WorkflowFailureKind;
+  /**
+   * A capped excerpt of the agent's final message, when the step errored.
+   *
+   * `text` stays `""` on an error — a failed step must never feed the next
+   * stage's `{{prev}}` — but the words themselves are evidence: how far the
+   * agent got, and often *why* it stopped. The lanes fill this in via
+   * {@link finalWordsExcerpt}; the engine journals it on the step's terminal
+   * and appends it to the failure message a human reads.
+   */
+  readonly finalText?: string;
 }
 
 /** Executes one step. Injected so the engine is testable without an LLM. */
@@ -651,6 +669,15 @@ export interface WorkflowStepResult {
    * the journal file to find.
    */
   readonly attempts?: number;
+  /**
+   * A capped excerpt of the agent's final message, when the step FAILED.
+   *
+   * {@link text} is empty on a failed step by contract (nothing may pipe a
+   * failure into `{{prev}}`), so this is the only place the agent's last
+   * words survive — mirrored onto the durable `stepEnd` line and into the
+   * step's {@link error} so a human sees how far the agent got.
+   */
+  readonly finalText?: string;
   /** Unset for a step that never started. */
   readonly startedAt?: number;
   /** Unset for a step that never finished. */
@@ -840,6 +867,25 @@ export interface WorkflowRunContext {
   verifyPatch?: (patchPath: string) => Promise<PatchPresence>;
   /** Self-healing retry policy for transient step failures. */
   retry?: WorkflowRetryPolicy;
+  /**
+   * Whether this run's origin may raise a ceiling at the stage-boundary budget
+   * ask. Defaults to `true` — the interactive terminal.
+   *
+   * The serve path passes `false`, because the wire contract
+   * (`@arcturn/server`'s workflow seam) is that nothing on the wire may raise a
+   * ceiling. ONE flag, because it decides two things that must never disagree:
+   * whether a `raise` reply is granted, and whether the question even *offers*
+   * `raise` as a reply. A question that advertises what its reader will only
+   * be refused for sending is an instruction to loop.
+   */
+  allowBudgetRaise?: boolean;
+  /**
+   * A dollar ceiling this run's starter bound it to, below (or in place of)
+   * the workflow file's own — recorded on the journal header so a *resume*
+   * enforces it too. See {@link RunHeaderLine.budgetCapUsd}; only the wire
+   * sets it.
+   */
+  budgetCapUsd?: number;
 }
 
 /**
@@ -1693,6 +1739,104 @@ function workflowTokenBudgetExceededError(
 }
 
 /**
+ * The consumed fraction at which the stage-boundary budget ask arms.
+ *
+ * 80% is the point where the *next* stage is plausibly the one the hard
+ * ceiling kills — late enough that most runs never see the question, early
+ * enough that answering it can still save the run.
+ */
+const BUDGET_ASK_FRACTION = 0.8;
+
+/**
+ * Parse a resume reply as a budget-raise instruction.
+ *
+ * Engine-side on purpose — the command parser hands every answer through
+ * verbatim, and this grammar only applies when the pending question IS a
+ * budget ask: at a role's `ORG-ASK`, "raise 40" is just words and threads
+ * through as an ordinary answer, untouched.
+ *
+ * @param text - The verbatim resume answer.
+ * @returns `undefined` when the reply is not raise-shaped at all. A
+ *   raise-shaped reply whose value does not parse comes back with a `NaN`
+ *   `value`, so the engine can name the problem ("raise fifty" is a bad
+ *   raise, not an acknowledgement).
+ */
+export function parseBudgetRaiseAnswer(
+  text: string,
+): { readonly raw: string; readonly value: number } | undefined {
+  const match = /^raise\s+(\S+)$/i.exec(text.trim());
+  if (match === null) return undefined;
+  const raw = match[1] ?? "";
+  // Tolerate the notations the ask itself renders: `$4.00`, `1,000,000`.
+  const cleaned = raw.replace(/^\$/, "").replace(/,/g, "");
+  return { raw, value: cleaned === "" ? Number.NaN : Number(cleaned) };
+}
+
+/**
+ * Whether a reply is the affirmative that answers a budget ask.
+ *
+ * {@link parseBudgetRaiseAnswer}'s sibling, and deliberately a *word*: an empty
+ * resume writes no consent (see {@link BUDGET_ACK_ANSWER}). Case- and
+ * whitespace-insensitive, and nothing else — the question names the exact word,
+ * and a guessed synonym would be the engine deciding a person meant "yes".
+ *
+ * @param text - The verbatim resume answer.
+ */
+export function isBudgetAckAnswer(text: string): boolean {
+  return text.trim().toLowerCase() === BUDGET_ACK_ANSWER;
+}
+
+/**
+ * Whether a raise value is spendable as this ceiling's own unit.
+ *
+ * Dollars are decimal; tokens are *counted*, and `budgetTokens:` in the
+ * frontmatter refuses a fractional value at parse time. A `raise 1000.5` on a
+ * token ask that the file itself would have rejected leaves the run under a
+ * ceiling the workflow language does not have — so the resume enforces the
+ * same rule. Exponent and hex notation go with it (`Number("0x400")` is 1024,
+ * and nobody typing a token budget means that): a token raise is digits.
+ *
+ * @param ceiling - Which ceiling is being raised.
+ * @param raw - The reply's raw value, before `$`/`,` were stripped.
+ * @param value - The numeric value {@link parseBudgetRaiseAnswer} produced.
+ */
+function isSpendableRaise(ceiling: BudgetCeilingKind, raw: string, value: number): boolean {
+  if (!Number.isFinite(value) || value <= 0) return false;
+  if (ceiling === "usd") return true;
+  return Number.isInteger(value) && /^\d[\d,]*$/.test(raw.trim());
+}
+
+/**
+ * Render one budget figure in its ceiling's own notation, for the raise
+ * validation messages — dollars as {@link formatCost} prints them everywhere
+ * else (so a sub-cent figure never renders as the "$0.00" that reads "this was
+ * free"), tokens in the same `en-US` grouping the token ceiling's message uses.
+ */
+function formatBudgetValue(ceiling: BudgetCeilingKind, value: number): string {
+  return ceiling === "usd"
+    ? formatCost(value)
+    : `${value.toLocaleString("en-US")} token${value === 1 ? "" : "s"}`;
+}
+
+/**
+ * The refusal both raise-blocking sites render, in one place.
+ *
+ * The serve path refuses a raise-shaped answer before the run starts (fail
+ * fast, and the client gets an error rather than a silently re-parked run);
+ * the engine refuses it again for any host that forgets to. Two sites, one
+ * contract, and therefore one sentence — a drift between them would be two
+ * different accounts of what the wire may do.
+ *
+ * @param source - The workflow file, which the operator may edit instead.
+ */
+export function budgetWireRaiseRefusal(source: string): string {
+  return (
+    `A run's ceiling cannot be raised over the wire; resume from the terminal, or edit ` +
+    `${source}. Reply "${BUDGET_ACK_ANSWER}" to run on to the ceiling already in force.`
+  );
+}
+
+/**
  * A role's declared per-assignment ceiling, or `undefined` when it opted out.
  *
  * Mirrors {@link shouldAbortForCost}'s own "`0`/absent disables" convention
@@ -2234,6 +2378,13 @@ function pauseSummary(pauses: readonly WorkflowPause[]): string {
   const first = pauses[0];
   if (first === undefined) return "";
   if (pauses.length === 1) {
+    // The budget ask is a run-level question with no step behind it — "at
+    // step budget" would send the operator hunting for a step that does not
+    // exist. It never coexists with a role's pause (the ask only fires on a
+    // stage that paused nothing), so only the single-pause wording needs it.
+    if (first.stepId === BUDGET_ASK_STEP_ID) {
+      return `Workflow paused at a budget checkpoint: ${first.question}`;
+    }
     return `Workflow paused for a human answer at step ${first.stepId}: ${first.question}`;
   }
   const asked = pauses.map((pause) => `${pause.stepId}: ${pause.question}`).join(" · ");
@@ -2365,6 +2516,155 @@ export async function runWorkflow(
     // settle a question that was asked, never a step that never ran.
     return pausedSteps?.has(step.id) === true ? stageReply.text : undefined;
   };
+
+  // -------------------------------------------- the budget-ask gate, on resume
+  /**
+   * What this origin may do about a budget ask — read by the raise check AND
+   * by every render of the question, so the two can never disagree.
+   */
+  const askAudience = { allowRaise: context.allowBudgetRaise !== false };
+  /**
+   * The hard cap this run's *starter* bound it to, when that ceiling did not
+   * come from the workflow file: a wire run's `budgetUsd`, which
+   * `resolveRunBudget` already refused to let rise above the file's.
+   *
+   * Load-bearing on a resume. A fresh wire run is handed a bounded *copy* of
+   * the parsed workflow, so `workflow.budgetUsd` below IS the lowered figure;
+   * a resume rediscovers the workflow from disk and gets the file's full
+   * ceiling back. Without the cap the client's $0.50 quietly became the file's
+   * $1.00 the moment anybody resumed — and the plain resume the budget-ask
+   * refusal itself recommends was exactly such a resume. Read from the journal
+   * on a resume, from the starter on a fresh run.
+   */
+  const budgetCapUsd = resumeFrom?.budgetCapUsd ?? context.budgetCapUsd;
+  /** The lower of two ceilings, treating `undefined` as "no ceiling of mine". */
+  const tighter = (a: number | undefined, b: number | undefined): number | undefined =>
+    a === undefined ? b : b === undefined ? a : Math.min(a, b);
+  /**
+   * The run's *effective* ceilings: a journalled `budgetRaise` from an earlier
+   * resume beats the frontmatter value, from the very start of the run, and
+   * the starter's cap bounds whatever comes out of that. A `let`, because a
+   * raise granted by THIS resume's reply updates it below — and never by
+   * mutating the parsed workflow or the file: the file stays the authority for
+   * every *fresh* run, and this run's grant lives in its own journal.
+   */
+  let budgetUsdLimit = tighter(
+    resumeFrom?.budgetRaises?.get("usd") ?? workflow.budgetUsd,
+    budgetCapUsd,
+  );
+  let budgetTokensLimit = resumeFrom?.budgetRaises?.get("tokens") ?? workflow.budgetTokens;
+  /**
+   * Ceilings whose ask a human already answered `continue` to — ask-once, per
+   * ceiling: the acknowledged ceiling never asks again this run and will
+   * hard-stop exactly as it always did. A raise is deliberately NOT in here:
+   * it re-arms the ask against the new limit.
+   */
+  const budgetAsked = new Set<BudgetCeilingKind>(resumeFrom?.budgetAcks ?? []);
+  /**
+   * A pause to re-surface before anything runs: the pending budget ask, when
+   * this resume did not settle it — no reply at all, a bare nudge, a reply
+   * that parses as neither a raise nor the acknowledgement, a malformed or
+   * insufficient raise, or a raise from an origin without raise authority. A
+   * bad reply re-parks the run with the reason; it never fails it.
+   */
+  let resurfacedAsk: WorkflowPause | undefined;
+  const pendingAsk = resumeFrom?.budgetAsk;
+  if (pendingAsk !== undefined) {
+    const reply = resumeFrom?.budgetAnswer;
+    const raise = reply === undefined ? undefined : parseBudgetRaiseAnswer(reply.text);
+    const resurface = (reason?: string): void => {
+      const question = budgetAskQuestion(pendingAsk, askAudience);
+      resurfacedAsk = {
+        stepId: BUDGET_ASK_STEP_ID,
+        // The stage's *position*, matching the fresh park below — and the only
+        // stage locator the durable ask line carries.
+        stageIndex: pendingAsk.stagesDone,
+        branchIndex: 0,
+        question: reason === undefined ? question : `${reason} ${question}`,
+        promptHash: "",
+      };
+    };
+    if (reply === undefined || reply.text.trim() === "") {
+      // NO ANSWER. A resume that never addressed the ask — a hand-built state,
+      // a crash of the answering host, a client script that nudges every
+      // stalled run — re-parks on the same question, and writes NOTHING.
+      //
+      // The empty gesture used to write the durable `budgetAck` this engine
+      // calls "the operator's consent on record", including for a run that
+      // crashed between the ask reaching disk and the pause that would have
+      // shown it to anybody. Consent nobody gave is not consent, and the
+      // role-pause gate already holds this exact line ("an answer, not a
+      // nudge"); spending past a ceiling warning needs a person's word.
+      resurface(
+        reply === undefined
+          ? undefined
+          : "A budget checkpoint needs an answer, not a nudge — nothing was spent.",
+      );
+    } else if (isBudgetAckAnswer(reply.text)) {
+      // The affirmative: an informed "keep going". Recorded durably so this
+      // ceiling never asks again this run — best-effort on the write itself,
+      // because an unwritable ack costs one repeated question on a later
+      // resume, never the run.
+      budgetAsked.add(pendingAsk.ceiling);
+      try {
+        await journalDurable({ kind: "budgetAck", ceiling: pendingAsk.ceiling, ts: now() });
+      } catch {
+        // Acknowledged in memory for this run regardless.
+      }
+    } else if (raise === undefined) {
+      resurface(`Reply "${oneLine(reply.text, 60)}" was not understood, so nothing was spent.`);
+    } else if (!askAudience.allowRaise) {
+      // Terminal-only, by the wire seam's contract. The serve path already
+      // refuses raise-shaped answers before starting the run; this is the
+      // engine keeping its own invariant for any host that forgets to.
+      resurface(budgetWireRaiseRefusal(workflow.source));
+    } else if (!isSpendableRaise(pendingAsk.ceiling, raise.raw, raise.value)) {
+      resurface(
+        pendingAsk.ceiling === "usd"
+          ? `"raise ${oneLine(raise.raw, 30)}" needs a positive number.`
+          : `"raise ${oneLine(raise.raw, 30)}" needs a positive whole number of tokens, ` +
+              "written in digits — the same value budgetTokens: would accept.",
+      );
+    } else if (raise.value <= pendingAsk.limit || raise.value <= pendingAsk.spent) {
+      resurface(
+        `A raise must exceed both the current ` +
+          `${formatBudgetValue(pendingAsk.ceiling, pendingAsk.limit)} ceiling and the ` +
+          `${formatBudgetValue(pendingAsk.ceiling, pendingAsk.spent)} already spent; ` +
+          `${formatBudgetValue(pendingAsk.ceiling, raise.value)} does not.`,
+      );
+    } else if (
+      pendingAsk.ceiling === "usd" &&
+      budgetCapUsd !== undefined &&
+      raise.value > budgetCapUsd
+    ) {
+      // The starter's cap outranks even a terminal raise. This run was started
+      // under a ceiling somebody else asked for; lifting it here would let the
+      // acknowledged resume do what the wire was refused at run start. A fresh
+      // run is the way to spend more than the run was commissioned for.
+      resurface(
+        `This run was started with a ${formatCost(budgetCapUsd)} cap of its own, which no ` +
+          `resume may lift; ${formatCost(raise.value)} is above it. Start a fresh run to ` +
+          "spend more.",
+      );
+    } else {
+      // A valid raise: this run continues under the new ceiling, and the ask
+      // re-arms against it. Durable because the grant must survive a crash —
+      // a resumed run that forgot its raise would hard-stop at a limit the
+      // human already lifted.
+      if (pendingAsk.ceiling === "usd") budgetUsdLimit = raise.value;
+      else budgetTokensLimit = raise.value;
+      try {
+        await journalDurable({
+          kind: "budgetRaise",
+          ceiling: pendingAsk.ceiling,
+          value: raise.value,
+          ts: now(),
+        });
+      } catch {
+        // The raise still governs this run; only its record degraded.
+      }
+    }
+  }
 
   /**
    * Set when journaling was never possible; surfaced on the run result.
@@ -2534,6 +2834,12 @@ export async function runWorkflow(
       stepTimeoutMs,
       maxStepRetries,
       startedAt,
+      // The starter's own cap, so a resume enforces it too. Best-effort like
+      // the rest of the header, and safely so: neither resume entry point can
+      // continue a run whose header never landed (both read the workflow's
+      // name from it), so there is no state where the cap is lost and the run
+      // goes on regardless.
+      ...(context.budgetCapUsd === undefined ? {} : { budgetCapUsd: context.budgetCapUsd }),
     });
   }
 
@@ -2586,6 +2892,23 @@ export async function runWorkflow(
     void journalAppend({ kind: "stop", reason, ts: now() });
   };
   /**
+   * Steps whose child agent ran out of turns, by id — the raw material for the
+   * run's `turn-ceiling` stop reason, not the reason itself.
+   *
+   * The distinction is the bug this closes. Turn exhaustion is discovered
+   * *inside* the step loop, and `recordStop` is first-wins, so recording it
+   * there beat the stage boundary's own cost/token checks: a run halted by its
+   * money ceiling reported `stop: turn-ceiling` whenever any earlier step had
+   * also run out of turns (reachable under `continueOnError`, and whenever one
+   * step did both). `/workflow status` exists to answer "what killed this",
+   * and a budget breach must not be relabelled — so the ceilings record their
+   * stop as they happen and this only decides the label for a run that ends
+   * with nothing louder to report.
+   */
+  const turnCeilingSteps = new Set<string>();
+  /** True when the failure that ENDS the run is a step that ran out of turns. */
+  let failureIsTurnCeiling = false;
+  /**
    * The human-question gate's pending pauses, once a step raised an `ORG-ASK`.
    *
    * Filled like {@link failure} is — from the step results after a stage
@@ -2602,6 +2925,11 @@ export async function runWorkflow(
    * re-executes, repeating whatever irreversible act that step already did.
    */
   const pauses: WorkflowPause[] = [];
+  // A budget ask this resume failed to settle re-parks the run before a token
+  // is spent: seeding the pause here makes the stage loop skip every stage and
+  // the run finish `"paused"` on the re-stated question — the same machinery a
+  // role's ORG-ASK rides, with nothing executed underneath an open question.
+  if (resurfacedAsk !== undefined) pauses.push(resurfacedAsk);
   /**
    * A durability failure the run must not quietly continue past.
    *
@@ -2648,7 +2976,10 @@ export async function runWorkflow(
   };
 
   try {
-    for (const stage of workflow.stages) {
+    // `entries()` for the stage's *position*: `stage.index` is the file's own
+    // step number, and "how many stages remain" — which the budget ask below
+    // depends on — must come from the list, not from what an author numbered.
+    for (const [stagePosition, stage] of workflow.stages.entries()) {
       // A pause short-circuits every later stage unconditionally — even under
       // `continueOnError`: those stages read the paused stage's output as
       // `{{prev}}`, and running them on an *unanswered question* is exactly the
@@ -3014,6 +3345,20 @@ export async function runWorkflow(
                 ? "cancelled"
                 : "failed"
               : "done";
+            // The agent's final words, on a failed step only: the pipe stays
+            // clean (`text` below is `""`), but the words reach the failure
+            // message and the durable terminal so a human sees how far it got.
+            const finalWords = status === "failed" ? outcome.finalText : undefined;
+            // HONEST TURN EXHAUSTION: a child that ran out of turns is a named
+            // condition, not a generic agent error, so the run's `stop` line
+            // can finally say so — but only if turn exhaustion is what ends
+            // the run. Recorded on the step, resolved after the stage loop:
+            // `recordStop` keeps the FIRST reason, and writing it here (before
+            // the stage boundary's cost/token checks) relabelled runs that a
+            // ceiling actually killed. See the resolution below `finally`.
+            if (status === "failed" && outcome.failureKind === "turn-ceiling") {
+              turnCeilingSteps.add(step.id);
+            }
             result = {
               ...base,
               status,
@@ -3025,7 +3370,16 @@ export async function runWorkflow(
               // Every attempt's spend, not just this final one's — a step that
               // flapped twice before it healed was billed three times.
               usage: spent,
-              ...(status === "failed" ? { error: outcome.error ?? `step ${step.id} failed` } : {}),
+              ...(status === "failed"
+                ? {
+                    error:
+                      (outcome.error ?? `step ${step.id} failed`) +
+                      (finalWords === undefined
+                        ? ""
+                        : `\nIts final words before the stop: ${finalWords}`),
+                  }
+                : {}),
+              ...(finalWords === undefined ? {} : { finalText: finalWords }),
               startedAt: stepStartedAt,
               endedAt: now(),
             };
@@ -3143,10 +3497,12 @@ export async function runWorkflow(
             ...(result.record === undefined ? {} : { record: result.record }),
             text: result.text,
             // A paused step carries its question on the durable terminal, so the
-            // pause — and what it asked — survive the process dying.
+            // pause — and what it asked — survive the process dying; a failed
+            // one carries the agent's final words for the same reason.
             ...(result.status === "paused" && result.question !== undefined
               ? { question: result.question }
               : {}),
+            ...(result.finalText === undefined ? {} : { finalText: result.finalText }),
             promptHash,
             attempts,
             startedAt: stepStartedAt,
@@ -3168,6 +3524,7 @@ export async function runWorkflow(
         if (result.status === "cancelled") cancelled = true;
         if (result.status === "failed" && failure === undefined) {
           failure = result.error ?? `step ${result.id} failed`;
+          failureIsTurnCeiling = turnCeilingSteps.has(result.id);
         }
         // ENFORCED PER-ROLE BUDGETS' run-level backstop (RFC 0001 §7.4): the
         // coarser net behind every role's own real-time `budget:` ceiling
@@ -3179,15 +3536,15 @@ export async function runWorkflow(
         // step's overrun, and it still stops every stage after this one.
         if (
           !budgetExhausted &&
-          workflow.budgetUsd !== undefined &&
-          shouldAbortForCost(usage.costUsd ?? 0, workflow.budgetUsd)
+          budgetUsdLimit !== undefined &&
+          shouldAbortForCost(usage.costUsd ?? 0, budgetUsdLimit)
         ) {
           budgetExhausted = true;
           recordStop("cost-ceiling");
           failure ??= workflowBudgetExceededError(
             workflow.name,
             usage.costUsd ?? 0,
-            workflow.budgetUsd,
+            budgetUsdLimit,
           );
         }
         // TOKEN CEILING (`budgetTokens:`): the same run-scope backstop for
@@ -3203,15 +3560,15 @@ export async function runWorkflow(
         const tokensSpent = totalTokens(usage);
         if (
           !budgetExhausted &&
-          workflow.budgetTokens !== undefined &&
-          shouldAbortForTokens(tokensSpent, workflow.budgetTokens)
+          budgetTokensLimit !== undefined &&
+          shouldAbortForTokens(tokensSpent, budgetTokensLimit)
         ) {
           budgetExhausted = true;
           recordStop("token-ceiling");
           failure ??= workflowTokenBudgetExceededError(
             workflow.name,
             tokensSpent,
-            workflow.budgetTokens,
+            budgetTokensLimit,
           );
         }
         // The human-question gate: EVERY paused step of this stage arms the
@@ -3234,6 +3591,79 @@ export async function runWorkflow(
       // the stage boundary: the steps themselves are reported truthfully, and
       // nothing further is started on a record that can no longer be resumed.
       if (durabilityFault !== undefined && failure === undefined) failure = durabilityFault;
+
+      // STAGE-BOUNDARY BUDGET ASK: park the run and ask BEFORE a hard ceiling
+      // kills it. The hard stop writes `runEnd{failed}` and a failed run is
+      // permanently unresumable — by then the operator's only options are an
+      // autopsy or paying for every finished stage again. So once a ceiling is
+      // 80% consumed *and stages remain*, the run pauses here instead: a clean,
+      // durable, answerable cut point. Never on the final stage (there is
+      // nothing left to save), never over a real problem (a failure, a
+      // cancellation, a role's own pause, an already-tripped ceiling), and only
+      // once per ceiling per run — an acknowledged ceiling runs to the hard
+      // stop with the operator's consent on record.
+      if (
+        !budgetExhausted &&
+        !cancelled &&
+        !controller.signal.aborted &&
+        failure === undefined &&
+        pauses.length === 0 &&
+        stagePosition < workflow.stages.length - 1
+      ) {
+        const usdSpent = usage.costUsd ?? 0;
+        const tokensNow = totalTokens(usage);
+        const nearCeilings: { ceiling: BudgetCeilingKind; spent: number; limit: number }[] = [];
+        if (
+          budgetUsdLimit !== undefined &&
+          !budgetAsked.has("usd") &&
+          nearingCeiling(usdSpent, budgetUsdLimit, BUDGET_ASK_FRACTION)
+        ) {
+          nearCeilings.push({ ceiling: "usd", spent: usdSpent, limit: budgetUsdLimit });
+        }
+        if (
+          budgetTokensLimit !== undefined &&
+          !budgetAsked.has("tokens") &&
+          nearingCeiling(tokensNow, budgetTokensLimit, BUDGET_ASK_FRACTION)
+        ) {
+          nearCeilings.push({ ceiling: "tokens", spent: tokensNow, limit: budgetTokensLimit });
+        }
+        // Both near at once: ask about the tighter one — the higher consumed
+        // fraction is the ceiling the next stage is likelier to hit first.
+        const tightest = nearCeilings.sort((a, b) => b.spent / b.limit - a.spent / a.limit)[0];
+        if (tightest !== undefined) {
+          const ask: PendingBudgetAsk = {
+            ...tightest,
+            stagesDone: stagePosition + 1,
+            stagesTotal: workflow.stages.length,
+          };
+          let parked = true;
+          try {
+            // Durable, and load-bearing: the park only exists if the ask is on
+            // disk. A `runEnd{paused}` with no recorded question would be a
+            // pause nobody can answer.
+            await journalDurable({ kind: "budgetAsk", ...ask, ts: now() });
+          } catch {
+            // No durable ask means no ask: fall back to today's behavior and
+            // run on to the hard ceiling, rather than parking the run on a
+            // question the journal cannot restate.
+            parked = false;
+          }
+          if (parked) {
+            pauses.push({
+              stepId: BUDGET_ASK_STEP_ID,
+              // The stage's *position*, which is what the durable ask line
+              // carries and therefore all a re-surfaced copy can restate. The
+              // parser refuses non-consecutive numbering, so this is also
+              // `stage.index` — but by construction rather than by a rule
+              // enforced three thousand lines away.
+              stageIndex: ask.stagesDone,
+              branchIndex: 0,
+              question: budgetAskQuestion(ask, askAudience),
+              promptHash: "",
+            });
+          }
+        }
+      }
 
       const stageText = combineStageText(stageResults);
       const stageStatus: WorkflowStepStatus = stageResults.some((r) => r.status === "cancelled")
@@ -3283,8 +3713,11 @@ export async function runWorkflow(
     // `cost-ceiling` / `token-ceiling` was already recorded at the crossing
     // above, and `recordStop` keeps the first reason: a budget breach that
     // also leaves a failed step must not be relabelled as a plain error on
-    // the way out.
-    recordStop("error");
+    // the way out. `turn-ceiling` is claimed here, and only here, because it
+    // is a property of the failure that ENDED the run — a step that ran out of
+    // turns three stages before a `continueOnError` run hit its ceiling did
+    // not stop the pipeline, the ceiling did.
+    recordStop(failureIsTurnCeiling ? "turn-ceiling" : "error");
     return finish("failed", results, prev, usage, failure);
   }
   // The human-question gate: a pause is a clean, resumable stop — not a failure.
@@ -4025,6 +4458,57 @@ function refusedStep(error: string): WorkflowStepOutcome {
 }
 
 /**
+ * How much of a failed step's final message survives into the journal and the
+ * failure text. The tail rather than the head, because an agent narrates
+ * forward: the last ~500 characters are where "I finished 3 of 5 indexes and
+ * was starting the 4th" lives.
+ */
+const FINAL_WORDS_MAX_CHARS = 500;
+
+/**
+ * The capped excerpt of what an agent had said when its step errored.
+ *
+ * `driveAgent` calls `finalText()` unconditionally, so even an errored run
+ * carries the agent's last message — the lanes used to throw it away with
+ * `text: ""`. The pipe contract stands (a failed step feeds the next stage
+ * nothing), but the words themselves go onto the outcome's `finalText`, the
+ * durable `stepEnd` line and the failure message a human reads.
+ *
+ * @param text - The agent's final message, possibly empty.
+ * @returns The trimmed tail, or `undefined` when there is nothing to keep.
+ */
+export function finalWordsExcerpt(text: string): string | undefined {
+  const trimmed = text.trim();
+  if (trimmed === "") return undefined;
+  if (trimmed.length <= FINAL_WORDS_MAX_CHARS) return trimmed;
+  return `…${trimmed.slice(-FINAL_WORDS_MAX_CHARS)}`;
+}
+
+/**
+ * The cause clause a lane's failure message carries when the child agent
+ * exhausted its turn ceiling.
+ *
+ * The loop's own message ("Reached the maximum of N turns. Send another
+ * message to continue…") is written for a person *in* that session; a
+ * workflow operator is not, and "send another message" points at a
+ * conversation they cannot reach. This names the real cause and the real
+ * levers instead. The turn count is lifted from the loop's message (its first
+ * integer) rather than re-derived, so the two can never disagree.
+ *
+ * @param roleName - The role the step dispatched to, when it named one.
+ * @param message - The loop's turn-ceiling error text.
+ */
+function turnCeilingCause(roleName: string | undefined, message: string | undefined): string {
+  const turns = message === undefined ? undefined : /\d+/.exec(message)?.[0];
+  const ceiling = turns === undefined ? "its turn ceiling" : `its ${turns}-turn ceiling`;
+  return roleName === undefined
+    ? `hit ${ceiling} before finishing; raise maxTurns (subagentMaxTurns in config) or narrow ` +
+        "the step"
+    : `role "${roleName}" hit ${ceiling} before finishing; raise maxTurns in the role file or ` +
+        "narrow the step";
+}
+
+/**
  * The message a write step fails with under a plan-mode parent.
  *
  * @param stepId - The step that tried to write.
@@ -4329,12 +4813,40 @@ async function runWorktreeStep(
     // `cancelled`, a terminal LLM error carries its own kind (a stalled socket
     // is `network`, retried at the step level), and anything else is a settled
     // `agent-error`. Read where the step's error result is built.
+    /** Read once: every branch below asks the same question of the same run. */
+    const turnCeiling = isTurnCeilingError(run.errorMessage);
     const laneFailureKind = (): WorkflowFailureKind =>
       run.reason === "aborted"
         ? "cancelled"
-        : run.errorKind !== undefined
-          ? failureKindFromAIError(run.errorKind)
-          : "agent-error";
+        : turnCeiling
+          ? "turn-ceiling"
+          : run.errorKind !== undefined
+            ? failureKindFromAIError(run.errorKind)
+            : "agent-error";
+
+    /**
+     * The `: cause` fragment a lane's failure message interpolates. Turn
+     * exhaustion is rewritten to name the real condition and the real levers
+     * (see {@link turnCeilingCause}); any other error passes through verbatim.
+     */
+    const laneCause = (): string =>
+      turnCeiling
+        ? `: ${turnCeilingCause(def.name, run.errorMessage)}`
+        : run.errorMessage
+          ? `: ${run.errorMessage}`
+          : "";
+
+    /**
+     * The agent's final words, for the error paths that keep them.
+     *
+     * A function, called from inside those branches only: the happy path
+     * discards the excerpt, and computing it eagerly ran a trim and a slice
+     * over a whole agent transcript on every worktree step that worked. The
+     * same guard `createRuntimeRunStep` uses, expressed the only way it can be
+     * here — the write lane decides "did this fail" after an `await`, so the
+     * answer cannot be bound before it.
+     */
+    const laneFinalWords = (): string | undefined => finalWordsExcerpt(run.text);
 
     // Capture BEFORE any teardown decision — a cancelled role's partial work
     // is still work, and (on the write lane) the patch on disk is the durable
@@ -4366,6 +4878,7 @@ async function runWorktreeStep(
       const discarded = record("discarded", files);
       const trailer = formatWriteLaneTrailer(discarded);
       if (run.reason !== "completed") {
+        const finalWords = laneFinalWords();
         return {
           text: "",
           usage,
@@ -4373,10 +4886,11 @@ async function runWorktreeStep(
           record: discarded,
           error: withTasks(
             `step ${step.id} (@${def.name}) ${run.reason === "aborted" ? "was cancelled" : "failed"}` +
-              `${run.errorMessage ? `: ${run.errorMessage}` : ""}. The exec lane applies nothing, ` +
+              `${laneCause()}. The exec lane applies nothing, ` +
               `ever. Its worktree is kept at ${worktree.dir} for inspection only — nothing in it ` +
               `will ever be replayed into ${lane.cwd}; delete it when you are done.\n${trailer}`,
           ),
+          ...(finalWords === undefined ? {} : { finalText: finalWords }),
           failureKind: laneFailureKind(),
         };
       }
@@ -4412,6 +4926,7 @@ async function runWorktreeStep(
         diff.trim() === ""
           ? ""
           : ` Patch preserved at ${patchFile}.\n${formatWriteLaneTrailer(captured)}`;
+      const finalWords = laneFinalWords();
       return {
         text: "",
         usage,
@@ -4419,9 +4934,10 @@ async function runWorktreeStep(
         record: captured,
         error: withTasks(
           `step ${step.id} (@${def.name}) ${run.reason === "completed" || run.reason === "aborted" ? "was cancelled" : "failed"}` +
-            `${run.errorMessage ? `: ${run.errorMessage}` : ""}. Nothing was applied.` +
+            `${laneCause()}. Nothing was applied.` +
             ` Worktree kept at ${worktree.dir}.${kept}`,
         ),
+        ...(finalWords === undefined ? {} : { finalText: finalWords }),
         // `signal.aborted` here reads as a cancellation the driver records as
         // such; otherwise the agent's own terminal kind decides retryability.
         failureKind: signal.aborted ? "cancelled" : laneFailureKind(),
@@ -4888,20 +5404,36 @@ export function createRuntimeRunStep(
 
     const isError = run.reason !== "completed";
     // A stalled/rate-limited read-lane child surfaces its terminal LLM kind,
-    // which the step retry loop reads to self-heal; an aborted child is a
+    // which the step retry loop reads to self-heal; a child that ran out of
+    // turns is the named, deterministic `turn-ceiling`; an aborted child is a
     // cancellation, everything else a settled agent error.
+    const turnCeiling = isError && isTurnCeilingError(run.errorMessage);
     const failureKind: WorkflowFailureKind | undefined = !isError
       ? undefined
       : run.reason === "aborted"
         ? "cancelled"
-        : run.errorKind !== undefined
-          ? failureKindFromAIError(run.errorKind)
-          : "agent-error";
+        : turnCeiling
+          ? "turn-ceiling"
+          : run.errorKind !== undefined
+            ? failureKindFromAIError(run.errorKind)
+            : "agent-error";
+    // The agent's final words are kept on an error — the pipe still gets ""
+    // (a failed step must not feed the next stage), but the excerpt reaches
+    // the journal and the failure message. See {@link finalWordsExcerpt}.
+    const finalWords = isError ? finalWordsExcerpt(run.text) : undefined;
     return {
       text: isError ? "" : run.text,
       usage: run.usage,
       isError,
-      ...(isError ? { error: run.errorMessage ?? `step ${step.id} ${run.reason}` } : {}),
+      ...(isError
+        ? {
+            error: turnCeiling
+              ? `step ${step.id}${role === undefined ? "" : ` (@${role.name})`}: ` +
+                `${turnCeilingCause(role?.name, run.errorMessage)}.`
+              : (run.errorMessage ?? `step ${step.id} ${run.reason}`),
+          }
+        : {}),
+      ...(finalWords === undefined ? {} : { finalText: finalWords }),
       ...(failureKind === undefined ? {} : { failureKind }),
     };
   };
@@ -7310,6 +7842,40 @@ export function createWorkflowCommands(
         }
         // No `pruneWorkflowRuns` here: it must not sweep the very run we are
         // about to resume (appending to its journal touches mtime anyway).
+
+        // The stage-boundary budget ask: the run parked short of a ceiling,
+        // and the reply is interpreted by the ENGINE (acknowledge, raise, or
+        // re-park with the reason) — never parsed here, which is exactly what
+        // keeps "raise 40" typed at a role's ORG-ASK an ordinary answer. This
+        // interactive path is the one origin with raise authority; the serve
+        // path passes `allowBudgetRaise: false` and the wire refuses raises
+        // outright.
+        if (state.budgetAsk !== undefined) {
+          if (answerText === "") {
+            // A bare resume is not consent, exactly as it is not an answer to
+            // a role's question: re-state the checkpoint and pre-fill the
+            // command. Nothing is journalled, and nothing is spent.
+            ui.notice(
+              "warn",
+              `Run ${runId} is parked at a budget checkpoint — ` +
+                budgetAskQuestion(state.budgetAsk),
+            );
+            ui.notice("info", budgetAskResumeHint(runId));
+            ui.setInput(`/workflow resume ${runId} `);
+            return;
+          }
+          ui.notice(
+            "info",
+            isBudgetAckAnswer(answerText)
+              ? `Resuming ${wf.name} run ${runId}: budget checkpoint acknowledged — the run ` +
+                  "continues to its hard stop and will not ask about this ceiling again."
+              : `Resuming ${wf.name} run ${runId} with your reply to its budget checkpoint; ` +
+                  `${state.completed.size} finished step(s) are reused, not redone.`,
+          );
+          const replied: ResumeState = { ...state, budgetAnswer: { text: answerText } };
+          await runAndOffer(wf, header?.input ?? "", runId, replied);
+          return;
+        }
 
         // The human-question gate: a paused run needs an ANSWER, not just a
         // resume. Without one, re-surface the question and pre-fill the answer

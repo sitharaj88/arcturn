@@ -48,7 +48,7 @@ Every key `.arcturn/config.json` accepts, in both user and project files:
 | `lsp` | `"off" \| "on"` | `"off"` | Language-server diagnostics after `write`/`edit`. See [LSP diagnostics](/docs/lsp). |
 | `sandbox` | `"off" \| "workspace-write"` | `"off"` | OS filesystem sandbox for `bash`'s foreground commands. See [Tools](/docs/tools#filesystem-sandbox-for-bash). |
 | `maxCostUsd` | `number ≥ 0` | *(unset = no limit)* | Abort a run once it has cost this many USD. Same guard as `--max-cost`. |
-| `maxTurns` | `integer > 0` | `200` (core default) | Turn ceiling for a run. Same guard as `--max-turns`. |
+| `maxTurns` | `integer > 0` | `200` (core default) | Turn ceiling for a run. Same guard as `--max-turns`. Shortly before the ceiling bites, the run is warned in-conversation so it wraps up and delivers instead of being cut off mid-work — see [The wrap-up warning](/docs/sdk-agent-options#the-wrap-up-warning) for the trip point, and for why a ceiling of 1 or 2 gets no warning at all. |
 | `subagentMaxTurns` | `integer > 0` | `64` | Turn ceiling for one delegated sub-agent or scout. |
 | `requestStallTimeoutMs` | `integer ≥ 0` | `120000` | Abort a streaming LLM request that emits **no event** for this long — a stalled/dead socket, not a slow one — and retry or fail it over as a transient network error. **Not** a total-duration cap: a long, actively streaming turn (extended thinking, a big response) is never interrupted, because the timer resets on every event. `0` disables the guard. |
 | `verify` | `string \| VerifyConfig` | *(unset)* | Command run after edits; failures are fed back to the model. String is sugar for `{ command }`. See below. |

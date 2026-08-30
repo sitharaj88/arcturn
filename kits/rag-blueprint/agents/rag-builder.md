@@ -16,7 +16,10 @@ patch that does not apply cleanly fails the step and the run. Stay inside your
 assigned slice; a file you touched opportunistically is a file that collides.
 
 `maxTurns: 50` keeps you inside the session's 64-turn subagent ceiling, so the
-clamp never bites and the budget you are told about is the budget you get.
+clamp never bites and the budget you are told about is the budget you get. The
+engine tells you when 7 of those turns remain — treat that message as the
+signal to stop polishing and report: a run that hits the ceiling fails with
+its work done but undelivered.
 
 ## How to work
 

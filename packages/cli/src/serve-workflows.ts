@@ -72,6 +72,7 @@ import { loadOrgMemoryInjector, orgMemoryPath } from "./org-memory.js";
 import { sanitizeDescription } from "./skill-tool.js";
 import {
   type AgentRoleResolver,
+  budgetWireRaiseRefusal,
   createPatchVerifier,
   createRunId,
   createRuntimeRunStep,
@@ -80,6 +81,7 @@ import {
   DEFAULT_WORKFLOW_STEP_TIMEOUT_MS,
   discoverWorkflows,
   type ModelTagResolver,
+  parseBudgetRaiseAnswer,
   pruneWorkflowRuns,
   reportWorkflowEvent,
   roleDispatch,
@@ -91,6 +93,9 @@ import {
   workflowPostureNotices,
 } from "./workflow.js";
 import {
+  BUDGET_ACK_ANSWER,
+  type BudgetAskAudience,
+  budgetAskQuestion,
   buildResumeState,
   createFileRunJournal,
   type JournalLine,
@@ -462,6 +467,13 @@ export function createServeWorkflows(
     runId: string;
     resumed: boolean;
     resumeFrom?: Awaited<ReturnType<typeof buildResumeState>>;
+    /**
+     * The dollar cap this run was commissioned under, when the client asked
+     * for one of its own. Journalled on the run header so a *resume* enforces
+     * it too — the bounded workflow copy the fresh run enforces it with lives
+     * only in memory, and a resume rediscovers the file's full ceiling.
+     */
+    budgetCapUsd?: number;
     sessionId: string;
     sessionMode: PermissionMode;
     emit: (event: AgentEvent) => void;
@@ -509,6 +521,12 @@ export function createServeWorkflows(
       journal,
       ...(lane === undefined ? {} : { verifyPatch: createPatchVerifier(lane) }),
       ...(params.resumeFrom === undefined ? {} : { resumeFrom: params.resumeFrom }),
+      // The seam's contract, threaded into the engine: nothing on the wire may
+      // raise a ceiling. It also decides how the budget ask is *worded* for
+      // this origin — a question that offered `raise` to a client forbidden to
+      // send it would be an instruction to loop on refusals.
+      allowBudgetRaise: false,
+      ...(params.budgetCapUsd === undefined ? {} : { budgetCapUsd: params.budgetCapUsd }),
       onEvent: (event) => {
         // The same function the TUI narrates with, so the sentences a panel
         // shows are the sentences a terminal shows — including the `ORG-ASK:`
@@ -537,7 +555,12 @@ export function createServeWorkflows(
       });
 
     const steps = workflow.stages.reduce((total, stage) => total + stage.steps.length, 0);
-    const budgetUsd = workflow.budgetUsd;
+    // The ceiling actually enforced, which on a resume is the file's bounded by
+    // the cap this run was commissioned under — not the file's alone.
+    const budgetUsd =
+      params.budgetCapUsd === undefined
+        ? workflow.budgetUsd
+        : Math.min(params.budgetCapUsd, workflow.budgetUsd ?? params.budgetCapUsd);
     const handle: WorkflowRunHandle = {
       runId: params.runId,
       workflow: workflow.name,
@@ -561,8 +584,12 @@ export function createServeWorkflows(
 
     async status(runId?: string): Promise<WorkflowResult<WorkflowRunStatus[]>> {
       const at = now();
+      // A parked run's question is rendered into this response verbatim, so it
+      // is rendered for THIS audience: a client the seam forbids from raising
+      // a ceiling must not be handed a question that tells it to.
+      const audience: BudgetAskAudience = { allowRaise: false };
       if (runId === undefined) {
-        const runs = await readWorkflowRuns(runsRoot);
+        const runs = await readWorkflowRuns(runsRoot, audience);
         return {
           ok: true,
           value: runs
@@ -575,7 +602,7 @@ export function createServeWorkflows(
       // journal gets zero rows: this verb degrades, so an in-band error would
       // be read as "this engine is too old".
       if (!isSafeRunId(runId)) return { ok: true, value: [] };
-      const run = await readWorkflowRun(runsRoot, runId);
+      const run = await readWorkflowRun(runsRoot, runId, audience);
       // An id with no journal answers an **empty list**, not a refusal — and
       // that is a correction rather than a preference. `isUnsupportedMethodError`
       // reads every `invalidRequest` as "this engine does not know the verb", so
@@ -620,6 +647,12 @@ export function createServeWorkflows(
         budget.value === workflow.budgetUsd
           ? workflow
           : { ...workflow, ...(budget.value === undefined ? {} : { budgetUsd: budget.value }) };
+      // …and, when this request set the ceiling rather than the file, the same
+      // number DURABLY, on the run's journal header. The bounded copy above is
+      // in memory; a resume rediscovers the workflow from disk with its full
+      // ceiling restored, so without this the lowered ceiling evaporated at the
+      // first resume — and a plain resume is exactly what a parked run invites.
+      const budgetCapUsd = budget.value === workflow.budgetUsd ? undefined : budget.value;
       const stepTimeoutMs = bounded.stepTimeoutMs ?? DEFAULT_WORKFLOW_STEP_TIMEOUT_MS;
       // Written before the response goes out, exactly as the slash command
       // writes it before running: a client handed a run id must be able to find
@@ -640,6 +673,7 @@ export function createServeWorkflows(
         input,
         runId,
         resumed: false,
+        ...(budgetCapUsd === undefined ? {} : { budgetCapUsd }),
         sessionId: request.sessionId,
         sessionMode: request.permissionMode,
         emit: request.emit,
@@ -713,16 +747,62 @@ export function createServeWorkflows(
         };
       }
 
+      // The stage-boundary budget ask, over the wire. Two answers are valid
+      // here and neither of them is silence.
+      //
+      // A raise-shaped answer is REFUSED, not threaded through: the seam's
+      // contract is that nothing on the wire may raise a ceiling
+      // (`packages/server/src/workflows.ts`), and the run-start `budgetUsd`
+      // refusal above would be theatre if a resume could smuggle the same
+      // raise in as free text. The raise grammar is the engine's own
+      // (`parseBudgetRaiseAnswer`), so the two can never drift.
+      //
+      // A *bare* resume is refused too, for the same reason the role-pause gate
+      // above refuses one: the acknowledgement is a durable record of an
+      // operator's consent, and a client that nudges every stalled run would
+      // otherwise mint that record for a question nobody ever read.
+      if (state.budgetAsk !== undefined) {
+        const answer = request.answer ?? "";
+        if (parseBudgetRaiseAnswer(answer) !== undefined) {
+          return {
+            ok: false,
+            error:
+              `Run ${request.runId} is parked at a budget checkpoint. ` +
+              budgetWireRaiseRefusal(workflow.source),
+          };
+        }
+        if (answer.trim() === "") {
+          request.emit({
+            type: "notice",
+            level: "warn",
+            text:
+              `Run ${request.runId} is parked at a budget checkpoint — ` +
+              budgetAskQuestion(state.budgetAsk, { allowRaise: false }),
+          });
+          return {
+            ok: false,
+            error:
+              `Run ${request.runId} is parked at a budget checkpoint and needs an answer, not a ` +
+              `nudge. Resume it again with "${BUDGET_ACK_ANSWER}" to run on to its hard stop.`,
+          };
+        }
+      }
       const resumeFrom =
-        state.pending !== undefined && request.answer !== undefined
-          ? { ...state, answer: { stepId: state.pending.stepId, text: request.answer } }
-          : state;
+        state.budgetAsk !== undefined
+          ? { ...state, budgetAnswer: { text: request.answer ?? "" } }
+          : state.pending !== undefined && request.answer !== undefined
+            ? { ...state, answer: { stepId: state.pending.stepId, text: request.answer } }
+            : state;
       const accepted = await start({
         workflow,
         input: header?.input ?? "",
         runId: request.runId,
         resumed: true,
         resumeFrom,
+        // The cap this run was commissioned under, recovered from its own
+        // journal header: the wire's "may lower, never raise" contract binds
+        // the RUN, not just the request that started it.
+        ...(state.budgetCapUsd === undefined ? {} : { budgetCapUsd: state.budgetCapUsd }),
         sessionId: request.sessionId,
         sessionMode: request.permissionMode,
         emit: request.emit,

@@ -99,6 +99,42 @@ All three are validated at parse time: a non-numeric or negative value — or, f
 `budgetTokens`, a fractional one — is a parse error naming the line, not a silently
 ignored key.
 
+### The stage-boundary budget ask
+
+A hard ceiling ends the run as `failed`, and a failed run is permanently unresumable — by
+the time it fires, your options are an autopsy or paying for every finished stage again. So
+the engine asks first: when a run crosses **80% of either ceiling at a stage boundary with
+stages still to go**, it parks as `paused` — the same durable, resumable state an `ORG-ASK`
+produces — with a question naming the spend, the limit, the percentage and the stages
+remaining. A ceiling you can answer beats a corpse with a patch.
+
+Two replies are valid, both through the ordinary resume command, and **both are words**:
+
+```text
+/workflow resume <run-id> raise 25    # raise the ceiling — for this run only
+/workflow resume <run-id> continue    # run on to the hard stop, with your consent on record
+```
+
+A bare `/workflow resume <run-id>` is neither. It re-states the question and pre-fills the
+command, exactly as it does for an unanswered `ORG-ASK` — because the acknowledgement is
+written to the journal as a record that a person said "keep going", and an empty gesture is
+not that. A script that nudges every stalled run, or a resume of a run that died between
+the ask reaching disk and anyone seeing it, must not be able to mint that record.
+
+A `raise` must be a positive number strictly above both the current limit and the current
+spend — and, on a token ceiling, a whole number written in digits, the same value
+`budgetTokens:` itself would accept. Anything else (including a reply the engine does not
+understand) re-parks the run with the reason; it never fails it, and never spends on an
+unclear instruction. The raise is **run-scoped**: the workflow file is never rewritten, the
+next fresh run starts from the file's own ceiling, and the ask re-arms against the new
+limit. `continue` is ask-once per ceiling: the acknowledged ceiling never asks again in
+this run and hard-stops exactly as it always did — the ask changes the conversation, never
+the ceiling. The ask stays out of the way when it has nothing to save: never on the final
+stage, never over a failure, a cancellation, a role's own pause, or a ceiling that already
+tripped. And because the raise grammar only applies when the pending question *is* the
+budget ask, answering a role's `ORG-ASK` with the words "raise 40" threads through as an
+ordinary answer, untouched.
+
 ## Model tags
 
 Every `[tag]` in a workflow file is resolved **before the first step runs**, not lazily as
@@ -270,7 +306,16 @@ Three things are worth knowing before you build on them, and all three are cover
   `budgetUsd` that must be *smaller* than the workflow's own `budgetUsd:`; a larger one is
   refused, naming both numbers, rather than clamped. Nothing else — `budgetTokens`,
   `stepTimeoutMs`, a role's `maxTurns`, a role's `tools:`, the permission engine — has a
-  parameter at all.
+  parameter at all. The contract binds the **run**, not just the request that started it:
+  the lowered ceiling is journalled on the run's header, so a resume — which rediscovers
+  the workflow from disk, full ceiling and all — still enforces the figure the client asked
+  for, and no raise may lift a run past it. At a resume, a run parked at the stage-boundary
+  budget ask accepts `answer: "continue"` (the acknowledgement), refuses a bare resume the
+  way an unanswered `ORG-ASK` does, and refuses a `raise <n>` answer with an error naming
+  the contract — raising a parked run's ceiling is terminal-only, or an edit to the workflow
+  file itself. Without those two refusals, the run-start rule would be theatre: a client
+  could smuggle the raise in as free resume text, or simply nudge the run back to the
+  file's own, larger ceiling.
 - **A run is followed on the session's own event stream.** `runWorkflow` answers as soon as
   the run is *accepted* (a pipeline outlives every sane request deadline), and its progress
   arrives as the same `notice` events the terminal prints, plus each step's child agent

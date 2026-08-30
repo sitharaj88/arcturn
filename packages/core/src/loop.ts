@@ -32,7 +32,63 @@ import {
   errorToolResult,
   toolCallsOf,
   toolResultMessage,
+  userMessage,
 } from "./util/content.js";
+
+/**
+ * The two halves of the turn-ceiling message, shared between the loop that
+ * mints it and {@link isTurnCeilingError} so the check can never drift from
+ * the wording.
+ */
+const TURN_CEILING_PREFIX = "Reached the maximum of ";
+const TURN_CEILING_SUFFIX =
+  " turns. Send another message to continue, or raise the ceiling: --max-turns " +
+  "for this session, or maxTurns: in the role file (subagentMaxTurns in config) " +
+  "for a delegated agent.";
+
+/** The exact error a run ends with when it exhausts its turn budget. */
+function turnCeilingMessage(maxTurns: number): string {
+  return `${TURN_CEILING_PREFIX}${maxTurns}${TURN_CEILING_SUFFIX}`;
+}
+
+/**
+ * Whether `message` is the loop's turn-ceiling error rather than some other
+ * failure. Turn exhaustion ends a run as a generic `error` — the same shape a
+ * socket failure takes — so a host that treats "ran out of rope" differently
+ * from "broke" (retry policy, wording, exit code) needs this discriminator.
+ * It matches against the same template the loop builds the message from.
+ *
+ * @param message - A `LoopResult.errorMessage` or `runEnd` error text.
+ */
+export function isTurnCeilingError(message: string | undefined): boolean {
+  if (message === undefined) return false;
+  if (!message.startsWith(TURN_CEILING_PREFIX) || !message.endsWith(TURN_CEILING_SUFFIX)) {
+    return false;
+  }
+  const count = message.slice(TURN_CEILING_PREFIX.length, -TURN_CEILING_SUFFIX.length);
+  return /^\d+$/.test(count);
+}
+
+/**
+ * How few remaining turns trip the one-shot wrap-up warning {@link runLoop}
+ * injects — or `0` for a ceiling too tight to warn on at all.
+ *
+ * The warning is advice about how to spend a budget, so it is meaningless
+ * before any of it has been spent. The floor of 2 puts the threshold at or
+ * above the ceiling for `maxTurns <= 2`, which would board the warning on the
+ * very *first* request — telling a one-shot run to "finish now" before the
+ * model has read the prompt. A ceiling that tight is a deliberate tight leash
+ * (a classifier, a sandboxed eval), so it gets no warning rather than a
+ * premature one. Requiring the threshold to sit strictly below the ceiling is
+ * what guarantees at least one turn has been taken when it trips.
+ *
+ * @param maxTurns - The run's turn ceiling.
+ * @returns Remaining-turn count that triggers the warning, or `0` for never.
+ */
+export function turnWarningThreshold(maxTurns: number): number {
+  const threshold = Math.max(2, Math.floor(maxTurns * 0.15));
+  return threshold < maxTurns ? threshold : 0;
+}
 
 /** Everything {@link runLoop} needs from the owning {@link Agent}. */
 export interface LoopRuntime {
@@ -428,6 +484,10 @@ async function settleDanglingCalls(
  */
 export async function runLoop(rt: LoopRuntime): Promise<LoopResult> {
   let turnIndex = 0;
+  // The turn-budget warning fires at most once per run: repeating it every
+  // remaining turn would teach the model to ignore it.
+  let warnedOfCeiling = false;
+  const warnAt = turnWarningThreshold(rt.maxTurns);
 
   while (true) {
     if (rt.signal.aborted) return { reason: "aborted" };
@@ -437,13 +497,29 @@ export async function runLoop(rt: LoopRuntime): Promise<LoopResult> {
       // But this loop also drives role agents inside a pipeline, where there
       // is no one to "send another message" to — so also say how to raise a
       // delegated agent's own budget, or the message is silently wrong there.
-      const message =
-        `Reached the maximum of ${rt.maxTurns} turns. Send another message to ` +
-        "continue, or raise the ceiling: --max-turns for this session, or " +
-        "maxTurns: in the role file (subagentMaxTurns in config) for a " +
-        "delegated agent.";
+      const message = turnCeilingMessage(rt.maxTurns);
       rt.emit({ type: "notice", level: "warn", text: message });
       return { reason: "error", errorMessage: message };
+    }
+
+    // Warn the model while there is still room to act on the warning. The
+    // ceiling is invisible from inside the run — an agent at turn 50 of 50,
+    // still polishing work it will never get to report, fails with the work
+    // done but undelivered. A user message appended here rides the next
+    // request without spending a turn of its own, and the ≤-threshold trigger
+    // means an agent that finishes well under budget never hears about the
+    // ceiling at all. It never boards the *first* request either: a leash too
+    // tight to warn in time gets `warnAt` 0 (see {@link turnWarningThreshold}),
+    // which is below every possible `remaining`.
+    const remaining = rt.maxTurns - turnIndex;
+    if (!warnedOfCeiling && remaining <= warnAt) {
+      warnedOfCeiling = true;
+      const warning =
+        `Turn budget: ${remaining} of ${rt.maxTurns} turns remain. Finish the work and ` +
+        "emit your final deliverable now — an unfinished run at the ceiling fails with " +
+        "its work uncommitted.";
+      await rt.appendMessage(userMessage(warning));
+      rt.emit({ type: "notice", level: "warn", text: warning });
     }
 
     await rt.beforeTurn();

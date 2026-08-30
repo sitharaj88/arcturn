@@ -20,6 +20,8 @@
 import { execFile } from "node:child_process";
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { contentText } from "@arcturn/core";
+import type { LLMRequest } from "@arcturn/types";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentDef } from "./agents.js";
 import {
@@ -191,7 +193,7 @@ describe("a role's maxTurns, counted rather than trusted", () => {
     expect(llm.requests).toHaveLength(3);
     // …and the run says *why* it stopped, rather than reporting a role that
     // quietly ran out of rope as a role that finished.
-    expect(outcome.error).toMatch(/Reached the maximum of 3 turns/);
+    expect(outcome.error).toMatch(/hit its 3-turn ceiling before finishing/);
     expect(outcome.error).toMatch(/Nothing was applied/);
   });
 
@@ -234,6 +236,34 @@ describe("a role's maxTurns, counted rather than trusted", () => {
     // "Roles narrow; nothing widens" — a checked-in role file must not be able
     // to buy itself nine turns in a session that budgeted two.
     expect(llm.requests).toHaveLength(2);
+  });
+
+  it("warns a role to land the plane before the ceiling, without spending a turn on the note", async () => {
+    const scratch = await gitScratch();
+    const llm = loopForever();
+    const runtime = await runtimeWith(scratch, llm);
+
+    const developer = role("developer", ["read", "edit"], { maxTurns: 3 });
+    const workflow = parseOk("---\nname: demo\n---\n1. @developer keep going\n");
+    await createRuntimeRunStep(runtime, {
+      resolveAgent: () => developer,
+      writeLane: laneFor(runtime, "run-turns-warn"),
+    })(firstRequest(workflow));
+
+    // The note is injected into the conversation, never *spent*: still exactly
+    // three requests reach the provider, same as the un-warned run above.
+    expect(llm.requests).toHaveLength(3);
+
+    // maxTurns 3 → threshold max(2, floor(0.45)) = 2 remaining, so the warning
+    // boards the second request — the model hears it with turns left to use —
+    // and rides the final request exactly once, not per remaining turn.
+    const budgetNotes = (request: LLMRequest) =>
+      request.messages.filter(
+        (m) => m.role === "user" && contentText(m.content).startsWith("Turn budget:"),
+      );
+    expect(budgetNotes(llm.requests[0]!)).toHaveLength(0);
+    expect(budgetNotes(llm.requests[1]!)).toHaveLength(1);
+    expect(budgetNotes(llm.requests[2]!)).toHaveLength(1);
   });
 });
 
@@ -530,9 +560,12 @@ describe("budgetUsd, proved by exceeding it", () => {
   itPosix(
     "stops the pipeline: the later stage has no journal entry and never wrote its file",
     async () => {
-      // Each turn costs $0.40, two turns per stage: stage one alone is $0.80 and
-      // stage two crosses $1.00.
-      const { scratch, journalDir, result } = await threeStages(0.4, 1);
+      // Each turn costs $0.30, two turns per stage: stage one alone is $0.60 —
+      // deliberately below the 80% stage-boundary budget ask, which would park
+      // the run `paused` before the ceiling (its own feature, proved in
+      // `workflow.test.ts`) — and stage two's $1.20 total crosses $1.00, so
+      // this run exercises the HARD stop this suite exists to prove.
+      const { scratch, journalDir, result } = await threeStages(0.3, 1);
 
       expect(result.status).toBe("failed");
       expect(result.error).toMatch(/exceeded its \$1\.00 run budget/);
@@ -660,10 +693,12 @@ describe("budgetTokens, proved by exceeding it", () => {
   itPosix(
     "stops the pipeline on tokens alone, where budgetUsd could never have fired: no turn carried a price",
     async () => {
-      // 400 output tokens per turn, two turns per stage: stage one alone is
-      // 800 tokens (under the 1,000 ceiling), and stage two's total of 1,600
-      // exceeds it.
-      const { scratch, journalDir, result } = await threeStages(400, 1_000);
+      // 300 output tokens per turn, two turns per stage: stage one alone is
+      // 600 tokens — deliberately below the 80% stage-boundary budget ask,
+      // which would park the run `paused` before the ceiling (its own feature,
+      // proved in `workflow.test.ts`) — and stage two's total of 1,200 exceeds
+      // the 1,000 ceiling, so this run exercises the HARD token stop.
+      const { scratch, journalDir, result } = await threeStages(300, 1_000);
 
       expect(result.status).toBe("failed");
       expect(result.error).toMatch(/exceeded its 1,000-token run budget/);

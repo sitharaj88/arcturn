@@ -472,6 +472,133 @@ describe("the ORG-ASK gate over the wire", () => {
   });
 });
 
+describe("the stage-boundary budget ask over the wire", () => {
+  it("parks before the hard stop, refuses a wire raise, and runs on to the hard ceiling once acknowledged", async () => {
+    const scratch = await makeScratch();
+    await writeWorkflow(
+      scratch,
+      "asky",
+      [
+        "---",
+        "name: asky",
+        "budgetUsd: 1",
+        "---",
+        "1. First: {{input}}",
+        "2. Second: {{prev}}",
+        "",
+      ].join("\n"),
+    );
+    // Each stage costs $0.90: stage 1 lands the run at 90% of its ceiling
+    // with a stage remaining, and stage 2 would cross it.
+    const harness = await serve(scratch, [{ text: "pricey output", usage: { costUsd: 0.9 } }]);
+
+    const handle = await harness.client.runWorkflow(harness.sessionId, "asky", { input: "go" });
+    const parked = await settled(harness.client, handle.runId);
+    // FAIL-FIRST: pre-change this run executed stage 2, crossed $1.00 and
+    // read "failed" here — a `runEnd{failed}` both resume verbs refuse
+    // permanently. Parked, it is a resumable question instead of a corpse.
+    expect(parked.state).toBe("paused");
+    expect(parked.questions).toHaveLength(1);
+    expect(parked.questions[0]?.stepId).toBe("budget");
+    expect(parked.questions[0]?.question).toContain("$0.90 of its $1.00 run budget");
+    // FAIL-FIRST: the question told every reader to `raise <new-limit>` — the
+    // one reply this origin is forbidden to send. An automation that followed
+    // its own question's instructions looped on refusals forever.
+    expect(parked.questions[0]?.question).not.toContain("raise <new-limit>");
+    expect(parked.questions[0]?.question).toContain('Reply "continue"');
+    expect(parked.questions[0]?.question).toContain("the wire cannot raise a ceiling");
+
+    // THE CONTRACT: nothing on the wire may raise a ceiling. `answer:
+    // "raise 999"` on the pending budget ask is refused, naming the contract —
+    // not threaded through, not clamped, and nothing starts.
+    await expect(
+      harness.client.resumeWorkflow(harness.sessionId, handle.runId, "raise 999"),
+    ).rejects.toThrow(/cannot be raised over the wire/);
+    const still = await harness.client.workflowStatus(handle.runId);
+    expect(still?.runs[0]?.state).toBe("paused");
+
+    // FAIL-FIRST: a *bare* resume used to write the durable acknowledgement
+    // the engine calls the operator's consent on record. It is a nudge, and
+    // the run stays exactly where it was — the same line the role-pause gate
+    // holds three functions up.
+    await expect(harness.client.resumeWorkflow(harness.sessionId, handle.runId)).rejects.toThrow(
+      /needs an answer, not a nudge/,
+    );
+    expect((await harness.client.workflowStatus(handle.runId))?.runs[0]?.state).toBe("paused");
+
+    // The acknowledgement IS answerable over the wire. The run continues, and
+    // the ceiling that stops it is the file's own $1.00 — not 999 — which is
+    // the proof no raise landed.
+    const resumed = await harness.client.resumeWorkflow(
+      harness.sessionId,
+      handle.runId,
+      "continue",
+    );
+    expect(resumed).toMatchObject({ runId: handle.runId, resumed: true });
+    const done = await settled(harness.client, handle.runId, (state) => state === "failed");
+    expect(done.state).toBe("failed");
+    expect(done.stopReason).toBe("cost-ceiling");
+    expect(harness.notices().some((line) => line.includes("exceeded its $1.00 run budget"))).toBe(
+      true,
+    );
+  });
+
+  it("keeps the ceiling the CLIENT lowered to, across the resume its own ask invites", async () => {
+    // FAIL-FIRST — and this is the hole the acknowledged resume opened. A
+    // wire run is enforced against a bounded *copy* of the parsed workflow
+    // (`{...workflow, budgetUsd: requested}`), which lives only in memory;
+    // `resume` rediscovers the workflow from disk and got the file's FULL
+    // ceiling back. So: file $1.00, client lowers to $0.50, the run parks at
+    // its ask, the client sends the acknowledgement the refusal text itself
+    // recommends — and the run continued under $1.00, twice the cap the wire
+    // had just been told it could not raise. Pre-change this run reported
+    // "done" at $0.90; the lowered ceiling has to bind here.
+    const scratch = await makeScratch();
+    await writeWorkflow(
+      scratch,
+      "capped",
+      [
+        "---",
+        "name: capped",
+        "budgetUsd: 1",
+        "---",
+        "1. First: {{input}}",
+        "2. Second: {{prev}}",
+        "",
+      ].join("\n"),
+    );
+    // $0.45 a stage: 90% of the client's $0.50 after stage 1, and $0.90 after
+    // stage 2 — over $0.50, comfortably under the file's $1.00.
+    const harness = await serve(scratch, [{ text: "output", usage: { costUsd: 0.45 } }]);
+
+    const handle = await harness.client.runWorkflow(harness.sessionId, "capped", {
+      input: "go",
+      budgetUsd: 0.5,
+    });
+    expect(handle.budgetUsd).toBe(0.5);
+    const parked = await settled(harness.client, handle.runId);
+    expect(parked.state).toBe("paused");
+    // The question is stated against the ceiling actually in force.
+    expect(parked.questions[0]?.question).toContain("$0.45 of its $0.50 run budget");
+
+    const resumed = await harness.client.resumeWorkflow(
+      harness.sessionId,
+      handle.runId,
+      "continue",
+    );
+    // The resumed run reports the ceiling it will actually enforce, not the
+    // file's — a client that renders this must not be shown $1.00.
+    expect(resumed.budgetUsd).toBe(0.5);
+    const done = await settled(harness.client, handle.runId, (state) => state === "failed");
+    expect(done.state).toBe("failed");
+    expect(done.stopReason).toBe("cost-ceiling");
+    expect(harness.notices().some((line) => line.includes("exceeded its $0.50 run budget"))).toBe(
+      true,
+    );
+    expect(harness.notices().some((line) => line.includes("$1.00 run budget"))).toBe(false);
+  });
+});
+
 describe("what a remote caller may not do", () => {
   it("cannot start a second pipeline on a session already running one", async () => {
     const scratch = await makeScratch();

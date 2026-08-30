@@ -45,6 +45,7 @@ import { createHash } from "node:crypto";
 import { appendFile, mkdir, open, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Usage } from "@arcturn/types";
+import { formatCost } from "./format.js";
 import type { WorkflowPatchRecord, WorkflowRunStatus, WorkflowStepStatus } from "./workflow.js";
 
 /** Bumped when a journal line's shape changes incompatibly. */
@@ -84,6 +85,26 @@ export interface RunHeaderLine {
   readonly stepTimeoutMs: number;
   readonly maxStepRetries: number;
   readonly startedAt: number;
+  /**
+   * A dollar ceiling the run's STARTER bound it to, when that ceiling did not
+   * come from the workflow file — an upper bound on every ceiling this run may
+   * ever be enforced under, resumes and raises included.
+   *
+   * Written by the wire path, which is the only starter that can hand the
+   * engine a `budgetUsd` of its own: `WorkflowRunRequest.budgetUsd` may lower
+   * the file's ceiling and may never raise it, and the engine enforces the
+   * lowered figure by running a bounded *copy* of the parsed workflow. That
+   * copy is in memory only. A resume rediscovers the workflow from disk — the
+   * file, with its full ceiling — so without this field the lowered ceiling
+   * simply evaporated at the first resume, and the plain resume the ask's own
+   * refusal text recommends became the raise the wire had just been denied.
+   *
+   * On the header rather than a line of its own because a journal with no
+   * header cannot be resumed by either entry point at all (both read the
+   * workflow's name from it), so there is no state in which the cap is missing
+   * and the run still continues. Absent for every run started from a terminal.
+   */
+  readonly budgetCapUsd?: number;
 }
 
 /** A stage began. */
@@ -166,6 +187,19 @@ export interface StepEndLine {
    * checkout, not a report the step actually made.
    */
   readonly recovered?: boolean;
+  /**
+   * A capped excerpt of what the agent had said when the step FAILED.
+   *
+   * `text` is deliberately empty on a failed step — a failure must not feed
+   * the next stage's `{{prev}}` — but the run used to discard the agent's
+   * final words along with it, so a step that hit its turn ceiling three
+   * tasks into five left no trace of how far it got. The excerpt is the
+   * honest middle: the pipe stays clean, and a human reading the journal (or
+   * the failure message, which carries the same excerpt) sees where the agent
+   * stopped. Absent on every non-failed terminal and when the agent said
+   * nothing.
+   */
+  readonly finalText?: string;
 }
 
 /**
@@ -238,6 +272,62 @@ export interface BudgetLine {
   readonly ts: number;
 }
 
+/** Which of the two run-scope ceilings a budget-ask line names. */
+export type BudgetCeilingKind = "usd" | "tokens";
+
+/**
+ * The run parked itself at a stage boundary to ask about an approaching
+ * ceiling — the STAGE-BOUNDARY BUDGET ASK.
+ *
+ * A hard ceiling (`budgetUsd:`/`budgetTokens:`) writes `runEnd{failed}` and
+ * both resume entry points refuse a failed run permanently, so by the time it
+ * fires the operator's only options are an autopsy or a fresh run. This line
+ * is the earlier, answerable moment: the run crossed the ask fraction with
+ * stages still to go, journalled this durably, and finished `"paused"` — a
+ * resumable state. The line carries the numbers (not rendered prose) so both
+ * folds re-render the same question from the same facts.
+ */
+export interface BudgetAskLine {
+  readonly kind: "budgetAsk";
+  readonly ceiling: BudgetCeilingKind;
+  /** The run's cumulative spend at the ask, in the ceiling's own unit. */
+  readonly spent: number;
+  /** The ceiling in force at the ask (the file's, or an earlier raise's). */
+  readonly limit: number;
+  /** Stages finished when the ask fired. */
+  readonly stagesDone: number;
+  readonly stagesTotal: number;
+  readonly ts: number;
+}
+
+/**
+ * A human answered a {@link BudgetAskLine} with a plain resume: an informed
+ * "keep going". That ceiling never asks again this run — it will hard-stop
+ * exactly as it always did, but now with the operator's consent on record.
+ */
+export interface BudgetAckLine {
+  readonly kind: "budgetAck";
+  readonly ceiling: BudgetCeilingKind;
+  readonly ts: number;
+}
+
+/**
+ * A human raised one ceiling *for this run* in answer to a budget ask.
+ *
+ * Run-scoped on purpose: the engine continues with a bounded copy of the
+ * parsed workflow — the file on disk and the shared parsed object are never
+ * mutated — and the ask re-arms against the new limit. Written only by the
+ * terminal resume path; the wire may never raise a ceiling (see
+ * `serve-workflows.ts` and the `@arcturn/server` seam contract).
+ */
+export interface BudgetRaiseLine {
+  readonly kind: "budgetRaise";
+  readonly ceiling: BudgetCeilingKind;
+  /** The new ceiling, validated above both the old limit and the spend. */
+  readonly value: number;
+  readonly ts: number;
+}
+
 /** The whole run was halted by a STOP condition. */
 export interface StopLine {
   readonly kind: "stop";
@@ -262,6 +352,9 @@ export type JournalLine =
   | StepEffectLine
   | StepEndLine
   | BudgetLine
+  | BudgetAskLine
+  | BudgetAckLine
+  | BudgetRaiseLine
   | StopLine
   | RunEndLine;
 
@@ -274,7 +367,12 @@ export type JournalLine =
  * always was.
  */
 export const DURABLE_JOURNAL_KINDS: ReadonlySet<JournalLine["kind"]> = new Set<JournalLine["kind"]>(
-  ["stepIntent", "stepEffect", "stepEnd"],
+  // The budget-ask trio is durable for the same reason `stepEnd` is: each one
+  // is a commitment a later resume acts on. An ask that never reached disk is
+  // a pause with no question (unanswerable); an ack or raise that vanished
+  // would re-ask a question the human already answered — or worse, run under a
+  // ceiling the human never granted.
+  ["stepIntent", "stepEffect", "stepEnd", "budgetAsk", "budgetAck", "budgetRaise"],
 );
 
 /**
@@ -317,6 +415,143 @@ export interface RunManifest {
   readonly stepTimeoutMs: number;
   readonly maxStepRetries: number;
   readonly startedAt: number;
+}
+
+/**
+ * The synthetic step id a budget-ask pause is keyed under.
+ *
+ * The pause machinery is step-keyed end to end (`WorkflowPause.stepId`, the
+ * status fold's pending map, the resume command's wording), and the budget ask
+ * is a *run*-level question with no step behind it — so it borrows a sentinel
+ * id that no real step can collide with: parsed step ids are always numeric
+ * (`"3"`, `"4.2"`).
+ */
+export const BUDGET_ASK_STEP_ID = "budget";
+
+/**
+ * The one affirmative reply that answers a stage-boundary budget ask "keep
+ * going".
+ *
+ * A *word*, not an empty resume, and that is the whole point: the ack is
+ * written to the journal as the operator's consent on record, and an empty
+ * gesture is not consent. A client script that routinely nudges stalled runs,
+ * or a resume of a run that crashed after the ask was journalled but before
+ * anybody ever saw it, must not be able to mint that record. Compare the
+ * role-pause gate, which refuses a bare resume with "an answer, not a nudge" —
+ * the budget ask now holds the same line.
+ *
+ * Named here because {@link budgetAskQuestion} is the text that tells the
+ * operator to send it; the grammar that recognises it (and its `raise`
+ * sibling) lives with the engine in `workflow.ts`.
+ */
+export const BUDGET_ACK_ANSWER = "continue";
+
+/** What a caller may do about a budget ask, for the renderers below. */
+export interface BudgetAskAudience {
+  /**
+   * Whether this origin may raise a ceiling at all. The interactive terminal
+   * may; the wire may not (`@arcturn/server`'s workflow seam: nothing on the
+   * wire raises a ceiling), so a question rendered for a wire client must not
+   * advertise a reply that client will only ever be refused for sending.
+   * Defaults to `true` — the terminal is the origin with full authority.
+   */
+  readonly allowRaise?: boolean;
+}
+
+/**
+ * The recorded facts of one ask, validated out of a {@link BudgetAskLine}.
+ *
+ * `readJournalLines` promises only that a line parsed as an object with a
+ * string `kind`: every numeric field below may be missing, `null` or a string
+ * on a line a crash tore in half. Both folds run over that data, and both of
+ * them used to hand it straight to {@link budgetAskQuestion} — where one
+ * `undefined.toFixed(2)` threw out of `foldJournal`, past `readWorkflowRuns`'s
+ * un-guarded `Promise.all`, and took `/workflow status` down for every run on
+ * the machine. So the shape is checked once, here, and a line that fails the
+ * check is *dropped*: an ask nobody can restate is not an ask.
+ *
+ * @param line - A candidate `budgetAsk` line, straight off disk.
+ * @returns The ask's facts, or `undefined` when the line is not usable.
+ */
+export function budgetAskFacts(line: BudgetAskLine): PendingBudgetAsk | undefined {
+  const positive = (value: unknown): value is number =>
+    typeof value === "number" && Number.isFinite(value) && value > 0;
+  const count = (value: unknown): value is number =>
+    typeof value === "number" && Number.isFinite(value) && value >= 0;
+  if (line.ceiling !== "usd" && line.ceiling !== "tokens") return undefined;
+  // A zero or negative limit is not a ceiling anyone is nearing, and it is the
+  // divisor of the percentage the question renders.
+  if (!positive(line.limit) || !count(line.spent)) return undefined;
+  if (!count(line.stagesDone) || !count(line.stagesTotal)) return undefined;
+  return {
+    ceiling: line.ceiling,
+    spent: line.spent,
+    limit: line.limit,
+    stagesDone: line.stagesDone,
+    stagesTotal: line.stagesTotal,
+  };
+}
+
+/**
+ * Render the question a stage-boundary budget ask puts to the human.
+ *
+ * One renderer, exported, because two independent folds surface the same ask —
+ * {@link buildResumeState} for resume and `workflow-status.ts`'s `foldJournal`
+ * for `/workflow status` — and the {@link BudgetAskLine} deliberately carries
+ * numbers rather than prose. Two renderers would be two questions for one ask.
+ *
+ * The *answer options* half of the text is rendered per origin rather than
+ * fixed: this string travels verbatim over the wire, and a wire client told to
+ * `raise` would follow the instruction into a refusal, forever. Same renderer,
+ * one sentence chosen by what the reader may actually do.
+ *
+ * @param ask - The recorded ask facts (a {@link BudgetAskLine} or its fold).
+ * @param audience - What the origin reading this may do about it.
+ */
+export function budgetAskQuestion(ask: PendingBudgetAsk, audience: BudgetAskAudience = {}): string {
+  // Not `contextPercent`: that helper is named for a model's context window
+  // and clamps at 100%, and a spend the ceiling already passed must read as
+  // the >100% it is rather than as "exactly full".
+  const pct = ask.limit > 0 ? Math.round((ask.spent / ask.limit) * 100) : 0;
+  const remaining = Math.max(0, ask.stagesTotal - ask.stagesDone);
+  const consumed =
+    ask.ceiling === "usd"
+      ? // `formatCost`, not `toFixed(2)`: a sub-cent spend rendered "$0.00"
+        // reads as "this was free", which is the one answer certainly wrong.
+        `spent ${formatCost(ask.spent)} of its ${formatCost(ask.limit)} run budget`
+      : `consumed ${Math.round(ask.spent).toLocaleString("en-US")} of its ` +
+        `${Math.round(ask.limit).toLocaleString("en-US")}-token run budget`;
+  // The wire's sentence is the terser of the two on purpose: a question
+  // crossing the seam is capped by `sanitizeDescription` before a client sees
+  // it, and the half that says what THIS reader may do must survive the cap.
+  const options =
+    audience.allowRaise === false
+      ? `Reply "${BUDGET_ACK_ANSWER}" to run on; the wire cannot raise a ceiling.`
+      : `Reply "${BUDGET_ACK_ANSWER}" to run on to the hard stop, or ` +
+        '"raise <new-limit>" to lift the ceiling for this run only.';
+  return (
+    `This run has ${consumed} (${pct}%), with ${remaining} of ${ask.stagesTotal} stage(s) ` +
+    `still to go. ${options}`
+  );
+}
+
+/**
+ * The `/workflow resume …` hint that goes under a parked run.
+ *
+ * Exported and shared because `/workflow status` prints it in two places (the
+ * table row and the detail view) and the two copies had already drifted in
+ * capitalisation — the first sign that they would drift in *content* next, and
+ * a budget checkpoint's valid replies are exactly the thing an operator must
+ * not be told two versions of.
+ *
+ * @param runId - The parked run.
+ * @param audience - What the origin reading this may do about it.
+ */
+export function budgetAskResumeHint(runId: string, audience: BudgetAskAudience = {}): string {
+  const ack = `/workflow resume ${runId} ${BUDGET_ACK_ANSWER}`;
+  return audience.allowRaise === false
+    ? `${ack} runs on to the hard stop; raising the ceiling is terminal-only`
+    : `${ack} runs on to the hard stop, /workflow resume ${runId} raise <new-limit> lifts it`;
 }
 
 /** SHA-256 of a step's spliced prompt — the staleness key resume compares on. */
@@ -592,6 +827,68 @@ export interface ResumeState {
    * still without re-running anything.
    */
   readonly answers?: readonly PendingAnswer[];
+  /**
+   * The stage-boundary budget ask the run parked on, when one is pending —
+   * the latest {@link BudgetAskLine} with no later ack or raise for its
+   * ceiling. A run holding one of these is `paused` for a *run*-level
+   * question, not a step's; the engine (never a command parser) interprets
+   * {@link budgetAnswer} against it on resume.
+   */
+  readonly budgetAsk?: PendingBudgetAsk;
+  /**
+   * Ceilings a human already answered `continue` to. Each one is ask-once: the
+   * engine never re-asks about it this run, and the hard stop fires exactly as
+   * it always did.
+   */
+  readonly budgetAcks?: ReadonlySet<BudgetCeilingKind>;
+  /**
+   * Run-scoped ceiling raises, latest per ceiling. A resumed `runWorkflow`
+   * prefers these over the workflow file's frontmatter from the very start of
+   * the run — the file itself was never touched, so the journal is the only
+   * place the granted ceiling lives.
+   */
+  readonly budgetRaises?: ReadonlyMap<BudgetCeilingKind, number>;
+  /**
+   * The dollar cap the run's starter bound it to, from the journal's own
+   * header ({@link RunHeaderLine.budgetCapUsd}) — present only for a run
+   * started over the wire with a `budgetUsd` of its own.
+   *
+   * A resumed run enforces `min(file ceiling, this)`, and no raise may lift a
+   * ceiling past it: the wire's "may lower, never raise" contract binds the
+   * run, not just the request that started it.
+   */
+  readonly budgetCapUsd?: number;
+  /**
+   * The human's reply to the pending {@link budgetAsk}, supplied by the
+   * resume flow — never read from the journal (the same rule as
+   * {@link answer}).
+   *
+   * `""` is a plain resume, and a plain resume is NOT an answer: it re-surfaces
+   * the question. Only the explicit {@link BUDGET_ACK_ANSWER} acknowledges.
+   */
+  readonly budgetAnswer?: BudgetAskReply;
+}
+
+/** A pending stage-boundary budget ask, rebuilt from the journal. */
+export interface PendingBudgetAsk {
+  readonly ceiling: BudgetCeilingKind;
+  readonly spent: number;
+  readonly limit: number;
+  readonly stagesDone: number;
+  readonly stagesTotal: number;
+}
+
+/**
+ * A human's reply to a pending budget ask, threaded in by a resume path.
+ *
+ * Whether the reply's origin may *raise* a ceiling is not on here: that is a
+ * property of the run's origin, not of one sentence, and it also decides how
+ * the question itself is worded — so it lives on
+ * `WorkflowRunContext.allowBudgetRaise`, one flag read by both.
+ */
+export interface BudgetAskReply {
+  /** The verbatim reply; `""` is a plain resume, which answers nothing. */
+  readonly text: string;
 }
 
 /**
@@ -791,6 +1088,13 @@ export function buildResumeState(lines: readonly JournalLine[]): ResumeState {
   // Steps currently *open*: started (or announced) with no terminal after it.
   // A `stepEnd` closes one; a later `stepStart` for the same id re-opens it.
   const open = new Map<string, InterruptedStep>();
+  // The budget-ask gate's fold: an ask is pending until a later ack or raise
+  // for its ceiling settles it (a raise re-arms the ask, so a *later* ask for
+  // the same ceiling can pend again — append order decides).
+  let budgetAsk: PendingBudgetAsk | undefined;
+  const budgetAcks = new Set<BudgetCeilingKind>();
+  const budgetRaises = new Map<BudgetCeilingKind, number>();
+  let budgetCapUsd: number | undefined;
 
   for (const line of lines) {
     switch (line.kind) {
@@ -799,6 +1103,11 @@ export function buildResumeState(lines: readonly JournalLine[]): ResumeState {
         source = line.source;
         workflow = line.workflow;
         startedAt = line.startedAt;
+        // Same tolerance rule as every other field folded off disk: a cap that
+        // is not a usable positive number is no cap, not a ceiling of `NaN`.
+        if (typeof line.budgetCapUsd === "number" && line.budgetCapUsd > 0) {
+          budgetCapUsd = line.budgetCapUsd;
+        }
         break;
       case "stepStart":
         latest.delete(line.id);
@@ -847,6 +1156,21 @@ export function buildResumeState(lines: readonly JournalLine[]): ResumeState {
       case "stepEnd":
         latest.set(line.id, line);
         open.delete(line.id);
+        break;
+      case "budgetAsk": {
+        // A torn line is dropped rather than folded (see `budgetAskFacts`) —
+        // and it does not disturb whatever ask was already pending.
+        const facts = budgetAskFacts(line);
+        if (facts !== undefined) budgetAsk = facts;
+        break;
+      }
+      case "budgetAck":
+        budgetAcks.add(line.ceiling);
+        if (budgetAsk?.ceiling === line.ceiling) budgetAsk = undefined;
+        break;
+      case "budgetRaise":
+        budgetRaises.set(line.ceiling, line.value);
+        if (budgetAsk?.ceiling === line.ceiling) budgetAsk = undefined;
         break;
       case "runEnd":
         ended = true;
@@ -929,6 +1253,12 @@ export function buildResumeState(lines: readonly JournalLine[]): ResumeState {
     ...(endedStatus === undefined ? {} : { endedStatus }),
     ...(pending === undefined ? {} : { pending }),
     pendings,
+    // Absent-when-empty, so a hand-built resume state (every host and test
+    // that constructs one) stays valid without naming fields it has no use for.
+    ...(budgetAsk === undefined ? {} : { budgetAsk }),
+    ...(budgetAcks.size === 0 ? {} : { budgetAcks }),
+    ...(budgetRaises.size === 0 ? {} : { budgetRaises }),
+    ...(budgetCapUsd === undefined ? {} : { budgetCapUsd }),
   };
 }
 
@@ -953,7 +1283,11 @@ export type WorkflowFailureClass = "transient" | "deterministic";
  *
  * `network`/`rateLimit`/`overloaded` come straight from the terminal
  * `AIError["kind"]` the child agent surfaced; `timeout` is minted by the step
- * deadline; `git-lock` from a git index-lock collision; the rest label the
+ * deadline; `git-lock` from a git index-lock collision; `turn-ceiling` is a
+ * child agent exhausting its `maxTurns` (recognised via `@arcturn/core`'s
+ * `isTurnCeilingError`) — deterministic on purpose: a rerun of the same step
+ * under the same ceiling runs out of the same rope, so the fix is the role
+ * file's `maxTurns:` or a narrower step, never a retry. The rest label the
  * deterministic refusals the runtime already produces.
  */
 export type WorkflowFailureKind =
@@ -965,6 +1299,7 @@ export type WorkflowFailureKind =
   | "patch-refused"
   | "config"
   | "agent-error"
+  | "turn-ceiling"
   | "cancelled";
 
 /** The transient kinds, in one place so the classifier and tests agree. */
