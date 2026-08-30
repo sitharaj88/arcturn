@@ -10,6 +10,75 @@ CLI, the SDK, or the wire protocol.
 
 ## [Unreleased]
 
+### Added
+
+- **`arcturn doctor` — ask every endpoint before a session has to.** It sends
+  each configured provider endpoint a one-token completion with your real key,
+  retries off, and prints a verdict per endpoint: ok with latency, auth failed
+  naming the variable, rate limited, network — and **no balance**, the verdict
+  that motivated it. A coding-plan key pointed at Z.AI's general endpoint
+  answers "429 Insufficient balance" (code 1113), which reads as billing when
+  the actual problem is the base URL; doctor calls it what it is and names the
+  sibling preset the key may belong to. The default run covers everything your
+  config references — the failover chain, every route and tier, consensus
+  models — flags a `route.main` that outvotes `model`, reports which variable
+  really supplied each key, and skips what has no key set.
+  `arcturn doctor <preset>` probes one endpoint; `--model <id>` picks the wire
+  model. Exit 0 when everything answers, 1 when something failed, 2 for a
+  usage error. No key material is ever printed.
+- **`budgetTokens:` — a workflow run ceiling that works when pricing doesn't.**
+  A workflow's `budgetUsd:` compares the run's spend against its ceiling, and
+  on a model that publishes no pricing (a coding-plan endpoint, Ollama, vLLM)
+  that spend is never computed — the ceiling silently never fires. The new
+  `budgetTokens:` frontmatter key caps the run by total tokens consumed
+  instead — input, output and both cache buckets, the numbers every model
+  reports — and halts the run with a `token-ceiling` stop the moment the total
+  exceeds it, skipping every later stage. `0` and absent both disable it, like
+  `budgetUsd:`; when one stage crosses both ceilings, the run reports
+  `cost-ceiling`, deterministically. `/workflow status` now shows every run's
+  token total beside its spend. Frontmatter-only in this first version: not
+  settable over the wire, and no per-stage or per-role token caps. The
+  rag-blueprint kit's `rag-setup` now carries one.
+- **A visual workflow builder on the site** (`arcturn.dev/builder`): assemble
+  stages, parallel branches, model tags, roles and the seven frontmatter keys
+  in the browser and take away the markdown file the CLI runs — or paste an
+  existing workflow in and edit it. The page is fully static: one client
+  island over a parser that mirrors the engine's grammar line for line,
+  validating inline with the engine's own error messages — including the
+  warning the engine never gives, that a name it would silently normalise is
+  not the name you typed. The example picker loads the real kit workflows,
+  read from disk at export time, and a round-trip through the builder reaches
+  a fixed point. Nothing is uploaded and nothing is stored.
+- **`/model route` — routing you can see and change without opening a config
+  file.** Bare, it prints where `main`, `subagent`, `compaction` and `title`
+  actually resolve, warnings included. `--auto` finds the cheapest
+  same-vendor (same id namespace — the `provider` field alone cannot tell
+  openai-protocol vendors apart), tool-capable model with published pricing
+  that undercuts a priced main, and routes sub-agents and compaction to
+  it — live at once, saved to your user config
+  (the project layer is never written, and the command says so when a project
+  `route` will outrank the save). It refuses to "optimise" your bill upward,
+  and `<kind> <id>` / `clear [kind]` manage single routes by hand. `main`
+  still belongs to `/model <id>`.
+- **Interactive sessions name themselves.** After the first completed run, one
+  small call on the `title` route writes a generated title onto the session —
+  `/sessions` and the startup splash show "Fixing the login redirect" instead
+  of a bare id. One attempt per session, failures swallowed, and a session
+  that already has a title is never re-titled — an untitled session from
+  before this feature picks one up the next time it completes a run;
+  `--print` and serve streams stay byte-for-byte contractual.
+  `sessionTitles: false` turns it off.
+
+### Changed
+
+- **The `compaction` route is now consumed.** When a `compaction` route is
+  explicitly configured — in config, or via `/model route` — every agent's
+  compaction summarizer uses it, read live at compact time, so a mid-session
+  `/model route --auto` governs the very next compaction. Unrouted agents
+  keep compacting with their own model, and a standing `route.main`
+  deliberately does not count: a sub-agent on the cheap route is never
+  silently upgraded to the flagship.
+
 ## [0.5.4] — 2026-08-30
 
 One complaint, chased to both of its roots: a model you picked should be the

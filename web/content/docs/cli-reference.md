@@ -81,6 +81,7 @@ The same table is in `arcturn --help`.
 | `arcturn mcp-serve` | Expose Arcturn *as* an MCP server — see [MCP server](/docs/mcp-server) |
 | `arcturn serve` | WebSocket server over the NDJSON protocol — see [Server mode](/docs/server-mode) |
 | `arcturn completions <shell>` | Print a bash, zsh or fish completion script |
+| `arcturn doctor [preset]` | Probe each configured provider endpoint with its real key (a one-token completion) and print a per-endpoint verdict — auth failed, no balance, rate limited, network |
 | `arcturn blame` · `arcturn replay` · `arcturn bisect` | Provenance and replay — see [Provenance](/docs/provenance) and [Replay & bisect](/docs/replay-bisect) |
 
 **`arcturn add` never links a package's executable code without being told to.** A package
@@ -102,7 +103,7 @@ Typed inside the interactive TUI.
 | `/help` | List the available commands |
 | `/clear` | Start a fresh session |
 | `/compact` | Summarise the conversation to free up context — see [Context management](/docs/context-management) |
-| `/sessions` | Resume an earlier session in this directory — see [Sessions](/docs/sessions) |
+| `/sessions` | Resume an earlier session in this directory, listed by generated title — see [Sessions](/docs/sessions) |
 | `/rewind` | Restore to an earlier turn; `/rewind <query>` jumps by intent — see [Checkpoints](/docs/checkpoints) |
 | `/copy` | Copy the last answer to the clipboard; `/copy all` for the conversation |
 | `/export` | Export the conversation to markdown or HTML |
@@ -116,7 +117,7 @@ session is a tree, so the branch you rewound away from is still there.
 
 | Command | What it does |
 |---|---|
-| `/model` | Switch the model — the pick persists as your default; `/model refresh` re-queries each provider's own list |
+| `/model` | Switch the model — the pick persists as your default; `/model refresh` re-queries each provider's own list; `/model route` shows the per-role routes and `/model route --auto` routes sub-agents and compaction to a cheaper same-provider model — see [Model routing](/docs/model-routing) |
 | `/cost` | Show usage and cost; also `limit <usd>`, `preview [steps]` |
 | `/theme` | Switch the colour theme |
 | `/ui` | Switch the renderer: `screen` (full-screen app, default) or `inline` (terminal-native) |

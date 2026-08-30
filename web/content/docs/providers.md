@@ -101,7 +101,11 @@ instead of hand-building an `openaiCompatible()` call. Presets are a convenience
 gate: they resolve lazily (`getModel`/`presetModel` pull in the whole table on first miss,
 via `wireExtendedPresets` in `packages/ai/src/catalog.ts`), so nothing needs an explicit
 registration call to be reachable by id. Run `arcturn --list-providers` to see which ones have
-their key set.
+their key set. To check that a key actually *works* — not just that it is set — run
+`arcturn doctor`: it probes every configured endpoint with a one-token completion and prints a
+per-endpoint verdict, telling a rejected key apart from an empty balance or a key that belongs
+on a sibling endpoint (a coding-plan key pointed at `zai-api` answers "insufficient balance";
+doctor says to try `zai`).
 
 All 35 presets, from `packages/ai/src/presets.ts`:
 
@@ -294,10 +298,12 @@ different models instead of hard-coding one flagship everywhere:
 |---|---|
 | `main` | The main conversation loop. |
 | `subagent` | Delegated sub-agent work — often mechanical, so a cheaper model is fine. |
-| `compaction` | Summarizing history when the context window fills — lossy by design already. |
-| `title` | Session-title suggestions — a few words. |
+| `compaction` | Summarizing history when the context window fills — lossy by design already. Consumed by every agent's compaction call only when a `compaction` route is explicitly configured; otherwise every agent compacts with its own model, even while a `route.main` override stands. |
+| `title` | Session-title suggestions — a few words, generated after a session's first completed run. |
 
-Config shape (`RouterConfig`): each key is an optional model id string. `main` absent means
+All four kinds are live: `subagent` drives delegated work, `compaction` picks the
+summarizer model, and `title` picks the model that names a session for `/sessions`. Config
+shape (`RouterConfig`): each key is an optional model id string. `main` absent means
 "use the fallback model" (typically whatever `--model` resolved to); `subagent` /
 `compaction` / `title` absent means "use whatever `main` resolves to". Resolution is lazy
 and cached per kind — nothing resolves until `router.specFor(kind)` is actually called — and
@@ -306,6 +312,13 @@ falls back to the router's fallback model and a warning is recorded via `router.
 because a stale model id in a config file must never be the reason Arcturn fails to start.
 `router.rebind(newFallback)` clears the cache and adopts a new fallback — call it after the
 session's main model changes, or routes that defaulted to the old one keep resolving to it.
+
+You don't have to write the config by hand: `/model route` prints the effective routes,
+and `/model route --auto` finds the cheapest same-vendor (same id namespace before the
+`/`), tool-capable model with published pricing that undercuts a priced main model, and
+routes `subagent` and `compaction` to it — applied live and saved
+to your user config in one step. See
+[Model routing](/docs/model-routing#cost-rationale-and-model-route---auto).
 
 ## Live model catalog
 
