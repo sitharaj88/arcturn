@@ -64,8 +64,10 @@ describe("projectSurfaceDigest", () => {
       { path: "a.ts", hash: "sha256:1" },
     ];
     const servers = [
-      { name: "z", command: "node", args: ["z.js"], env: [] },
-      { name: "a", command: "node", args: ["a.js"], env: ["K=v"] },
+      { transport: "stdio" as const, name: "z", command: "node", args: ["z.js"], env: [] },
+      { transport: "stdio" as const, name: "a", command: "node", args: ["a.js"], env: ["K=v"] },
+      { transport: "http" as const, name: "r", url: "https://b.test", headers: ["A: 1"] },
+      { transport: "http" as const, name: "q", url: "https://a.test", headers: [] },
     ];
     const one = projectSurfaceDigest({
       hooks,
@@ -206,7 +208,7 @@ describe("collectProjectCodeSurface", () => {
   });
 
   // biome-ignore lint/suspicious/noTemplateCurlyInString: the `${…}` spelling is the fixture.
-  it("reads stdio MCP servers without expanding ${ENV} and skips http ones", async () => {
+  it("reads BOTH transports without expanding ${ENV}", async () => {
     const scratch = await makeScratch();
     await writeFileAt(
       join(scratch.cwd, ".arcturn", "mcp.json"),
@@ -214,17 +216,42 @@ describe("collectProjectCodeSurface", () => {
         servers: {
           // biome-ignore lint/suspicious/noTemplateCurlyInString: mcp.json's own env syntax.
           spawner: { type: "stdio", command: "node", args: ["s.js"], env: { K: "${HOME}" } },
-          remote: { type: "http", url: "https://example.test" },
+          // An `http` entry is not a process on this machine and is covered
+          // anyway: its tool names and descriptions become model input, and
+          // its arguments become egress. See the module doc.
+          // biome-ignore lint/suspicious/noTemplateCurlyInString: mcp.json's own env syntax.
+          remote: { type: "http", url: "https://example.test", headers: { A: "${TOKEN}" } },
         },
       }),
     );
     const surface = await surfaceOf(scratch);
-    expect(surface.counts.mcp).toBe(1);
+    expect(surface.counts.mcp).toBe(2);
+    const spawner = surface.mcpServers.find((server) => server.name === "spawner");
+    const remote = surface.mcpServers.find((server) => server.name === "remote");
     // Verbatim: expanding it would put the user's environment into a digest,
     // and `loadMcpConfig` throws outright on an unset variable — a hostile
     // repo could otherwise crash the gate that judges it.
     // biome-ignore lint/suspicious/noTemplateCurlyInString: asserting the literal output.
-    expect(surface.mcpServers[0]?.env).toEqual(["K=${HOME}"]);
+    expect(spawner?.transport === "stdio" && spawner.env).toEqual(["K=${HOME}"]);
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: asserting the literal output.
+    expect(remote?.transport === "http" && remote.headers).toEqual(["A: ${TOKEN}"]);
+  });
+
+  it("changes the digest when a server's transport flips at the same name", async () => {
+    const scratch = await makeScratch();
+    const file = join(scratch.cwd, ".arcturn", "mcp.json");
+    await writeFileAt(
+      file,
+      JSON.stringify({ servers: { srv: { type: "stdio", command: "node", args: ["s.js"] } } }),
+    );
+    const asStdio = await surfaceOf(scratch);
+    await writeFileAt(
+      file,
+      JSON.stringify({ servers: { srv: { type: "http", url: "https://example.test" } } }),
+    );
+    // A grant for "srv spawns node s.js" must not stand in for "srv is egress
+    // to a host the repository picked".
+    expect((await surfaceOf(scratch)).digest).not.toBe(asStdio.digest);
   });
 
   it("survives an mcp.json that is not valid JSON", async () => {

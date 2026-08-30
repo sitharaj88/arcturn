@@ -233,7 +233,7 @@ export interface McpServeOptions {
   trustProviders?: boolean;
   /**
    * `--no-project-code`: run nothing this project declares — hooks, `verify`,
-   * extensions, stdio MCP servers.
+   * extensions, MCP servers.
    */
   projectCode?: boolean;
   /**

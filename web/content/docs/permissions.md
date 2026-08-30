@@ -32,6 +32,14 @@ one layer of — this page is the operational reference for that one layer.
 Switch modes at runtime with `agent.setPermissionMode(mode)`, or in the CLI with
 `/permissions` — it prints the current rules, then prompts you to pick a mode from the list.
 
+Ordered by how much they let through, the modes run `plan` → `default` → `acceptEdits` →
+`yolo`. A **project** `.arcturn/config.json` may only move you *down* that list, never up:
+a repository asking for `plan` is honored, and one asking for `acceptEdits` or `yolo` while
+you are at `default` is ignored with a warning naming the file. That is the same reasoning
+as "a project allow cannot cancel a user deny" below — otherwise a config file would
+escalate its own privileges just by being cloned. `--permission-mode` is you speaking and
+overrides both layers in either direction.
+
 The default tool classifications a mode reasons about:
 
 - **Read-only** (usable in `plan` mode, auto-allowed in `default`): `read`, `grep`, `glob`, `ls`.
@@ -298,6 +306,96 @@ lives in — a project file that labels one of its rules `"session"` has that la
 downgraded to `"project"` with a warning, so a checked-in config can't claim session-level
 authority just by asserting it.
 
+## Project code
+
+A repository's `.arcturn` directory can declare things that **run as you**: lifecycle
+`hooks`, a `verify` command, extensions under `.arcturn/extensions/`, and MCP servers in
+`.arcturn/mcp.json`. A `sessionStart` hook runs during startup, before you have typed
+anything. None of that requires your consent to be *written* — it arrives with a `git
+clone`.
+
+So Arcturn asks, once per project, before running any of it:
+
+```
+This project wants to run code on your machine.
+
+  <repo>/.arcturn declares 2 hooks, 1 verify command and 2 extension files.
+
+  hooks — from <repo>/.arcturn/config.json
+    sessionStart  curl -s https://setup.example/i.sh | sh
+  ...
+Run this project's code? [y/N]
+```
+
+The prompt names every command and file, grouped by the file that declared it. **The
+default is no.** One decision covers all four kinds, because they are one decision in
+practice: a `sessionStart` hook can write the extensions directory, `mcp.json` and your own
+config, so approving any one of them grants the rest by transitivity.
+
+### What the approval is pinned to
+
+The decision is recorded in `~/.arcturn/trust.json` — user scope, with deliberately no
+project-level spelling, so a repository has no file it could write to approve itself. It is
+keyed to a digest of the project's executable surface, not to the directory:
+
+- **Extension files are hashed by content**, recursively. An `index.ts` that imports a
+  changed `helpers.ts` re-asks, even though nothing you can see in the config changed.
+- **Hooks, `verify` and MCP servers are pinned by declaration** — the command string, the
+  URL, the headers.
+
+Editing `src/`, a README, a skill, or your model choice never re-asks. Adding a hook,
+touching any file under `extensions/`, or declaring an MCP server does. That restraint is
+deliberate: a gate that re-asks for nothing is a gate you learn to click through.
+
+### What it cannot pin
+
+**A hook command is a pointer into a shell, and the digest covers the pointer.**
+`bash ./scripts/setup.sh` is approved once, and `setup.sh` can be rewritten afterwards
+without asking again. The same is true of `make bootstrap`, `eval $(cat x)`, and anything
+whose payload is one indirection away. There is deliberately no attempt to chase those
+paths: it would cover `./scripts/x.sh` and miss the rest, and a guarantee with ragged edges
+is worse than a limitation stated plainly. Approving a project means trusting its commands
+as pointers.
+
+An approved **http MCP server** is pinned by URL, not by what it serves. It can answer with
+different tools tomorrow — and the names and descriptions it returns go into the model's
+tool list, which is why it takes this gate at all rather than the lighter treatment an
+`http` server gets at install time.
+
+### Off a terminal
+
+`--print`, CI, `arcturn serve`, `acp`, `mcp-serve`, background agents and evals have nobody
+to ask, so **project code stays off** and the run continues without it. It is never a hard
+exit: "your repo has a hook" must not become "arcturn no longer starts in CI". The warning
+is loud and unconditional, because the hook that just stopped running may have been a
+*protective* `preToolUse` guard rather than an offensive one.
+
+| To do this | Use |
+|---|---|
+| See exactly what would run | `arcturn trust --list` |
+| Approve, deny or forget a project | `arcturn trust --allow` · `--deny` · `--revoke`, or `/trust` |
+| Approve for one run in CI | `--trust-project`, or `ARCTURN_TRUST_PROJECT=1` |
+| Run nothing the project declares | `--no-project-code` |
+| Always trust some paths of your own | `trustedProjects` in your **user** config |
+
+`trustedProjects` is the weakest of these on purpose: it is a standing grant to a path, not
+to a digest, so it does not re-ask when those repositories change. It is ignored outright
+when it appears in a project config.
+
+### What this gate does not stop
+
+- **Your own `~/.arcturn`.** User-layer hooks, extensions and MCP servers run
+  unconditionally. That is the point of them.
+- **Anything after your first yes.** Approval is total for that project: an approved
+  `sessionStart` hook can immediately write your user config, the extensions directory, and
+  `trust.json` itself.
+- **`--trust-project` in CI.** In a pipeline whose configuration lives in the repository,
+  the repository chooses the flag too. Arcturn is not the boundary there; your checkout
+  policy is.
+- **Project *data*.** Skills, agents, memory, themes and `ARCTURN.md` are read, not run,
+  and are handled as untrusted *content* — a different and correct mechanism. See
+  [Prompt injection](/docs/injection-defense).
+
 ## Provider endpoints from a project config
 
 A `providers` block in configuration points Arcturn at an endpoint of your own — see
@@ -339,21 +437,20 @@ repository chose. So the rule is:
 
 ### What this gate is not
 
-**It is defence in depth against a repository that declares an endpoint in *data*. It is
-not a boundary against a repository that can execute code.** Today a cloned repo can run
-code at startup without any gate: project `hooks` in `<cwd>/.arcturn/config.json` merge
-into the config and a `sessionStart` hook runs through `$SHELL -c`, and
-`<cwd>/.arcturn/extensions/*.ts` is imported unconditionally. Either one can write a
-`provider` allow rule straight into `~/.arcturn/config.json` and then resolve to its own
-endpoint with no prompt — so the user config file is *not* an artefact a cloned repo cannot
-write, and nothing on this page should be read as saying otherwise.
+**It is defence in depth against a repository that declares an endpoint in *data*, and it
+sits behind a second gate rather than in front of nothing.** A cloned repo's `hooks`,
+`verify`, extensions and MCP servers no longer run on the repository's say-so — see
+[Project code](#project-code) — so the "write a `provider` allow rule into
+`~/.arcturn/config.json` from a `sessionStart` hook" path now requires you to have trusted
+that project's code first.
 
-That is a pre-existing execution primitive rather than something this feature grants: a
-repo that can run a shell at startup can already read your environment and exfiltrate every
-credential in it directly, without touching `providers` at all. What the gate buys is that
-declaring an endpoint *in configuration data* — which needs no code execution — does not
-reach the wire on the repository's say-so. Project-hook and project-extension trust is
-separate, unfixed work.
+What that ordering means, stated plainly: **trusting a project's code is strictly stronger
+than trusting its endpoint declaration.** Once a repository may run a `sessionStart` hook,
+it can write its own `provider` allow rule and resolve to its own endpoint with no further
+prompt — and it can read your environment and exfiltrate every credential in it directly,
+without touching `providers` at all. Two prompts do not mean two boundaries. The endpoint
+gate earns its place by covering the case that needs *no* code execution: a repository that
+only edits configuration data never reaches the wire on its own authority.
 
 ### The consent rule
 

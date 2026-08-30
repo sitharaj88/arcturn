@@ -40,6 +40,8 @@ an inherited stdin open that never closes; waiting for EOF there would hang fore
 | `--dry-run` | Send file edits to a shadow copy; review with `/diff` — see [Dry run](/docs/dry-run) |
 | `--trace` | Write one JSON line per finished telemetry span to stderr — see [Telemetry](/docs/telemetry) |
 | `--trust-providers` | Enable provider endpoints declared by **this project's** config without asking. For CI that already trusts the repository; not saved — see [Permissions](/docs/permissions#provider-endpoints-from-a-project-config) |
+| `--trust-project` | Run the code **this project** declares — hooks, `verify`, extensions, MCP servers — without asking. For CI that already trusts the checkout; not saved (`ARCTURN_TRUST_PROJECT=1` does the same) — see [Permissions](/docs/permissions#project-code) |
+| `--no-project-code` | Run nothing this project declares; everything still parses and lists |
 | `--no-providers` | Register nothing from a config `providers` block; entries still parse and still list. Both flags apply to `serve`, `acp`, `mcp-serve` and `replay` as well as to an ordinary run |
 | `--list-models` | Print the model catalog and exit |
 | `--list-providers` | Print every provider and preset endpoint — including the ones your config declares, with their state — and exit |
@@ -83,6 +85,7 @@ The same table is in `arcturn --help`.
 | `arcturn mcp-serve` | Expose Arcturn *as* an MCP server — see [MCP server](/docs/mcp-server) |
 | `arcturn serve` | WebSocket server over the NDJSON protocol — see [Server mode](/docs/server-mode) |
 | `arcturn completions <shell>` | Print a bash, zsh or fish completion script |
+| `arcturn trust [--list\|--allow\|--deny\|--revoke]` | Show or decide whether this project's declared code runs — see [Permissions](/docs/permissions#project-code) |
 | `arcturn doctor [preset]` | Probe each configured provider endpoint with its real key (a one-token completion) and print a per-endpoint verdict — auth failed, no balance, rate limited, network. An endpoint declared by a project config you have not approved is reported `not enabled` and never probed |
 | `arcturn blame` · `arcturn replay` · `arcturn bisect` | Provenance and replay — see [Provenance](/docs/provenance) and [Replay & bisect](/docs/replay-bisect) |
 
@@ -124,6 +127,7 @@ session is a tree, so the branch you rewound away from is still there.
 | `/theme` | Switch the colour theme |
 | `/ui` | Switch the renderer: `screen` (full-screen app, default) or `inline` (terminal-native) |
 | `/permissions` | Show rules and mode; also `suggest` |
+| `/trust` | Show or decide whether this project's declared code runs; also `allow`, `deny`, `revoke` |
 | `/mcp` | Show MCP server status |
 
 ### Changes

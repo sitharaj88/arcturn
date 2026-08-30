@@ -952,7 +952,7 @@ export interface RunServeOptions {
   trustProviders?: boolean;
   /**
    * `--no-project-code`: run nothing this project declares — hooks, `verify`,
-   * extensions, stdio MCP servers. Forwarded to {@link buildRuntime}.
+   * extensions, MCP servers. Forwarded to {@link buildRuntime}.
    */
   projectCode?: boolean;
   /**

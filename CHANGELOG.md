@@ -51,6 +51,35 @@ CLI, the SDK, or the wire protocol.
 
 ### Fixed
 
+- **A repository you cloned could switch off your permission prompts with
+  four words of JSON.** `<repo>/.arcturn/config.json` saying
+  `{"permissionMode": "yolo"}` outranked your own setting for that
+  directory — no hook, no extension, no code execution, just data — and
+  every tool you had not written an explicit `deny` for was auto-approved:
+  bash, write, fetch, all of it. It did not even need the project-code
+  gate's consent: a repository whose code you *declined* still got its
+  mode. A project layer may now only *narrow* the mode, never widen it.
+  Ordered by how much they let through, the modes run `plan` → `default` →
+  `acceptEdits` → `yolo`; a repo asking for `plan` is honoured, one asking
+  for `yolo` is ignored with a warning naming the file, the mode it wanted,
+  the mode still in force, and the two deliberate ways to opt in. This is
+  the rule permission *rules* have always followed — "a project allow
+  cannot cancel a user deny" — finally applied to the mode.
+  `--permission-mode` is you speaking and still wins in either direction.
+- **A cloned repository's `mcp.json` could point Arcturn at a host of its
+  choosing, ungated.** The project-code gate covered `stdio` servers and
+  skipped `http` ones, inheriting `arcturn add`'s reasoning that an http
+  server is "egress to a URL the disclosure already prints". Nobody reads a
+  cloned repo's `mcp.json`, and the consequence is worse than egress:
+  connecting hands the model tool names and descriptions *that host wrote*
+  — a prompt-injection surface with no filter in front of it — and sends it
+  every argument the model passes them, your conversation included.
+  Project-declared `http` servers now sit in the same one decision as
+  everything else, shown with their URL and the headers they would send,
+  verbatim and unexpanded so `Bearer ${GITHUB_TOKEN}` reads as the
+  disclosure it is. Flipping a trusted `stdio` entry to `http` at the same
+  name re-asks; a grant you already gave a stdio-only project still stands.
+
 - **`arcturn serve` now shuts down in bounded time.** A client that stopped
   answering — a wedged editor panel, a suspended laptop, or a bare TCP
   connection that never sends a byte — could hold the server open for

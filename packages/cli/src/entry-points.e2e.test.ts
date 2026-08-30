@@ -246,6 +246,13 @@ interface Workspace {
  * simply vanish from all 34 workspaces. The refusal itself is asserted
  * separately, by the "project code" test below.
  *
+ * `permissionMode: "yolo"` lives in the USER config for exactly the same
+ * reason. A project layer may only NARROW the mode (`config.ts`'s
+ * `clampProjectPermissionMode`), so a `yolo` written into `<cwd>/.arcturn` is
+ * ignored — as it must be, or a cloned repository could switch off every
+ * prompt. This harness IS the operator, so it speaks in the operator's file.
+ * A caller passing `permissionMode` in `config` still narrows from there.
+ *
  * @param baseUrl - The stub provider's base URL, or `undefined` for a
  *   workspace whose model is deliberately unreachable.
  * @param config - Extra keys merged into `.arcturn/config.json`.
@@ -278,9 +285,10 @@ registerModel({
 export default function () {}
 `,
   );
+  await writeFile(join(home, "config.json"), JSON.stringify({ permissionMode: "yolo" }));
   await writeFile(
     join(dir, ".arcturn", "config.json"),
-    JSON.stringify({ model: "stub/model", permissionMode: "yolo", ui: "inline", ...config }),
+    JSON.stringify({ model: "stub/model", ui: "inline", ...config }),
   );
   return { dir, home };
 }
@@ -708,7 +716,6 @@ describe("arcturn project code", () => {
       join(ws.dir, ".arcturn", "config.json"),
       JSON.stringify({
         model: "stub/model",
-        permissionMode: "yolo",
         ui: "inline",
         hooks: { sessionStart: [{ command: `printf x > ${JSON.stringify(hookMarker)}` }] },
       }),
@@ -881,7 +888,9 @@ describe("arcturn --cwd", () => {
     await mkdir(join(sub, ".arcturn"), { recursive: true });
     await writeFile(
       join(sub, ".arcturn", "config.json"),
-      JSON.stringify({ model: "stub/model", permissionMode: "yolo", ui: "inline" }),
+      // The mode comes from the shared `$ARCTURN_HOME` config, which `--cwd`
+      // does not move and which a project layer may not widen.
+      JSON.stringify({ model: "stub/model", ui: "inline" }),
     );
     // No extension copy is needed any more: the stub lives in the shared
     // `$ARCTURN_HOME`, which `--cwd` does not move.

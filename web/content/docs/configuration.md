@@ -16,13 +16,20 @@ built-in defaults
   → ARCTURN_MODEL environment variable
 ```
 
-Most keys simply overwrite (project beats user, env beats both). Two are different:
+Most keys simply overwrite (project beats user, env beats both). Three are different:
 
 - **`permissions`** accumulates across layers instead of replacing — a user rule and a
   project rule can both apply. See [Permissions](/docs/permissions) for the rule schema
   and how the four permission modes interact with it.
 - **`hooks`** also accumulates — a user-level hook and a project-level hook both fire for
   the same lifecycle event. See [Lifecycle hooks](/docs/hooks).
+- **`permissionMode`** is clamped: a project layer may only *narrow* it, never widen it.
+  From narrowest to widest the modes are `plan` → `default` → `acceptEdits` → `yolo`, so a
+  repository asking for `plan` is honored while one asking for `yolo` when you are at
+  `default` is ignored with a warning. Otherwise a checked-in config would switch off your
+  permission prompts for anyone who cloned the repository. To run a project at a wider mode
+  deliberately, set it in your own `~/.arcturn/config.json` or pass `--permission-mode`,
+  which wins over both layers in either direction.
 
 A malformed or unreadable config file is a warning, never a crash: Arcturn falls back to
 the layers it could read. An unrecognized top-level key is likewise a warning (`unknown
@@ -38,7 +45,7 @@ Every key `.arcturn/config.json` accepts, in both user and project files:
 | Key | Type | Default | Notes |
 |---|---|---|---|
 | `model` | `string \| string[]` | `"anthropic/claude-sonnet-4-5"` | An array is a failover chain: first entry primary, later ones tried on overload/rate-limit/unreachable. |
-| `permissionMode` | `"default" \| "acceptEdits" \| "plan" \| "yolo"` | `"default"` | Starting permission mode. See [Permissions](/docs/permissions). |
+| `permissionMode` | `"default" \| "acceptEdits" \| "plan" \| "yolo"` | `"default"` | Starting permission mode. A project layer may only narrow it (see above). See [Permissions](/docs/permissions). |
 | `permissions` | `PermissionRule[]` | `[]` | Accumulates across layers. See [Permissions](/docs/permissions). |
 | `thinking` | `"off" \| "low" \| "medium" \| "high"` | `"off"` | Extended-thinking level for `thinking`-capable models. |
 | `theme` | `string` | `"dark"` | `"dark"`, `"light"`, or a custom theme file name under `~/.arcturn/themes` / `<cwd>/.arcturn/themes`. |

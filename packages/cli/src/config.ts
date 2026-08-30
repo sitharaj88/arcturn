@@ -42,6 +42,47 @@ import type { VerifyConfig } from "./verify.js";
 const SCOPE_RANK: Record<PermissionScope, number> = { session: 0, project: 1, user: 2 };
 
 /**
+ * How much each permission mode lets through. Higher is MORE permissive.
+ *
+ * A total order written down once, the way {@link SCOPE_RANK} is, rather than
+ * a hardcoded pair of names — a mode that arrives later gets ranked here or it
+ * does not typecheck, instead of comparing as `undefined` and slipping through
+ * {@link clampProjectPermissionMode} unnoticed.
+ *
+ * The order is read straight off `@arcturn/core`'s `PermissionEngine#resolve`:
+ *
+ * - `plan` refuses every non-read-only tool BEFORE the rules are consulted, so
+ *   it is strictly the narrowest — it can only take things away.
+ * - `default` settles nothing on its own: whatever the rules do not answer is
+ *   put to the user.
+ * - `acceptEdits` auto-approves the edit tools that `default` would have asked
+ *   about, and nothing else. Strictly a superset of `default`.
+ * - `yolo` auto-approves everything `default` would have asked about, edits
+ *   included. Strictly a superset of `acceptEdits`.
+ *
+ * A stored `deny` still outranks all four (see that module's step 3), which is
+ * why this is a clamp on the MODE and not a claim about the whole engine.
+ */
+const PERMISSION_MODE_RANK: Record<PermissionMode, number> = {
+  plan: 0,
+  default: 1,
+  acceptEdits: 2,
+  yolo: 3,
+};
+
+/**
+ * How permissive a mode is, as a number. Higher lets more through.
+ *
+ * Exported so a caller comparing two modes — and the regression test that pins
+ * the ordering — uses the one ranking rather than restating it.
+ *
+ * @param mode - The mode to rank.
+ */
+export function permissionModeRank(mode: PermissionMode): number {
+  return PERMISSION_MODE_RANK[mode];
+}
+
+/**
  * Wire protocol a {@link ConfiguredProvider}'s endpoint speaks. Deliberately
  * the same two words `@arcturn/ai`'s `PresetProtocol` uses, because a
  * configured provider *is* a preset the user wrote down themselves.
@@ -121,7 +162,13 @@ export interface ArcturnConfig {
    * provider is overloaded, rate-limited or unreachable.
    */
   model: string | string[];
-  /** Starting permission mode. */
+  /**
+   * Starting permission mode.
+   *
+   * A project layer may only NARROW this, never widen it — see
+   * {@link clampProjectPermissionMode}. `--permission-mode` is the user
+   * speaking and overrides the merged value in either direction.
+   */
   permissionMode: PermissionMode;
   /** Persisted permission rules, in layer order (user first, then project). */
   permissions: PermissionRule[];
@@ -1234,6 +1281,60 @@ function mergeProviders(
 }
 
 /**
+ * Drop a project layer's `permissionMode` when it is MORE permissive than the
+ * mode already in force.
+ *
+ * A project layer may NARROW the permission mode, never widen it. `plan` from
+ * a repository that wants read-only exploration is a safety wish and is
+ * honoured; `yolo` or `acceptEdits` from a repository whose user is at
+ * `default` is a privilege escalation shipped as data and is ignored.
+ *
+ * This is the exact inverse of a rule the config layer already enforces for
+ * permission RULES — {@link parseRule}'s scope clamp ("a file may label its
+ * rules with a weaker scope than its own, never a stronger one") and
+ * `@arcturn/core`'s `matchRules` ("a project allow cannot cancel a user deny …
+ * a checked-in config could escalate its own privileges just by being
+ * cloned"). The MODE simply never got the same treatment: a cloned repository
+ * containing `{"permissionMode": "yolo"}` outranked the user's own setting and
+ * auto-approved everything they had not written an explicit `deny` for.
+ *
+ * Deliberately here and not at `buildRuntime`'s `options.permissionMode ??
+ * config.permissionMode`: the clamp belongs to the layering, so every consumer
+ * of a merged config — the runtime, `serve`, `acp`, `mcp-serve`, background
+ * agents, `/permissions` — inherits it without remembering to ask. A
+ * `--permission-mode` flag is the USER speaking and still overrides the result
+ * in both directions, because it is applied after this, on top.
+ *
+ * @param base - The config the project layer is being merged onto (the user's).
+ * @param layer - The parsed project layer.
+ * @param file - The project config file, for the warning.
+ * @param userConfigFile - The user's own config file, for the opt-in advice.
+ * @param warnings - Collector; a silent clamp would be its own bug.
+ * @returns The layer, with `permissionMode` removed if it widened.
+ */
+function clampProjectPermissionMode(
+  base: ArcturnConfig,
+  layer: Partial<ArcturnConfig>,
+  file: string,
+  userConfigFile: string,
+  warnings: string[],
+): Partial<ArcturnConfig> {
+  const wanted = layer.permissionMode;
+  if (wanted === undefined) return layer;
+  const inForce = base.permissionMode;
+  if (permissionModeRank(wanted) <= permissionModeRank(inForce)) return layer;
+  warnings.push(
+    `${file}: "permissionMode": "${wanted}" is more permissive than "${inForce}", which is ` +
+      "in force here — a project config may narrow the permission mode, never widen it, so a " +
+      `repository cannot switch off your prompts just by being cloned. Staying in "${inForce}". ` +
+      `To use "${wanted}" here deliberately, set it in ${userConfigFile} or pass ` +
+      `--permission-mode ${wanted}.`,
+  );
+  const { permissionMode: _widened, ...rest } = layer;
+  return rest;
+}
+
+/**
  * Merge a config layer over a base, concatenating permission rules.
  *
  * @param base - Lower-priority config.
@@ -1388,9 +1489,19 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Loade
   // `~/.arcturn` and the "project" file is the user file — reading it again would
   // load every rule twice, so the project layer is skipped.
   if (!options.skipProject && paths.project !== paths.home) {
+    const projectLayer = await readLayer(paths.projectConfig, "project", sources, warnings);
     config = mergeConfig(
       config,
-      await readLayer(paths.projectConfig, "project", sources, warnings),
+      // A project layer may narrow the permission mode, never widen it. See
+      // {@link clampProjectPermissionMode}: this is the mode's half of the
+      // rule `parseRule` already applies to a rule's declared scope.
+      clampProjectPermissionMode(
+        config,
+        projectLayer,
+        paths.projectConfig,
+        paths.userConfig,
+        warnings,
+      ),
       warnings,
     );
   }

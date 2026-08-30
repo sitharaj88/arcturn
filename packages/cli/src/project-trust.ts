@@ -12,7 +12,9 @@
  * - **verify** — `config.json`'s `verify` command, shelled out after every
  *   successful `write`/`edit`.
  * - **extensions** — `<cwd>/.arcturn/extensions`, `jiti.import`ed at startup.
- * - **stdio MCP servers** — `<cwd>/.arcturn/mcp.json`, spawned by `connectMcp`.
+ * - **MCP servers** — `<cwd>/.arcturn/mcp.json`, connected by `connectMcp`. A
+ *   `stdio` entry is a command line this process spawns. An `http` entry is
+ *   not a process at all, and is covered anyway — see below.
  *
  * ## Why one decision and not four
  *
@@ -64,10 +66,41 @@
  * The consequence, which is a property to preserve rather than an accident:
  * editing `src/**`, `README.md`, `.arcturn/skills/*.md`, `.arcturn/agents/*.md`
  * or the config's `model`/`route`/`theme` does NOT re-ask. Adding or editing a
- * hook, ANY file under `extensions/`, `verify`, or a stdio MCP server does. A
- * gate that re-asks for nothing gets clicked through, so the no-noise property
- * is itself a security property (`taint.ts` makes the same argument about false
- * positives).
+ * hook, ANY file under `extensions/`, `verify`, or an MCP server of either
+ * transport does. Changing a server's TRANSPORT at the same name re-asks too:
+ * the digest carries `stdio` and `http` entries as different line kinds, so a
+ * trusted `stdio` entry cannot quietly become egress to a URL. A gate that
+ * re-asks for nothing gets clicked through, so the no-noise property is itself
+ * a security property (`taint.ts` makes the same argument about false
+ * positives) — which is also why the `stdio` line kept its exact original
+ * spelling when `http` was added, rather than re-asking every project on earth
+ * for a change that affected none of them.
+ *
+ * ## Why an `http` MCP server is on this list
+ *
+ * `registry.ts` gates `stdio` servers a *package* installs and deliberately
+ * does not gate `http` ones: "an `http` server is not on this list: it is
+ * egress to a URL the disclosure already prints, not a process on this
+ * machine." That premise is true there and false here, twice over.
+ *
+ * First, "the disclosure already prints it" is a statement about a person
+ * running `arcturn add` and reading the output. Nobody reads a cloned repo's
+ * `mcp.json`; that is the entire threat model of this file.
+ *
+ * Second, the consequence is worse than plain egress. Connecting to an MCP
+ * server puts its tool NAMES AND DESCRIPTIONS — attacker-written prose — into
+ * the model's tool list, which is a prompt-injection surface with no filter in
+ * front of it, and every argument the model then passes to one of those tools
+ * is sent to that host, conversation content included. The blast radius sets
+ * the gate, not the mechanism; the mechanism here is a socket rather than a
+ * process, and the blast radius is not smaller for it.
+ *
+ * A `stdio` entry is still shown as a command line and an `http` entry as a
+ * URL plus the headers it would send, because those are what the two decisions
+ * actually are. Header values are shown **verbatim and unexpanded**: a value
+ * like `Bearer ${GITHUB_TOKEN}` is the interesting half of the disclosure, and
+ * expanding it would print the user's real credential into a terminal and hash
+ * it into a digest.
  *
  * ## Fail-open case, written down rather than discovered later
  *
@@ -88,9 +121,12 @@
  * - **Project *data*** — skills, agents, memory, themes, `ARCTURN.md`. Those
  *   are untrusted *content*, and `skill-tool.ts`'s `isTrusted` already handles
  *   them with the right mechanism. This gate must not swallow that one.
- * - **`http` MCP servers declared by the project.** Egress to a URL, not a
- *   process on this machine — the same line `registry.ts` draws. It is a real
- *   remaining gap; see the docs.
+ * - **What an approved server later becomes.** The digest pins the
+ *   *declaration* — a URL, a command line — not the thing on the other end. An
+ *   approved host may serve different tools tomorrow, exactly as an approved
+ *   hook command may invoke a file whose contents changed. Same limitation,
+ *   stated the same way, for the same reason: a guarantee the prompt implies
+ *   but does not have is worse than none.
  * - **The case `paths.project === paths.home`.** Running from `~` means there
  *   is no project layer at all (`loadConfig` skips it), so there is nothing to
  *   ask about and this must not prompt.
@@ -153,8 +189,9 @@ export interface ProjectExtensionFile {
   readonly hash: string;
 }
 
-/** One project-declared stdio MCP server, as the consent prompt shows it. */
-export interface ProjectMcpSurface {
+/** One project-declared `stdio` MCP server: a command line this machine spawns. */
+export interface ProjectStdioMcpSurface {
+  readonly transport: "stdio";
   readonly name: string;
   readonly command: string;
   readonly args: readonly string[];
@@ -162,6 +199,40 @@ export interface ProjectMcpSurface {
   readonly env: readonly string[];
   readonly cwd?: string;
 }
+
+/**
+ * One project-declared `http` MCP server: egress to a URL the repository chose.
+ *
+ * Not a process on this machine, and gated anyway. See the module doc: the
+ * `arcturn add` reasoning it used to inherit — "egress to a URL the disclosure
+ * already prints" — does not survive the move to a cloned checkout, because
+ * nobody reads a cloned repo's `mcp.json`, and because the consequence is
+ * worse than plain egress. The host's tool NAMES AND DESCRIPTIONS are placed
+ * in the model's tool list, and every argument the model passes to one of them
+ * is sent there, conversation content included.
+ */
+export interface ProjectHttpMcpSurface {
+  readonly transport: "http";
+  readonly name: string;
+  /** The URL verbatim from the file — `${ENV}` references are NOT expanded. */
+  readonly url: string;
+  /**
+   * Sorted `Name: value` pairs, verbatim from the file (never expanded).
+   *
+   * Shown rather than hidden, and by value rather than by name alone. These
+   * headers are the repository's, not the user's, and they are half of what is
+   * being approved: `Authorization: Bearer ${GITHUB_TOKEN}` says which of the
+   * user's secrets this host would be handed. Expanding is the thing that must
+   * not happen — that would print the real credential and put it in a digest —
+   * and it is exactly what {@link readProjectMcpServers} refuses to do.
+   */
+  readonly headers: readonly string[];
+  /** `"oauth"` when the entry asks for the OAuth authorization-code flow. */
+  readonly auth?: "oauth";
+}
+
+/** One project-declared MCP server of any transport, as the prompt shows it. */
+export type ProjectMcpSurface = ProjectStdioMcpSurface | ProjectHttpMcpSurface;
 
 /** How many of each kind of executable thing a project declares. */
 export interface ProjectCodeCounts {
@@ -234,7 +305,7 @@ export type ProjectTrustReason =
 /** The decision `buildRuntime` enforces and `connectMcp` later reads. */
 export interface ProjectTrustResult {
   readonly surface: ProjectCodeSurface;
-  /** Whether this project's hooks, verify, extensions and stdio MCP servers run. */
+  /** Whether this project's hooks, verify, extensions and MCP servers run. */
   readonly allowed: boolean;
   readonly reason: ProjectTrustReason;
   /** Whether a confirmer was actually called. */
@@ -377,8 +448,17 @@ async function hashExtensionTree(
   return { files, truncated };
 }
 
+/** Sorted `<key><sep><value>` pairs from a string-valued record, verbatim. */
+function pairs(value: unknown, separator: string): string[] {
+  if (!isRecord(value)) return [];
+  return Object.entries(value)
+    .filter((pair): pair is [string, string] => typeof pair[1] === "string")
+    .map(([key, val]) => `${key}${separator}${val}`)
+    .sort();
+}
+
 /**
- * Read the project's `mcp.json` for STDIO servers only.
+ * Read the project's `mcp.json`, both transports.
  *
  * Parsed here rather than through `@arcturn/mcp`'s `loadMcpConfig` for two
  * reasons: that function throws on an unset `${ENV_VAR}` (a hostile repo could
@@ -386,10 +466,10 @@ async function hashExtensionTree(
  * the user's secrets into a digest for no benefit. The raw declaration is also
  * the more faithful thing to show and to hash — it is what the file says.
  *
- * `http` entries are skipped: egress to a URL is not a process on this
- * machine. See the module doc.
+ * `stdio` AND `http` entries are both collected. See the module doc for why
+ * the `registry.ts` line that once excluded `http` does not hold here.
  */
-async function readProjectStdioServers(
+async function readProjectMcpServers(
   file: string,
   warnings: string[],
 ): Promise<ProjectMcpSurface[]> {
@@ -411,26 +491,46 @@ async function readProjectStdioServers(
   if (!isRecord(parsed) || !isRecord(parsed.servers)) return [];
   const out: ProjectMcpSurface[] = [];
   for (const [name, value] of Object.entries(parsed.servers)) {
-    if (!isRecord(value) || value.type !== "stdio") continue;
-    if (typeof value.command !== "string" || value.command.length === 0) continue;
-    const args = Array.isArray(value.args)
-      ? value.args.filter((arg): arg is string => typeof arg === "string")
-      : [];
-    const env = isRecord(value.env)
-      ? Object.entries(value.env)
-          .filter((pair): pair is [string, string] => typeof pair[1] === "string")
-          .map(([key, val]) => `${key}=${val}`)
-          .sort()
-      : [];
-    out.push({
-      name,
-      command: value.command,
-      args,
-      env,
-      ...(typeof value.cwd === "string" ? { cwd: value.cwd } : {}),
-    });
+    if (!isRecord(value)) continue;
+    if (value.type === "stdio") {
+      if (typeof value.command !== "string" || value.command.length === 0) continue;
+      const args = Array.isArray(value.args)
+        ? value.args.filter((arg): arg is string => typeof arg === "string")
+        : [];
+      out.push({
+        transport: "stdio",
+        name,
+        command: value.command,
+        args,
+        env: pairs(value.env, "="),
+        ...(typeof value.cwd === "string" ? { cwd: value.cwd } : {}),
+      });
+      continue;
+    }
+    if (value.type === "http") {
+      if (typeof value.url !== "string" || value.url.length === 0) continue;
+      out.push({
+        transport: "http",
+        name,
+        url: value.url,
+        headers: pairs(value.headers, ": "),
+        ...(value.auth === "oauth" ? { auth: "oauth" as const } : {}),
+      });
+    }
   }
-  out.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  // Sorted by transport then name, so the digest cannot depend on key order
+  // and two entries of different transports at one name never collide.
+  out.sort((a, b) =>
+    a.transport !== b.transport
+      ? a.transport < b.transport
+        ? -1
+        : 1
+      : a.name < b.name
+        ? -1
+        : a.name > b.name
+          ? 1
+          : 0,
+  );
   return out;
 }
 
@@ -466,9 +566,20 @@ export function projectSurfaceBlob(surface: {
     lines.push(`ext ${file.path}\0${file.hash}`);
   }
   for (const server of surface.mcpServers) {
+    // Two line KINDS, not a transport field inside one kind, so that flipping
+    // `stdio` → `http` at the same name changes the blob and re-asks.
+    //
+    // The `stdio` line is byte-identical to the one that shipped, deliberately:
+    // extending this gate to cover `http` must not invalidate the grant of
+    // every project that only ever had `stdio` servers. A gate that re-asks for
+    // nothing gets clicked through, which is the property the module doc calls
+    // a security property in its own right.
     lines.push(
-      `mcp ${server.name}\0${server.command}\0${server.args.join("\0")}\0` +
-        `${server.env.join("\0")}\0${server.cwd ?? ""}`,
+      server.transport === "stdio"
+        ? `mcp ${server.name}\0${server.command}\0${server.args.join("\0")}\0` +
+            `${server.env.join("\0")}\0${server.cwd ?? ""}`
+        : `mcp-http ${server.name}\0${server.url}\0${server.headers.join("\0")}\0` +
+            `${server.auth ?? ""}`,
     );
   }
   if (surface.truncated === true) lines.push("truncated");
@@ -524,7 +635,7 @@ export async function collectProjectCodeSurface(options: {
     paths.projectExtensions,
     warnings,
   );
-  const mcpServers = await readProjectStdioServers(paths.projectMcp, warnings);
+  const mcpServers = await readProjectMcpServers(paths.projectMcp, warnings);
 
   const counts: ProjectCodeCounts = {
     hook: hooks.length,
@@ -1037,8 +1148,26 @@ export function renderProjectTrustPrompt(surface: ProjectCodeSurface): string {
     "  Approving runs all of it as you, every time arcturn starts here — hooks before",
     "  you have typed anything. Commands run through your shell, so Arcturn cannot see",
     "  what the files they invoke will contain later.",
+    ...remoteMcpNote(surface),
     "",
   ].join("\n");
+}
+
+/**
+ * The extra sentence an `http` MCP server earns, when there is one.
+ *
+ * Only when there is one: a prompt that explains a risk the project does not
+ * take is the same "0 MCP servers" mistake {@link describeProjectCodeCounts}
+ * avoids, and it trains its reader to skim.
+ */
+function remoteMcpNote(surface: ProjectCodeSurface): string[] {
+  if (!surface.mcpServers.some((server) => server.transport === "http")) return [];
+  return [
+    "",
+    "  An http server is not a process on this machine, but approving one puts tool names",
+    "  and descriptions THAT HOST WRITES into the model's tool list, and sends it whatever",
+    "  the model passes to those tools — your conversation included.",
+  ];
 }
 
 /**
@@ -1096,8 +1225,18 @@ export function renderProjectCodeInventory(surface: ProjectCodeSurface): string[
     pushEntries(
       lines,
       surface.mcpServers.map((server) => {
-        const env = server.env.length === 0 ? "" : `  [${display(server.env.join(" "), 160)}]`;
-        return `${display(server.name, 80)}  ${display([server.command, ...server.args].join(" "))}${env}`;
+        const name = display(server.name, 80);
+        if (server.transport === "stdio") {
+          const env = server.env.length === 0 ? "" : `  [${display(server.env.join(" "), 160)}]`;
+          return `${name}  (stdio)  ${display([server.command, ...server.args].join(" "))}${env}`;
+        }
+        // The URL is the whole decision for an http entry, and the headers say
+        // which of the user's secrets this host would be handed — both are the
+        // repository's text and both go through `display`.
+        const headers =
+          server.headers.length === 0 ? "" : `  [${display(server.headers.join("  "), 160)}]`;
+        const auth = server.auth === "oauth" ? "  (asks you to authorize via OAuth)" : "";
+        return `${name}  (http)  ${display(server.url)}${headers}${auth}`;
       }),
       display(surface.mcpFile, 200),
     );
@@ -1308,7 +1447,8 @@ export async function runTrustCommand(options: RunTrustCommandOptions): Promise<
       if (options.action === "allow") {
         out(
           "The approval covers these exact contents: changing a hook, the verify command, " +
-            "any file under the extensions directory, or a stdio MCP server asks again.",
+            "any file under the extensions directory, or an MCP server — its transport " +
+            "included — asks again.",
         );
       }
       return 0;

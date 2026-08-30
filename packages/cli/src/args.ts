@@ -260,7 +260,7 @@ export interface CliArgs {
   trustProviders: boolean;
   /**
    * `--no-project-code` runs nothing THIS PROJECT declares — its hooks,
-   * `verify` command, extensions and stdio MCP servers — and asks nothing.
+   * `verify` command, extensions and MCP servers — and asks nothing.
    * The `--no-providers` analogue: everything still parses and still lists.
    * Your own `~/.arcturn` hooks and extensions are unaffected.
    */
@@ -1012,7 +1012,7 @@ Commands
   doctor [preset]               Probe each configured provider endpoint with its
                                 real key and print a verdict per endpoint.
   trust [--allow|--deny]        Decide whether THIS directory's own .arcturn code —
-       [--revoke|--list]        hooks, verify, extensions, stdio MCP servers — may
+       [--revoke|--list]        hooks, verify, extensions, MCP servers — may
        [--cwd <dir>]            run. --list prints exactly what that is; with no
                                 switch it reports the current decision.
   mcp list                      Show configured MCP servers and where they're defined.

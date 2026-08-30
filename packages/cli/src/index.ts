@@ -51,6 +51,7 @@ export {
   type ProviderProtocol,
   parseConfigFile,
   parsePermissionMode,
+  permissionModeRank,
   permissionModes,
   persistPermissionRule,
   persistSetting,

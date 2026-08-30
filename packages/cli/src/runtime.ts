@@ -708,7 +708,7 @@ export class ArcturnRuntime {
    *
    * `buildRuntime` already enforced this for hooks, `verify` and extensions
    * before it returned. It is carried on the runtime because {@link connectMcp}
-   * runs afterwards and has to make the same decision about stdio servers, and
+   * runs afterwards and has to make the same decision about MCP servers, and
    * because `/trust` reports it.
    */
   readonly projectTrust: ProjectTrustResult;
@@ -2200,7 +2200,7 @@ export interface BuildRuntimeOptions {
   configProviders?: boolean;
   /**
    * Asks the user whether to run everything THIS PROJECT declares — its hooks,
-   * `verify` command, extensions and stdio MCP servers, as one decision.
+   * `verify` command, extensions and MCP servers, as one decision.
    *
    * Absent means `() => false`: a hard refusal, not a prompt and not an
    * assumption. Only a host that owns a real terminal may pass one; `--print`,
@@ -2257,7 +2257,7 @@ export async function buildRuntime(options: BuildRuntimeOptions = {}): Promise<A
   //
   // A cloned repository can put executable code in front of a user who did
   // nothing but `cd` into it, four ways: a `sessionStart` hook, an extension
-  // file, a `verify` command and a stdio MCP server. They are transitively
+  // file, a `verify` command and an MCP server. They are transitively
   // equivalent (a hook can write the other three), so one consent decision
   // covers all four — see `project-trust.ts` for why that is one checkbox and
   // not three. This sits before `registerConfiguredProviders` and therefore
@@ -2867,17 +2867,18 @@ export async function connectMcp(
     // without configured servers should never pay for.
     const { loadMcpConfig, McpManager: Manager } = await import("@arcturn/mcp");
     const config = await loadMcpConfig(files);
-    // A `stdio` entry is a command line this process spawns — someone else's
-    // program with the user's full permissions — so a project-declared one is
-    // the fourth surface `project-trust.ts` gates, and `buildRuntime` has
-    // already made the decision this reads. Done per SERVER rather than by
-    // dropping the whole file: a project entry that shadows a user entry of
-    // the same name must fall back to the USER definition, not vanish.
+    // A project-declared MCP server is the fourth surface `project-trust.ts`
+    // gates, and `buildRuntime` has already made the decision this reads. Done
+    // per SERVER rather than by dropping the whole file: a project entry that
+    // shadows a user entry of the same name must fall back to the USER
+    // definition, not vanish.
     //
-    // `http` entries are deliberately left alone. Egress to a URL is not a
-    // process on this machine — the line `registry.ts` draws for the same
-    // reason — and it is a real remaining gap, documented rather than quietly
-    // widened into this gate.
+    // BOTH transports. A `stdio` entry is a command line this process spawns —
+    // someone else's program with the user's full permissions. An `http` entry
+    // is not a process at all, and is withheld anyway: connecting puts tool
+    // names and descriptions the host wrote into the model's tool list, and
+    // sends that host whatever the model passes to them. See
+    // `project-trust.ts`'s "Why an `http` MCP server is on this list".
     if (!runtime.projectTrust.allowed && runtime.projectTrust.surface.mcpServers.length > 0) {
       const blocked = runtime.projectTrust.surface.mcpServers.map((server) => server.name);
       const empty: Awaited<ReturnType<typeof loadMcpConfig>> = { servers: {} };
