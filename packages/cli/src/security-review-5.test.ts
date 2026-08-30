@@ -671,7 +671,16 @@ describe("PROJECT CODE: the repository writes every string in its own consent pr
     // user is approving a blank list.
     expect(rendered).toContain("Approved by your administrator");
     expect(rendered).toContain("pnpm test");
-    expect(rendered).toContain("b.mjs");
+    // The name still reaches the reader — stripped of the escape, not dropped.
+    // Derived from the name this platform could actually create, so the
+    // assertion cannot drift from the fixture: Windows refuses a filename
+    // holding control characters, POSIX allows every byte but `/` and NUL.
+    // Built with `new RegExp` rather than a literal: a control character in a
+    // regex literal is a Biome error (`noControlCharactersInRegex`), the same
+    // rule that made the renderer's sanitiser a scanner instead of a regex.
+    const csi = `${String.fromCharCode(0x1b)}\\[[0-9;]*[A-Za-z]`;
+    const visibleName = hostileName.replace(new RegExp(csi, "g"), "");
+    expect(rendered).toContain(visibleName);
   });
 
   it("never implies an elided list is complete", async () => {
