@@ -311,7 +311,12 @@ describe("session titles (runtime wiring)", () => {
   async function waitForTitle(
     runtime: Awaited<ReturnType<typeof buildTestRuntime>>,
   ): Promise<SessionHeader> {
-    for (let i = 0; i < 300; i++) {
+    // Titling is fire-and-forget by design, so the wait has to be generous:
+    // a loaded Windows runner overran a 3s budget and failed this suite for
+    // the release. The deadline sits under vitest's 20s so a genuine failure
+    // still reports as "never titled" rather than as a timeout.
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline) {
       const header = await runtime.store.open(runtime.agent.sessionId);
       if (header.title !== undefined) return header;
       await new Promise((resolve) => setTimeout(resolve, 10));
