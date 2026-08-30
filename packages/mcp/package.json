@@ -1,6 +1,6 @@
 {
   "name": "@arcturn/mcp",
-  "version": "0.5.5",
+  "version": "0.5.6",
   "description": "Model Context Protocol client bridge for the Arcturn agent harness Internal to the arcturn CLI; API may change in any release.",
   "license": "Apache-2.0",
   "publishConfig": {

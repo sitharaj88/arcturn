@@ -10,6 +10,10 @@ CLI, the SDK, or the wire protocol.
 
 ## [Unreleased]
 
+## [0.5.6] — 2026-08-30
+
+A ceiling that stops you dead is a worse ceiling than one that asks.
+
 ### Added
 
 - **A budget checkpoint you can answer, instead of a corpse with a patch.**

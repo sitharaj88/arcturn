@@ -1,6 +1,6 @@
 {
   "name": "@arcturn/evals",
-  "version": "0.5.5",
+  "version": "0.5.6",
   "private": true,
   "description": "Task-level eval harness for the Arcturn agent: real coding tasks, programmatic assertions",
   "license": "Apache-2.0",
