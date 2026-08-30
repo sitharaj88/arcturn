@@ -44,7 +44,13 @@ import {
   type WriteLane,
   type WriteLaneHost,
 } from "./workflow.js";
-import { buildResumeState, createFileRunJournal, readJournalLines } from "./workflow-run.js";
+import {
+  buildResumeState,
+  createFileRunJournal,
+  type JournalLine,
+  type ResumeState,
+  readJournalLines,
+} from "./workflow-run.js";
 import { foldJournal, summariseRun } from "./workflow-status.js";
 
 const execFileAsync = (cmd: string, args: readonly string[], cwd: string): Promise<void> =>
@@ -158,6 +164,32 @@ function firstRequest(
     ...(step.agent === undefined ? {} : { agent: step.agent }),
     ...overrides,
   };
+}
+
+/**
+ * A run's journal once its terminal `runEnd` has landed.
+ *
+ * `runWorkflow` appends that one line fire-and-forget (see `finish`'s note:
+ * a finished run must not be held up by a last write), so a test that reads
+ * the file the instant the promise resolves can legitimately miss it. Every
+ * other line these tests assert on is written durably and needs no poll.
+ *
+ * @param dir - The run's journal directory.
+ * @param status - The terminal status to wait for; any terminal by default.
+ */
+async function journalOnceEnded(
+  dir: string,
+  status?: "done" | "failed" | "cancelled" | "paused",
+): Promise<JournalLine[]> {
+  for (let i = 0; i < 100; i += 1) {
+    const lines = await readJournalLines(dir);
+    const end = lines.findLast(
+      (line): line is Extract<JournalLine, { kind: "runEnd" }> => line.kind === "runEnd",
+    );
+    if (end !== undefined && (status === undefined || end.status === status)) return lines;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`journal at ${dir} never recorded a ${status ?? "terminal"} runEnd`);
 }
 
 /** The production write lane over a real runtime and a real repository. */
@@ -426,7 +458,10 @@ describe("stepTimeoutMs, proved by exceeding it", () => {
       await watcher;
 
       // The step was really killed for the reason claimed…
-      expect(result.status).toBe("failed");
+      expect(result.steps[0]?.status).toBe("failed");
+      // …and the run parked on it rather than ending (the step-failure park),
+      // which changes nothing about the kill this test is here to prove.
+      expect(result.status).toBe("paused");
       expect(result.steps[0]?.error).toMatch(/exceeded its .* deadline/);
       // …and the later stage never ran at all.
       expect(result.steps[1]?.status).toBe("skipped");
@@ -968,6 +1003,168 @@ describe("resume replays the journal instead of re-running — against a real ch
 });
 
 // ================================================================= ORG-HALT
+
+// ============================================ the step-failure park, recovered
+
+/**
+ * The whole recovery, against a real checkout and a real journal.
+ *
+ * FAIL-FIRST, from the run that motivated it: a nine-stage pipeline finished
+ * four paid stages and then stage 5's `@rag-builder` hit its turn ceiling. The
+ * engine wrote `runEnd{failed}`, both resume verbs refuse a failed run
+ * forever, and the only way forward was to buy the four finished stages again.
+ *
+ * Every claim here is an effect: how many requests actually reached the
+ * provider (the money), which files are in the user's checkout, and what is on
+ * disk in the journal — never a field read back out of the object that set it.
+ */
+describe("a failed step parks the run, and the run really is recoverable", () => {
+  itPosix("retries only the broken step, under the ceiling a human raised", async () => {
+    const scratch = await gitScratch();
+    // The SESSION's ceiling, deliberately above the role's own: a raise that
+    // lifted only one half of `Math.min(role maxTurns, subagentMaxTurns)`
+    // would land on 3 or on 5, and the request count below can tell all three
+    // apart. This is the trap that made hand-editing the role file useless.
+    await mkdir(join(scratch.cwd, ".arcturn"), { recursive: true });
+    await writeFile(
+      join(scratch.cwd, ".arcturn", "config.json"),
+      JSON.stringify({ subagentMaxTurns: 5 }),
+      "utf8",
+    );
+
+    const llm = fakeLLM([
+      // Stage 1, the survey: one write, then it lands the plane.
+      {
+        toolCalls: [
+          { id: "s1", name: "write", arguments: { path: "SURVEY.md", content: "the survey\n" } },
+        ],
+      },
+      { text: "survey done" },
+      // Stage 2, the builder: it starts real work…
+      {
+        toolCalls: [
+          { id: "b1", name: "write", arguments: { path: "BUILD.md", content: "half built\n" } },
+        ],
+      },
+      // …and then never stops asking for another turn. The ceiling is the only
+      // thing that can end this, which is the whole point.
+      { toolCalls: [{ id: "b2", name: "read", arguments: { path: "seed.txt" } }] },
+    ]);
+    const runtime = await runtimeWith(scratch, llm);
+    expect(runtime.config.subagentMaxTurns).toBe(5);
+
+    const surveyor = role("surveyor", ["read", "write", "edit"]);
+    const builder = role("builder", ["read", "write", "edit"], { maxTurns: 3 });
+    const resolve = (name: string): AgentDef => (name === "surveyor" ? surveyor : builder);
+    const workflow = parseOk(
+      "---\nname: pipeline\n---\n1. @surveyor survey it\n2. @builder build it {{prev}}\n",
+    );
+    const runId = "run-park";
+    const journalDir = join(scratch.home, "park-journal");
+    const drive = (resumeFrom?: ResumeState) =>
+      runWorkflow(workflow, {
+        resolveAgent: resolve,
+        agentNames: () => ["surveyor", "builder"],
+        journal: createFileRunJournal(journalDir),
+        runId,
+        ...(resumeFrom === undefined ? {} : { resumeFrom }),
+        runStep: createRuntimeRunStep(runtime, {
+          resolveAgent: resolve,
+          writeLane: laneFor(runtime, runId),
+        }),
+      });
+
+    // ---- run one: stage 1 lands, stage 2 runs out of turns, the run PARKS.
+    const parked = await drive();
+
+    // FAIL-FIRST: this was `failed`, and `runEnd{failed}` is the tombstone
+    // both resume verbs refuse — the survey would have had to be bought again.
+    expect(parked.status).toBe("paused");
+    expect(parked.steps.map((step) => step.status)).toEqual(["done", "failed"]);
+    // Stage 1's patch really is in the user's checkout…
+    expect(await readFile(join(scratch.cwd, "SURVEY.md"), "utf8")).toBe("the survey\n");
+    // …and the failed step applied nothing, exactly as it always did.
+    expect(await exists(join(scratch.cwd, "BUILD.md"))).toBe(false);
+    // 2 turns for the survey + the builder's 3 = 5 requests reached the model.
+    expect(llm.requests).toHaveLength(5);
+
+    // `runEnd` is the engine's one fire-and-forget append (see `finish`), so
+    // the terminal line is polled for rather than assumed.
+    const lines = await journalOnceEnded(journalDir);
+    const firstAsk = lines.find(
+      (line): line is Extract<JournalLine, { kind: "stepFailAsk" }> => line.kind === "stepFailAsk",
+    );
+    expect(firstAsk).toMatchObject({
+      stepId: "2",
+      role: "builder",
+      failureKind: "turn-ceiling",
+      ceiling: 3,
+      attempts: 1,
+    });
+    // The captured patch the question points a human at is a real file on
+    // disk, holding the work the failed step could not apply.
+    expect(firstAsk?.patchPath).toBeDefined();
+    expect(await readFile(firstAsk?.patchPath ?? "", "utf8")).toContain("BUILD.md");
+    // And the run is resumable rather than a corpse.
+    const state = buildResumeState(lines);
+    expect(state.ended).toBe(true);
+    expect(state.endedStatus).toBe("paused");
+    expect(state.stepFailAsk?.stepId).toBe("2");
+    expect([...state.completed.keys()]).toEqual(["1"]);
+    // `/workflow status` says the same thing from the same file.
+    expect(summariseRun(foldJournal(runId, lines), Date.now()).state).toBe("paused");
+
+    // ---- run two: "raise 8". Only the broken step re-runs, and it re-runs
+    // with EIGHT turns — not 3 (the role file's), not 5 (the session's).
+    const raised = await drive({ ...state, stepFailAnswer: { text: "raise 8" } });
+    expect(raised.status).toBe("paused"); // it ran out of the new rope too
+
+    // THE MONEY, counted: 5 from run one plus the builder's 8. Stage 1 was
+    // replayed from the journal and its model was never asked again — 15 would
+    // mean the survey was re-bought, 8 would mean the raise never reached the
+    // child, and 10 would mean it lifted only the role's own half.
+    expect(llm.requests).toHaveLength(13);
+    // The survey is still in the checkout exactly once: a re-executed stage 1
+    // would have re-applied a patch that creates a file that already exists,
+    // and `git apply` would have refused it outright.
+    expect(await readFile(join(scratch.cwd, "SURVEY.md"), "utf8")).toBe("the survey\n");
+
+    const afterRaise = await journalOnceEnded(journalDir);
+    expect(
+      afterRaise.find(
+        (line): line is Extract<JournalLine, { kind: "turnRaise" }> => line.kind === "turnRaise",
+      ),
+    ).toMatchObject({ stepId: "2", role: "builder", value: 8 });
+    const asks = afterRaise.filter(
+      (line): line is Extract<JournalLine, { kind: "stepFailAsk" }> => line.kind === "stepFailAsk",
+    );
+    // The second park states the ceiling the child actually ran under — the
+    // effective 8, straight out of the loop's own exhaustion message — and a
+    // higher attempt count, so nobody feeds a hole without being told.
+    expect(asks).toHaveLength(2);
+    expect(asks[1]).toMatchObject({ ceiling: 8, attempts: 2 });
+
+    // ---- run three: "abandon". The tombstone, chosen — and now it really is
+    // one: the gate both resume entry points apply refuses this run.
+    const abandoned = await drive({
+      ...buildResumeState(afterRaise),
+      stepFailAnswer: { text: "abandon" },
+    });
+    expect(abandoned.status).toBe("failed");
+    // Nothing was spent to abandon.
+    expect(llm.requests).toHaveLength(13);
+
+    const ended = buildResumeState(await journalOnceEnded(journalDir, "failed"));
+    expect(ended.endedStatus).toBe("failed");
+    expect(ended.stepFailAsk).toBeUndefined();
+    expect(ended.ended && ended.endedStatus !== "paused").toBe(true);
+    expect(
+      (await readJournalLines(journalDir))
+        .filter((line): line is Extract<JournalLine, { kind: "stop" }> => line.kind === "stop")
+        .map((line) => line.reason),
+    ).toEqual(["turn-ceiling"]);
+  });
+});
 
 describe("ORG-HALT short-circuits every later stage — nothing is dispatched", () => {
   it("never builds the later role's agent, never asks its model, never makes its worktree", async () => {

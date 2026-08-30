@@ -86,6 +86,7 @@ import {
   reportWorkflowEvent,
   roleDispatch,
   runWorkflow as runWorkflowEngine,
+  turnWireRaiseRefusal,
   type Workflow,
   type WorkflowCommandRuntime,
   type WorkflowRunResult,
@@ -101,6 +102,9 @@ import {
   type JournalLine,
   RUN_JOURNAL_SCHEMA_VERSION,
   readJournalLines,
+  STEP_ABANDON_ANSWER,
+  STEP_RETRY_ANSWER,
+  stepFailAskQuestion,
   writeManifest,
 } from "./workflow-run.js";
 import {
@@ -787,12 +791,52 @@ export function createServeWorkflows(
           };
         }
       }
+
+      // The step-failure park, over the wire. Two answers are valid here —
+      // `retry` and `abandon` — and neither of them is silence.
+      //
+      // A raise-shaped answer is REFUSED for the reason a budget raise is:
+      // nothing on the wire may lift a ceiling, turn ceilings included. The
+      // grammar is the engine's own (`parseBudgetRaiseAnswer`, shared by both
+      // gates), so the two can never drift.
+      //
+      // A *bare* resume is refused too: a retry is money, and a client that
+      // nudges every stalled run must not be able to spend it.
+      if (state.stepFailAsk !== undefined) {
+        const answer = request.answer ?? "";
+        if (parseBudgetRaiseAnswer(answer) !== undefined) {
+          return {
+            ok: false,
+            error:
+              `Run ${request.runId} is parked at a failed step. ` +
+              turnWireRaiseRefusal(workflow.source),
+          };
+        }
+        if (answer.trim() === "") {
+          request.emit({
+            type: "notice",
+            level: "warn",
+            text:
+              `Run ${request.runId} is parked at a failed step — ` +
+              stepFailAskQuestion(state.stepFailAsk, { allowRaise: false }),
+          });
+          return {
+            ok: false,
+            error:
+              `Run ${request.runId} is parked at a failed step and needs an answer, not a nudge. ` +
+              `Resume it again with "${STEP_RETRY_ANSWER}" to run that step again, or ` +
+              `"${STEP_ABANDON_ANSWER}" to end the run failed.`,
+          };
+        }
+      }
       const resumeFrom =
         state.budgetAsk !== undefined
           ? { ...state, budgetAnswer: { text: request.answer ?? "" } }
-          : state.pending !== undefined && request.answer !== undefined
-            ? { ...state, answer: { stepId: state.pending.stepId, text: request.answer } }
-            : state;
+          : state.stepFailAsk !== undefined
+            ? { ...state, stepFailAnswer: { text: request.answer ?? "" } }
+            : state.pending !== undefined && request.answer !== undefined
+              ? { ...state, answer: { stepId: state.pending.stepId, text: request.answer } }
+              : state;
       const accepted = await start({
         workflow,
         input: header?.input ?? "",

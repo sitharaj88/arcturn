@@ -411,7 +411,10 @@ describe("the per-step wall-clock deadline", () => {
       },
     });
     expect(Date.now() - startedAt).toBeLessThan(1_500);
-    expect(result.status).toBe("failed");
+    // The STEP fails on its deadline; the run parks on it (the step-failure
+    // park) rather than ending, which is orthogonal to the wait under test.
+    expect(result.steps[0]?.status).toBe("failed");
+    expect(result.status).toBe("paused");
     expect(result.steps[0]?.error).toContain("deadline");
   });
 
@@ -427,7 +430,8 @@ describe("the per-step wall-clock deadline", () => {
         return { text: "", usage: usage(9_000, 4_000), isError: true, error: "aborted" };
       },
     });
-    expect(result.status).toBe("failed");
+    expect(result.steps[0]?.status).toBe("failed");
+    expect(result.status).toBe("paused");
     expect(result.usage.inputTokens).toBe(9_000);
     expect(result.usage.outputTokens).toBe(4_000);
   });
@@ -444,7 +448,8 @@ describe("the per-step wall-clock deadline", () => {
         return { text: "", usage: usage(), isError: true, error: "cancelled" };
       },
     });
-    expect(result.status).toBe("failed");
+    expect(result.steps[0]?.status).toBe("failed");
+    expect(result.status).toBe("paused");
     // teardown runs on the abandoned promise
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(reaped).toBe(true);

@@ -45,7 +45,7 @@ import { createHash } from "node:crypto";
 import { appendFile, mkdir, open, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Usage } from "@arcturn/types";
-import { formatCost } from "./format.js";
+import { formatCost, oneLine } from "./format.js";
 import type { WorkflowPatchRecord, WorkflowRunStatus, WorkflowStepStatus } from "./workflow.js";
 
 /** Bumped when a journal line's shape changes incompatibly. */
@@ -328,6 +328,88 @@ export interface BudgetRaiseLine {
   readonly ts: number;
 }
 
+/**
+ * A step failed with its retries spent, and the run parked to ask a human —
+ * the STEP-FAILURE ASK.
+ *
+ * The twin of {@link BudgetAskLine}, and for the same reason. A failed step
+ * used to write `runEnd{failed}`, which both resume entry points refuse
+ * permanently: the survey, the threat model and the ADR that stages 1–4 paid
+ * for were still on disk, and the only way back was to buy them again. A step
+ * failure is the *most* recoverable stop this engine has — the work is
+ * captured to a patch, and the fix is usually one number — so it parks instead
+ * and states the question.
+ *
+ * Durable, because the park only exists if the question does: a
+ * `runEnd{paused}` with no recorded ask is a pause nobody can answer. The line
+ * carries facts rather than prose, so the resume fold and the status fold
+ * re-render one identical question.
+ */
+export interface StepFailAskLine {
+  readonly kind: "stepFailAsk";
+  /** The step that failed — a real step id, unlike the budget ask's sentinel. */
+  readonly stepId: string;
+  /** The `@role` it dispatched to, when it named one. */
+  readonly role?: string;
+  /** The classified cause, so the reply grammar knows whether `raise` applies. */
+  readonly failureKind?: WorkflowFailureKind;
+  /** The step's own failure text — the honest cause a human reads, verbatim. */
+  readonly cause: string;
+  /**
+   * Where the lane captured the work this step could not apply, when it
+   * captured any (`record.status === "captured"`). The human can apply it by
+   * hand instead of paying to reproduce it.
+   */
+  readonly patchPath?: string;
+  /**
+   * The turn ceiling that tripped, for a `turn-ceiling` failure — lifted from
+   * the cause the lane wrote. It is what a `raise <n>` must exceed, recorded
+   * rather than re-parsed on every resume (the same rule
+   * {@link BudgetAskLine.limit} follows).
+   */
+  readonly ceiling?: number;
+  /** How many times this step has now been run and failed, across resumes. */
+  readonly attempts: number;
+  readonly ts: number;
+}
+
+/**
+ * A human answered a {@link StepFailAskLine} with `abandon`: end the run
+ * `failed`, exactly as it always did.
+ *
+ * The tombstone is still available — it is just no longer the *default*. The
+ * line exists so the fold can tell "the human chose to stop" from "the ask was
+ * never answered", which is the difference between a settled run and one still
+ * owed a reply.
+ */
+export interface StepAbandonLine {
+  readonly kind: "stepAbandon";
+  readonly stepId: string;
+  readonly ts: number;
+}
+
+/**
+ * A human raised a role's turn ceiling *for this run* in answer to a
+ * step-failure ask.
+ *
+ * Run-scoped exactly as {@link BudgetRaiseLine} is: the role file on disk is
+ * never touched, so the journal is the only place the grant lives, and a fresh
+ * run gets the file's number back. Written only by the terminal resume path;
+ * the wire may never raise a ceiling.
+ *
+ * Keyed by {@link turnRaiseKey} on the fold — the ROLE when the step named
+ * one, so a second step dispatching the same role inherits the rope the human
+ * granted it, and the step itself otherwise.
+ */
+export interface TurnRaiseLine {
+  readonly kind: "turnRaise";
+  readonly stepId: string;
+  readonly role?: string;
+  /** The new ceiling, validated above the one that just tripped. */
+  readonly value: number;
+  readonly ts: number;
+}
+
 /** The whole run was halted by a STOP condition. */
 export interface StopLine {
   readonly kind: "stop";
@@ -355,6 +437,9 @@ export type JournalLine =
   | BudgetAskLine
   | BudgetAckLine
   | BudgetRaiseLine
+  | StepFailAskLine
+  | StepAbandonLine
+  | TurnRaiseLine
   | StopLine
   | RunEndLine;
 
@@ -371,8 +456,19 @@ export const DURABLE_JOURNAL_KINDS: ReadonlySet<JournalLine["kind"]> = new Set<J
   // is a commitment a later resume acts on. An ask that never reached disk is
   // a pause with no question (unanswerable); an ack or raise that vanished
   // would re-ask a question the human already answered — or worse, run under a
-  // ceiling the human never granted.
-  ["stepIntent", "stepEffect", "stepEnd", "budgetAsk", "budgetAck", "budgetRaise"],
+  // ceiling the human never granted. The step-failure trio is the same
+  // commitment about the same kind of question, so it keeps the same promise.
+  [
+    "stepIntent",
+    "stepEffect",
+    "stepEnd",
+    "budgetAsk",
+    "budgetAck",
+    "budgetRaise",
+    "stepFailAsk",
+    "stepAbandon",
+    "turnRaise",
+  ],
 );
 
 /**
@@ -552,6 +648,234 @@ export function budgetAskResumeHint(runId: string, audience: BudgetAskAudience =
   return audience.allowRaise === false
     ? `${ack} runs on to the hard stop; raising the ceiling is terminal-only`
     : `${ack} runs on to the hard stop, /workflow resume ${runId} raise <new-limit> lifts it`;
+}
+
+/**
+ * The reply that re-runs a step parked by a {@link StepFailAskLine}.
+ *
+ * A *word*, for the same reason {@link BUDGET_ACK_ANSWER} is one: every retry
+ * is money, and an empty resume is not a decision to spend it. A client script
+ * that nudges stalled runs, or a resume of a run that crashed after the ask
+ * reached disk but before anybody read it, must not be able to buy a rerun.
+ */
+export const STEP_RETRY_ANSWER = "retry";
+
+/**
+ * The reply that ends a parked run `failed` — today's behaviour, now chosen
+ * rather than imposed.
+ *
+ * Named beside {@link STEP_RETRY_ANSWER} because the two are rendered as one
+ * sentence and must never drift apart.
+ */
+export const STEP_ABANDON_ANSWER = "abandon";
+
+/** A pending step-failure ask, rebuilt from the journal. */
+export interface PendingStepFailAsk {
+  readonly stepId: string;
+  readonly role?: string;
+  readonly failureKind?: WorkflowFailureKind;
+  readonly cause: string;
+  readonly patchPath?: string;
+  readonly ceiling?: number;
+  readonly attempts: number;
+}
+
+/**
+ * A human's reply to a pending step-failure ask, threaded in by a resume path.
+ *
+ * Whether the origin may *raise* a turn ceiling is not on here — that is a
+ * property of the run's origin, not of one sentence, and it also decides how
+ * the question is worded. It lives on `WorkflowRunContext.allowBudgetRaise`,
+ * the one flag both raise gates read.
+ */
+export interface StepFailReply {
+  /** The verbatim reply; `""` is a plain resume, which answers nothing. */
+  readonly text: string;
+}
+
+/**
+ * The key a run-scoped turn raise is stored under.
+ *
+ * The ROLE when the step named one: a human who granted `@rag-builder` 120
+ * turns at stage 5 has said something about the role, and a later stage
+ * dispatching the same role would otherwise walk into the same 64-turn wall
+ * and park again for the same answer. A step with no role is keyed by itself,
+ * because there is nothing else to key it by.
+ *
+ * @param stepId - The step the ask named.
+ * @param role - Its `@role`, when it had one.
+ */
+export function turnRaiseKey(stepId: string, role?: string): string {
+  return role === undefined || role === "" ? `step:${stepId}` : `role:${role}`;
+}
+
+/**
+ * The recorded facts of one step-failure ask, validated out of a
+ * {@link StepFailAskLine}.
+ *
+ * Exactly {@link budgetAskFacts}' contract and for exactly its reason:
+ * `readJournalLines` promises only an object with a string `kind`, both folds
+ * run over that data, and a torn line that reached a renderer once took
+ * `/workflow status` down for every run on the machine. A line that fails the
+ * check is *dropped* — an ask nobody can restate is not an ask.
+ *
+ * @param line - A candidate `stepFailAsk` line, straight off disk.
+ * @returns The ask's facts, or `undefined` when the line is not usable.
+ */
+export function stepFailAskFacts(line: StepFailAskLine): PendingStepFailAsk | undefined {
+  // A pause with no step to retry, or no cause to state, is unanswerable.
+  if (typeof line.stepId !== "string" || line.stepId === "") return undefined;
+  if (typeof line.cause !== "string" || line.cause.trim() === "") return undefined;
+  const attempts =
+    typeof line.attempts === "number" && Number.isFinite(line.attempts) && line.attempts > 0
+      ? Math.floor(line.attempts)
+      : 1;
+  const ceiling =
+    typeof line.ceiling === "number" && Number.isFinite(line.ceiling) && line.ceiling > 0
+      ? line.ceiling
+      : undefined;
+  return {
+    stepId: line.stepId,
+    ...(typeof line.role === "string" && line.role !== "" ? { role: line.role } : {}),
+    ...(typeof line.failureKind === "string"
+      ? { failureKind: line.failureKind as WorkflowFailureKind }
+      : {}),
+    cause: line.cause,
+    ...(typeof line.patchPath === "string" && line.patchPath !== ""
+      ? { patchPath: line.patchPath }
+      : {}),
+    ...(ceiling === undefined ? {} : { ceiling }),
+    attempts,
+  };
+}
+
+/**
+ * How much of a failed step's cause the park question restates.
+ *
+ * The cause carries the agent's preserved final words, which are already
+ * capped at 500 characters of their own — enough to make a question nobody
+ * finishes reading. The full text is on the step's `error` and on its durable
+ * `stepEnd` line either way.
+ */
+const CAUSE_MAX_CHARS = 400;
+
+/**
+ * How much of a role name the wire's terse park question spends.
+ *
+ * See {@link stepFailAskQuestion}: that string is capped at 160 characters by
+ * `sanitizeDescription` before a client sees it, and a long role name would
+ * otherwise eat the half that tells the reader what they may reply.
+ */
+const WIRE_ROLE_MAX_CHARS = 20;
+
+/**
+ * Render the question a step-failure park puts to the human.
+ *
+ * One renderer, exported, for the reason {@link budgetAskQuestion} is one: two
+ * independent folds surface the same ask ({@link buildResumeState} for resume,
+ * `workflow-status.ts` for `/workflow status`), and the line carries facts
+ * rather than prose. Two renderers would be two questions for one ask.
+ *
+ * The *answer options* half is rendered per origin, again like the budget
+ * ask's: `raise` is terminal-only, and a wire client told to send it would
+ * follow its own question into a refusal forever.
+ *
+ * THE ALERT THIS IS. A turn ceiling had no human-facing warning at all — the
+ * wrap-up note goes to the model, and the model ignored it — so when the
+ * ceiling is what stopped the step, this sentence says so in those words and
+ * names `raise <n>` as the lever. That is the alert the operator never got.
+ *
+ * @param ask - The recorded ask facts.
+ * @param audience - What the origin reading this may do about it.
+ */
+export function stepFailAskQuestion(
+  ask: PendingStepFailAsk,
+  audience: BudgetAskAudience = {},
+): string {
+  const named = (role: string | undefined): string =>
+    role === undefined || role === "" ? `Step ${ask.stepId}` : `Step ${ask.stepId} (@${role})`;
+  const who = named(ask.role);
+  const turnCeiling = ask.failureKind === "turn-ceiling";
+  const stopped = turnCeiling ? "ran out of turns" : "failed";
+  // The wire's sentence is the terser of the two, exactly as the budget ask's
+  // is and for exactly its reason: a question crossing the seam is capped by
+  // `sanitizeDescription` (first line, 160 characters), and the half that says
+  // what THIS reader may do must survive the cap. So the role name is bounded
+  // here too — an org is free to call a role
+  // `security-threat-modeller-v2`, and paying for that in the reply options is
+  // the one trade this sentence must not make. The cause itself is not lost:
+  // it reaches a wire client as the `Step N failed: …` notice
+  // `reportWorkflowEvent` publishes onto the session stream.
+  if (audience.allowRaise === false) {
+    const short =
+      ask.role !== undefined && ask.role.length > WIRE_ROLE_MAX_CHARS
+        ? `${ask.role.slice(0, WIRE_ROLE_MAX_CHARS - 1)}…`
+        : ask.role;
+    return (
+      `${named(short)} ${stopped}; the run is parked. Reply "${STEP_RETRY_ANSWER}" to rerun it ` +
+      `or "${STEP_ABANDON_ANSWER}" to end it` +
+      (turnCeiling ? "; the wire cannot raise a turn ceiling." : ".")
+    );
+  }
+  const tries = ask.attempts === 1 ? "" : ` after ${String(ask.attempts)} attempts`;
+  const headline = turnCeiling
+    ? `${who} ran out of turns${tries} — it hit a turn ceiling, it did not crash.`
+    : `${who} failed${tries}.`;
+  // The cause is the lane's own honest text and is MULTI-LINE by construction:
+  // a failed step's message carries the agent's preserved final words on a
+  // second line. Flattening it with a blind `\s+ → " "` ran two sentences
+  // together ("…narrow the step Its final words before the stop: …"), so each
+  // line is closed off before the join. Bounded, too — the whole thing is on
+  // the step's own `error` and on the durable `stepEnd`, and a question is
+  // read, not archived.
+  const sentence = oneLine(
+    ask.cause
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line !== "")
+      .map((line) => (/[.!?:;]$/.test(line) ? line : `${line}.`))
+      .join(" "),
+    CAUSE_MAX_CHARS,
+  );
+  const captured =
+    ask.patchPath === undefined
+      ? ""
+      : ` Its unapplied work was captured to ${ask.patchPath}, so the partial result is not lost.`;
+  const raiseTo = ask.ceiling === undefined ? "" : ` (above ${String(ask.ceiling)})`;
+  const options = turnCeiling
+    ? `Reply "${STEP_RETRY_ANSWER}" to run this step again, "raise <n>"${raiseTo} to lift its ` +
+      `turn ceiling for this run only and retry, or "${STEP_ABANDON_ANSWER}" to end the run failed.`
+    : `Reply "${STEP_RETRY_ANSWER}" to run this step again, or "${STEP_ABANDON_ANSWER}" to end ` +
+      "the run failed.";
+  return (
+    `${headline} This run is parked, not finished: every earlier stage is on disk and is ` +
+    `reused, not paid for again. ${sentence}${captured} ${options}`
+  );
+}
+
+/**
+ * The `/workflow resume …` hint that goes under a run parked at a failed step.
+ *
+ * Shared for the reason {@link budgetAskResumeHint} is shared: `/workflow
+ * status` prints it in two places, and a parked run's valid replies are
+ * exactly the thing an operator must not be told two versions of.
+ *
+ * @param runId - The parked run.
+ * @param ask - The recorded ask, so the hint offers `raise` only where it applies.
+ * @param audience - What the origin reading this may do about it.
+ */
+export function stepFailAskResumeHint(
+  runId: string,
+  ask: PendingStepFailAsk,
+  audience: BudgetAskAudience = {},
+): string {
+  const base =
+    `/workflow resume ${runId} ${STEP_RETRY_ANSWER} runs the step again, ` +
+    `/workflow resume ${runId} ${STEP_ABANDON_ANSWER} ends the run failed`;
+  if (ask.failureKind !== "turn-ceiling") return base;
+  return audience.allowRaise === false
+    ? `${base}; raising a turn ceiling is terminal-only`
+    : `${base}, /workflow resume ${runId} raise <n> lifts its turn ceiling for this run and retries`;
 }
 
 /** SHA-256 of a step's spliced prompt — the staleness key resume compares on. */
@@ -867,6 +1191,32 @@ export interface ResumeState {
    * the question. Only the explicit {@link BUDGET_ACK_ANSWER} acknowledges.
    */
   readonly budgetAnswer?: BudgetAskReply;
+  /**
+   * The step-failure ask the run parked on, when one is pending — the latest
+   * {@link StepFailAskLine} with no later terminal for its step and no
+   * `stepAbandon`. A run holding one is `paused` on a *recoverable* stop: the
+   * step failed, nothing after it ran, and a person decides whether to spend
+   * again. The engine (never a command parser) interprets
+   * {@link stepFailAnswer} against it on resume.
+   */
+  readonly stepFailAsk?: PendingStepFailAsk;
+  /**
+   * Run-scoped turn-ceiling grants, latest per {@link turnRaiseKey}. A resumed
+   * `runWorkflow` prefers these over the role file's own `maxTurns:` — and
+   * over the session's `subagentMaxTurns` clamp — from the very start of the
+   * run, because neither file was touched and the journal is the only place
+   * the grant lives.
+   */
+  readonly turnRaises?: ReadonlyMap<string, number>;
+  /**
+   * The human's reply to the pending {@link stepFailAsk}, supplied by the
+   * resume flow — never read from the journal (the same rule as
+   * {@link answer} and {@link budgetAnswer}).
+   *
+   * `""` is a plain resume, and a plain resume is NOT an answer: it
+   * re-surfaces the question and spends nothing.
+   */
+  readonly stepFailAnswer?: StepFailReply;
 }
 
 /** A pending stage-boundary budget ask, rebuilt from the journal. */
@@ -1095,6 +1445,13 @@ export function buildResumeState(lines: readonly JournalLine[]): ResumeState {
   const budgetAcks = new Set<BudgetCeilingKind>();
   const budgetRaises = new Map<BudgetCeilingKind, number>();
   let budgetCapUsd: number | undefined;
+  // The step-failure gate's fold, the budget gate's twin: an ask is pending
+  // until the step it names produces a fresh terminal (the retry ran) or a
+  // `stepAbandon` settles it. A `turnRaise` deliberately does NOT settle it —
+  // a crash between the grant and the retry must re-ask rather than spend on
+  // a gesture nobody made twice.
+  let stepFailAsk: PendingStepFailAsk | undefined;
+  const turnRaises = new Map<string, number>();
 
   for (const line of lines) {
     switch (line.kind) {
@@ -1156,6 +1513,10 @@ export function buildResumeState(lines: readonly JournalLine[]): ResumeState {
       case "stepEnd":
         latest.set(line.id, line);
         open.delete(line.id);
+        // A fresh terminal for the asked step is the retry landing (or the
+        // failure that a NEW ask is about to be appended for, below). Either
+        // way the previous ask is answered and gone.
+        if (stepFailAsk?.stepId === line.id) stepFailAsk = undefined;
         break;
       case "budgetAsk": {
         // A torn line is dropped rather than folded (see `budgetAskFacts`) —
@@ -1171,6 +1532,24 @@ export function buildResumeState(lines: readonly JournalLine[]): ResumeState {
       case "budgetRaise":
         budgetRaises.set(line.ceiling, line.value);
         if (budgetAsk?.ceiling === line.ceiling) budgetAsk = undefined;
+        break;
+      case "stepFailAsk": {
+        // A torn line is dropped rather than folded (see `stepFailAskFacts`),
+        // and it does not disturb whatever ask was already pending.
+        const facts = stepFailAskFacts(line);
+        if (facts !== undefined) stepFailAsk = facts;
+        break;
+      }
+      case "stepAbandon":
+        if (stepFailAsk?.stepId === line.stepId) stepFailAsk = undefined;
+        break;
+      case "turnRaise":
+        // Same tolerance rule as every other number folded off disk: a grant
+        // that is not a usable positive count is no grant, not a ceiling of
+        // `NaN` handed to a child agent.
+        if (typeof line.value === "number" && Number.isFinite(line.value) && line.value > 0) {
+          turnRaises.set(turnRaiseKey(line.stepId, line.role), Math.floor(line.value));
+        }
         break;
       case "runEnd":
         ended = true;
@@ -1259,6 +1638,8 @@ export function buildResumeState(lines: readonly JournalLine[]): ResumeState {
     ...(budgetAcks.size === 0 ? {} : { budgetAcks }),
     ...(budgetRaises.size === 0 ? {} : { budgetRaises }),
     ...(budgetCapUsd === undefined ? {} : { budgetCapUsd }),
+    ...(stepFailAsk === undefined ? {} : { stepFailAsk }),
+    ...(turnRaises.size === 0 ? {} : { turnRaises }),
   };
 }
 

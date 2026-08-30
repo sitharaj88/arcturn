@@ -143,11 +143,34 @@ run only* (the file is never rewritten), and `/workflow resume <run-id> continue
 acknowledges it, after which that ceiling never asks again and hard-stops exactly as
 before. Both replies are words: a bare resume re-states the question instead, because the
 acknowledgement is recorded as a person's consent and a nudge is not one. A ceiling you can
-answer beats a dead pipeline you can only re-buy. When a role
-does run out of turns, the failure now says so honestly: the step's error names the
-`maxTurns` ceiling it hit (not the core loop's "send another message" advice), `/workflow
-status` records `stop: turn-ceiling`, and the agent's final words are journalled so you can
-see how far it got before the rope ran out.
+answer beats a dead pipeline you can only re-buy.
+
+**A broken step is a question too.** The ceiling that actually kills long org runs is not
+money — it is turns, and a run can hit it at 5% of its token budget, where no budget
+checkpoint could ever fire. So a step that exhausts its retries no longer ends the run: it
+**parks** it, on the same durable machinery, naming the step, the role, why it stopped, and
+the patch its work was captured to. The step is still `failed`; the run is `paused`, and
+three words answer it:
+
+```text
+/workflow resume <run-id> retry       # run that step again — finished stages are reused, not redone
+/workflow resume <run-id> raise 120   # turn ceilings only: lift it for this run, then retry
+/workflow resume <run-id> abandon     # end the run failed, which is what it used to do by itself
+```
+
+A bare resume re-states the question and spends nothing; each retry is an explicit gesture,
+and a second failure parks again with the attempt count. `raise <n>` is run-scoped and
+lifts **both** halves of the ceiling a child actually runs under — the role file's
+`maxTurns:` and the session's `subagentMaxTurns` clamp — because those are combined with
+`Math.min` and editing the role file alone leaves the wall exactly where it was. Over the
+wire `retry` and `abandon` are fine and `raise` is refused, the same rule the budget ask
+follows. `continueOnError: true` keeps its old meaning and never parks.
+
+When a role does run out of turns the failure says so honestly, too: the step's error names
+the `maxTurns` ceiling it hit (not the core loop's "send another message" advice), the
+agent's final words are journalled so you can see how far it got before the rope ran out,
+and `/workflow status` records `stop: turn-ceiling` at the point the run genuinely stops —
+which is now the moment you answer `abandon`, not the moment the ceiling fires.
 
 ## Remembering what the last fifty runs cost you
 

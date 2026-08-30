@@ -16,6 +16,49 @@ The repository you cloned gets asked first.
 
 ### Added
 
+- **A failed step is a question, not a tombstone.** A step that exhausted
+  its retries used to write `runEnd{failed}`, and a failed run is
+  permanently unresumable — a nine-stage pipeline that got through four
+  paid stages and then hit a turn ceiling on stage five could only be
+  *re-bought*, survey, threat model, ADR and all. It now parks the run
+  `paused` at a durable, answerable cut point, on the same machinery the
+  stage-boundary budget ask rides. The step is still `failed` in
+  `/workflow status`, in `--print` and in CI; the run is a question.
+  `continueOnError: true` keeps its old meaning and never parks.
+- **Three replies, all words.** `/workflow resume <id> retry` re-runs that
+  step and continues — finished stages are replayed from the journal, never
+  paid for twice. `abandon` ends the run `failed`, which is what it used to
+  do by itself. `raise <n>` lifts a turn ceiling for that run only and
+  retries. A bare resume re-states the question and spends nothing: a retry
+  is money, and a script that nudges every stalled run must not be able to
+  buy one. A second failure parks again with the attempt count.
+- **A run-scoped turn raise lifts both halves of the ceiling.** A child's
+  `maxTurns` is `min(role maxTurns, subagentMaxTurns)`, so editing the role
+  file alone left a 64-turn wall exactly where it was — a trap that has
+  already cost a real run. `raise <n>` lifts both, applies to the role so a
+  later stage dispatching it inherits the rope, is journalled, and rewrites
+  no file: the next fresh run starts from the role file's own number.
+- **The turn ceiling finally has a human-facing alert.** The budget
+  checkpoint watches dollars and tokens, so a run killed by *turns* at 5%
+  of its token budget correctly never triggered it, and the wrap-up warning
+  near a ceiling goes to the model — which can ignore it. The park says, to
+  a person, that a turn ceiling and not a crash stopped the step, and that
+  `raise <n>` is available.
+- **Nothing on the wire lifts a ceiling — turns included.**
+  `resumeWorkflow` accepts `retry` and `abandon`, refuses a bare resume as a
+  nudge, and refuses `raise <n>` outright, naming the contract. The question
+  a wire client is shown never advertises the reply it would only be
+  refused for.
+
+### Fixed
+
+- **A retried worktree-lane step no longer collides with the worktree its
+  failure kept.** A failed write- or exec-lane step preserves its worktree
+  for forensics, and the worktree slug is keyed on the attempt index —
+  which restarted at 0 on every resume, so a retry died with "a worktree
+  already exists". The index now continues across resumes.
+
+
 - **A repository you cloned no longer runs its own code because you `cd`'d
   into it.** `<repo>/.arcturn` can declare lifecycle hooks, a `verify`
   command, extensions and stdio MCP servers — all of which run as you, and

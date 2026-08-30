@@ -165,7 +165,7 @@ exist so it can happen without leaving a session.
 | `/workflow <name> [args]` | Run a scripted multi-step workflow — see [Workflows](/docs/workflows) |
 | `/workflow list` | List discovered workflows |
 | `/workflow status [runId]` | What a run reached, its spend and turns, and why it stopped |
-| `/workflow resume <runId> [answer]` | Re-enter an interrupted run, or answer an `ORG-ASK:` |
+| `/workflow resume <runId> [answer]` | Re-enter an interrupted run, or answer what it parked on: an `ORG-ASK:` (free text), a budget checkpoint (`continue` / `raise <n>`), or a failed step (`retry` / `abandon` / `raise <n>`) |
 | `/org memory` | Inspect per-role lessons injected into later runs — see [Agent organizations](/docs/agent-organizations) |
 | `/org memory add\|propose\|approve\|revoke\|rm` | Edit that store |
 

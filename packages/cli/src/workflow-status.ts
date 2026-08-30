@@ -30,7 +30,11 @@ import {
   budgetAskQuestion,
   budgetAskResumeHint,
   type JournalLine,
+  type PendingStepFailAsk,
   readJournalLines,
+  stepFailAskFacts,
+  stepFailAskQuestion,
+  stepFailAskResumeHint,
   type WorkflowStopReason,
 } from "./workflow-run.js";
 
@@ -106,6 +110,15 @@ export interface JournalRun {
    * is asked about first, so a one-line reader stays consistent with the list.
    */
   pendingQuestion?: string;
+  /**
+   * The step-failure park this run is holding, when one is pending.
+   *
+   * Kept on the fold (rather than derived from the question text) because the
+   * *hint* under a parked run differs by failure kind: `raise <n>` is offered
+   * only where a turn ceiling actually tripped, and offering a reply the
+   * engine will refuse is an instruction to loop.
+   */
+  parkedStep?: PendingStepFailAsk;
   /** Wall clock of the newest journal line — the staleness signal. */
   lastWriteTs?: number;
 }
@@ -148,6 +161,8 @@ export interface RunSummary {
   readonly pendingQuestion?: string;
   /** Every question it is waiting on — more than one when a parallel stage paused. */
   readonly pendingQuestions: readonly PendingJournalQuestion[];
+  /** The step-failure park it is holding, when it is parked on one. */
+  readonly parkedStep?: PendingStepFailAsk;
 }
 
 /** Track the newest timestamp seen, from whichever field a line carries it in. */
@@ -181,6 +196,12 @@ export function foldJournal(
   // follows. Two folds of one journal disagreeing about whether a question is
   // still owed is how status says "answered" while resume asks again.
   let askedCeiling: BudgetCeilingKind | undefined;
+  // The step-failure park's fold, the budget ask's twin: which step is parked,
+  // kept so a later terminal for THAT step (the retry landing) retires it and
+  // so the resume hint can offer `raise` only where a turn ceiling tripped.
+  // Two folds of one journal disagreeing about whether a question is still
+  // owed is how status says "answered" while resume asks again.
+  let parkedStep: PendingStepFailAsk | undefined;
   // Every step whose latest terminal is a `paused` one, in the order the journal
   // first saw it — insertion order is what makes `pendingQuestions` stable and
   // `pendingQuestion` the *first* question rather than whichever branch of a
@@ -271,6 +292,11 @@ export function foldJournal(
         // per step — a parallel stage's siblings are settled independently.
         if (line.status === "paused") pending.set(line.id, line.question ?? "");
         else pending.delete(line.id);
+        // A fresh terminal for a parked step is the retry landing: the park's
+        // question is answered and gone, whatever this terminal says. The
+        // `stepFailAsk` that a *failing* terminal is followed by re-arms it on
+        // the very next line, so a step that failed again stays parked.
+        if (parkedStep?.stepId === line.id) parkedStep = undefined;
         bumpWrite(run, line.endedAt);
         break;
       }
@@ -309,6 +335,34 @@ export function foldJournal(
         }
         bumpWrite(run, line.ts);
         break;
+      case "stepFailAsk": {
+        // The step-failure park is a pending question keyed under the step
+        // that failed — a real id, not the budget ask's sentinel. Rendered
+        // here from the recorded facts by the writer's own renderer, so status
+        // and resume restate one identical question, and validated first
+        // because these numbers came off disk.
+        const facts = stepFailAskFacts(line);
+        if (facts !== undefined) {
+          parkedStep = facts;
+          pending.set(facts.stepId, stepFailAskQuestion(facts, audience));
+        }
+        bumpWrite(run, line.ts);
+        break;
+      }
+      case "stepAbandon":
+        // The human chose the tombstone: the question is settled, and the
+        // `runEnd{failed}` that follows is the run's own answer.
+        if (parkedStep?.stepId === line.stepId) {
+          pending.delete(line.stepId);
+          parkedStep = undefined;
+        }
+        bumpWrite(run, line.ts);
+        break;
+      case "turnRaise":
+        // A grant settles nothing on its own — the retry's terminal does. It
+        // is recorded here only for the clock.
+        bumpWrite(run, line.ts);
+        break;
       case "stop":
         run.stopReason = line.reason;
         bumpWrite(run, line.ts);
@@ -325,6 +379,7 @@ export function foldJournal(
   run.stages.push(...[...stages.values()].sort((a, b) => a.index - b.index));
   run.pendingQuestions = [...pending].map(([stepId, question]) => ({ stepId, question }));
   run.pendingQuestion = run.pendingQuestions[0]?.question;
+  if (parkedStep !== undefined) run.parkedStep = parkedStep;
   return run;
 }
 
@@ -383,6 +438,7 @@ export function summariseRun(run: JournalRun, now: number = Date.now()): RunSumm
     ...(run.lastWriteTs === undefined ? {} : { lastWriteTs: run.lastWriteTs }),
     ...(run.pendingQuestion === undefined ? {} : { pendingQuestion: run.pendingQuestion }),
     pendingQuestions: run.pendingQuestions,
+    ...(run.parkedStep === undefined ? {} : { parkedStep: run.parkedStep }),
   };
 }
 
@@ -457,6 +513,11 @@ export function formatRunsTable(
       // is one copy too many.
       if (row.pendingQuestions[0]?.stepId === BUDGET_ASK_STEP_ID) {
         lines.push(`    ${budgetAskResumeHint(row.runId)}`);
+      } else if (row.parkedStep !== undefined) {
+        // A parked step takes `retry`/`abandon` (and `raise <n>` only for a
+        // turn ceiling), not prose — telling the operator "<answer>" here
+        // would invite a reply the engine can only bounce back.
+        lines.push(`    ${stepFailAskResumeHint(row.runId, row.parkedStep)}`);
       } else {
         lines.push(`    answer with /workflow resume ${row.runId} <answer>`);
       }
@@ -518,13 +579,23 @@ export function formatRunDetail(
     // The detail view has the room to list every owed question with the step
     // that raised it, which is what an operator needs to answer them.
     if (run.pendingQuestions.length === 1 && run.pendingQuestion) {
-      lines.push(`Awaiting a human answer: ${run.pendingQuestion}`);
+      // A parked step did not *ask* anything — it broke, and the run stopped
+      // to be told what to do about it. Calling that "awaiting a human answer"
+      // sends an operator hunting the transcript for an `ORG-ASK` that is not
+      // there.
+      lines.push(
+        run.parkedStep === undefined
+          ? `Awaiting a human answer: ${run.pendingQuestion}`
+          : `Parked at a failed step: ${run.pendingQuestion}`,
+      );
     } else if (run.pendingQuestions.length > 1) {
       lines.push(`Awaiting ${run.pendingQuestions.length} human answers:`);
       for (const q of run.pendingQuestions) lines.push(`  ${q.stepId}: ${q.question}`);
     }
     if (run.pendingQuestions[0]?.stepId === BUDGET_ASK_STEP_ID) {
       lines.push(budgetAskResumeHint(run.runId));
+    } else if (run.parkedStep !== undefined) {
+      lines.push(stepFailAskResumeHint(run.runId, run.parkedStep));
     } else {
       lines.push(`Answer with /workflow resume ${run.runId} <answer>`);
     }

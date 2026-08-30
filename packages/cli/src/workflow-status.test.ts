@@ -26,7 +26,7 @@ import {
   type WorkflowStepOutcome,
   type WorkflowStepRequest,
 } from "./workflow.js";
-import type { JournalLine } from "./workflow-run.js";
+import { buildResumeState, type JournalLine, type ResumeState } from "./workflow-run.js";
 import {
   deriveRunState,
   foldJournal,
@@ -106,10 +106,18 @@ async function engineJournal(options: {
   runStep: (request: WorkflowStepRequest) => Promise<WorkflowStepOutcome>;
   runId?: string;
   retry?: WorkflowRetryPolicy;
+  /**
+   * Continue an existing journal instead of starting one, so a fixture can
+   * cover what a resumed run writes — the step-failure park's `abandon` in
+   * particular, which is where a broken run's `runEnd{failed}` and its `stop`
+   * line now come from.
+   */
+  into?: JournalLine[];
+  resumeFrom?: ResumeState;
 }): Promise<JournalLine[]> {
   const parsed = parseWorkflow(options.source, { name: "wf" });
   if (isWorkflowParseError(parsed)) throw new Error(`bad fixture workflow: ${parsed.error}`);
-  const lines: JournalLine[] = [];
+  const lines: JournalLine[] = options.into ?? [];
   let clock = START;
   await runWorkflow(parsed, {
     runId: options.runId ?? "run-A",
@@ -118,6 +126,7 @@ async function engineJournal(options: {
     resolveAgent: (name) => role(name),
     agentNames: () => [],
     ...(options.retry === undefined ? {} : { retry: options.retry }),
+    ...(options.resumeFrom === undefined ? {} : { resumeFrom: options.resumeFrom }),
     runStep: async (request) => {
       clock += 100; // wall clock moves while the step runs
       const outcome = await options.runStep(request);
@@ -293,6 +302,15 @@ describe("foldJournal + formatRunsTable", () => {
         return { text: "", usage: usage(9000, 10), isError: true, error: "it broke" };
       },
     });
+    // A broken step parks the run now, so the `runEnd{failed}` this fold reads
+    // comes from the human declining to spend again.
+    expect(deriveRunState(foldJournal("run-cost", lines), lastTs(lines) + 500)).toBe("paused");
+    await engineJournal({
+      source: [FRONT, "1. @developer patch it"].join("\n"),
+      into: lines,
+      resumeFrom: { ...buildResumeState(lines), stepFailAnswer: { text: "abandon" } },
+      runStep: async () => ({ text: "", usage: usage(), isError: true, error: "it broke" }),
+    });
     const run = foldJournal("run-cost", lines);
     expect(deriveRunState(run, lastTs(lines) + 500)).toBe("failed");
     const table = formatRunsTable([run], lastTs(lines) + 500).join("\n");
@@ -383,6 +401,15 @@ describe("foldJournal + formatRunsTable", () => {
         failureKind: "turn-ceiling",
         finalText: "Index 3 of 5 is built; starting the reranker next.",
       }),
+    });
+    // The ceiling parks the run; `abandon` is where it actually stops, and
+    // that is where the `turn-ceiling` label is written.
+    expect(foldJournal("run-turns", lines).endStatus).toBe("paused");
+    await engineJournal({
+      source: [FRONT, "1. @developer build it", "2. @reviewer read it {{prev}}"].join("\n"),
+      into: lines,
+      resumeFrom: { ...buildResumeState(lines), stepFailAnswer: { text: "abandon" } },
+      runStep: async () => ({ text: "", usage: usage(50), isError: true, error: "unused" }),
     });
     const run = foldJournal("run-turns", lines);
     expect(run.stopReason).toBe("turn-ceiling");

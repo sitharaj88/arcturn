@@ -472,6 +472,104 @@ describe("the ORG-ASK gate over the wire", () => {
   });
 });
 
+describe("the step-failure park over the wire", () => {
+  /** A read-lane role with a two-turn ceiling, and a workflow that uses it. */
+  async function ragFixture(scratch: Scratch): Promise<void> {
+    await writeRole(
+      scratch,
+      "indexer",
+      "---\nname: indexer\ndescription: Builds indexes\ntools: read, grep\nmaxTurns: 2\n---\nIndex.\n",
+    );
+    await writeWorkflow(
+      scratch,
+      "rag",
+      ["---", "name: rag", "---", "1. First: {{input}}", "2. @indexer Index: {{prev}}", ""].join(
+        "\n",
+      ),
+    );
+  }
+
+  /** The model turn that keeps a role asking for another turn, forever. */
+  const looping = { toolCalls: [{ id: "c", name: "grep", arguments: { pattern: "x" } }] };
+
+  it("parks on a turn ceiling, refuses a wire raise and a nudge, and accepts retry", async () => {
+    const scratch = await makeScratch();
+    await ragFixture(scratch);
+    // Stage 1 lands in one turn; stage 2's role then loops until its two-turn
+    // ceiling — the ceiling is the only thing that can end it, which is the
+    // condition this park exists for. The fourth turn is the retry's, and it
+    // lands the plane.
+    const harness = await serve(scratch, [
+      { text: "the survey" },
+      looping,
+      looping,
+      { text: "indexed" },
+    ]);
+
+    const handle = await harness.client.runWorkflow(harness.sessionId, "rag", { input: "go" });
+    const parked = await settled(harness.client, handle.runId);
+    // FAIL-FIRST: pre-change stage 2's ceiling wrote `runEnd{failed}` and this
+    // read "failed" — a corpse both resume verbs refuse forever, with stage 1
+    // already paid for. Parked, it is a resumable question.
+    expect(parked.state).toBe("paused");
+    expect(parked.questions).toHaveLength(1);
+    expect(parked.questions[0]?.stepId).toBe("2");
+    expect(parked.questions[0]?.question).toContain("ran out of turns");
+    // The wire is never told to send the one reply it will only be refused for.
+    expect(parked.questions[0]?.question).not.toContain("raise <n>");
+    expect(parked.questions[0]?.question).toContain('Reply "retry"');
+    expect(parked.questions[0]?.question).toContain("the wire cannot raise a turn ceiling");
+
+    // THE CONTRACT: nothing on the wire may lift a ceiling — a dollar one, a
+    // token one, or a turn one. `answer: "raise 99"` is refused, not threaded
+    // through and not clamped, and nothing starts.
+    await expect(
+      harness.client.resumeWorkflow(harness.sessionId, handle.runId, "raise 99"),
+    ).rejects.toThrow(/turn ceiling cannot be raised over the wire/);
+    expect((await harness.client.workflowStatus(handle.runId))?.runs[0]?.state).toBe("paused");
+
+    // A *bare* resume is a nudge, and a retry is money: refused too.
+    await expect(harness.client.resumeWorkflow(harness.sessionId, handle.runId)).rejects.toThrow(
+      /needs an answer, not a nudge/,
+    );
+    expect((await harness.client.workflowStatus(handle.runId))?.runs[0]?.state).toBe("paused");
+
+    // `retry` IS answerable over the wire, and it re-runs only the broken step.
+    const retried = await harness.client.resumeWorkflow(harness.sessionId, handle.runId, "retry");
+    expect(retried).toMatchObject({ runId: handle.runId, resumed: true });
+    const finished = await settled(harness.client, handle.runId, (state) => state === "done");
+    expect(finished.state).toBe("done");
+    const steps = (await harness.client.workflowStatus(handle.runId, { steps: true }))?.runs[0]
+      ?.steps;
+    expect(steps?.find((step) => step.id === "1")?.status).toBe("done");
+    expect(steps?.find((step) => step.id === "2")?.status).toBe("done");
+    // Stage 1 was reused, not redone — and the proof is the script: the retry
+    // consumed the FOURTH scripted turn ("indexed"). A re-executed stage 1
+    // would have eaten that turn itself and left stage 2 looping into its
+    // ceiling again, which is a `paused`, not the `done` asserted above.
+    // (`orchestration-effects.test.ts` counts the requests directly.)
+  });
+
+  it("ends the run failed on abandon, and it is then genuinely unresumable", async () => {
+    const scratch = await makeScratch();
+    await ragFixture(scratch);
+    const harness = await serve(scratch, [{ text: "the survey" }, looping]);
+
+    const handle = await harness.client.runWorkflow(harness.sessionId, "rag", { input: "go" });
+    expect((await settled(harness.client, handle.runId)).state).toBe("paused");
+
+    // The tombstone, chosen rather than imposed.
+    await harness.client.resumeWorkflow(harness.sessionId, handle.runId, "abandon");
+    const dead = await settled(harness.client, handle.runId, (state) => state === "failed");
+    expect(dead.state).toBe("failed");
+    // The `stop` label the ceiling earned, written where the run really stops.
+    expect(dead.stopReason).toBe("turn-ceiling");
+    await expect(
+      harness.client.resumeWorkflow(harness.sessionId, handle.runId, "retry"),
+    ).rejects.toThrow(/already finished \(failed\); nothing to resume/);
+  });
+});
+
 describe("the stage-boundary budget ask over the wire", () => {
   it("parks before the hard stop, refuses a wire raise, and runs on to the hard ceiling once acknowledged", async () => {
     const scratch = await makeScratch();

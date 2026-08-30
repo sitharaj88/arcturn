@@ -135,6 +135,64 @@ tripped. And because the raise grammar only applies when the pending question *i
 budget ask, answering a role's `ORG-ASK` with the words "raise 40" threads through as an
 ordinary answer, untouched.
 
+## A failed step is a question, not a tombstone
+
+The same reasoning applies to the *other* way a run used to die, and this one is far more
+common. When a step exhausted its retries — a role that hit its turn ceiling, a deadline
+that fired, a patch that would not apply, a role that spent its own `budget:` — the engine
+wrote `runEnd{failed}`, and a failed run is permanently unresumable:
+
+```text
+⚠ Run 20260830T152033-9f51b895 already finished (failed); nothing to resume.
+```
+
+For a nine-stage pipeline that got through four paid stages before stage 5 ran out of
+turns, the only way forward was a fresh run: paying again for a survey, a threat model and
+two ADRs that had already succeeded and were already on disk.
+
+So a failed step now **parks** the run instead. The step is still `failed` — it shows as
+`failed` in `/workflow status`, in `--print` and in CI — but the *run* ends `paused`, at a
+clean, durable, answerable cut point, with a question naming the step, the role, why it
+stopped in one line, the patch its work was captured to when there is one, and the replies
+that are valid. `continueOnError: true` is untouched: those runs already continue past a
+failed step and never park.
+
+Three replies, all through the ordinary resume command, and all of them **words**:
+
+```text
+/workflow resume <run-id> retry       # run that step again; finished stages are reused, not redone
+/workflow resume <run-id> raise 120   # turn ceilings only: lift it for this run, then retry
+/workflow resume <run-id> abandon     # end the run failed — today's behaviour, now chosen
+```
+
+A bare `/workflow resume <run-id>` is none of them. It re-states the question, pre-fills the
+command and spends nothing, exactly as it does for an unanswered `ORG-ASK` or a budget
+checkpoint — a retry is money, and a script that nudges every stalled run must not be able
+to buy one. Anything the engine does not understand re-parks the run with the reason. Each
+retry is therefore an explicit human gesture: if the same step fails again it parks again,
+with the attempt count in the question, so nobody feeds a hole without being told.
+
+**`raise <n>` is the turn ceiling's lever and nothing else's.** It is offered only when the
+step actually ran out of turns, must be a positive whole number strictly above the ceiling
+that just tripped, and is **run-scoped**: no file is rewritten, and a fresh run starts from
+the role file's own number again. It applies to the role, so a later stage dispatching the
+same role inherits the rope rather than parking again for an answer you already gave — and
+it lifts *both* halves of the ceiling the child actually runs under, the role's own
+`maxTurns:` and the session's `subagentMaxTurns` clamp. That last part is the trap it
+exists to close: those two are combined with `Math.min`, so editing the role file alone
+leaves a 64-turn wall exactly where it was.
+
+This is also the alert that was missing. The budget checkpoint watches dollars and tokens;
+a run that dies on *turns* can be at 5% of its token budget, so that checkpoint correctly
+never fires. The wrap-up warning a role gets near its ceiling goes to the model, and a
+model can ignore it. The park is the version a person sees, and it says in words that a
+turn ceiling — not a crash — is what stopped the step, and that `raise <n>` is available.
+
+Two failures deliberately do **not** park, because a retry could not change them: a resume
+refused because the workflow file changed under the run (every attempt re-derives the same
+prompt hash and is refused identically — start a fresh run), and a fatal `ORG-HALT`, where
+the role itself declared the work unrecoverable.
+
 ## Model tags
 
 Every `[tag]` in a workflow file is resolved **before the first step runs**, not lazily as
@@ -315,7 +373,10 @@ Three things are worth knowing before you build on them, and all three are cover
   the contract — raising a parked run's ceiling is terminal-only, or an edit to the workflow
   file itself. Without those two refusals, the run-start rule would be theatre: a client
   could smuggle the raise in as free resume text, or simply nudge the run back to the
-  file's own, larger ceiling.
+  file's own, larger ceiling. A run parked at a **failed step** follows the identical rule:
+  `answer: "retry"` and `answer: "abandon"` are both fine over the wire, a bare resume is
+  refused as a nudge, and `raise <n>` is refused outright — a turn ceiling is a ceiling, and
+  nothing on the wire lifts one.
 - **A run is followed on the session's own event stream.** `runWorkflow` answers as soon as
   the run is *accepted* (a pipeline outlives every sane request deadline), and its progress
   arrives as the same `notice` events the terminal prints, plus each step's child agent
@@ -341,6 +402,13 @@ checkout is **not applied a second time** — the engine probes each recorded pa
 `git apply --check --reverse` to establish whether it is already present before deciding.
 That property is the reason the journal exists; treat any resume that re-executes finished
 work as a bug worth reporting.
+
+A resume re-enters a run that was interrupted **or** parked. Three kinds of park are
+resumable, and each takes its own replies: an unanswered `ORG-ASK` takes your answer as
+free text, a stage-boundary budget checkpoint takes `continue` or `raise <n>`, and a failed
+step takes `retry`, `abandon` or (for a turn ceiling) `raise <n>`. A genuinely finished run
+— `done`, `cancelled`, or a `failed` you reached by answering `abandon` — has nothing to
+resume and both entry points say so.
 
 If journaling was never possible at all — an unwritable state directory, say — the run
 still executes normally and simply tells you at the end that it was not resumable. A
@@ -371,6 +439,14 @@ matters:
   timestamps, zero usage). Set `continueOnError: true` in the frontmatter to disable the
   short-circuit — the run still ends `failed` overall, and `error` still names the *first*
   failure, so a caller can never mistake a `continueOnError` run for a clean one.
+- **A failed step parks the run rather than ending it.** Without `continueOnError`, the
+  short-circuit is unchanged and the step is still `failed`, but the *run* ends `paused`
+  with a question — `retry`, `abandon`, or `raise <n>` for a turn ceiling — instead of a
+  `runEnd{failed}` no resume can re-enter. See [A failed step is a question, not a
+  tombstone](#a-failed-step-is-a-question-not-a-tombstone). A run only reports `failed` when
+  something genuinely un-retryable ended it: a money ceiling, a cancelled run, a
+  `continueOnError` pipeline, a stale resume, an `ORG-HALT`, or a human answering
+  `abandon`.
 - **`{{prev}}` only ever carries what the stage actually produced.** An all-failed
   `continueOnError` stage hands the next stage an empty string, never stale text carried
   over from an earlier stage.

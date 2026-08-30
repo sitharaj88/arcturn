@@ -43,6 +43,7 @@ import {
   roleDispatch,
   roleLane,
   runWorkflow,
+  turnCeilingFromCause,
   type Workflow,
   type WorkflowAgentHost,
   type WorkflowBackgroundTasks,
@@ -50,6 +51,7 @@ import {
   type WorkflowEvent,
   type WorkflowPatchRecord,
   type WorkflowStepDurability,
+  type WorkflowStepOutcome,
   type WorkflowStepRequest,
   type WorkflowStepRunner,
   type WriteLane,
@@ -72,6 +74,12 @@ import {
   type RunJournal,
   readJournalLines,
 } from "./workflow-run.js";
+import {
+  deriveRunState,
+  foldJournal,
+  formatRunDetail,
+  formatRunsTable,
+} from "./workflow-status.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -455,8 +463,14 @@ describe("runWorkflow", () => {
       },
     });
     expect(ran).toEqual(["1", "2"]);
-    expect(result.status).toBe("failed");
-    expect(result.error).toBe("boom");
+    // THE STEP-FAILURE PARK: the short-circuit is unchanged — stage 3 never
+    // ran — but the RUN now stops resumably rather than writing its own
+    // tombstone. The step itself is still `failed`, and the run's message
+    // still carries the step's own words.
+    expect(result.status).toBe("paused");
+    expect(result.error).toContain("boom");
+    expect(result.pause?.stepId).toBe("2");
+    expect(result.pause?.reason).toBe("step-failure");
     expect(result.steps.map((step) => step.status)).toEqual(["done", "failed", "skipped"]);
     expect(result.steps[2]?.usage).toMatchObject({ inputTokens: 0 });
   });
@@ -470,7 +484,10 @@ describe("runWorkflow", () => {
           : { text: "B", usage: usage(), isError: false },
     });
     expect(result.steps.map((step) => step.status)).toEqual(["failed", "done", "skipped"]);
-    expect(result.status).toBe("failed");
+    // The sibling still finished and stage 2 was still skipped; only the run's
+    // own terminal moved from `failed` to the resumable park.
+    expect(result.status).toBe("paused");
+    expect(result.pause?.stepId).toBe("1.1");
   });
 
   it("keeps going past a failure when continueOnError is set", async () => {
@@ -497,7 +514,7 @@ describe("runWorkflow", () => {
         throw new Error("runner exploded");
       },
     });
-    expect(result.status).toBe("failed");
+    expect(result.status).toBe("paused");
     expect(result.steps[0]?.status).toBe("failed");
     expect(result.error).toMatch(/runner exploded/);
   });
@@ -1567,7 +1584,9 @@ describe("runWorkflow — per-step deadline", () => {
     const result = await run;
 
     expect(sawAbort).toBe(true);
-    expect(result.status).toBe("failed");
+    // The deadline still fails the STEP and still skips stage 2; the run parks
+    // on it rather than ending, so the operator can fix the hang and retry.
+    expect(result.status).toBe("paused");
     expect(result.steps.map((step) => step.status)).toEqual(["failed", "skipped"]);
     expect(result.steps[0]?.error).toMatch(
       /^step 1 exceeded its 5s deadline \(5000ms\) and was aborted/,
@@ -1691,7 +1710,7 @@ describe("runWorkflow — per-step deadline", () => {
       runStep: createRuntimeRunStep({ createSubagent: () => agent }),
     });
 
-    expect(result.status).toBe("failed");
+    expect(result.status).toBe("paused");
     expect(result.steps[0]?.usage).toMatchObject({ inputTokens: 9_000, outputTokens: 4_000 });
     // The run's own total — what `formatWorkflowRun` reports — includes it.
     expect(result.usage).toMatchObject({ inputTokens: 9_000, outputTokens: 4_000 });
@@ -1942,7 +1961,10 @@ describe("createWorkflowCommands — role wiring", () => {
       commands: {} as never,
     });
 
-    expect(out.notices.at(-1)?.text).toMatch(/plan mode has no write lane/);
+    // The refusal is still stated to the operator — it is now the *cause* on a
+    // parked step rather than the run's own last word, because leaving plan
+    // mode and replying `retry` is a real recovery this run can still take.
+    expect(out.notices.some((n) => /plan mode has no write lane/.test(n.text))).toBe(true);
     expect(lane.created).toEqual([]);
     expect(lane.spawned).toEqual([]);
     expect(runtime.defs).toEqual([]);
@@ -5113,7 +5135,10 @@ describe("runWorkflow — self-healing retry", () => {
     });
     // maxRetries:0 reproduces pre-change behaviour: no retry, one attempt, fail.
     expect(flaky.calls()).toBe(1);
-    expect(result.status).toBe("failed");
+    // The step failed once and the run parked on it (the retry policy is what
+    // is under test here, not the run's terminal).
+    expect(result.status).toBe("paused");
+    expect(result.steps[0]?.status).toBe("failed");
   });
 
   it("does NOT retry a deterministic (patch-refused) failure", async () => {
@@ -5133,7 +5158,7 @@ describe("runWorkflow — self-healing retry", () => {
       },
     });
     expect(n).toBe(1); // retries were available, but a deterministic failure took none
-    expect(result.status).toBe("failed");
+    expect(result.status).toBe("paused");
     expect(result.steps[0]?.error).toBe("conflict");
   });
 
@@ -5148,7 +5173,7 @@ describe("runWorkflow — self-healing retry", () => {
       },
     });
     expect(n).toBe(1);
-    expect(result.status).toBe("failed");
+    expect(result.status).toBe("paused");
   });
 
   it("stops retrying once the step's shared wall clock is spent (retries do not multiply it)", async () => {
@@ -5168,7 +5193,7 @@ describe("runWorkflow — self-healing retry", () => {
     });
     // Budget exhausted after the first attempt: no retry even with maxRetries:5.
     expect(n).toBe(1);
-    expect(result.status).toBe("failed");
+    expect(result.status).toBe("paused");
   });
 
   it("caps transient retries at maxRetries then fails the step", async () => {
@@ -5188,7 +5213,7 @@ describe("runWorkflow — self-healing retry", () => {
       },
     });
     expect(n).toBe(3); // 1 + 2 retries, all failed
-    expect(result.status).toBe("failed");
+    expect(result.status).toBe("paused");
   });
 });
 
@@ -5272,8 +5297,9 @@ describe("runWorkflow — cost telemetry", () => {
       },
     });
     expect(n).toBe(3);
-    expect(result.status).toBe("failed");
-    // A run that failed still spent 3 × 30 tokens; a failed run is not a refund.
+    expect(result.status).toBe("paused");
+    // A run that broke still spent 3 × 30 tokens; a parked run is not a refund
+    // any more than a failed one was.
     expect(result.usage.outputTokens).toBe(90);
   });
 
@@ -5386,7 +5412,7 @@ describe("runWorkflow — cost telemetry", () => {
         throw new Error("host died"); // …then the runner blew up
       },
     });
-    expect(result.status).toBe("failed");
+    expect(result.status).toBe("paused");
     // The tokens that turn burned were billed; an exception is not a refund.
     expect(result.steps[0]?.usage.outputTokens).toBe(500);
     expect(result.usage.costUsd).toBeCloseTo(4, 10);
@@ -5435,7 +5461,10 @@ describe("runWorkflow — enforced per-role and run budgets", () => {
     });
 
     expect(sawAbort).toBe(true);
-    expect(result.status).toBe("failed");
+    // The role's own ceiling still aborts the step and still skips stage 2 —
+    // and the run parks on it, because "raise the role's budget and try again"
+    // is a decision only a person can make.
+    expect(result.status).toBe("paused");
     expect(result.steps.map((step) => step.status)).toEqual(["failed", "skipped"]);
     expect(result.steps[0]?.error).toMatch(
       /^step 1 \(@developer\) exceeded its \$1\.50 budget \(spent \$1\.65\) and was aborted/,
@@ -5498,7 +5527,7 @@ describe("runWorkflow — enforced per-role and run budgets", () => {
     // ceiling again, never heal it.
     expect(n).toBe(2);
     expect(sawAbort).toBe(true);
-    expect(result.status).toBe("failed");
+    expect(result.status).toBe("paused");
     expect(result.steps[0]?.error).toMatch(/exceeded its \$1\.50 budget \(spent \$1\.60\)/);
   });
 
@@ -6258,6 +6287,815 @@ describe("runWorkflow — the stage-boundary budget ask", () => {
   });
 });
 
+// ===========================================================================
+// THE STEP-FAILURE PARK — a failed step is a question, not a tombstone.
+//
+// FAIL-FIRST, and the run that motivated it: a nine-stage pipeline finished
+// stages 1–4 (a survey, a threat model, two ADRs — all paid for, all on disk)
+// and then stage 5's `@rag-builder` hit its 64-turn ceiling. The engine wrote
+// `runEnd{failed}`, and BOTH resume entry points refuse a failed run forever:
+//
+//     ⚠ Run 20260830T152033-9f51b895 already finished (failed); nothing to resume.
+//
+// The only way forward was a fresh run — paying again for four stages that had
+// already succeeded. Every assertion below on `status === "paused"`, on the
+// journalled `stepFailAsk`, on `buildResumeState` accepting the run, and on
+// the retried step being the ONLY one re-executed, failed before this change.
+// ===========================================================================
+describe("runWorkflow — the step-failure park", () => {
+  const TWO_STAGES = parseOk(
+    [FRONT, "1. @surveyor survey", "2. @builder build {{prev}}"].join("\n"),
+  );
+  const RESOLVE: AgentRoleResolver = (name) => role(name, ["read", "grep"]);
+
+  /** The cause a lane writes when a child agent runs out of turns. */
+  const CEILING_CAUSE =
+    'role "builder" hit its 64-turn ceiling before finishing; raise maxTurns in the role ' +
+    "file or narrow the step";
+
+  /**
+   * Stage 1 succeeds; stage 2 exhausts its turns. `calls` records which steps
+   * actually executed — the money the old behaviour was throwing away.
+   */
+  function ceilingRunner(
+    calls: string[],
+    outcome: (request: WorkflowStepRequest) => Partial<WorkflowStepOutcome> = () => ({}),
+  ): WorkflowStepRunner {
+    return async (request) => {
+      calls.push(request.step.id);
+      if (request.step.id === "1") {
+        return { text: "<survey>", usage: usage(1, 1), isError: false };
+      }
+      return {
+        text: "",
+        usage: usage(1, 1),
+        isError: true,
+        error: CEILING_CAUSE,
+        failureKind: "turn-ceiling",
+        ...outcome(request),
+      };
+    };
+  }
+
+  /** Run to the park, returning the journal and the folded resume state. */
+  async function parkedRun(runner?: WorkflowStepRunner): Promise<{
+    sink: RunJournal;
+    lines: JournalLine[];
+    calls: string[];
+    state: ReturnType<typeof buildResumeState>;
+  }> {
+    const { sink, lines } = memoryJournal();
+    const calls: string[] = [];
+    const result = await runWorkflow(TWO_STAGES, {
+      journal: sink,
+      runStep: runner ?? ceilingRunner(calls),
+      resolveAgent: RESOLVE,
+      agentNames: () => ["surveyor", "builder"],
+    });
+    expect(result.status).toBe("paused");
+    return { sink, lines, calls, state: buildResumeState(lines) };
+  }
+
+  it("parks the run `paused` on a turn ceiling instead of writing a tombstone", async () => {
+    const { sink, lines } = memoryJournal();
+    const calls: string[] = [];
+    const result = await runWorkflow(TWO_STAGES, {
+      journal: sink,
+      runStep: ceilingRunner(calls),
+      resolveAgent: RESOLVE,
+      agentNames: () => ["surveyor", "builder"],
+    });
+
+    // FAIL-FIRST: this was `failed`, and a failed run is permanently
+    // unresumable — the stage-1 survey would have had to be bought again.
+    expect(result.status).toBe("paused");
+    expect(calls).toEqual(["1", "2"]);
+    expect(result.steps.map((step) => step.status)).toEqual(["done", "failed"]);
+    expect(result.pause?.stepId).toBe("2");
+    expect(result.pause?.reason).toBe("step-failure");
+
+    // THE ALERT THE OPERATOR NEVER GOT: the question says, in words, that a
+    // turn ceiling stopped this — the thing the model was told by the wrap-up
+    // warning and the human was told by nothing at all — and names `raise`.
+    expect(result.pause?.question).toContain("Step 2 (@builder) ran out of turns");
+    expect(result.pause?.question).toContain("it hit a turn ceiling, it did not crash");
+    expect(result.pause?.question).toContain("64-turn ceiling");
+    expect(result.pause?.question).toContain('Reply "retry"');
+    expect(result.pause?.question).toContain('"raise <n>" (above 64)');
+    expect(result.pause?.question).toContain('"abandon" to end the run failed');
+    // …and that the four stages already on disk are not being thrown away.
+    expect(result.pause?.question).toContain("reused, not paid for again");
+    expect(result.error).toContain("parked at a failed step");
+
+    const ask = lines.find(
+      (line): line is Extract<JournalLine, { kind: "stepFailAsk" }> => line.kind === "stepFailAsk",
+    );
+    expect(ask).toMatchObject({
+      stepId: "2",
+      role: "builder",
+      failureKind: "turn-ceiling",
+      ceiling: 64,
+      attempts: 1,
+    });
+    expect(ask?.cause).toContain("64-turn ceiling");
+    // A park is not a stop: no `stop` line, and the end is the soft `paused`.
+    expect(lines.some((line) => line.kind === "stop")).toBe(false);
+    expect(lines.find((line) => line.kind === "runEnd")).toMatchObject({ status: "paused" });
+
+    // FAIL-FIRST, the half that costs money: the resume gate refused this run.
+    const state = buildResumeState(lines);
+    expect(state.ended).toBe(true);
+    expect(state.endedStatus).toBe("paused"); // not "failed" — resumable
+    expect(state.stepFailAsk).toMatchObject({ stepId: "2", failureKind: "turn-ceiling" });
+    expect(state.completed.has("1")).toBe(true);
+  });
+
+  it("names the captured patch, so the partial work can be applied by hand", async () => {
+    const { lines } = await parkedRun(
+      ceilingRunner([], () => ({
+        record: {
+          status: "captured" as const,
+          files: 2,
+          patchPath: "/runs/r1/2-builder.patch",
+          insertions: 10,
+          deletions: 0,
+        },
+      })),
+    );
+    const ask = lines.find(
+      (line): line is Extract<JournalLine, { kind: "stepFailAsk" }> => line.kind === "stepFailAsk",
+    );
+    expect(ask?.patchPath).toBe("/runs/r1/2-builder.patch");
+    expect(buildResumeState(lines).stepFailAsk?.patchPath).toBe("/runs/r1/2-builder.patch");
+  });
+
+  it("re-runs ONLY the failed step on `retry` — the finished stages are not paid for twice", async () => {
+    const { sink, state } = await parkedRun();
+
+    const calls: string[] = [];
+    const resumed = await runWorkflow(TWO_STAGES, {
+      journal: sink,
+      runStep: async (request) => {
+        calls.push(request.step.id);
+        return { text: "<built>", usage: usage(1, 1), isError: false };
+      },
+      resolveAgent: RESOLVE,
+      agentNames: () => ["surveyor", "builder"],
+      resumeFrom: { ...state, stepFailAnswer: { text: "retry" } },
+    });
+
+    expect(resumed.status).toBe("done");
+    // THE WHOLE POINT: stage 1 was replayed from the journal, never re-executed.
+    expect(calls).toEqual(["2"]);
+    expect(resumed.steps[0]?.text).toBe("<survey>");
+    expect(resumed.steps[1]?.text).toBe("<built>");
+  });
+
+  it("grants `raise <n>` for this run only, journals it, and hands it to the retried step", async () => {
+    const { sink, lines, state } = await parkedRun();
+
+    const seen: (number | undefined)[] = [];
+    const resumed = await runWorkflow(TWO_STAGES, {
+      journal: sink,
+      runStep: async (request) => {
+        seen.push(request.turnCeiling);
+        return { text: "<built>", usage: usage(1, 1), isError: false };
+      },
+      resolveAgent: RESOLVE,
+      agentNames: () => ["surveyor", "builder"],
+      resumeFrom: { ...state, stepFailAnswer: { text: "raise 120" } },
+    });
+
+    expect(resumed.status).toBe("done");
+    // The grant reaches the step that was parked — the value a runner hands
+    // its child agent's constructor. (`orchestration-effects.test.ts` proves
+    // it reaches the model as 120 real requests.)
+    expect(seen).toEqual([120]);
+    expect(
+      lines.find(
+        (line): line is Extract<JournalLine, { kind: "turnRaise" }> => line.kind === "turnRaise",
+      ),
+    ).toMatchObject({ stepId: "2", role: "builder", value: 120 });
+    // Run-scoped: the role file and the parsed workflow are untouched.
+    expect(RESOLVE("builder")?.maxTurns).toBeUndefined();
+  });
+
+  it("carries a granted ceiling to every later step of the same role, and to no other role", async () => {
+    // The grant is a statement about the ROLE — a later stage dispatching
+    // `@builder` would otherwise walk into the same wall and park again for an
+    // answer the human has already given.
+    const workflow = parseOk(
+      [
+        FRONT,
+        "1. @surveyor survey",
+        "2. @builder build {{prev}}",
+        "3. @builder polish {{prev}}",
+      ].join("\n"),
+    );
+    const { sink, lines } = memoryJournal();
+    const first = await runWorkflow(workflow, {
+      journal: sink,
+      runStep: ceilingRunner([]),
+      resolveAgent: RESOLVE,
+      agentNames: () => ["surveyor", "builder"],
+    });
+    expect(first.status).toBe("paused");
+
+    const seen = new Map<string, number | undefined>();
+    const resumed = await runWorkflow(workflow, {
+      journal: sink,
+      runStep: async (request) => {
+        seen.set(request.step.id, request.turnCeiling);
+        return { text: "ok", usage: usage(1, 1), isError: false };
+      },
+      resolveAgent: RESOLVE,
+      agentNames: () => ["surveyor", "builder"],
+      resumeFrom: { ...buildResumeState(lines), stepFailAnswer: { text: "raise 200" } },
+    });
+    expect(resumed.status).toBe("done");
+    expect(seen.get("2")).toBe(200);
+    expect(seen.get("3")).toBe(200);
+    // Stage 1 (@surveyor) was replayed and never asked for a ceiling at all.
+    expect(seen.has("1")).toBe(false);
+  });
+
+  it("takes an EMPTY resume as no answer at all — a nudge cannot buy a rerun", async () => {
+    const { sink, lines, state } = await parkedRun();
+    const calls: string[] = [];
+    const resumed = await runWorkflow(TWO_STAGES, {
+      journal: sink,
+      runStep: ceilingRunner(calls),
+      resolveAgent: RESOLVE,
+      agentNames: () => ["surveyor", "builder"],
+      resumeFrom: { ...state, stepFailAnswer: { text: "" } },
+    });
+
+    expect(resumed.status).toBe("paused");
+    expect(calls).toEqual([]); // nothing ran, so nothing was spent
+    expect(resumed.pause?.stepId).toBe("2");
+    expect(resumed.pause?.question).toMatch(/needs an answer, not a nudge/);
+    expect(resumed.pause?.question).toContain("64-turn ceiling");
+    // Nothing was journalled on the operator's behalf, either.
+    expect(lines.some((line) => line.kind === "turnRaise")).toBe(false);
+    expect(lines.some((line) => line.kind === "stepAbandon")).toBe(false);
+    // And the run is still parked for a later, real answer.
+    expect(buildResumeState(lines).stepFailAsk).toBeDefined();
+  });
+
+  it("does not retry for a run that crashed before anyone saw the question", async () => {
+    // The ask reached disk; the `runEnd{paused}` never did, so no operator was
+    // ever shown anything. A resume that says nothing must not spend for them.
+    const { sink, lines } = memoryJournal();
+    const calls: string[] = [];
+    await runWorkflow(TWO_STAGES, {
+      journal: sink,
+      runStep: ceilingRunner(calls),
+      resolveAgent: RESOLVE,
+      agentNames: () => ["surveyor", "builder"],
+    });
+    const askIndex = lines.findIndex((line) => line.kind === "stepFailAsk");
+    expect(askIndex).toBeGreaterThan(-1);
+    const crashed = buildResumeState(lines.slice(0, askIndex + 1));
+    expect(crashed.ended).toBe(false);
+    expect(crashed.stepFailAsk).toBeDefined();
+
+    calls.length = 0;
+    const resumed = await runWorkflow(TWO_STAGES, {
+      journal: sink,
+      runStep: ceilingRunner(calls),
+      resolveAgent: RESOLVE,
+      agentNames: () => ["surveyor", "builder"],
+      resumeFrom: { ...crashed, stepFailAnswer: { text: "" } },
+    });
+    expect(resumed.status).toBe("paused");
+    expect(calls).toEqual([]);
+  });
+
+  it("re-surfaces on a reply that is neither retry, abandon nor a raise", async () => {
+    const { sink, state } = await parkedRun();
+    const calls: string[] = [];
+    const resumed = await runWorkflow(TWO_STAGES, {
+      journal: sink,
+      runStep: ceilingRunner(calls),
+      resolveAgent: RESOLVE,
+      agentNames: () => ["surveyor", "builder"],
+      resumeFrom: { ...state, stepFailAnswer: { text: "yeah go on then" } },
+    });
+    expect(resumed.status).toBe("paused");
+    expect(resumed.pause?.question).toMatch(/was not understood, so nothing was spent/);
+    expect(calls).toEqual([]);
+  });
+
+  it("refuses a raise that does not exceed the ceiling that just tripped", async () => {
+    const { sink, lines, state } = await parkedRun();
+    const calls: string[] = [];
+    for (const bad of ["raise 64", "raise 12", "raise 64.5", "raise 0x80", "raise many"]) {
+      const refused = await runWorkflow(TWO_STAGES, {
+        journal: sink,
+        runStep: ceilingRunner(calls),
+        resolveAgent: RESOLVE,
+        agentNames: () => ["surveyor", "builder"],
+        resumeFrom: { ...state, stepFailAnswer: { text: bad } },
+      });
+      expect(refused.status).toBe("paused");
+      expect(refused.pause?.question).toMatch(
+        /must exceed the 64-turn ceiling|whole number of turns, written in digits/,
+      );
+    }
+    expect(calls).toEqual([]);
+    expect(lines.some((line) => line.kind === "turnRaise")).toBe(false);
+  });
+
+  it("refuses `raise` for a failure that is not a turn ceiling — more turns fix nothing", async () => {
+    const { sink, lines } = memoryJournal();
+    const parked = await runWorkflow(TWO_STAGES, {
+      journal: sink,
+      runStep: async (request) =>
+        request.step.id === "1"
+          ? { text: "<survey>", usage: usage(1, 1), isError: false }
+          : {
+              text: "",
+              usage: usage(1, 1),
+              isError: true,
+              error: "patch refused: conflict in src/app.ts",
+              failureKind: "patch-refused",
+            },
+      resolveAgent: RESOLVE,
+      agentNames: () => ["surveyor", "builder"],
+    });
+    expect(parked.status).toBe("paused");
+    // The question offers exactly two replies, because only two apply.
+    expect(parked.pause?.question).toContain('Reply "retry"');
+    expect(parked.pause?.question).toContain('"abandon"');
+    expect(parked.pause?.question).not.toContain("raise <n>");
+
+    const refused = await runWorkflow(TWO_STAGES, {
+      journal: sink,
+      runStep: async () => ({ text: "x", usage: usage(1, 1), isError: false }),
+      resolveAgent: RESOLVE,
+      agentNames: () => ["surveyor", "builder"],
+      resumeFrom: { ...buildResumeState(lines), stepFailAnswer: { text: "raise 500" } },
+    });
+    expect(refused.status).toBe("paused");
+    expect(refused.pause?.question).toMatch(
+      /did not run out of turns, so there is no turn ceiling/,
+    );
+    expect(lines.some((line) => line.kind === "turnRaise")).toBe(false);
+  });
+
+  it("refuses a raise from an origin without raise authority — the wire contract, engine-side", async () => {
+    const { sink, lines, state } = await parkedRun();
+    const calls: string[] = [];
+    const resumed = await runWorkflow(TWO_STAGES, {
+      journal: sink,
+      runStep: ceilingRunner(calls),
+      resolveAgent: RESOLVE,
+      agentNames: () => ["surveyor", "builder"],
+      allowBudgetRaise: false,
+      resumeFrom: { ...state, stepFailAnswer: { text: "raise 999" } },
+    });
+    expect(resumed.status).toBe("paused");
+    expect(resumed.pause?.question).toMatch(
+      /cannot be raised over the wire; resume from the terminal/,
+    );
+    expect(calls).toEqual([]);
+    expect(lines.some((line) => line.kind === "turnRaise")).toBe(false);
+  });
+
+  it("never offers a reply the origin is forbidden to send", async () => {
+    const { sink, lines } = memoryJournal();
+    const parked = await runWorkflow(TWO_STAGES, {
+      journal: sink,
+      runStep: ceilingRunner([]),
+      resolveAgent: RESOLVE,
+      agentNames: () => ["surveyor", "builder"],
+      allowBudgetRaise: false,
+    });
+    expect(parked.status).toBe("paused");
+    expect(parked.pause?.question).not.toContain("raise <n>");
+    expect(parked.pause?.question).toContain('Reply "retry" to rerun it');
+    expect(parked.pause?.question).toContain("the wire cannot raise a turn ceiling");
+    // It also has to FIT: the seam caps a question at 160 characters, and the
+    // half that says what this reader may reply must survive the cap.
+    expect((parked.pause?.question ?? "").length).toBeLessThanOrEqual(160);
+
+    // The re-surfaced copy keeps the wire's wording too.
+    const again = await runWorkflow(TWO_STAGES, {
+      journal: sink,
+      runStep: ceilingRunner([]),
+      resolveAgent: RESOLVE,
+      agentNames: () => ["surveyor", "builder"],
+      allowBudgetRaise: false,
+      resumeFrom: { ...buildResumeState(lines), stepFailAnswer: { text: "" } },
+    });
+    expect(again.pause?.question).not.toContain("raise <n>");
+  });
+
+  it("ends the run `failed` on `abandon`, and it is then genuinely unresumable", async () => {
+    const { sink, lines, state } = await parkedRun();
+    const calls: string[] = [];
+    const abandoned = await runWorkflow(TWO_STAGES, {
+      journal: sink,
+      runStep: ceilingRunner(calls),
+      resolveAgent: RESOLVE,
+      agentNames: () => ["surveyor", "builder"],
+      resumeFrom: { ...state, stepFailAnswer: { text: "abandon" } },
+    });
+
+    expect(abandoned.status).toBe("failed");
+    expect(abandoned.error).toContain("64-turn ceiling");
+    expect(calls).toEqual([]); // abandoning spends nothing
+    expect(lines.some((line) => line.kind === "stepAbandon")).toBe(true);
+    // The `stop` label the ceiling earned, written where the run really stops.
+    expect(
+      lines
+        .filter((line): line is Extract<JournalLine, { kind: "stop" }> => line.kind === "stop")
+        .map((line) => line.reason),
+    ).toEqual(["turn-ceiling"]);
+    // The tombstone, chosen: `runEnd{failed}`, no pending ask, and the gate
+    // both resume entry points apply now refuses it.
+    const after = buildResumeState(lines);
+    expect(after.ended).toBe(true);
+    expect(after.endedStatus).toBe("failed");
+    expect(after.stepFailAsk).toBeUndefined();
+    expect(after.ended && after.endedStatus !== "paused").toBe(true);
+  });
+
+  it("parks again with a HIGHER attempt count when the same step fails twice", async () => {
+    // Not a silent loop: every rerun is an explicit gesture, and the question
+    // says how many the operator has now paid for.
+    const { sink, lines, state } = await parkedRun();
+    const calls: string[] = [];
+    const again = await runWorkflow(TWO_STAGES, {
+      journal: sink,
+      runStep: ceilingRunner(calls),
+      resolveAgent: RESOLVE,
+      agentNames: () => ["surveyor", "builder"],
+      resumeFrom: { ...state, stepFailAnswer: { text: "retry" } },
+    });
+
+    expect(again.status).toBe("paused");
+    expect(calls).toEqual(["2"]); // only the failed step was re-run
+    expect(again.pause?.question).toContain("ran out of turns after 2 attempts");
+    const asks = lines.filter(
+      (line): line is Extract<JournalLine, { kind: "stepFailAsk" }> => line.kind === "stepFailAsk",
+    );
+    expect(asks.map((ask) => ask.attempts)).toEqual([1, 2]);
+    // Still parked, still answerable — a second failure is not a tombstone either.
+    expect(buildResumeState(lines).stepFailAsk?.attempts).toBe(2);
+  });
+
+  it("continues the attempt index across the resume, so a retry gets its own worktree", async () => {
+    // FAIL-FIRST, and found by the end-to-end recovery in
+    // `orchestration-effects.test.ts`: a failed write-lane step KEEPS its
+    // worktree for forensics, and the worktree/patch slug is keyed on the
+    // retry index. A resume-driven retry restarted that index at 0, reused the
+    // slug and died with "A worktree already exists at …" — every time. The
+    // park would have offered a `retry` that could not work on the one lane
+    // where the money is.
+    const { sink, state } = await parkedRun();
+    const attempts: (number | undefined)[] = [];
+    await runWorkflow(TWO_STAGES, {
+      journal: sink,
+      runStep: async (request) => {
+        attempts.push(request.attempt);
+        return { text: "<built>", usage: usage(1, 1), isError: false };
+      },
+      resolveAgent: RESOLVE,
+      agentNames: () => ["surveyor", "builder"],
+      resumeFrom: { ...state, stepFailAnswer: { text: "retry" } },
+    });
+    // The first run burned attempt 0; this one continues at 1, so
+    // `writeLaneSlug` produces `2-builder-r1` rather than colliding.
+    expect(attempts).toEqual([1]);
+  });
+
+  it("keeps `continueOnError: true` continuing rather than parking", async () => {
+    const workflow = parseOk(
+      [
+        "---",
+        "name: demo",
+        "description: d",
+        "continueOnError: true",
+        "---",
+        "1. @builder build",
+        "2. @surveyor survey {{prev}}",
+      ].join("\n"),
+    );
+    const { sink, lines } = memoryJournal();
+    const calls: string[] = [];
+    const result = await runWorkflow(workflow, {
+      journal: sink,
+      runStep: async (request) => {
+        calls.push(request.step.id);
+        return request.step.id === "1"
+          ? {
+              text: "",
+              usage: usage(1, 1),
+              isError: true,
+              error: CEILING_CAUSE,
+              failureKind: "turn-ceiling" as const,
+            }
+          : { text: "<survey>", usage: usage(1, 1), isError: false };
+      },
+      resolveAgent: RESOLVE,
+      agentNames: () => ["surveyor", "builder"],
+    });
+
+    // Unchanged: the run ran on past the failure and ended `failed`, and no
+    // ask was journalled at all.
+    expect(calls).toEqual(["1", "2"]);
+    expect(result.status).toBe("failed");
+    expect(lines.some((line) => line.kind === "stepFailAsk")).toBe(false);
+    expect(
+      lines
+        .filter((line): line is Extract<JournalLine, { kind: "stop" }> => line.kind === "stop")
+        .map((line) => line.reason),
+    ).toEqual(["turn-ceiling"]);
+  });
+
+  it("does not park a stale resume — a retry would be refused identically, forever", async () => {
+    const { sink, lines } = memoryJournal();
+    await runWorkflow(TWO_STAGES, {
+      journal: sink,
+      runStep: ceilingRunner([]),
+      resolveAgent: RESOLVE,
+      agentNames: () => ["surveyor", "builder"],
+    });
+    // The workflow file changed under the run: the recorded prompt hash no
+    // longer matches, so every attempt is refused for the same reason. The
+    // fix is a fresh run, which is exactly what the refusal says.
+    const mutated = parseOk(
+      [FRONT, "1. @surveyor survey harder", "2. @builder build {{prev}}"].join("\n"),
+    );
+    const stale = await runWorkflow(mutated, {
+      journal: sink,
+      runStep: ceilingRunner([]),
+      resolveAgent: RESOLVE,
+      agentNames: () => ["surveyor", "builder"],
+      resumeFrom: { ...buildResumeState(lines), stepFailAnswer: { text: "retry" } },
+    });
+    expect(stale.status).toBe("failed");
+    expect(stale.error).toMatch(/cannot resume: the workflow/);
+  });
+
+  it("survives a torn journal tail: an ask nobody can restate is not an ask", async () => {
+    // `readJournalLines` promises only "an object with a string kind", so
+    // every field below can be missing or the wrong type on a line a crash
+    // tore in half. A torn ask is DROPPED rather than folded — and it must
+    // never take the fold (or `/workflow status`) down with it.
+    const torn: JournalLine[] = [
+      {
+        kind: "run",
+        v: 1,
+        runId: "r",
+        workflow: "wf",
+        source: "s",
+        input: "",
+        stepTimeoutMs: 1,
+        maxStepRetries: 0,
+        startedAt: 1,
+      },
+      { kind: "stepFailAsk", stepId: "2", cause: "real cause", attempts: 1, ts: 2 },
+      // Every one of these is unusable, and none of them may disturb the good
+      // ask above or throw.
+      { kind: "stepFailAsk", cause: "no step id", attempts: 1, ts: 3 } as unknown as JournalLine,
+      { kind: "stepFailAsk", stepId: "2", attempts: 1, ts: 4 } as unknown as JournalLine,
+      {
+        kind: "stepFailAsk",
+        stepId: "",
+        cause: "empty id",
+        attempts: 1,
+        ts: 5,
+      } as unknown as JournalLine,
+      {
+        kind: "stepFailAsk",
+        stepId: "2",
+        cause: "   ",
+        attempts: 1,
+        ts: 6,
+      } as unknown as JournalLine,
+      { kind: "turnRaise", stepId: "2", value: "lots", ts: 7 } as unknown as JournalLine,
+      { kind: "turnRaise", stepId: "2", value: Number.NaN, ts: 8 } as unknown as JournalLine,
+      { kind: "turnRaise", stepId: "2", value: -5, ts: 9 } as unknown as JournalLine,
+      { kind: "runEnd", status: "paused", ts: 10 },
+    ];
+    const state = buildResumeState(torn);
+    expect(state.stepFailAsk).toMatchObject({ stepId: "2", cause: "real cause", attempts: 1 });
+    expect(state.turnRaises).toBeUndefined(); // not a ceiling of NaN
+    // The question renders from the surviving facts without throwing.
+    expect(() => formatRunDetail(foldJournal("r", torn), 100)).not.toThrow();
+    expect(foldJournal("r", torn).pendingQuestions.map((q) => q.stepId)).toEqual(["2"]);
+
+    // A torn ask with an unusable `attempts`/`ceiling` degrades those fields
+    // rather than the whole ask.
+    const sloppy = buildResumeState([
+      {
+        kind: "stepFailAsk",
+        stepId: "7",
+        cause: "c",
+        attempts: "two",
+        ceiling: -1,
+        ts: 1,
+      } as unknown as JournalLine,
+    ]);
+    expect(sloppy.stepFailAsk).toMatchObject({ stepId: "7", attempts: 1 });
+    expect(sloppy.stepFailAsk?.ceiling).toBeUndefined();
+  });
+
+  it("shows the park in /workflow status with the retry/abandon/raise hint", async () => {
+    const { lines } = await parkedRun();
+    const run = foldJournal("run-parked", lines);
+    expect(run.endStatus).toBe("paused");
+    expect(deriveRunState(run, 10_000_000_000)).toBe("paused");
+    expect(run.pendingQuestions.map((question) => question.stepId)).toEqual(["2"]);
+    expect(run.parkedStep).toMatchObject({ stepId: "2", failureKind: "turn-ceiling" });
+    // Both renderers, because both used to drift: the table row and the detail
+    // view are the two places an operator reads a parked run's valid replies.
+    const table = formatRunsTable([run], 10_000_000_000).join("\n");
+    expect(table).toContain("/workflow resume run-parked retry runs the step again");
+    expect(table).not.toContain("answer with /workflow resume run-parked <answer>");
+    const detail = formatRunDetail(run, 10_000_000_000).join("\n");
+    expect(detail).toContain("Parked at a failed step:");
+    expect(detail).toContain("/workflow resume run-parked retry runs the step again");
+    expect(detail).toContain("/workflow resume run-parked abandon ends the run failed");
+    expect(detail).toContain("raise <n> lifts its turn ceiling");
+    // The wire sees the same ask rendered for what IT may send: terse enough
+    // to survive `sanitizeDescription`'s 160-character cap, and with no
+    // mention of the one reply it would only be refused for.
+    const wire = foldJournal("run-parked", lines, { allowRaise: false });
+    const wireQuestion = wire.pendingQuestion ?? "";
+    expect(wireQuestion).not.toContain("raise <n>");
+    expect(wireQuestion).toContain("the wire cannot raise a turn ceiling");
+    expect(wireQuestion.length).toBeLessThanOrEqual(160);
+  });
+
+  it('threads "retry" through as an ordinary answer to a role\'s ORG-ASK', async () => {
+    const workflow = parseOk([FRONT, "1. spec it", "2. build {{prev}}"].join("\n"));
+    const { sink, lines } = memoryJournal();
+    let n = 0;
+    const runStep: WorkflowStepRunner = async () => {
+      n += 1;
+      return n === 1
+        ? { text: "ORG-ASK: which retry policy?", usage: usage(1, 1), isError: false }
+        : { text: "built", usage: usage(1, 1), isError: false };
+    };
+    const first = await runWorkflow(workflow, { journal: sink, runStep });
+    expect(first.status).toBe("paused");
+    const state = buildResumeState(lines);
+    // A role's question is NOT a step-failure park, so the park grammar never
+    // applies and "retry" is just the operator's words.
+    expect(state.stepFailAsk).toBeUndefined();
+    const second = await runWorkflow(workflow, {
+      journal: sink,
+      runStep,
+      resumeFrom: { ...state, answer: { stepId: "1", text: "retry" } },
+    });
+    expect(second.status).toBe("done");
+    expect(second.steps[0]?.text).toBe("retry");
+  });
+
+  it("round-trips resume <id> raise 120 / retry / abandon through the slash command", async () => {
+    const home = await mkdtemp(join(tmpdir(), "arcturn-park-cmd-"));
+    const front = ["---", "name: ship", "description: d", "---"].join("\n");
+    let subCall = 0;
+    const ceilings: (number | undefined)[] = [];
+    const parkRuntime = {
+      paths: { home, project: join(home, "proj") },
+      createSubagent: (_task: string, _def: unknown, options?: { turnCeiling?: number }) => {
+        subCall += 1;
+        ceilings.push(options?.turnCeiling);
+        return subCall === 1
+          ? fakeAgent({ events: [{ type: "runEnd", reason: "completed" }], text: "the spec" })
+          : fakeAgent({
+              events: [
+                {
+                  type: "runEnd",
+                  reason: "error",
+                  errorMessage:
+                    "Reached the maximum of 64 turns. Send another message to continue, or " +
+                    "raise the ceiling: --max-turns for this session, or maxTurns: in the role " +
+                    "file (subagentMaxTurns in config) for a delegated agent.",
+                },
+              ],
+              text: "half way through the indexes",
+            });
+      },
+    };
+    const printed: string[] = [];
+    const notices: { level: string; text: string }[] = [];
+    const setInputs: string[] = [];
+    const parkUi = {
+      print: (c: string | readonly string[]) =>
+        printed.push(...(typeof c === "string" ? [c] : [...c])),
+      notice: (level: string, text: string) => notices.push({ level, text }),
+      select: async <T>(_t: string, options: readonly { data: T }[]) => options[0]?.data,
+      setInput: (text: string) => setInputs.push(text),
+      clear: () => {},
+      exit: () => {},
+    };
+    const [command] = createWorkflowCommands({
+      discover: async () => [parseOk(`${front}\n1. spec {{input}}\n2. build {{prev}}`)],
+    });
+    const run = (args: string) =>
+      command?.run({
+        args,
+        runtime: parkRuntime as never,
+        ui: parkUi as never,
+        commands: {} as never,
+      });
+
+    // ROUND 1: stage 2 runs out of turns and the run parks.
+    await run("ship index the corpus");
+    expect(printed.join("\n")).toMatch(/Workflow ship: paused/);
+    const runId = (setInputs.at(-1) ?? "").match(/resume (\S+)/)?.[1] ?? "";
+    expect(runId).not.toBe("");
+    expect(subCall).toBe(2);
+    const parked = buildResumeState(await readJournalLines(join(home, "workflow-runs", runId)));
+    expect(parked.stepFailAsk).toMatchObject({
+      stepId: "2",
+      failureKind: "turn-ceiling",
+      ceiling: 64,
+    });
+
+    // ROUND 2: a bare `resume <id>` is a nudge. It re-states the park,
+    // pre-fills the command, and spends nothing.
+    notices.length = 0;
+    await run(`resume ${runId}`);
+    expect(notices.some((n) => n.level === "warn" && /parked at a failed step/.test(n.text))).toBe(
+      true,
+    );
+    expect(notices.some((n) => n.text.includes(`/workflow resume ${runId} retry`))).toBe(true);
+    expect(setInputs.at(-1)).toBe(`/workflow resume ${runId} `);
+    expect(subCall).toBe(2);
+
+    // ROUND 3: the raise goes through the same resume command an answer does;
+    // the ENGINE validates and grants it, only stage 2 re-runs, and the grant
+    // reaches the child agent's constructor.
+    printed.length = 0;
+    await run(`resume ${runId} raise 120`);
+    expect(subCall).toBe(3); // stage 1 was reused, not redone
+    expect(ceilings).toEqual([undefined, undefined, 120]);
+    const after = await readJournalLines(join(home, "workflow-runs", runId));
+    expect(
+      after.find(
+        (line): line is Extract<JournalLine, { kind: "turnRaise" }> => line.kind === "turnRaise",
+      ),
+    ).toMatchObject({ stepId: "2", value: 120 });
+
+    // ROUND 4: it failed again (same scripted agent), so it parked again —
+    // and `abandon` is the tombstone, chosen.
+    const reparked = buildResumeState(after);
+    expect(reparked.stepFailAsk?.attempts).toBe(2);
+    notices.length = 0;
+    await run(`resume ${runId} abandon`);
+    // The `stepAbandon` is durable and lands with the reply; the terminal
+    // `runEnd` is the engine's one fire-and-forget append, so it is polled for
+    // rather than assumed (see `finish`'s note on the trailing write).
+    let ended = buildResumeState(await readJournalLines(join(home, "workflow-runs", runId)));
+    for (let i = 0; i < 50 && ended.endedStatus !== "failed"; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      ended = buildResumeState(await readJournalLines(join(home, "workflow-runs", runId)));
+    }
+    expect(ended.endedStatus).toBe("failed");
+    expect(ended.stepFailAsk).toBeUndefined();
+    // …and now the gate really does refuse it.
+    notices.length = 0;
+    await run(`resume ${runId}`);
+    expect(notices.some((n) => /already finished \(failed\); nothing to resume/.test(n.text))).toBe(
+      true,
+    );
+
+    await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+  });
+});
+
+describe("turnCeilingFromCause", () => {
+  it("lifts the ceiling out of the cause the lanes write", () => {
+    expect(
+      turnCeilingFromCause('role "rag-builder" hit its 64-turn ceiling before finishing'),
+    ).toBe(64);
+    expect(turnCeilingFromCause("hit its 8-turn ceiling before finishing; raise maxTurns")).toBe(8);
+  });
+
+  it("does not mistake a digit in a role name for the ceiling", () => {
+    // The cause is followed by the agent's own final words, and a role called
+    // `v2-indexer` would donate its digit to a "first integer" reading.
+    expect(
+      turnCeilingFromCause(
+        'role "v2-indexer" hit its 40-turn ceiling before finishing\n' +
+          "Its final words before the stop: 3 of 5 indexes built",
+      ),
+    ).toBe(40);
+  });
+
+  it("is absent when the cause names no count", () => {
+    expect(turnCeilingFromCause(undefined)).toBeUndefined();
+    expect(turnCeilingFromCause("hit its turn ceiling before finishing")).toBeUndefined();
+    expect(turnCeilingFromCause("patch refused: conflict")).toBeUndefined();
+  });
+});
+
 describe("parseBudgetRaiseAnswer", () => {
   it("parses the raise grammar, tolerating the notations the ask itself renders", () => {
     expect(parseBudgetRaiseAnswer("raise 5")?.value).toBe(5);
@@ -6325,7 +7163,12 @@ describe("runWorkflow — honest turn-exhaustion failures", () => {
       agentNames: () => ["rag-builder"],
     });
 
-    expect(result.status).toBe("failed");
+    // THE STEP-FAILURE PARK: turn exhaustion is the *most* recoverable stop
+    // this engine has, so the run stops resumably instead of writing the
+    // `runEnd{failed}` both resume verbs refuse forever. The step is still
+    // `failed` and still says exactly why.
+    expect(result.status).toBe("paused");
+    expect(result.pause?.reason).toBe("step-failure");
     // The error names the real condition and the real levers — not "send
     // another message" into a session the operator cannot reach.
     expect(result.steps[0]?.error).toMatch(
@@ -6341,12 +7184,12 @@ describe("runWorkflow — honest turn-exhaustion failures", () => {
       (line): line is Extract<JournalLine, { kind: "stepEnd" }> => line.kind === "stepEnd",
     );
     expect(end?.finalText).toContain("Index 3 of 5 is built");
-    // The declared-but-never-emitted stop reason finally has its writer.
-    expect(
-      lines
-        .filter((line): line is Extract<JournalLine, { kind: "stop" }> => line.kind === "stop")
-        .map((line) => line.reason),
-    ).toEqual(["turn-ceiling"]);
+    // A park is not a stop: no `stop` line, and the end is the soft `paused` —
+    // the same distinction the stage-boundary budget ask draws. `turn-ceiling`
+    // is still written when the run genuinely stops, which is now the moment a
+    // human answers `abandon` (see the step-failure-park describe below).
+    expect(lines.some((line) => line.kind === "stop")).toBe(false);
+    expect(lines.find((line) => line.kind === "runEnd")).toMatchObject({ status: "paused" });
     // Deterministic, exactly as before: the same ceiling yields the same
     // exhaustion, so the self-healing retry never touches it.
     expect(built).toBe(1);
@@ -6410,14 +7253,25 @@ describe("runWorkflow — honest turn-exhaustion failures", () => {
     ).toEqual(["cost-ceiling"]);
   });
 
-  it("still reports turn-ceiling when that is what actually ended the run", async () => {
+  it("still reports turn-ceiling when that is what actually ended the run — at the abandon", async () => {
+    // The run no longer ends at the ceiling; it parks. `turn-ceiling` is
+    // written at the moment the run genuinely stops, which is when a human
+    // declines to spend again — and it is still the label, not "error".
     const workflow = parseOk([FRONT, "1. a", "2. b {{prev}}"].join("\n"));
     const { sink, lines } = memoryJournal();
-    const result = await runWorkflow(workflow, {
+    const parked = await runWorkflow(workflow, {
       journal: sink,
       runStep: async () => outOfTurns(0),
     });
-    expect(result.status).toBe("failed");
+    expect(parked.status).toBe("paused");
+    expect(lines.some((line) => line.kind === "stop")).toBe(false);
+
+    const abandoned = await runWorkflow(workflow, {
+      journal: sink,
+      runStep: async () => outOfTurns(0),
+      resumeFrom: { ...buildResumeState(lines), stepFailAnswer: { text: "abandon" } },
+    });
+    expect(abandoned.status).toBe("failed");
     expect(
       lines
         .filter((line): line is Extract<JournalLine, { kind: "stop" }> => line.kind === "stop")

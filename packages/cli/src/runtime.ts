@@ -646,6 +646,13 @@ export interface SessionAgentSpec {
   model?: ModelSpec;
   onPermissionAsk?: PermissionPrompt;
   maxTurns?: number;
+  /**
+   * A run-scoped turn grant from a human, lifting this session's ceiling for
+   * one workflow run only. Only meaningful alongside `maxTurns` (the key that
+   * opts a session into the subagent ceiling at all); see
+   * `ArcturnRuntime.childMaxTurns` for why it lifts both halves of the clamp.
+   */
+  turnCeiling?: number;
   origin?: string;
   fixedToolset?: boolean;
   checkpoints?: CheckpointStore;
@@ -1264,8 +1271,17 @@ export class ArcturnRuntime {
    *   is read by the host's dialog and by nothing else, so it can neither
    *   widen nor narrow what the child is allowed to do. Omit it and the
    *   child's prompts are byte-for-byte what they were before this existed.
+   * @param options.turnCeiling - A RUN-SCOPED turn grant a human typed at a
+   *   parked workflow step (`/workflow resume <id> raise 120`), which lifts
+   *   this child's ceiling for that run only. See `#childMaxTurns` below for
+   *   why it has to lift *both* halves of the clamp, and why a role file can
+   *   never reach this parameter.
    */
-  createSubagent(task: string, def?: AgentDef, options?: { origin?: string }): Agent {
+  createSubagent(
+    task: string,
+    def?: AgentDef,
+    options?: { origin?: string; turnCeiling?: number },
+  ): Agent {
     const yolo = this.permissionMode === "yolo";
     // A child's permission mode may only NARROW the parent's, never widen it.
     // A plan-mode parent (read-only, no prompts) must not produce a
@@ -1326,10 +1342,7 @@ export class ArcturnRuntime {
       // repo controls `.arcturn/agents/**`) must not be able to grant itself a
       // longer leash than the session's own `subagentMaxTurns` (or the
       // built-in floor when that is unset) allows.
-      maxTurns: Math.min(
-        def?.maxTurns ?? Number.POSITIVE_INFINITY,
-        this.config.subagentMaxTurns ?? SUBAGENT_MAX_TURNS,
-      ),
+      maxTurns: this.#childMaxTurns(def?.maxTurns, options?.turnCeiling),
       sessionStore: this.store,
       title: `subagent: ${task.slice(0, 60)}`,
       // The child inherits the parent's rules: a deny the user configured must
@@ -1714,15 +1727,46 @@ export class ArcturnRuntime {
             model: options.model,
             compaction: routedCompactionOptions(options.model, this.router),
           }),
+      // The same one helper the read lane's `createSubagent` uses: two clamp
+      // sites for one rule, and a run-scoped grant that lifted only one of
+      // them would silently do nothing on the other lane.
       ...("maxTurns" in options
-        ? {
-            maxTurns: Math.min(
-              options.maxTurns ?? Number.POSITIVE_INFINITY,
-              this.config.subagentMaxTurns ?? SUBAGENT_MAX_TURNS,
-            ),
-          }
+        ? { maxTurns: this.#childMaxTurns(options.maxTurns, options.turnCeiling) }
         : {}),
     };
+  }
+
+  /**
+   * The turn budget one delegated child actually gets.
+   *
+   * TWO HALVES, ONE `Math.min`. A role's own `maxTurns:` may only NARROW the
+   * session's `subagentMaxTurns` ceiling (RFC 0001 §8.4, "Roles narrow;
+   * nothing widens") — a checked-in role file in a cloned repo must not grant
+   * itself a longer leash. That is the clamp, unchanged.
+   *
+   * `granted` is the one thing that outranks it, and it is not a file: it is a
+   * number a human typed at a parked run (`/workflow resume <id> raise 120`,
+   * see `workflow.ts`'s step-failure ask), scoped to that run and recorded in
+   * its journal. It has to lift BOTH halves, because lifting either alone
+   * leaves `Math.min` exactly where it was — raising the role file's number
+   * still clamps to 64, and raising the session ceiling still clamps to the
+   * role's. That trap has already cost a real run: editing the role file alone
+   * left the ceiling at 64 and the next attempt died in the same place.
+   *
+   * Nothing on a role file, a workflow file or the wire can reach this
+   * parameter; only a caller holding a human's answer passes it.
+   *
+   * @param requested - The role's declared `maxTurns:`, when it declared one.
+   * @param granted - A run-scoped grant from a human, when one was made.
+   */
+  #childMaxTurns(requested: number | undefined, granted: number | undefined): number {
+    const clamped = Math.min(
+      requested ?? Number.POSITIVE_INFINITY,
+      this.config.subagentMaxTurns ?? SUBAGENT_MAX_TURNS,
+    );
+    return granted !== undefined && Number.isFinite(granted) && granted > 0
+      ? Math.max(clamped, Math.floor(granted))
+      : clamped;
   }
 
   /** Finish a session agent: the audit trail, for both construction routes. */

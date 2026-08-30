@@ -265,10 +265,16 @@ import {
   type JournalLine,
   type PatchPresence,
   type PendingBudgetAsk,
+  type PendingStepFailAsk,
   type ResumeState,
   RUN_JOURNAL_SCHEMA_VERSION,
   type RunJournal,
   readJournalLines,
+  STEP_ABANDON_ANSWER,
+  STEP_RETRY_ANSWER,
+  stepFailAskQuestion,
+  stepFailAskResumeHint,
+  turnRaiseKey,
   type WorkflowFailureKind,
   type WorkflowStopReason,
   writeManifest,
@@ -455,13 +461,18 @@ export interface WorkflowStepRequest {
    */
   readonly onUsage?: (usage: Usage) => void;
   /**
-   * 0-based attempt index within this step's self-healing retry loop.
+   * 0-based attempt index for this step, across the whole RUN.
    *
-   * `0` on the first attempt; incremented for each transient retry. A worktree
-   * lane folds it into the worktree/patch slug so a retry gets a *fresh*
-   * worktree instead of colliding with the failed attempt's, which is kept for
-   * forensics. Absent means "first (and only) attempt". See the retry loop in
-   * {@link runWorkflow}.
+   * `0` on the first attempt; incremented for each transient retry, and
+   * *seeded* by the attempts earlier runs of this same run already burned —
+   * the engine reads that from the step-failure ask it is answering. A
+   * worktree lane folds it into the worktree/patch slug so an attempt gets a
+   * *fresh* worktree instead of colliding with the failed one's, which is kept
+   * for forensics. That seeding is load-bearing: a failed write-lane step
+   * keeps its worktree on purpose, so a retry that reused the slug would fail
+   * with "a worktree already exists" every single time — the park would offer
+   * a `retry` that could not work. Absent means "first (and only) attempt".
+   * See the retry loop in {@link runWorkflow}.
    */
   readonly attempt?: number;
   /**
@@ -479,6 +490,19 @@ export interface WorkflowStepRequest {
    * never re-executed.
    */
   readonly durability?: WorkflowStepDurability;
+  /**
+   * A run-scoped turn ceiling a human granted for this step, when one was
+   * granted (`/workflow resume <id> raise 120` at a step-failure park).
+   *
+   * The engine reads it out of the run's journal and hands it to the runner;
+   * the runner hands it to the child agent's constructor, where it lifts BOTH
+   * halves of the `Math.min(role maxTurns, subagentMaxTurns)` clamp. Absent —
+   * the overwhelmingly common case — leaves that clamp exactly as it was.
+   *
+   * Deliberately on the *request* rather than on the role: the role file is
+   * never edited, and the grant belongs to one run.
+   */
+  readonly turnCeiling?: number;
 }
 
 /**
@@ -742,6 +766,17 @@ export interface WorkflowPause {
   readonly question: string;
   /** The spliced prompt hash the asking step ran under (resume staleness key). */
   readonly promptHash: string;
+  /**
+   * What kind of question this is, when it is not a role's `ORG-ASK`.
+   *
+   * `"step-failure"` marks the STEP-FAILURE PARK: the step did not ask
+   * anything, it *failed*, and the run stopped to let a human decide whether
+   * to spend again. Readers that word a pause ({@link pauseSummary}, the
+   * resume command, the status hint) need to tell the two apart, and the
+   * step id cannot tell them — unlike the budget ask's sentinel, this pause
+   * is keyed under a real step. Absent means an ordinary `ORG-ASK`.
+   */
+  readonly reason?: "step-failure";
 }
 
 /**
@@ -1837,6 +1872,85 @@ export function budgetWireRaiseRefusal(source: string): string {
 }
 
 /**
+ * Whether a reply is the affirmative that re-runs a step parked by a
+ * step-failure ask.
+ *
+ * {@link isBudgetAckAnswer}'s twin, and a *word* for the same reason: a retry
+ * is money, and an empty resume is not a decision to spend it. Case- and
+ * whitespace-insensitive, and nothing else — the question names the exact
+ * word, and a guessed synonym would be the engine deciding a person meant
+ * "yes, spend again".
+ *
+ * @param text - The verbatim resume answer.
+ */
+export function isStepRetryAnswer(text: string): boolean {
+  return text.trim().toLowerCase() === STEP_RETRY_ANSWER;
+}
+
+/**
+ * Whether a reply is the one that ends a parked run `failed` — today's
+ * behaviour, now chosen rather than imposed.
+ *
+ * @param text - The verbatim resume answer.
+ */
+export function isStepAbandonAnswer(text: string): boolean {
+  return text.trim().toLowerCase() === STEP_ABANDON_ANSWER;
+}
+
+/**
+ * Lift the turn ceiling that tripped out of the cause {@link turnCeilingCause}
+ * wrote, so a `raise <n>` can be validated against a real number.
+ *
+ * A targeted pattern rather than "the first integer in the string": the cause
+ * is followed by the agent's own final words, and a role named `v2-indexer`
+ * would otherwise donate its digit. Absent when the cause does not name a
+ * count (a role file with no `maxTurns:` under a loop message this engine did
+ * not write), and the raise is then validated as a positive integer alone.
+ *
+ * @param message - The failing step's error text.
+ */
+export function turnCeilingFromCause(message: string | undefined): number | undefined {
+  if (message === undefined) return undefined;
+  const match = /\bits (\d+)-turn ceiling\b/.exec(message);
+  const value = match?.[1] === undefined ? Number.NaN : Number(match[1]);
+  return Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+/**
+ * Whether a turn-raise value is a ceiling this engine can hand a child agent.
+ *
+ * {@link isSpendableRaise}'s sibling for the turn ceiling, and it follows the
+ * *token* rule rather than the dollar one: turns are counted, `maxTurns:` in a
+ * role file refuses a fractional value, and `Number("0x400")` is 1024 — which
+ * nobody typing a turn budget means.
+ *
+ * @param raw - The reply's raw value, before `,` was stripped.
+ * @param value - The numeric value {@link parseBudgetRaiseAnswer} produced.
+ */
+function isCountableRaise(raw: string, value: number): boolean {
+  if (!Number.isFinite(value) || value <= 0) return false;
+  return Number.isInteger(value) && /^\d[\d,]*$/.test(raw.trim());
+}
+
+/**
+ * The refusal a raise-shaped answer to a step-failure ask gets over the wire.
+ *
+ * The exact posture of {@link budgetWireRaiseRefusal}, because it is the exact
+ * contract: nothing on the wire may lift a ceiling — a dollar one, a token one
+ * or a turn one. Two sites (the serve path refuses before the run starts, the
+ * engine refuses again for any host that forgets to), one sentence.
+ *
+ * @param source - The workflow file, whose role files the operator may edit.
+ */
+export function turnWireRaiseRefusal(source: string): string {
+  return (
+    "A turn ceiling cannot be raised over the wire; resume from the terminal, or edit the role " +
+    `file behind ${source}. Reply "${STEP_RETRY_ANSWER}" to run the step again under the ` +
+    `ceiling already in force, or "${STEP_ABANDON_ANSWER}" to end the run.`
+  );
+}
+
+/**
  * A role's declared per-assignment ceiling, or `undefined` when it opted out.
  *
  * Mirrors {@link shouldAbortForCost}'s own "`0`/absent disables" convention
@@ -2227,7 +2341,12 @@ async function runStepAttempts(
           };
     const run = await runStepWithDeadline(
       runStep,
-      { ...request, attempt: attempts - 1 },
+      // The retry index is added to whatever base the request already carries,
+      // never assigned over it. The engine seeds that base with the attempts
+      // this step has already burned in EARLIER runs (see the step-failure
+      // park), so a worktree-lane retry across a resume gets a slug of its own
+      // instead of colliding with the forensic worktree its last failure kept.
+      { ...request, attempt: (request.attempt ?? 0) + attempts - 1 },
       parentSignal,
       Math.max(1, remaining),
       stepBudget,
@@ -2384,6 +2503,13 @@ function pauseSummary(pauses: readonly WorkflowPause[]): string {
     // stage that paused nothing), so only the single-pause wording needs it.
     if (first.stepId === BUDGET_ASK_STEP_ID) {
       return `Workflow paused at a budget checkpoint: ${first.question}`;
+    }
+    // The step-failure park is not a question a role asked — it is the run
+    // reporting that a step broke and stopping to be told what to do about
+    // it. "Paused for a human answer at step 5" would read as an `ORG-ASK`,
+    // which is exactly the wrong thing to go looking for in the transcript.
+    if (first.reason === "step-failure") {
+      return `Workflow parked at a failed step (${first.stepId}): ${first.question}`;
     }
     return `Workflow paused for a human answer at step ${first.stepId}: ${first.question}`;
   }
@@ -2666,6 +2792,121 @@ export async function runWorkflow(
     }
   }
 
+  // -------------------------------------- the step-failure gate, on resume
+  /**
+   * Run-scoped turn grants, by {@link turnRaiseKey}. Seeded from the journal
+   * so a grant made two resumes ago still governs, and added to below when
+   * THIS resume's reply grants one. Never by editing a role file: the file is
+   * the authority for every *fresh* run, and this run's grant lives in its own
+   * journal.
+   */
+  const turnRaises = new Map<string, number>(resumeFrom?.turnRaises ?? []);
+  /**
+   * A step-failure park to re-surface before anything runs: this resume did
+   * not settle the pending ask — no reply, a bare nudge, a reply that is
+   * neither `retry` nor `abandon` nor a valid raise, or a raise from an origin
+   * without raise authority. A bad reply re-parks the run with the reason; it
+   * never fails it, and it never silently retries (that is the whole point:
+   * every rerun is an explicit human gesture).
+   */
+  let resurfacedFailAsk: WorkflowPause | undefined;
+  /**
+   * Set when the human answered `abandon`: the run ends `failed` with the
+   * step's own cause, exactly as it did before this gate existed.
+   */
+  let abandonedFailure: string | undefined;
+  /** True when the abandoned failure was a turn ceiling, for the `stop` label. */
+  let abandonedTurnCeiling = false;
+  const pendingFailAsk = resumeFrom?.stepFailAsk;
+  if (pendingFailAsk !== undefined) {
+    const reply = resumeFrom?.stepFailAnswer;
+    const raise = reply === undefined ? undefined : parseBudgetRaiseAnswer(reply.text);
+    const resurface = (reason?: string): void => {
+      const question = stepFailAskQuestion(pendingFailAsk, askAudience);
+      resurfacedFailAsk = {
+        stepId: pendingFailAsk.stepId,
+        // The step's own coordinates are not on the durable ask line — a
+        // re-surfaced copy can only restate what was recorded — so the pause
+        // is reported at the run's own origin, exactly as the budget ask's is.
+        stageIndex: 0,
+        branchIndex: 0,
+        question: reason === undefined ? question : `${reason} ${question}`,
+        promptHash: "",
+        reason: "step-failure",
+      };
+    };
+    if (reply === undefined || reply.text.trim() === "") {
+      // NO ANSWER. A resume that never addressed the park — a hand-built
+      // state, a crash of the answering host, a client script that nudges
+      // every stalled run — re-parks on the same question and spends nothing.
+      // The same line the role-pause and budget gates hold.
+      resurface(
+        reply === undefined
+          ? undefined
+          : "A parked step needs an answer, not a nudge — nothing was spent.",
+      );
+    } else if (isStepAbandonAnswer(reply.text)) {
+      // The tombstone, chosen. Recorded durably so a later read can tell "the
+      // human stopped this" from "the ask was never answered" — best-effort
+      // on the write itself, because the run is ending either way.
+      abandonedFailure = pendingFailAsk.cause;
+      abandonedTurnCeiling = pendingFailAsk.failureKind === "turn-ceiling";
+      try {
+        await journalDurable({ kind: "stepAbandon", stepId: pendingFailAsk.stepId, ts: now() });
+      } catch {
+        // The run still ends failed; only its record degraded.
+      }
+    } else if (isStepRetryAnswer(reply.text)) {
+      // The affirmative: run that step again under the ceiling in force. No
+      // line is written for it — the retry's own `stepEnd` is the record, and
+      // a crash before that lands re-asks rather than spending twice on one
+      // gesture.
+    } else if (raise === undefined) {
+      resurface(`Reply "${oneLine(reply.text, 60)}" was not understood, so nothing was spent.`);
+    } else if (pendingFailAsk.failureKind !== "turn-ceiling") {
+      // `raise` is the turn ceiling's lever and nothing else's. A refused
+      // patch or a config error is not made runnable by more turns, and
+      // pretending otherwise would sell a rerun that fails the same way.
+      resurface(
+        `This step did not run out of turns, so there is no turn ceiling to raise; reply ` +
+          `"${STEP_RETRY_ANSWER}" or "${STEP_ABANDON_ANSWER}".`,
+      );
+    } else if (!askAudience.allowRaise) {
+      // Terminal-only, by the wire seam's contract — the same flag, and the
+      // same posture, as the budget raise. The serve path already refuses
+      // raise-shaped answers before starting the run; this is the engine
+      // keeping its own invariant for any host that forgets to.
+      resurface(turnWireRaiseRefusal(workflow.source));
+    } else if (!isCountableRaise(raise.raw, raise.value)) {
+      resurface(
+        `"raise ${oneLine(raise.raw, 30)}" needs a positive whole number of turns, written in ` +
+          "digits — the same value maxTurns: would accept.",
+      );
+    } else if (pendingFailAsk.ceiling !== undefined && raise.value <= pendingFailAsk.ceiling) {
+      resurface(
+        `A raise must exceed the ${String(pendingFailAsk.ceiling)}-turn ceiling that just ` +
+          `tripped; ${String(raise.value)} does not.`,
+      );
+    } else {
+      // A valid raise: this run's copy of the role runs under the new ceiling,
+      // and the step is retried. Durable because the grant must survive a
+      // crash — a resumed run that forgot its raise would walk into the same
+      // wall the human already lifted.
+      turnRaises.set(turnRaiseKey(pendingFailAsk.stepId, pendingFailAsk.role), raise.value);
+      try {
+        await journalDurable({
+          kind: "turnRaise",
+          stepId: pendingFailAsk.stepId,
+          ...(pendingFailAsk.role === undefined ? {} : { role: pendingFailAsk.role }),
+          value: raise.value,
+          ts: now(),
+        });
+      } catch {
+        // The raise still governs this run; only its record degraded.
+      }
+    }
+  }
+
   /**
    * Set when journaling was never possible; surfaced on the run result.
    *
@@ -2806,6 +3047,25 @@ export async function runWorkflow(
     const def = context.resolveAgent?.(step.agent);
     return def ? roleBudgetUsd(def) : undefined;
   };
+  /**
+   * The run-scoped turn ceiling a human granted for this step, if any.
+   *
+   * Keyed by {@link turnRaiseKey} — the role when the step named one, so a
+   * later stage dispatching the same role inherits the rope rather than
+   * parking again for the answer that was already given.
+   */
+  const turnCeilingFor = (step: WorkflowStep): number | undefined =>
+    turnRaises.get(turnRaiseKey(step.id, step.agent));
+  /**
+   * How many times this step has already been run and failed in this run,
+   * across resumes — the base the retry loop's own index continues from.
+   *
+   * Only the step named by the ask this resume is answering has one: every
+   * other step is either finished (replayed from the journal) or has never
+   * run.
+   */
+  const priorAttemptsFor = (stepId: string): number =>
+    resumeFrom?.stepFailAsk?.stepId === stepId ? resumeFrom.stepFailAsk.attempts : 0;
 
   const stepTimeoutMs = workflow.stepTimeoutMs ?? DEFAULT_WORKFLOW_STEP_TIMEOUT_MS;
 
@@ -2856,7 +3116,11 @@ export async function runWorkflow(
   // run's. (Spend has no such gap — `usage.costUsd` is on the recorded line.)
   let runTurns = 0;
   let prev = "";
-  let failure: string | undefined;
+  // `abandon` at a step-failure park seeds the failure the park was holding
+  // open, so every stage is skipped and the run ends `failed` with the step's
+  // own cause — byte-for-byte the outcome this engine produced before the park
+  // existed, now reached because a person chose it.
+  let failure: string | undefined = abandonedFailure;
   let cancelled = controller.signal.aborted;
   /**
    * ENFORCED PER-ROLE BUDGETS' run-level backstop (RFC 0001 §7.4): set once
@@ -2906,8 +3170,35 @@ export async function runWorkflow(
    * with nothing louder to report.
    */
   const turnCeilingSteps = new Set<string>();
+  /**
+   * Step failures the run must NOT park on, by id.
+   *
+   * The park exists because a failed step is usually recoverable: the work is
+   * captured, and a person can raise a ceiling, resolve a conflict, leave plan
+   * mode, wait out an outage — and then say `retry`. Two failures are not, and
+   * parking on them would be a loop with extra steps rather than a question:
+   *
+   * - a STALE RESUME. The workflow file changed under the run, so the recorded
+   *   prompt hash no longer matches. Every retry re-derives the same hash and
+   *   is refused the same way, forever. The fix is a fresh run, which is what
+   *   the refusal already says.
+   * - a fatal `ORG-HALT`. The role itself declared the run unrecoverable —
+   *   that is what distinguishes it from the `ORG-ASK` beside it — and
+   *   offering to run it again would be the engine second-guessing the only
+   *   participant that looked at the work.
+   */
+  const unparkableSteps = new Set<string>();
   /** True when the failure that ENDS the run is a step that ran out of turns. */
-  let failureIsTurnCeiling = false;
+  let failureIsTurnCeiling = abandonedTurnCeiling;
+  /**
+   * The step result behind {@link failure}, when a *step* is what failed.
+   *
+   * Deliberately not the same thing as `failure`: that string is also written
+   * by the run's own money ceilings and by a durability fault, and neither of
+   * those is a question a human can answer with "run it again". Only a real
+   * step failure parks.
+   */
+  let failedStep: WorkflowStepResult | undefined;
   /**
    * The human-question gate's pending pauses, once a step raised an `ORG-ASK`.
    *
@@ -2930,6 +3221,10 @@ export async function runWorkflow(
   // the run finish `"paused"` on the re-stated question — the same machinery a
   // role's ORG-ASK rides, with nothing executed underneath an open question.
   if (resurfacedAsk !== undefined) pauses.push(resurfacedAsk);
+  // Same seeding for a step-failure park this resume did not settle: the
+  // question comes back before a token is spent, and the stage loop skips
+  // everything underneath it.
+  if (resurfacedFailAsk !== undefined) pauses.push(resurfacedFailAsk);
   /**
    * A durability failure the run must not quietly continue past.
    *
@@ -3056,7 +3351,13 @@ export async function runWorkflow(
            * Shared by both resume paths: an interrupted step is no safer to
            * re-run under a changed prompt than a finished one.
            */
-          const staleResume = (): WorkflowStepResult => ({
+          const staleResume = (): WorkflowStepResult => {
+            // Never parkable: a retry re-derives the same prompt hash and is
+            // refused identically. See {@link unparkableSteps}.
+            unparkableSteps.add(step.id);
+            return staleResumeResult();
+          };
+          const staleResumeResult = (): WorkflowStepResult => ({
             ...base,
             status: "failed",
             text: "",
@@ -3313,6 +3614,15 @@ export async function runWorkflow(
             state: { appliedPatches: [...appliedPatches] },
             signal: controller.signal,
             durability,
+            // Attempts this step already burned in an earlier run of THIS run,
+            // so the retry loop's index continues rather than restarts — see
+            // {@link WorkflowStepRequest.attempt}.
+            ...(priorAttemptsFor(step.id) === 0 ? {} : { attempt: priorAttemptsFor(step.id) }),
+            // The human's run-scoped turn grant, when this step (or its role)
+            // has one. Read from the journal-backed map rather than from the
+            // role file, which was never touched — and handed to the runner,
+            // which is the only thing that can reach the child's ceiling.
+            ...(turnCeilingFor(step) === undefined ? {} : { turnCeiling: turnCeilingFor(step) }),
           };
           let result: WorkflowStepResult;
           // ENFORCED PER-ROLE BUDGETS (RFC 0001 §8.4): resolved once per step
@@ -3472,6 +3782,10 @@ export async function runWorkflow(
             const halt = classifyStepHalt(result.text);
             if (halt?.kind === "halt") {
               result = { ...result, status: "failed", text: "", error: halt.reason };
+              // The role declared this unrecoverable, which is the whole
+              // difference between `ORG-HALT` and the `ORG-ASK` beside it. The
+              // run does not offer to try again. See {@link unparkableSteps}.
+              unparkableSteps.add(step.id);
             } else if (halt?.kind === "ask") {
               result = { ...result, status: "paused", question: halt.question.question };
             }
@@ -3525,6 +3839,10 @@ export async function runWorkflow(
         if (result.status === "failed" && failure === undefined) {
           failure = result.error ?? `step ${result.id} failed`;
           failureIsTurnCeiling = turnCeilingSteps.has(result.id);
+          // Kept for the step-failure park at the stage boundary below, which
+          // needs more than the message: the role, the captured patch, the
+          // attempt count and whether `raise` is even a valid reply.
+          failedStep = result;
         }
         // ENFORCED PER-ROLE BUDGETS' run-level backstop (RFC 0001 §7.4): the
         // coarser net behind every role's own real-time `budget:` ceiling
@@ -3591,6 +3909,88 @@ export async function runWorkflow(
       // the stage boundary: the steps themselves are reported truthfully, and
       // nothing further is started on a record that can no longer be resumed.
       if (durabilityFault !== undefined && failure === undefined) failure = durabilityFault;
+
+      // ============================================================ THE PARK
+      // STEP-FAILURE PARK: a failed step is a question, not a tombstone.
+      //
+      // A step that exhausted its retries used to set `failure`, short-circuit
+      // every later stage and write `runEnd{failed}` — which both resume entry
+      // points refuse permanently. The nine-stage run that motivated this got
+      // through four stages of real, paid work and then died on stage 5's turn
+      // ceiling; the survey, the threat model and the ADRs were all on disk,
+      // and the only way forward was to buy them again. That is the single
+      // most expensive thing this engine did.
+      //
+      // So it parks instead, on exactly the machinery the stage-boundary
+      // budget ask already rides: a durable question at a clean cut point, a
+      // `runEnd{paused}` a resume re-enters, and a reply that is a *word*.
+      //
+      // Deliberately NOT parked:
+      //   - `continueOnError: true` — those runs already continue past a
+      //     failed step, and that flag's meaning is untouched here;
+      //   - a run whose money ceiling tripped (`budgetExhausted`) — the hard
+      //     stop owns that, and it has its own checkpoint one stage earlier;
+      //   - a durability fault — the ask itself would be unwritable, and a
+      //     pause nobody can restate is not a pause;
+      //   - a cancellation — the human already said stop.
+      if (
+        failedStep !== undefined &&
+        failure !== undefined &&
+        !unparkableSteps.has(failedStep.id) &&
+        !workflow.continueOnError &&
+        !budgetExhausted &&
+        !cancelled &&
+        !controller.signal.aborted &&
+        durabilityFault === undefined
+      ) {
+        // Attempts ACROSS resumes: the retry loop's count for this run, on top
+        // of whatever the ask this resume answered had already recorded. A
+        // second failure of the same step therefore parks again saying so,
+        // which is how a human notices they are feeding a hole.
+        const broken = failedStep;
+        const priorAttempts = priorAttemptsFor(broken.id);
+        const captured = broken.record?.status === "captured" ? broken.record.patchPath : undefined;
+        const turnCeiling = turnCeilingSteps.has(broken.id);
+        // Only meaningful for a turn ceiling, and only when the lane's own
+        // cause named the number — it is what a `raise <n>` must exceed.
+        const tripped = turnCeiling ? turnCeilingFromCause(broken.error) : undefined;
+        const ask: PendingStepFailAsk = {
+          stepId: broken.id,
+          ...(broken.agent === undefined ? {} : { role: broken.agent }),
+          ...(turnCeiling ? { failureKind: "turn-ceiling" as const } : {}),
+          cause: failure,
+          ...(captured === undefined ? {} : { patchPath: captured }),
+          ...(tripped === undefined ? {} : { ceiling: tripped }),
+          attempts: priorAttempts + (broken.attempts ?? 1),
+        };
+        let parked = true;
+        try {
+          // Durable, and load-bearing for the same reason the budget ask's is:
+          // the park only exists if the question is on disk.
+          await journalDurable({ kind: "stepFailAsk", ...ask, ts: now() });
+        } catch {
+          // No durable ask means no ask: fall back to today's behaviour and
+          // let the run end `failed`, rather than parking it on a question the
+          // journal can never restate.
+          parked = false;
+        }
+        if (parked) {
+          // The failure is now a question. The STEP's own status stays
+          // `failed` — it did fail, and `--print`/CI still see that — but the
+          // RUN stops resumably instead of writing its own tombstone.
+          failure = undefined;
+          failureIsTurnCeiling = false;
+          failedStep = undefined;
+          pauses.unshift({
+            stepId: ask.stepId,
+            stageIndex: stage.index,
+            branchIndex: 0,
+            question: stepFailAskQuestion(ask, askAudience),
+            promptHash: "",
+            reason: "step-failure",
+          });
+        }
+      }
 
       // STAGE-BOUNDARY BUDGET ASK: park the run and ask BEFORE a hard ceiling
       // kills it. The hard stop writes `runEnd{failed}` and a failed run is
@@ -3751,7 +4151,20 @@ export interface WorkflowAgentHost {
    *   prompt this child raises can say which role in which step raised it.
    *   Optional so a host predating attribution still satisfies this shape.
    */
-  createSubagent(task: string, def?: AgentDef, options?: { origin?: string }): WorkflowChildAgent;
+  createSubagent(
+    task: string,
+    def?: AgentDef,
+    options?: {
+      origin?: string;
+      /**
+       * A human's run-scoped turn grant for this step (see
+       * {@link WorkflowStepRequest.turnCeiling}). The runtime lifts BOTH
+       * halves of its `Math.min(role maxTurns, subagentMaxTurns)` clamp for
+       * it; omitting it leaves that clamp exactly as it was.
+       */
+      turnCeiling?: number;
+    },
+  ): WorkflowChildAgent;
 }
 
 /**
@@ -4168,6 +4581,14 @@ export interface WriteLaneSpawnRequest {
   readonly model?: ModelSpec;
   /** The step this agent serves, for titles and session ids. */
   readonly stepId: string;
+  /**
+   * A human's run-scoped turn grant for this step (see
+   * {@link WorkflowStepRequest.turnCeiling}) — the worktree lanes' half of the
+   * same plumbing the read lane does through `createSubagent`. A raise that
+   * reached only one lane would be a raise that silently did nothing on the
+   * other.
+   */
+  readonly turnCeiling?: number;
 }
 
 /**
@@ -4790,6 +5211,8 @@ async function runWorktreeStep(
       cwd: worktree.dir,
       ...(model === undefined ? {} : { model }),
       stepId: step.id,
+      // The human's run-scoped grant, carried onto the expensive lane too.
+      ...(request.turnCeiling === undefined ? {} : { turnCeiling: request.turnCeiling }),
     });
     const run = await driveAgent(
       agent,
@@ -5393,6 +5816,8 @@ export function createRuntimeRunStep(
     if (role === undefined && confinedToReading(options.tools)) await declareGuarded(request);
     const agent = host.createSubagent(prompt, def, {
       origin: workflowStepOrigin(step.id, role?.name),
+      // A turn ceiling a human raised at a parked step, for this run only.
+      ...(request.turnCeiling === undefined ? {} : { turnCeiling: request.turnCeiling }),
     });
     const run = await driveAgent(
       agent,
@@ -5532,6 +5957,13 @@ export interface WriteLaneHost {
      * agent into the subagent ceiling at all.
      */
     maxTurns?: number | undefined;
+    /**
+     * A human's run-scoped turn grant for this step, which lifts BOTH halves
+     * of `buildSessionAgent`'s clamp — the role's `maxTurns:` and the
+     * session's `subagentMaxTurns` — for this run only. Absent leaves the
+     * clamp byte-for-byte what it was.
+     */
+    turnCeiling?: number | undefined;
     /**
      * {@link workflowStepOrigin} for the step this agent serves. A worktree
      * role prompts as readily as a read-lane one — more so, since it holds
@@ -7193,7 +7625,7 @@ export function createRuntimeWriteLane(host: WriteLaneHost, runId = createRunId(
         );
       }
     },
-    spawn({ def, cwd, model, stepId }) {
+    spawn({ def, cwd, model, stepId, turnCeiling }) {
       const agent = host.buildSessionAgent({
         sessionId: createSessionId(),
         cwd,
@@ -7206,6 +7638,11 @@ export function createRuntimeWriteLane(host: WriteLaneHost, runId = createRunId(
         // subagent ceiling — the key travels even when the role declared no
         // number, which is what opts this agent into that ceiling at all.
         maxTurns: def.maxTurns,
+        // A human's run-scoped raise, which lifts BOTH halves of that clamp —
+        // the role's own `maxTurns:` AND the session's `subagentMaxTurns`.
+        // Lifting one alone leaves `Math.min` where it was, which is exactly
+        // the trap that made a hand-edited role file change nothing.
+        ...(turnCeiling === undefined ? {} : { turnCeiling }),
         // The narrowing, the confinement guard and the background tracking
         // below are all installed with `setTools`, and a deferred toolset
         // would quietly outrank every one of them. This child's tools are
@@ -7713,6 +8150,14 @@ export function createWorkflowCommands(
               result.status === "cancelled" ? "warn" : "error",
               result.error ?? result.status,
             );
+          } else if (result.pauses[0]?.reason === "step-failure") {
+            // A step-failure park is a pause, so it is not an error — but it
+            // is emphatically not a completed run either, and off a TTY
+            // (`--print`, serve, acp, CI) the modal below never appears. This
+            // is the one line that says "this pipeline did not finish, and a
+            // person has to decide what happens next", loud enough to be
+            // grepped out of a CI log.
+            ui.notice("warn", result.error ?? "Workflow parked at a failed step.");
           }
           return result;
         } catch (error) {
@@ -7873,6 +8318,39 @@ export function createWorkflowCommands(
                   `${state.completed.size} finished step(s) are reused, not redone.`,
           );
           const replied: ResumeState = { ...state, budgetAnswer: { text: answerText } };
+          await runAndOffer(wf, header?.input ?? "", runId, replied);
+          return;
+        }
+
+        // The step-failure park: a failed step is a question now, and the
+        // reply is interpreted by the ENGINE (retry, abandon, raise, or
+        // re-park with the reason) — never parsed here, which is what keeps
+        // "retry" typed at a role's ORG-ASK an ordinary answer. This
+        // interactive path is the one origin with raise authority; the serve
+        // path passes `allowBudgetRaise: false` and the wire refuses raises
+        // outright.
+        if (state.stepFailAsk !== undefined) {
+          if (answerText === "") {
+            // A bare resume is not a decision to spend again: re-state the
+            // park and pre-fill the command. Nothing is journalled, nothing
+            // runs, nothing is charged.
+            ui.notice(
+              "warn",
+              `Run ${runId} is parked at a failed step — ${stepFailAskQuestion(state.stepFailAsk)}`,
+            );
+            ui.notice("info", stepFailAskResumeHint(runId, state.stepFailAsk));
+            ui.setInput(`/workflow resume ${runId} `);
+            return;
+          }
+          ui.notice(
+            "info",
+            isStepAbandonAnswer(answerText)
+              ? `Ending ${wf.name} run ${runId}: step ${state.stepFailAsk.stepId} abandoned, ` +
+                  "the run is recorded as failed."
+              : `Resuming ${wf.name} run ${runId} at step ${state.stepFailAsk.stepId}; ` +
+                  `${state.completed.size} finished step(s) are reused, not redone.`,
+          );
+          const replied: ResumeState = { ...state, stepFailAnswer: { text: answerText } };
           await runAndOffer(wf, header?.input ?? "", runId, replied);
           return;
         }
