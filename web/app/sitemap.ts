@@ -28,6 +28,8 @@ const STATIC_ROUTES = [
   "/terminal",
   "/open-source",
   "/docs",
+  "/hub",
+  "/builder",
   "/blog",
 ];
 

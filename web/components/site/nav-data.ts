@@ -69,6 +69,7 @@ export const FEATURE_GROUPS: NavGroup[] = [
 export const PRIMARY_NAV: NavLink[] = [
   { href: "/docs", label: "Docs" },
   { href: "/hub", label: "Hub" },
+  { href: "/builder", label: "Builder" },
   { href: "/sdk", label: "SDK" },
   { href: "/security", label: "Security" },
   { href: "/blog", label: "Blog" },
@@ -93,6 +94,7 @@ export const FOOTER_COLUMNS: NavGroup[] = [
       { href: "/docs/getting-started", label: "Getting started" },
       { href: "/sdk", label: "SDK" },
       { href: "/hub", label: "Hub" },
+      { href: "/builder", label: "Workflow builder" },
       { href: "/docs/architecture", label: "Architecture" },
       { href: "/security", label: "Security" },
       { href: REPO, label: "GitHub", external: true },

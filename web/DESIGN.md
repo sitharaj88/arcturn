@@ -1484,6 +1484,9 @@ build time — static export freezes it, which is fine and matches the old site)
 | `/docs/<slug>` | `app/docs/[slug]/page.tsx` + `generateStaticParams` | 40 pages |
 | `/blog` | `app/blog/page.tsx` | §3.12 |
 | `/blog/<slug>` | `app/blog/[slug]/page.tsx` + `generateStaticParams` | |
+| `/hub` | `app/hub/page.tsx` | Package hub — server-rendered catalogue, one client filter island |
+| `/hub/<name>` · `/hub/<name>/<item>` | `app/hub/[name]/**` + `generateStaticParams` | |
+| `/builder` | `app/builder/page.tsx` | Visual workflow builder — static shell, one client island, no backend |
 | `/404` | `app/not-found.tsx` → `404.html` | §3.13 |
 
 The old site linked `/#accountability` from its footer — the home page must therefore give
