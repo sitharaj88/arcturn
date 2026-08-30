@@ -10,6 +10,12 @@ CLI, the SDK, or the wire protocol.
 
 ## [Unreleased]
 
+## [0.5.5] — 2026-08-30
+
+Four features from one bad afternoon: the endpoint that lied about its
+balance, the budget that could never fire, the workflow file you had to
+write blind, and the routes you could not see.
+
 ### Added
 
 - **`arcturn doctor` — ask every endpoint before a session has to.** It sends
