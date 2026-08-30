@@ -15,11 +15,13 @@ import { describe, expect, it } from "vitest";
 import {
   BackgroundAgentManager,
   createBackgroundAgentCommands,
+  formatBackgroundTranscript,
   getBackgroundAgentManager,
 } from "./background-agents.js";
 import { CommandRegistry, type CommandUi, type SelectOption } from "./commands.js";
 import type { ArcturnRuntime } from "./runtime.js";
 import { fakeLLM } from "./test-helpers/fake-llm.js";
+import { buildTestRuntime, makeScratch, writeFileAt } from "./test-helpers/scratch.js";
 
 const TEST_MODEL: ModelSpec = {
   id: "test/model",
@@ -596,6 +598,117 @@ describe("BackgroundAgentManager lifecycle", () => {
     // `bash` was filtered out of the tool list entirely, so the model's call
     // to it is rejected before ever reaching bashTool.execute().
     expect(toolResult.isError).toBe(true);
+  });
+});
+
+describe("background agents honour the session's permission rules", () => {
+  /** A tool that is neither read-only nor always-allowed: it must be gated. */
+  const peekTool: Tool = {
+    definition: { name: "peek", description: "peek", parameters: { type: "object" } },
+    async execute(): Promise<ToolResult> {
+      return { content: [{ type: "text", text: "PEEKED-OUTPUT" }] };
+    },
+  };
+
+  async function transcriptOf(
+    manager: BackgroundAgentManager,
+    id: string,
+  ): Promise<{ text: string; toolError: boolean }> {
+    const messages = (await manager.transcript(id)) ?? [];
+    const result = messages.find((message) => message.role === "toolResult");
+    return {
+      text: formatBackgroundTranscript(messages).join("\n"),
+      toolError: result?.role === "toolResult" && result.isError === true,
+    };
+  }
+
+  it("binds a config `deny` rule to a /bg agent", async () => {
+    const scratch = await makeScratch();
+    await writeFileAt(
+      join(scratch.cwd, ".arcturn", "config.json"),
+      JSON.stringify({
+        permissions: [{ tool: "read", specifier: "**/secret.txt", action: "deny" }],
+      }),
+    );
+    await writeFileAt(join(scratch.cwd, "secret.txt"), "TOP-SECRET-VALUE\n");
+    const runtime = await buildTestRuntime(scratch, [
+      { toolCalls: [{ id: "c1", name: "read", arguments: { path: "secret.txt" } }] },
+      { text: "all done" },
+    ]);
+    const manager = getBackgroundAgentManager(runtime);
+    const { id } = manager.start({ task: "read the secret" });
+    await manager.result(id);
+
+    // `read` is a read-only tool, so the *only* thing between a background
+    // agent and this file is the user's own deny rule.
+    const { text, toolError } = await transcriptOf(manager, id);
+    expect(text).not.toContain("TOP-SECRET-VALUE");
+    expect(toolError).toBe(true);
+    manager.dispose();
+    await runtime.dispose();
+  });
+
+  it("applies a config `allow` rule to a /bg agent", async () => {
+    const scratch = await makeScratch();
+    await writeFileAt(
+      join(scratch.cwd, ".arcturn", "config.json"),
+      JSON.stringify({ permissions: [{ tool: "peek", action: "allow" }] }),
+    );
+    const runtime = await buildTestRuntime(scratch, [
+      { toolCalls: [{ id: "c1", name: "peek", arguments: {} }] },
+      { text: "all done" },
+    ]);
+    const manager = getBackgroundAgentManager(runtime);
+    const { id } = manager.start({ task: "have a peek", tools: [peekTool] });
+    await manager.result(id);
+
+    const { text, toolError } = await transcriptOf(manager, id);
+    expect(toolError).toBe(false);
+    expect(text).toContain("PEEKED-OUTPUT");
+    manager.dispose();
+    await runtime.dispose();
+  });
+
+  it("applies a rule granted in-session to a /bg agent started afterwards", async () => {
+    const scratch = await makeScratch();
+    const runtime = await buildTestRuntime(scratch, [
+      { toolCalls: [{ id: "c1", name: "peek", arguments: {} }] },
+      { text: "all done" },
+    ]);
+    // What "Allow always" leaves behind, mid-session.
+    await runtime.applyPermissionRule({ tool: "peek", action: "allow", scope: "session" });
+
+    const manager = getBackgroundAgentManager(runtime);
+    const { id } = manager.start({ task: "have a peek", tools: [peekTool] });
+    await manager.result(id);
+
+    const { text, toolError } = await transcriptOf(manager, id);
+    expect(toolError).toBe(false);
+    expect(text).toContain("PEEKED-OUTPUT");
+    manager.dispose();
+    await runtime.dispose();
+  });
+
+  it("still fails closed for a tool no rule covers", async () => {
+    const scratch = await makeScratch();
+    await writeFileAt(
+      join(scratch.cwd, ".arcturn", "config.json"),
+      JSON.stringify({ permissions: [{ tool: "fetch", action: "allow" }] }),
+    );
+    const runtime = await buildTestRuntime(scratch, [
+      { toolCalls: [{ id: "c1", name: "peek", arguments: {} }] },
+      { text: "all done" },
+    ]);
+    const manager = getBackgroundAgentManager(runtime);
+    const { id } = manager.start({ task: "have a peek", tools: [peekTool] });
+    await manager.result(id);
+
+    // No requester, no covering rule: denied, exactly as before this change.
+    const { text, toolError } = await transcriptOf(manager, id);
+    expect(toolError).toBe(true);
+    expect(text).not.toContain("PEEKED-OUTPUT");
+    manager.dispose();
+    await runtime.dispose();
   });
 });
 

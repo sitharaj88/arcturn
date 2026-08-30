@@ -14,13 +14,7 @@ import { getTheme, setTheme } from "@arcturn/tui";
 import type { PermissionMode, PermissionRule } from "@arcturn/types";
 import { createBackgroundAgentCommands } from "./background-agents.js";
 import { copyToClipboard } from "./clipboard.js";
-import {
-  permissionModes,
-  persistModelPick,
-  persistPermissionRule,
-  persistRoutePatch,
-  persistSetting,
-} from "./config.js";
+import { permissionModes, persistModelPick, persistRoutePatch, persistSetting } from "./config.js";
 import { estimateCost, formatEstimate } from "./cost-preview.js";
 import { exportHtml, exportMarkdown, suggestExportFilename } from "./export.js";
 import type { ExtensionCommand } from "./extensions.js";
@@ -993,11 +987,17 @@ export function createBuiltInCommands(): SlashCommand[] {
             { value: "none", label: "Not now", data: undefined },
           ]);
           if (!choice) return;
-          const file = await persistPermissionRule(
-            { ...choice.rule, scope: "project" },
-            runtime.paths,
+          // Saving alone was a lie: nothing re-reads a config file mid-run, so
+          // the live agent went on prompting for exactly what was just
+          // approved, and `/permissions` did not list it either. The rule goes
+          // into force first and onto disk second.
+          const file = await runtime.applyPermissionRule({ ...choice.rule, scope: "project" });
+          ui.notice(
+            "info",
+            file === undefined
+              ? "Rule applied for the rest of this session; it could not be saved to your config."
+              : `Rule applied now, and saved to ${file}.`,
           );
-          ui.notice("info", `Saved to ${file}.`);
           return;
         }
         const rules = runtime.agent.permissions.rules;

@@ -42,6 +42,7 @@ import {
   DEFAULT_SEARCH_TOOL_NAME,
   type DeferredToolset,
   emptyUsage,
+  errorText,
   JsonlSessionStore,
   latestEntryId,
   materializeBranch,
@@ -556,6 +557,16 @@ function ruleKey(rule: PermissionRule): string {
 }
 
 /**
+ * Name a rule the way the user saw it offered — `allow bash git *` — for a
+ * notice that has to say *which* grant is about to be lost.
+ *
+ * @param rule - The rule to name.
+ */
+function describeRuleBriefly(rule: PermissionRule): string {
+  return `${rule.action} ${rule.tool}${rule.specifier ? ` ${rule.specifier}` : ""}`;
+}
+
+/**
  * Stamp a delegating agent's label onto one permission request.
  *
  * The label travels on the request itself rather than through a side channel
@@ -963,22 +974,77 @@ export class ArcturnRuntime {
   }
 
   /**
+   * Put a rule the user just approved into force everywhere this session
+   * reaches, and store it durably when its scope says it should outlive the
+   * run.
+   *
+   * Three things, because a user who answered "always" meant all three:
+   *
+   * 1. **The live agent's engine.** {@link PermissionEngine} re-reads its rule
+   *    list on every `check()`, so adding here lands on the main
+   *    conversation's very next tool call. Without this a grant answered
+   *    inside a sub-agent (or saved from `/permissions suggest`) was invisible
+   *    to the conversation the user is actually having: arcturn asked again for
+   *    the identical thing, and `/permissions` did not list it.
+   * 2. **{@link ArcturnRuntime.livePermissionRules}' session list**, which is
+   *    what every child built from here on is seeded from — sub-agents,
+   *    session agents, `/bg` background agents.
+   * 3. **The config file**, unless the rule is session-scoped, which
+   *    `persistPermissionRule` drops on purpose.
+   *
+   * A failed write is not fatal — the rule still holds for the rest of the run
+   * — but it is not silent either. An unwritable `~/.arcturn` used to mean
+   * "Allow always" worked all session and evaporated on relaunch with nothing
+   * ever said about it; now the user is told which rule will not survive.
+   *
+   * @param rule - The rule to put in force.
+   * @returns The file written, or `undefined` for a session-scoped rule (there
+   *   is nothing to write) and for a write that failed (the user was warned).
+   */
+  async applyPermissionRule(rule: PermissionRule): Promise<string | undefined> {
+    const key = ruleKey(rule);
+    // `PermissionEngine.check` has already appended the rule to whichever
+    // engine did the asking, which IS the live one when the main conversation
+    // prompted — so this must not double-list it in `/permissions`.
+    // `#started` guards the window in which `this.agent` is still being built.
+    if (this.#started && !this.agent.permissions.rules.some((r) => ruleKey(r) === key)) {
+      this.agent.addPermissionRule(rule);
+    }
+    if (!this.#sessionRules.some((existing) => ruleKey(existing) === key)) {
+      this.#sessionRules.push(rule);
+    }
+    try {
+      // Session-scoped rules are dropped by `persistPermissionRule`; project
+      // and user ones land in the matching config file, exactly as before.
+      return await persistPermissionRule(rule, this.paths);
+    } catch (error) {
+      this.notify(
+        "warn",
+        `Could not save the permission rule "${describeRuleBriefly(rule)}" ` +
+          `(${errorText(error)}). It applies for the rest of this session, but it will ` +
+          "be gone the next time arcturn starts.",
+      );
+      return undefined;
+    }
+  }
+
+  /**
    * Record a rule the user just approved at a prompt, and store it durably
    * when its scope says it should outlive the run.
    *
    * Every agent this runtime builds routes `onPersistRule` here — the live
-   * agent, sub-agents and session agents alike — so a grant answered inside
-   * stage 1 of a pipeline is already in place when stage 2 is built.
+   * agent, sub-agents, session agents and background agents alike — so a
+   * grant answered inside stage 1 of a pipeline is already in place when
+   * stage 2 is built, and so a grant answered inside any child reaches the
+   * main conversation too. Fire-and-forget by contract: the engine calling
+   * this is in the middle of resolving a tool call and must not wait on a
+   * disk write. See {@link ArcturnRuntime.applyPermissionRule}, which is the
+   * whole of it.
    *
    * @param rule - The rule carried by the decision.
    */
   #persistRule(rule: PermissionRule): void {
-    if (!this.#sessionRules.some((existing) => ruleKey(existing) === ruleKey(rule))) {
-      this.#sessionRules.push(rule);
-    }
-    // Session-scoped rules are dropped by `persistPermissionRule`; project and
-    // user ones land in the matching config file, exactly as before.
-    void persistPermissionRule(rule, this.paths).catch(() => undefined);
+    void this.applyPermissionRule(rule);
   }
 
   /** Session headers for this working directory, newest first. */

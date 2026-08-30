@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { getModel, registerModel, unregisterModel } from "@arcturn/ai";
 import type {
@@ -1166,6 +1166,68 @@ describe("live permission rules", () => {
     const second = runtime.createSubagent("second role");
     expect(hasRule(second.permissions.rules, fetchRule)).toBe(true);
     expect(second.permissions.evaluate("fetch", "https://example.test/other")).toBe("allow");
+    await runtime.dispose();
+  });
+
+  it("shows a grant answered inside a child to the PARENT's own next check", async () => {
+    const scratch = await makeScratch();
+    const fetchRule: PermissionRule = {
+      tool: "fetch",
+      specifier: "https://example.test/*",
+      action: "allow",
+      scope: "session",
+    };
+    const runtime = await buildTestRuntime(scratch, [{ text: "x" }], {
+      onPermissionAsk: grants(fetchRule),
+    });
+
+    const child = runtime.createSubagent("first role");
+    const decision = await child.permissions.check({
+      toolName: "fetch",
+      toolCallId: "c1",
+      subject: "https://example.test/spec",
+    });
+    expect(decision.behavior).toBe("allow");
+
+    // The user said "always". The main conversation must not ask again.
+    expect(hasRule(runtime.agent.permissions.rules, fetchRule)).toBe(true);
+    expect(runtime.agent.permissions.evaluate("fetch", "https://example.test/other")).toBe("allow");
+    await runtime.dispose();
+  });
+
+  it("warns when an 'always' rule cannot be written, and keeps it for the session", async () => {
+    const scratch = await makeScratch();
+    const projectRule: PermissionRule = {
+      tool: "bash",
+      specifier: "echo *",
+      action: "allow",
+      scope: "project",
+    };
+    const runtime = await buildTestRuntime(
+      scratch,
+      [
+        { toolCalls: [{ id: "t1", name: "bash", arguments: { command: "echo hi" } }] },
+        { text: "done" },
+      ],
+      { onPermissionAsk: grants(projectRule) },
+    );
+    const warned: string[] = [];
+    runtime.subscribe((event) => {
+      if (event.type === "notice" && event.level === "warn") warned.push(event.text);
+    });
+    // A directory where the config file belongs: every write to it fails,
+    // which is what an unwritable `~/.arcturn` looks like from here.
+    await mkdir(runtime.paths.projectConfig, { recursive: true });
+
+    await runtime.agent.prompt("run echo");
+    // The write is fire-and-forget; the warning it produces is not optional.
+    for (let i = 0; i < 200 && warned.length === 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    expect(warned.join("\n")).toContain("bash echo *");
+    expect(warned.join("\n")).toMatch(/session/i);
+    // Best-effort means best-effort: the rule still holds for this run.
+    expect(hasRule(runtime.agent.permissions.rules, projectRule)).toBe(true);
     await runtime.dispose();
   });
 });

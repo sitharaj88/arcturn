@@ -12,6 +12,37 @@
  * so the `/bg` commands and the host application always observe the same
  * instance — see `INTEGRATION-background-agents.md` for how to wire the
  * finished-agent notification into a UI.
+ *
+ * ## Permissions
+ *
+ * A background agent runs under **the session's own permission rules** — the
+ * user's config file unioned with every grant made during the run — read fresh
+ * at each launch through {@link BackgroundAgentManagerOptions.permissionRules}.
+ *
+ * It did not always. It used to be built with no rules at all, and that was a
+ * hole: a user's `deny read "**\/.env"` in `~/.arcturn/config.json` did not bind
+ * a `/bg` agent, and a deny is the one decision nothing — no mode, `yolo`
+ * included — is allowed to override. The narrowed toolset below hid the worst
+ * of it (a read-only agent has little to deny) but hid nothing at all from a
+ * `yolo` background agent, which got the full toolset with an empty rule list.
+ *
+ * Seeding the real rules also makes the user's `allow` rules apply, which is a
+ * genuine widening: calls that used to fail closed for want of a requester now
+ * succeed where an `allow` covers them. That is the correct reading of a rule
+ * the user wrote down — it says "I approve of this, do not ask me" — and it is
+ * bounded on every side:
+ *
+ * - the rules are exactly the ones the foreground agent already honours, so a
+ *   background agent can never resolve a call more permissively than the
+ *   session that spawned it;
+ * - `mode` still defaults to `"default"`, never `"yolo"`, so no rule-free
+ *   auto-allow appears;
+ * - the toolset is still narrowed to read-only plus `fetch` unless the caller
+ *   explicitly asked for `yolo` (see {@link defaultToolsForMode}) — an `allow`
+ *   for a tool the agent does not have is inert;
+ * - anything no rule covers still hits {@link PermissionEngine}'s
+ *   no-requester branch and is denied. Fail-closed is unchanged; what changed
+ *   is that the user's own written-down decisions are now honoured, both ways.
  */
 
 import { randomUUID } from "node:crypto";
@@ -31,7 +62,15 @@ import {
   materializeBranch,
   pathToLeaf,
 } from "@arcturn/core";
-import type { LLMClient, Message, ModelSpec, PermissionMode, Tool, Usage } from "@arcturn/types";
+import type {
+  LLMClient,
+  Message,
+  ModelSpec,
+  PermissionMode,
+  PermissionRule,
+  Tool,
+  Usage,
+} from "@arcturn/types";
 import type { CommandContext, CommandUi, SlashCommand } from "./commands.js";
 import { formatCost, formatDuration, oneLine } from "./format.js";
 import { isProcessAlive } from "./process-liveness.js";
@@ -125,6 +164,26 @@ export interface BackgroundAgentManagerOptions {
    * per-call override) explicitly to run agents with broader tool access.
    */
   permissionMode?: PermissionMode;
+  /**
+   * The rules every background agent's permission engine is seeded with.
+   *
+   * A **function**, not an array, and it is called once per agent at launch:
+   * a manager outlives any snapshot of the session's rules, so an agent
+   * started after the user answered "always" to something must see that
+   * answer. A host passes `() => runtime.livePermissionRules()`.
+   *
+   * Defaults to `() => []`, which is what a manager with no host behind it
+   * (this module's own unit tests) should have: no rules at all, everything
+   * that needs asking denied for want of a requester.
+   */
+  permissionRules?: () => readonly PermissionRule[];
+  /**
+   * Where a rule a background agent's own run produced is recorded — the same
+   * hook every other child agent gets. A background agent has no requester, so
+   * nothing reaches this from a prompt; a tool or extension that hands back a
+   * `persistRule` is the path that does.
+   */
+  onPersistRule?: (rule: PermissionRule) => void | Promise<void>;
   /** Max background agents running at once; the rest queue. Defaults to 3. */
   concurrency?: number;
   /** Turn ceiling per background agent. Defaults to core's `Agent` default. */
@@ -328,6 +387,8 @@ export class BackgroundAgentManager {
   readonly #isProcessAlive: (pid: number) => boolean;
   readonly #ownerPid: number;
   readonly #heartbeat: ReturnType<typeof setInterval>;
+  readonly #permissionRules: () => readonly PermissionRule[];
+  readonly #onPersistRule: ((rule: PermissionRule) => void | Promise<void>) | undefined;
 
   #llm: LLMClient;
   #model: ModelSpec;
@@ -351,6 +412,8 @@ export class BackgroundAgentManager {
     this.#cwd = options.cwd;
     this.#systemPrompt = options.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
     this.#permissionMode = options.permissionMode ?? "default";
+    this.#permissionRules = options.permissionRules ?? (() => []);
+    this.#onPersistRule = options.onPersistRule;
     this.#concurrency = Math.max(1, Math.floor(options.concurrency ?? DEFAULT_CONCURRENCY));
     this.#maxTurns = options.maxTurns;
     this.#now = options.now ?? Date.now;
@@ -575,6 +638,9 @@ export class BackgroundAgentManager {
     // Combined with `mode` defaulting to `"default"` (never `"yolo"` unless
     // the caller explicitly asked), anything the tool filter didn't already
     // exclude that still needs asking is denied automatically, fail-closed.
+    //
+    // The rules ARE the session's, read here rather than at construction so an
+    // agent started after a mid-session grant sees it. See the module doc.
     const agent = new Agent({
       llm: this.#llm,
       model,
@@ -584,7 +650,11 @@ export class BackgroundAgentManager {
       sessionStore: this.#store,
       sessionId: record.sessionId,
       title: `background: ${oneLine(record.task, 60)}`,
-      permissions: { mode },
+      permissions: {
+        mode,
+        rules: [...this.#permissionRules()],
+        ...(this.#onPersistRule === undefined ? {} : { onPersistRule: this.#onPersistRule }),
+      },
       signal: controller.signal,
       ...(this.#maxTurns === undefined ? {} : { maxTurns: this.#maxTurns }),
     });
@@ -753,6 +823,21 @@ export interface BackgroundAgentHost {
   readonly model: ModelSpec;
   readonly tools: readonly Tool[];
   readonly cwd: string;
+  /**
+   * The permission rules in force in this session right now — the config file
+   * unioned with everything the user has granted during the run. A real
+   * `ArcturnRuntime` provides it.
+   *
+   * Optional so a stub host (a test, an embedder) still satisfies the shape;
+   * absent, background agents run with no rules, which is the fail-closed
+   * posture they had before this existed and the truth for such a host.
+   */
+  readonly livePermissionRules?: () => readonly PermissionRule[];
+  /**
+   * Record a rule a background agent's run produced, the same way every other
+   * child agent's grants are recorded. Optional on the same terms.
+   */
+  readonly applyPermissionRule?: (rule: PermissionRule) => unknown;
 }
 
 const managers = new WeakMap<BackgroundAgentHost, BackgroundAgentManager>();
@@ -779,6 +864,13 @@ export function getBackgroundAgentManager(runtime: BackgroundAgentHost): Backgro
       model: runtime.model,
       tools: runtime.tools,
       cwd: runtime.cwd,
+      // Re-read per agent, not captured here: the manager is memoized for the
+      // life of the runtime, and a grant made an hour into the session has to
+      // reach the agent started after it.
+      permissionRules: () => runtime.livePermissionRules?.() ?? [],
+      onPersistRule: (rule) => {
+        runtime.applyPermissionRule?.(rule);
+      },
     });
     managers.set(runtime, manager);
   } else {

@@ -545,6 +545,74 @@ describe("built-in commands", () => {
     await runtime.dispose();
   });
 
+  it("/permissions suggest applies the saved rule to the live session, not just the file", async () => {
+    const scratch = await makeScratch();
+    const runtime = await buildTestRuntime(scratch, [{ text: "x" }]);
+    // Three consistent denials of one cluster: the learner's threshold.
+    for (let i = 0; i < 3; i++) {
+      runtime.policy.observe(
+        {
+          id: `perm-${i}`,
+          toolName: "bash",
+          toolCallId: `call-${i}`,
+          subject: `git push origin branch-${i}`,
+          description: "",
+        },
+        { requestId: `perm-${i}`, behavior: "deny" },
+      );
+    }
+    const [suggestion] = runtime.policy.suggestions();
+    expect(suggestion?.rule).toMatchObject({ tool: "bash", specifier: "git *", action: "deny" });
+
+    const ui = fakeUi(suggestion);
+    await run(runtime, "/permissions suggest", ui);
+
+    const wanted = { tool: "bash", specifier: "git *", action: "deny", scope: "project" };
+    // (a) The live agent must stop asking about the thing just approved.
+    expect(runtime.agent.permissions.rules).toContainEqual(wanted);
+    expect(runtime.agent.permissions.evaluate("bash", "git push")).toBe("deny");
+    // (b) ...and a child built afterwards must inherit it.
+    const child = runtime.createSubagent("look around");
+    expect(child.permissions.rules).toContainEqual(wanted);
+    // (c) ...and it must still be on disk for the next launch.
+    const stored = JSON.parse(await readFile(runtime.paths.projectConfig, "utf8")) as {
+      permissions: unknown[];
+    };
+    expect(stored.permissions).toContainEqual(wanted);
+    // The notice must not claim more (or less) than actually happened.
+    expect(ui.notices[0]?.text).toContain(runtime.paths.projectConfig);
+    expect(ui.notices[0]?.text.toLowerCase()).toContain("now");
+    await runtime.dispose();
+  });
+
+  it("/permissions lists a rule granted inside a sub-agent", async () => {
+    const scratch = await makeScratch();
+    const fetchRule = {
+      tool: "fetch",
+      specifier: "https://example.test/*",
+      action: "allow" as const,
+      scope: "session" as const,
+    };
+    const runtime = await buildTestRuntime(scratch, [{ text: "x" }], {
+      onPermissionAsk: async () => ({
+        requestId: "",
+        behavior: "allow" as const,
+        persistRule: fetchRule,
+      }),
+    });
+    const child = runtime.createSubagent("first role");
+    await child.permissions.check({
+      toolName: "fetch",
+      toolCallId: "c1",
+      subject: "https://example.test/spec",
+    });
+
+    const ui = fakeUi();
+    await run(runtime, "/permissions", ui);
+    expect(ui.lines.join("\n")).toContain("fetch https://example.test/*");
+    await runtime.dispose();
+  });
+
   it("/mcp explains how to configure servers when none are connected", async () => {
     const scratch = await makeScratch();
     const runtime = await buildTestRuntime(scratch);

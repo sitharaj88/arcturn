@@ -10,6 +10,36 @@ CLI, the SDK, or the wire protocol.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Background agents ignored your permission rules entirely.** A `/bg`
+  agent was built with an empty rule list, so a `deny read "**/.env"` in
+  your own config did not bind it — and a deny is the one decision no
+  mode, `yolo` included, may override. The read-only toolset hid most of
+  it, and hid none of it from a `yolo` background agent, which got the
+  full tool set with no rules at all. A background agent now runs under
+  the session's own rules, read fresh at each launch so a grant you made
+  an hour in still reaches it. Your `allow` rules apply too, which is the
+  other half of honouring what you wrote down; everything no rule covers
+  is still denied outright, because a background agent has nobody to ask.
+- **"Allow always" answered inside a sub-agent did not reach the
+  conversation you were having.** The grant was recorded for future
+  children and written to your config, but never applied to the live
+  agent — so the main conversation asked again for the identical thing on
+  its next turn, and `/permissions` did not list it. One helper now puts a
+  rule into force in all three places at once: the live engine, the
+  session list every child is seeded from, and the config file.
+- **`/permissions suggest` said "Saved" and changed nothing about the
+  running session.** Nothing re-reads a config file mid-run, so the rule
+  you had just approved took effect on the *next* launch while Arcturn
+  went on prompting for it. It now applies immediately and persists, and
+  the notice says both.
+- **A permission rule that could not be written vanished without a word.**
+  An unwritable `~/.arcturn` meant "Allow always" worked all session and
+  was gone on relaunch, with nothing said. Saving stays best-effort — the
+  rule still holds for the rest of the run — but a failed write now names
+  the rule and tells you it will not outlive the session.
+
 ### Added
 
 - **Point Arcturn at your own endpoint from configuration, not from code.**
