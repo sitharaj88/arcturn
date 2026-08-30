@@ -57,6 +57,7 @@ Every key `.arcturn/config.json` accepts, in both user and project files:
 | `dryRun` | `boolean` | `false` | Route file mutations to a shadow copy for review instead of the real tree. Same as `--dry-run`. See [Dry-run mode](/docs/dry-run). |
 | `speculation` | `boolean` | `false` | Keep editing speculatively while a permission prompt is open. |
 | `route` | `RouterConfig` | `{}` | Per-role model overrides (`main`, `subagent`, `compaction`, `title`). See below. |
+| `sessionTitles` | `boolean` | `true` | Generate a session title with one small LLM call (on the `title` route) after an interactive session's first completed run. `false` turns the call off. See [Sessions](/docs/sessions#session-titles). |
 | `taint` | `"off" \| "warn" \| "confirm" \| "deny"` | `"warn"` | How to treat a mutating call that echoes untrusted fetched content. See [Injection defense](/docs/injection-defense). |
 | `canary` | `"off" \| "warn" \| "deny"` | `"off"` | How to treat an outbound call carrying a planted canary token. See [Injection defense](/docs/injection-defense). |
 | `canaries` | `string[]` | *(unset)* | Literal values that must never leave this machine; concatenates across layers. |
@@ -122,6 +123,12 @@ Each of `main`, `subagent`, `compaction`, `title` is an independent model id. An
 key falls back to `main`'s route, and an absent `main` falls back to whatever model the
 session is actually running (typically what `--model` resolved to). A stale or typo'd id
 never throws or blocks startup — it falls back to the main model and surfaces a warning.
+
+You don't have to edit this block by hand: `/model route --auto` picks a cheaper
+same-provider model and writes `route.subagent` and `route.compaction` into your user
+config (merging into the existing block), and `/model route <kind> <id>` /
+`/model route clear [kind]` manage single keys. See
+[Model routing](/docs/model-routing) for the full precedence.
 
 ## Provider API keys
 

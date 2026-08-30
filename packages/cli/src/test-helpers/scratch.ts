@@ -59,6 +59,10 @@ export async function buildTestRuntime(
     llm: fakeLLM(turns),
     extensions: false,
     skipRepoLookup: true,
+    // A scripted client's turns belong to the test: the fire-and-forget
+    // session-title call must not consume one or race an assertion. Titling
+    // tests opt back in via overrides (or a config file, which wins anyway).
+    sessionTitles: false,
     ...overrides,
   });
 }

@@ -7,7 +7,7 @@
  * touches the terminal directly.
  */
 
-import { writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { listModels, listPresets, refreshCatalog, subscriptionPlanFor } from "@arcturn/ai";
 import { getTheme, setTheme } from "@arcturn/tui";
@@ -18,6 +18,7 @@ import {
   permissionModes,
   persistModelPick,
   persistPermissionRule,
+  persistRoutePatch,
   persistSetting,
 } from "./config.js";
 import { estimateCost, formatEstimate } from "./cost-preview.js";
@@ -36,6 +37,12 @@ import { createOrgMemoryCommands } from "./org-memory.js";
 import { formatSuggestion } from "./policy-learn.js";
 import { createRegistryCommands } from "./registry.js";
 import { bestMatch, explainMatch, searchTurns } from "./rewind-search.js";
+import {
+  describeRoutes,
+  SETTABLE_ROUTE_KINDS,
+  type SettableRouteKind,
+  suggestCheapModel,
+} from "./router.js";
 import { type ArcturnRuntime, resolveModelSpec } from "./runtime.js";
 import { formatScoutReport, runScouts } from "./scouts.js";
 import { createStatsCommands } from "./stats.js";
@@ -294,6 +301,165 @@ function describeRule(rule: PermissionRule): string {
   return `${rule.action.padEnd(5)} ${rule.tool}${specifier}  (${rule.scope})`;
 }
 
+function isSettableRouteKind(value: string): value is SettableRouteKind {
+  return (SETTABLE_ROUTE_KINDS as readonly string[]).includes(value);
+}
+
+/**
+ * Apply a route patch live and persist it, in that order. The live half
+ * (`setRoute`) cannot fail; a failed save downgrades to a warning exactly
+ * like a failed `/model` pick — the session keeps the change either way.
+ *
+ * @returns The " Saved…" suffix for the caller's notice, or `""` when the
+ *   save failed (the warning has already been shown).
+ */
+async function applyRoutePatch(
+  runtime: ArcturnRuntime,
+  ui: CommandUi,
+  patch: Partial<Record<SettableRouteKind, string | undefined>>,
+): Promise<string> {
+  for (const kind of Object.keys(patch) as SettableRouteKind[]) {
+    runtime.router.setRoute(kind, patch[kind]);
+  }
+  try {
+    const file = await persistRoutePatch(patch, runtime.paths);
+    return ` Saved as your default (${file}).`;
+  } catch (error) {
+    ui.notice(
+      "warn",
+      `Applied for this session, but could not be saved: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return "";
+  }
+}
+
+/**
+ * Whether the project-layer config carries its own `route` block. `route`
+ * replaces wholesale per layer, so a project block will outrank whatever
+ * `/model route` just wrote to the user file on the next launch here —
+ * worth saying out loud at the moment of writing, not discovering later.
+ */
+async function projectRouteOutranks(runtime: ArcturnRuntime): Promise<boolean> {
+  if (runtime.paths.project === runtime.paths.home) return false;
+  try {
+    const parsed: unknown = JSON.parse(await readFile(runtime.paths.projectConfig, "utf8"));
+    return (
+      typeof parsed === "object" &&
+      parsed !== null &&
+      !Array.isArray(parsed) &&
+      (parsed as Record<string, unknown>).route !== undefined
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The `/model route` family: inspect the effective routes, apply the cheap
+ * heuristic (`--auto`), or set/clear one route by hand. Every mutation goes
+ * through {@link applyRoutePatch}: live first, then persisted to the USER
+ * config only.
+ */
+async function runModelRoute(args: string, runtime: ArcturnRuntime, ui: CommandUi): Promise<void> {
+  const words = args.split(/\s+/).filter((word) => word !== "");
+  if (words.length === 0) {
+    ui.print(["Model routes", ...describeRoutes(runtime.router).map((line) => `  ${line}`)]);
+    for (const warning of runtime.router.warnings()) ui.notice("warn", warning);
+    return;
+  }
+  if (words.length === 1 && words[0] === "--auto") {
+    const main = runtime.model;
+    const suggestion = suggestCheapModel(listModels(), main);
+    // The heuristic enforces every requirement itself (same vendor namespace,
+    // tools, published pricing, strictly cheaper than a priced main), so an
+    // empty answer collapses to one honest warning naming them all.
+    if (!suggestion) {
+      ui.notice(
+        "warn",
+        `No cheap stand-in for ${main.id}: a candidate must come from the same ` +
+          "provider namespace, support tools, publish pricing, and cost less than " +
+          "a priced main model. Nothing changed.",
+      );
+      return;
+    }
+    const saved = await applyRoutePatch(runtime, ui, {
+      subagent: suggestion.id,
+      compaction: suggestion.id,
+    });
+    // Honest caveat: with an unpriced main model, "cheaper" is a claim about
+    // the catalog, not a comparison anyone actually made.
+    const caveat =
+      main.cost === undefined
+        ? ` ${main.displayName} publishes no pricing, so "cheaper" could not be checked against it.`
+        : "";
+    ui.notice(
+      "info",
+      `Routed subagent and compaction to ${suggestion.displayName} ` +
+        `(${suggestion.id}, $${suggestion.cost!.input}/Mtok in).${saved}${caveat}`,
+    );
+    if (await projectRouteOutranks(runtime)) {
+      ui.notice(
+        "warn",
+        'This project\'s .arcturn/config.json sets its own "route", which replaces ' +
+          "the saved user-level routes wholesale the next time Arcturn starts here.",
+      );
+    }
+    return;
+  }
+  if (words[0] === "clear" && words.length <= 2) {
+    const target = words[1];
+    if (target !== undefined && !isSettableRouteKind(target)) {
+      ui.notice(
+        "error",
+        `Unknown route "${target}". Clearable routes: ${SETTABLE_ROUTE_KINDS.join(", ")}.`,
+      );
+      return;
+    }
+    const kinds = target === undefined ? SETTABLE_ROUTE_KINDS : [target];
+    const patch = Object.fromEntries(kinds.map((kind) => [kind, undefined])) as Partial<
+      Record<SettableRouteKind, string | undefined>
+    >;
+    const saved = await applyRoutePatch(runtime, ui, patch);
+    ui.notice(
+      "info",
+      `Cleared the ${kinds.join(", ")} route${kinds.length === 1 ? "" : "s"}; ` +
+        `falling back to the main route.${saved}`,
+    );
+    return;
+  }
+  const [kindWord, idWord] = words;
+  if (words.length === 2 && kindWord !== undefined && idWord !== undefined) {
+    if (kindWord === "main") {
+      ui.notice("error", "The main route follows your model pick — use /model <id> instead.");
+      return;
+    }
+    if (!isSettableRouteKind(kindWord)) {
+      ui.notice(
+        "error",
+        `Unknown route "${kindWord}". Settable routes: ${SETTABLE_ROUTE_KINDS.join(", ")}.`,
+      );
+      return;
+    }
+    // Resolve eagerly: the router itself tolerates a bad id (falls back and
+    // warns), but a user typing one deserves the catalog error now, not a
+    // quietly ineffective route discovered later.
+    let spec: ReturnType<typeof resolveModelSpec>;
+    try {
+      spec = resolveModelSpec(idWord, runtime.env);
+    } catch (error) {
+      ui.notice("error", error instanceof Error ? error.message : String(error));
+      return;
+    }
+    const saved = await applyRoutePatch(runtime, ui, { [kindWord]: spec.id });
+    ui.notice("info", `Routed ${kindWord} to ${spec.displayName} (${spec.id}).${saved}`);
+    return;
+  }
+  ui.notice(
+    "error",
+    "Usage: /model route [--auto | <subagent|compaction|title> <model-id> | clear [route]]",
+  );
+}
+
 /** The commands Arcturn ships with. */
 export function createBuiltInCommands(): SlashCommand[] {
   return [
@@ -341,6 +507,12 @@ export function createBuiltInCommands(): SlashCommand[] {
             "info",
             `Live catalog refreshed: ${result.registered.length} models across ${presetIds.length} presets.`,
           );
+          return;
+        }
+        // `route` is its own family, not a model id: inspect the effective
+        // per-role routes, or change the cheap ones (see `runModelRoute`).
+        if (args.trim() === "route" || args.trim().startsWith("route ")) {
+          await runModelRoute(args.trim().slice("route".length).trim(), runtime, ui);
           return;
         }
         // The pick is a default, not a whim: it outlives the session, like
@@ -435,12 +607,25 @@ export function createBuiltInCommands(): SlashCommand[] {
         }
         const choice = await ui.select(
           "Resume a session",
-          headers.slice(0, 50).map((header) => ({
-            value: header.sessionId,
-            label: `${new Date(header.createdAt).toISOString().slice(0, 16).replace("T", " ")}  ${header.sessionId}`,
-            ...(header.title ? { description: oneLine(header.title, 60) } : {}),
-            data: header.sessionId,
-          })),
+          headers.slice(0, 50).map((header) => {
+            const stamp = new Date(header.createdAt).toISOString().slice(0, 16).replace("T", " ");
+            // A generated title is what a person recognises, so it is the
+            // row; the id drops to the description. Untitled sessions (from
+            // before titling, or with it switched off) keep the id row they
+            // always had.
+            return header.title
+              ? {
+                  value: header.sessionId,
+                  label: `${stamp}  ${oneLine(header.title, 60)}`,
+                  description: header.sessionId,
+                  data: header.sessionId,
+                }
+              : {
+                  value: header.sessionId,
+                  label: `${stamp}  ${header.sessionId}`,
+                  data: header.sessionId,
+                };
+          }),
           { filterable: true },
         );
         if (!choice) return;

@@ -27,7 +27,7 @@ import {
   type ResolveArcturnPathsOptions,
   resolveArcturnPaths,
 } from "./paths.js";
-import type { RouterConfig } from "./router.js";
+import type { RouteKind, RouterConfig } from "./router.js";
 import type { VerifyConfig } from "./verify.js";
 
 /** Lower rank wins when rules from different scopes disagree. */
@@ -156,6 +156,22 @@ export interface ArcturnConfig {
   dryRun: boolean;
   /** Keep editing speculatively while a permission prompt is open. */
   speculation: boolean;
+  /**
+   * Generate a session title with one small LLM call (on the `title` route)
+   * after an interactive session's first completed run (default `true`;
+   * `--print`/serve/acp never title — see
+   * `ArcturnRuntime.sessionTitlesEligible`). `false` turns the call off
+   * entirely — sessions then keep whatever title they already had, exactly
+   * as before titling existed.
+   *
+   * Deliberately absent from {@link DEFAULT_CONFIG}, unlike the other
+   * booleans: "unset" is meaningful here. A host may supply its own default
+   * (`BuildRuntimeOptions.sessionTitles` — an embedder or test whose
+   * scripted LLM must not receive a surprise call), and only an explicit
+   * config value outranks that; a baked-in `true` would erase the
+   * distinction between "the user chose on" and "nobody said".
+   */
+  sessionTitles?: boolean;
   /** Command run after edits, whose failures are fed back to the model. */
   verify?: VerifyConfig | undefined;
   /**
@@ -240,6 +256,7 @@ const KNOWN_KEYS = new Set([
   "provenance",
   "dryRun",
   "speculation",
+  "sessionTitles",
   "route",
   "taint",
   "canary",
@@ -485,6 +502,10 @@ export function parseConfigFile(
     if (typeof raw.speculation === "boolean") out.speculation = raw.speculation;
     else warnings.push(`${where}: "speculation" must be a boolean`);
   }
+  if (raw.sessionTitles !== undefined) {
+    if (typeof raw.sessionTitles === "boolean") out.sessionTitles = raw.sessionTitles;
+    else warnings.push(`${where}: "sessionTitles" must be a boolean`);
+  }
   if (raw.lsp !== undefined) {
     if (raw.lsp === "off" || raw.lsp === "on") out.lsp = raw.lsp;
     else warnings.push(`${where}: "lsp" must be "off" or "on"`);
@@ -696,6 +717,9 @@ export function mergeConfig(base: ArcturnConfig, layer: Partial<ArcturnConfig>):
     provenance: layer.provenance ?? base.provenance,
     dryRun: layer.dryRun ?? base.dryRun,
     speculation: layer.speculation ?? base.speculation,
+    ...((layer.sessionTitles ?? base.sessionTitles) === undefined
+      ? {}
+      : { sessionTitles: layer.sessionTitles ?? base.sessionTitles }),
     lsp: layer.lsp ?? base.lsp,
     offload: layer.offload ?? base.offload,
     ...((layer.offloadLimits ?? base.offloadLimits) === undefined
@@ -907,8 +931,11 @@ export async function persistSetting<K extends keyof ArcturnConfig>(
  * wrote only `model` would look saved and change nothing against a config
  * carrying `route.main` — so when the user layer has one, it moves with the
  * pick. The other route keys (`subagent`, `compaction`, `title`, `tiers`)
- * are deliberate policy, not the pick, and stay untouched — as does a
- * project-layer config, which outranks the user layer on purpose.
+ * are deliberate policy, not the pick, and stay untouched here: the one
+ * command allowed to machine-write them is `/model route` (via
+ * {@link persistRoutePatch}), which is itself an explicit, user-typed
+ * decision about routing. A project-layer config outranks the user layer on
+ * purpose and is never written by either path.
  *
  * A `model` failover chain keeps its tail: the pick becomes the head and the
  * remaining entries stay behind it as fallbacks.
@@ -933,6 +960,49 @@ export async function persistModelPick(id: string, paths: ArcturnPaths): Promise
   if (isRecord(existing.route) && typeof existing.route.main === "string") {
     next.route = { ...existing.route, main: id };
   }
+  await mkdir(dirname(file), { recursive: true });
+  await writeFile(file, `${JSON.stringify(next, null, 2)}\n`, "utf8");
+  return file;
+}
+
+/**
+ * Persist a per-kind route change from `/model route` as the user's default.
+ *
+ * Always the user file, never the project one: the command is a personal
+ * routing decision, and writing the *merged* view back would quietly promote
+ * project-layer values into the user's own config. For the same reason this
+ * merges into the `route` object already in the file rather than replacing
+ * it — `main`, `tiers` and every kind the patch does not name survive
+ * exactly as written. This is the on-disk half of a route change;
+ * `ModelRouter.setRoute` (see `router.ts`) is the live half.
+ *
+ * @param patch - Kinds to change. A `string` value sets that kind's model
+ *   id; an explicit `undefined` deletes it (the kind falls back to `main`
+ *   again on the next launch). Kinds absent from the patch are untouched.
+ * @param paths - Resolved filesystem layout.
+ * @returns The file written (always the user config).
+ */
+export async function persistRoutePatch(
+  patch: Partial<Record<RouteKind, string | undefined>>,
+  paths: ArcturnPaths,
+): Promise<string> {
+  const file = paths.userConfig;
+  let existing: Record<string, unknown> = {};
+  try {
+    const parsed: unknown = JSON.parse(await readFile(file, "utf8"));
+    if (isRecord(parsed)) existing = parsed;
+  } catch {
+    // Treat an absent or broken file as empty.
+  }
+  const route: Record<string, unknown> = isRecord(existing.route) ? { ...existing.route } : {};
+  for (const [kind, id] of Object.entries(patch)) {
+    if (id === undefined) delete route[kind];
+    else route[kind] = id;
+  }
+  const next: Record<string, unknown> = { ...existing, route };
+  // A patch that emptied the block removes the key outright — `route: {}` in
+  // a config file reads as policy where none exists.
+  if (Object.keys(route).length === 0) delete next.route;
   await mkdir(dirname(file), { recursive: true });
   await writeFile(file, `${JSON.stringify(next, null, 2)}\n`, "utf8");
   return file;

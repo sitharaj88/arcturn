@@ -1,9 +1,12 @@
 # Integrating the model router
 
-`packages/cli/src/router.ts` (+ `router.test.ts`) is a new, standalone module.
-It is **not wired in anywhere yet** — this document is the map for doing that.
-Per the task's hard rules, no existing file was edited to produce it; the
-changes below are a plan, not a diff.
+`packages/cli/src/router.ts` (+ `router.test.ts`) began as a standalone,
+unwired module, and this document was the map for wiring it. **The map has
+since been walked**: the config key (§1), the runtime construction and
+`subagent` consumption (§2), the compaction seam (`routedCompactionOptions`
+in `runtime.ts`), LLM-generated session titles on the `title` route
+(`session-title.ts`), and the `/model route` command family (§4) are all
+live. Sections below are annotated where reality superseded the sketch.
 
 ## What it gives you
 
@@ -192,15 +195,36 @@ the budget), that would be a second call site inside `core`, out of scope
 here — call it out as a follow-up rather than reaching into `core` under
 this task's "new files only" constraint.
 
-### Title generation
+**LANDED, with a different split than sketched:** core already had the seam
+(`CompactionOptions.model`, consumed as `options.model ?? input.model`), so
+no core change was needed. `routedCompactionOptions(seat, router)` in
+`runtime.ts` still sizes the budget from the *seat* model (the window the
+conversation actually lives in — not the summarizer's, as this note once
+suggested) and adds `model` as a **live getter** that yields
+`specFor("compaction")` only when `router.isRouted("compaction")` says a
+compaction (or standing `route.main`) policy exists; otherwise `undefined`,
+so an unrouted agent — a sub-agent on its own cheap model, a served session
+with a per-session model — keeps compacting with the model in its seat.
+The getter is read at compact time, which is what lets a mid-session
+`/model route --auto` or `/model <id>` rebind govern the very next
+compaction on agents constructed earlier.
 
-`runtime.ts` doesn't currently generate session titles from an LLM call
-(session `title` is set from the delegated task text, e.g. line 568:
-`` title: `subagent: ${task.slice(0, 60)}` `` — it's a truncation, not a
-model call). If/when title generation becomes an LLM call (e.g. "summarize
-this conversation into a 6-word title" for the session list), that call site
-should request `router.specFor("title")`, matching the `subagent` and
-`compaction` pattern above.
+### Title generation — LANDED
+
+This is no longer an "if/when": `packages/cli/src/session-title.ts` is the
+event-driven title generator (fire-once-per-session, triggered by the first
+`runEnd` with `reason: "completed"` on an untitled session), and
+`buildRuntime` wires it beside the cost guard. The LLM call requests
+`router.specFor("title")` exactly as sketched here — through the *base*
+client rather than the failover/consensus chain, because a title is a nicety
+that should fail once and cheaply. It arms only for interactive sessions
+(`ArcturnRuntime.sessionTitlesEligible`, set by the interactive app):
+`--print`, serve and acp keep their contractual request streams — cassettes,
+replay and the e2e "exactly one request reached the provider" pins would all
+be polluted by a surprise second call. Sub-agent scratch sessions still get
+their truncation title (`` `subagent: ${task.slice(0, 60)}` ``) at create
+time, and the generator skips any session whose stored header already
+carries a title. `sessionTitles: false` in config disables the whole path.
 
 ## 3. Composing with markdown agents — precedence summary
 
@@ -220,59 +244,37 @@ only *narrows* the parent's allowed set (line 546) while `def.model` fully
 between "no agent-specific override" and "runtime's current model" with a
 policy decision, without disturbing either end of that existing chain.
 
-## 4. `/model route` command sketch
+## 4. `/model route` command — LANDED
 
-`packages/cli/src/commands.ts` already has a `model` command (line 191) that
-switches `runtime.model` via `runtime.setModel`. A sibling `route`
-subcommand (or `model route` as a second word, mirroring how `model refresh`
-already branches on `args.trim()` at line 196) would look like:
+The sketch below shipped, with one deliberate upgrade over what this note
+originally proposed: `--auto` no longer merely *suggests*. Now that the
+router has a mutator (`ModelRouter.setRoute`) and the config a targeted
+writer (`persistRoutePatch`), applying the pick is itself an explicit,
+user-typed action — which was the whole reason suggestion-only existed. The
+shipped shape, all inside the existing `model` command's handler
+(`runModelRoute` in `commands.ts`), branching between `refresh` and the
+model-id path:
 
-```ts
-{
-  name: "model", // extend the existing handler, or add a dedicated "route" command
-  ...
-  async run({ ui, runtime, args }) {
-    const [sub, ...rest] = args.trim().split(/\s+/);
-    if (sub === "route") {
-      const arg = rest.join(" ");
-      if (arg === "--auto") {
-        const suggestion = suggestCheapModel(listModels(), runtime.model);
-        if (!suggestion) {
-          ui.notice("warn", "No cheaper same-provider, tool-capable model with known pricing found.");
-          return;
-        }
-        ui.print([
-          `Suggested cheap model: ${suggestion.id} (${suggestion.displayName})`,
-          `$${suggestion.cost?.input}/Mtok input vs. $${runtime.model.cost?.input ?? "?"}/Mtok for ${runtime.model.id}.`,
-          "Not applied — add it to route.subagent / route.compaction / route.title in .arcturn/config.json and restart.",
-        ]);
-        return;
-      }
-      // No args: show the current routes.
-      ui.print(["Model routes:", ...describeRoutes(runtime.router).map((line) => `  ${line}`)]);
-      for (const warning of runtime.router.warnings()) ui.notice("warn", warning);
-      return;
-    }
-    // ...existing /model switch-model behavior below...
-  },
-}
-```
-
-Key points for whoever wires this in:
-
-- `--auto` only *suggests* (per the task's design: "used by a `/model route
-  --auto` sketch, not applied automatically") — it prints a suggestion and
-  the config key to set by hand; it never calls `runtime.setModel` or writes
-  config. Applying a suggested route is a deliberate, separate action (edit
-  `.arcturn/config.json`, restart arcturn) so a heuristic pick never silently changes
-  what a sub-agent run costs or what compaction does to context fidelity.
-- Plain `/model route` (no args) is the read path: `describeRoutes` plus
-  printing any accumulated `warnings()`, so a stale `route.subagent` id shows
-  up in the UI once, in the same place a user would look to fix it.
-- `suggestCheapModel` needs a `main` argument that is the *current* model
-  (`runtime.model`, which already tracks `/model` switches), not a router
-  route — it answers "what's cheaper than what I'm running now," independent
-  of whatever `route.*` happens to already say.
+- `/model route` — the read path, exactly as sketched: `describeRoutes`
+  plus any accumulated `router.warnings()`, so a stale `route.subagent` id
+  shows up once, in the place a user would look to fix it.
+- `/model route --auto` — `suggestCheapModel(listModels(), runtime.model)`
+  (the *current* model, which tracks `/model` switches), then applies the
+  pick to the `subagent` AND `compaction` routes: live first
+  (`setRoute` cannot fail), then persisted to the USER config only
+  (`persistRoutePatch` merges into the existing `route` block; a failed
+  save downgrades to a warning, like a failed `/model` pick). It refuses
+  when no candidate qualifies, and refuses to route "up" when the cheapest
+  candidate is not actually cheaper than the current model; an unpriced main
+  model gets an honest caveat instead of a fake comparison. When the
+  project-layer config carries its own `route` (which replaces wholesale),
+  the command says so at write time.
+- `/model route <subagent|compaction|title> <id>` and
+  `/model route clear [kind]` — manual single-key management through the
+  same live-then-persist pair. `main` is rejected with a pointer to
+  `/model <id>`: the main route belongs to the pick/rebind lifecycle, and
+  `setRoute`'s type (`Exclude<RouteKind, "main">`) makes that
+  unrepresentable rather than merely discouraged.
 
 ## Verification
 

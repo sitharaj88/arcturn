@@ -13,6 +13,7 @@ import {
   parsePermissionMode,
   persistModelPick,
   persistPermissionRule,
+  persistRoutePatch,
   persistSetting,
 } from "./config.js";
 import { resolveArcturnPaths } from "./paths.js";
@@ -477,6 +478,112 @@ describe("persistModelPick", () => {
     await persistModelPick("zai-api/glm-5.3", paths);
     const stored = JSON.parse(await readFile(paths.userConfig, "utf8")) as ArcturnConfig;
     expect(stored.model).toEqual(["zai-api/glm-5.3", "zai-api/glm-5.2", "openai/gpt-5"]);
+  });
+});
+
+describe("persistRoutePatch", () => {
+  it("writes the patched kinds into a fresh config, and nothing else", async () => {
+    const { home, cwd } = await scratch();
+    const paths = resolveArcturnPaths({ home, cwd, env: {} });
+    const file = await persistRoutePatch({ subagent: "cheap/one", compaction: "cheap/one" }, paths);
+    expect(file).toBe(paths.userConfig);
+    const stored = JSON.parse(await readFile(paths.userConfig, "utf8")) as ArcturnConfig;
+    expect(stored.route).toEqual({ subagent: "cheap/one", compaction: "cheap/one" });
+    expect(stored.model).toBeUndefined();
+  });
+
+  it("preserves main, tiers, unspecified kinds and unrelated settings", async () => {
+    const { home, cwd } = await scratch();
+    const paths = resolveArcturnPaths({ home, cwd, env: {} });
+    await writeJson(paths.userConfig, {
+      theme: "light",
+      route: {
+        main: "big/one",
+        subagent: "old/one",
+        title: "tiny/one",
+        tiers: { judgment: "big/one" },
+      },
+    });
+    await persistRoutePatch({ subagent: "cheap/two", compaction: "cheap/two" }, paths);
+    const stored = JSON.parse(await readFile(paths.userConfig, "utf8")) as ArcturnConfig;
+    expect(stored.route).toEqual({
+      main: "big/one",
+      subagent: "cheap/two",
+      compaction: "cheap/two",
+      title: "tiny/one",
+      tiers: { judgment: "big/one" },
+    });
+    expect(stored.theme).toBe("light");
+  });
+
+  it("deletes a kind for an explicit undefined, dropping an emptied route block", async () => {
+    const { home, cwd } = await scratch();
+    const paths = resolveArcturnPaths({ home, cwd, env: {} });
+    await writeJson(paths.userConfig, { route: { subagent: "cheap/one", title: "tiny/one" } });
+    await persistRoutePatch({ subagent: undefined }, paths);
+    let stored = JSON.parse(await readFile(paths.userConfig, "utf8")) as ArcturnConfig;
+    expect(stored.route).toEqual({ title: "tiny/one" });
+
+    await persistRoutePatch({ title: undefined }, paths);
+    stored = JSON.parse(await readFile(paths.userConfig, "utf8")) as ArcturnConfig;
+    // `route: {}` in a config file reads as policy where none exists.
+    expect("route" in (stored as Record<string, unknown>)).toBe(false);
+  });
+
+  it("tolerates a broken existing file, starting from empty", async () => {
+    const { home, cwd } = await scratch();
+    const paths = resolveArcturnPaths({ home, cwd, env: {} });
+    await mkdir(join(paths.userConfig, ".."), { recursive: true });
+    await writeFile(paths.userConfig, "{ not json", "utf8");
+    await persistRoutePatch({ compaction: "cheap/one" }, paths);
+    const stored = JSON.parse(await readFile(paths.userConfig, "utf8")) as ArcturnConfig;
+    expect(stored.route).toEqual({ compaction: "cheap/one" });
+  });
+
+  it("writes the user file only — project-layer values are never promoted or touched", async () => {
+    const { home, cwd } = await scratch();
+    const paths = resolveArcturnPaths({ home, cwd, env: {} });
+    await writeJson(paths.projectConfig, { route: { subagent: "project/model" } });
+    await persistRoutePatch({ subagent: "cheap/one" }, paths);
+    // The project file is byte-for-byte what it was…
+    const project = JSON.parse(await readFile(paths.projectConfig, "utf8")) as ArcturnConfig;
+    expect(project.route).toEqual({ subagent: "project/model" });
+    // …and the user file carries only the patch, not the merged view.
+    const user = JSON.parse(await readFile(paths.userConfig, "utf8")) as ArcturnConfig;
+    expect(user.route).toEqual({ subagent: "cheap/one" });
+  });
+});
+
+describe("sessionTitles config key", () => {
+  it("stays unset in DEFAULT_CONFIG — 'nobody said' must stay distinguishable from 'on'", () => {
+    // The behavioral default is on, applied where the key is consumed
+    // (buildRuntime). A baked-in `true` here would outrank the host-level
+    // default (`BuildRuntimeOptions.sessionTitles`) on every runtime.
+    expect(DEFAULT_CONFIG.sessionTitles).toBeUndefined();
+  });
+
+  it("parses true and false", () => {
+    const warnings: string[] = [];
+    expect(parseConfigFile({ sessionTitles: false }, "user", "cfg", warnings).sessionTitles).toBe(
+      false,
+    );
+    expect(parseConfigFile({ sessionTitles: true }, "user", "cfg", warnings).sessionTitles).toBe(
+      true,
+    );
+    expect(warnings).toEqual([]);
+  });
+
+  it("warns and drops a non-boolean", () => {
+    const warnings: string[] = [];
+    const parsed = parseConfigFile({ sessionTitles: "yes" }, "user", "cfg", warnings);
+    expect(parsed.sessionTitles).toBeUndefined();
+    expect(warnings.join("\n")).toContain('"sessionTitles" must be a boolean');
+  });
+
+  it("merges with the layer winning, including a false over the default true", () => {
+    const merged = mergeConfig({ ...DEFAULT_CONFIG }, { sessionTitles: false });
+    expect(merged.sessionTitles).toBe(false);
+    expect(mergeConfig(merged, {}).sessionTitles).toBe(false);
   });
 });
 

@@ -23,8 +23,8 @@ type RouteKind = "main" | "subagent" | "compaction" | "title";
 |---|---|---|
 | `main` | The main conversation loop. | Resolved model for the session. |
 | `subagent` | Delegated sub-agent work, scouts, and team members. | `createSubagent` and `scoutAgent` in `runtime.ts`; `/team` member dispatch and cost accounting in `team.ts`. |
-| `compaction` | Summarizing history when the context window fills. | Intended for `compactionOptionsFor`; lossy work already, so a cheaper model costs nothing in quality that compaction wasn't already spending. |
-| `title` | Session-title suggestions. | Reserved for future use — today's session title is derived from the task text directly, not an LLM call. |
+| `compaction` | Summarizing history when the context window fills. | `routedCompactionOptions` in `runtime.ts` hands the route to every agent's compaction call (`CompactionOptions.model`) — but only when a `compaction` route is explicitly configured (in config, or via `/model route`); otherwise every agent compacts with its own model. A standing `route.main` does not count, so a sub-agent on the cheap route (or a served session on its own model) is never silently upgraded to the flagship. Lossy work already, so a cheaper model costs nothing in quality that compaction wasn't already spending. |
+| `title` | Session-title suggestions. | The session-title call (`session-title.ts`, wired in `buildRuntime`): after an interactive session's first completed run, one small call on this route names it for `/sessions` and the startup splash. `sessionTitles: false` turns the call off — see [Sessions](/docs/sessions#session-titles). |
 
 ## Config shape
 
@@ -132,6 +132,9 @@ tier fallbacks, workflow stages — not just the chat. The per-kind overrides an
 survive the switch; they are deliberate policy, not the pick. The pick also persists as
 your default: `/model` writes it back to the user config, moving a user-layer
 `route.main` with it (a project-layer config still outranks the user layer, on purpose).
+`/model route --auto` persists the same way: it writes `route.subagent` and
+`route.compaction` into the user config — merging into the existing `route` block, so
+`main`, `title` and `tiers` survive — and never touches the project file.
 
 ## Failure handling: never blocks startup
 
@@ -164,15 +167,28 @@ identically on every link in the chain, so burning through it would be pointless
 on an unknown id or a missing API key); a model list is handled by mapping this function
 over every entry, not by a separate list-aware resolver.
 
-## Cost rationale
+## Cost rationale, and `/model route --auto`
 
 Per-role routing exists so a long session doesn't have to downgrade the main loop just to
 afford everything running alongside it — a cheap model for sub-agent delegation,
 compaction summaries, and scouting keeps the aggregate bill down while the model actually
-carrying the conversation stays the flagship. `suggestCheapModel` (`router.ts`) is a
-heuristic for finding a cheaper same-provider, tool-capable candidate by input cost — it's
-advisory only (meant for a future `/model route --auto` sketch) and is never applied
-automatically today.
+carrying the conversation stays the flagship.
+
+You don't have to pick the cheap model by hand. `/model route` prints the effective
+routes (and any resolution warnings), and `/model route --auto` applies the heuristic:
+`suggestCheapModel` (`router.ts`) finds the cheapest tool-capable candidate with
+published pricing from the same catalog vendor — the namespace before the `/` in the
+model id, because the `provider` field alone cannot tell openai-protocol vendors apart
+(every preset model carries `openai-compatible`), and a cross-vendor or cross-endpoint
+swap needs a human decision, not a heuristic — and the command routes `subagent` and
+`compaction` to it, live for this session (`ModelRouter.setRoute`) and persisted to your
+user config (`persistRoutePatch`). A candidate that isn't strictly cheaper than a priced
+main model is never suggested — the heuristic refuses rather than "optimises" the bill
+upward — and the command says so plainly when your model publishes no pricing to compare
+against. `/model route <kind> <id>` sets one route
+by hand (`subagent`, `compaction` or `title` — `main` belongs to the `/model` pick), and
+`/model route clear [kind]` withdraws overrides. Nothing is ever applied without one of
+these explicit commands: a heuristic must not silently change what a sub-agent run costs.
 
 ## Related
 

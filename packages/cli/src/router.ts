@@ -12,11 +12,12 @@
  *
  * This module is intentionally standalone — it has no dependency on
  * `runtime.ts` or `config.ts` and does not resolve ids against the real
- * catalog itself; the caller injects a `resolve` function. See
- * `INTEGRATION-router.md` at the repo root for the exact call sites this is
- * meant to wire into (`resolveModelSpec` in `runtime.ts`'s `createSubagent`
- * and `compactionOptionsFor`, and a config key in `config.ts`), none of
- * which this file touches.
+ * catalog itself; the caller injects a `resolve` function. `buildRuntime`
+ * constructs one router per runtime over `config.route`, `createSubagent`
+ * and the compaction call sites consume it, and `/model route` reads it
+ * (via {@link describeRoutes}) and mutates it (via
+ * {@link ModelRouter.setRoute}) — see
+ * `docs/integration-notes/INTEGRATION-router.md` for how that wiring landed.
  *
  * Design choice worth calling out: resolution is lazy and per-kind cached,
  * and a bad id never throws. A stale cheap-model id left over in a user's
@@ -62,6 +63,20 @@ export type RouteKind = "main" | "subagent" | "compaction" | "title";
 
 /** Every {@link RouteKind}, in the order routes are usually displayed. */
 export const ROUTE_KINDS: readonly RouteKind[] = ["main", "subagent", "compaction", "title"];
+
+/**
+ * A route kind {@link ModelRouter.setRoute} (and `/model route`) may change —
+ * every kind but `main`, which is governed by the pick/rebind lifecycle.
+ */
+export type SettableRouteKind = Exclude<RouteKind, "main">;
+
+/**
+ * Every {@link SettableRouteKind}, derived from {@link ROUTE_KINDS} so a new
+ * kind can never exist in one list and not the other.
+ */
+export const SETTABLE_ROUTE_KINDS: readonly SettableRouteKind[] = ROUTE_KINDS.filter(
+  (kind): kind is SettableRouteKind => kind !== "main",
+);
 
 /**
  * Prefix that marks a `[tag]` or `model:` string as a symbolic tier name
@@ -136,11 +151,45 @@ export interface ModelRouter {
    * session's main model changes, or routes that defaulted to the old one
    * keep resolving to it. Also clears a configured `route.main`: the switch
    * is an explicit choice of main model, and a config default must not keep
-   * outvoting it on routed calls. Per-kind overrides and `tiers` survive.
+   * outvoting it on routed calls. Per-kind overrides and `tiers` survive —
+   * including ones installed by {@link ModelRouter.setRoute}.
    *
    * @param fallback - The new main model.
    */
   rebind(fallback: ModelSpec): void;
+  /**
+   * Change one cheap route in the LIVE router — the in-session half of a
+   * persisted route change (`persistRoutePatch` in `config.ts` is the
+   * on-disk half; `/model route --auto` calls both). Clears the resolution
+   * caches, exactly as {@link ModelRouter.rebind} does, so the next
+   * {@link ModelRouter.specFor} (and {@link describeRoutes}) reflects the
+   * change immediately; the `main` override is left standing.
+   *
+   * `main` is deliberately not settable here: the main route is governed by
+   * the pick/rebind lifecycle (`/model <id>` → {@link ModelRouter.rebind}),
+   * and letting a route mutation reach it would hand the heuristic in
+   * `/model route --auto` the power to silently swap the conversation's own
+   * model.
+   *
+   * @param kind - Which cheap route to change.
+   * @param id - New model id, or `undefined` to clear the override (the kind
+   *   then falls back to the `main` route again).
+   */
+  setRoute(kind: SettableRouteKind, id: string | undefined): void;
+  /**
+   * Whether `kind` is EXPLICITLY routed — set in config or installed via
+   * {@link ModelRouter.setRoute} (for `main`: a standing `route.main`
+   * override). Never true merely because a fallback (`route.main`, or the
+   * live main model) would answer `specFor(kind)`. Callers that would
+   * otherwise use "the model already in the seat" (e.g. an agent compacting
+   * with its own model) use this to defer to the seat when no per-kind policy
+   * exists — a standing `route.main` must not silently upgrade a sub-agent's
+   * compaction to the flagship. `specFor` alone cannot tell the two apart,
+   * because its fallback chain always produces *some* model.
+   *
+   * @param kind - The route kind to ask about.
+   */
+  isRouted(kind: RouteKind): boolean;
 }
 
 /**
@@ -171,6 +220,11 @@ export function createModelRouter(
 ): ModelRouter {
   const cache = new Map<RouteKind, ModelSpec>();
   const tierCache = new Map<string, ModelSpec>();
+  // The router's own view of the config, shallow-copied so `setRoute` can
+  // mutate it without reaching back into the caller's (merged, shared)
+  // config object — a live route change is the router's state, not a rewrite
+  // of what the config files said.
+  const view: RouterConfig = { ...config };
   let active = fallback;
   // `route.main` is a startup default, not a standing veto: an explicit
   // in-session switch (`rebind`) clears it, or the pick would govern the
@@ -205,14 +259,15 @@ export function createModelRouter(
     const cached = cache.get(kind);
     if (cached) return cached;
 
+    const configured = kind === "main" ? undefined : view[kind];
     const spec =
       kind === "main"
         ? mainOverride === undefined
           ? active
           : resolveConfigured(mainOverride, kind)
-        : config[kind] === undefined
+        : configured === undefined
           ? specFor("main")
-          : resolveConfigured(config[kind], kind);
+          : resolveConfigured(configured, kind);
 
     cache.set(kind, spec);
     return spec;
@@ -222,7 +277,7 @@ export function createModelRouter(
     const cached = tierCache.get(name);
     if (cached) return cached;
 
-    const configuredId = config.tiers?.[name];
+    const configuredId = view.tiers?.[name];
     let spec: ModelSpec;
     if (configuredId === undefined) {
       // Compute the fallback first so the warning can name what it actually
@@ -250,23 +305,69 @@ export function createModelRouter(
       cache.clear();
       tierCache.clear();
     },
+    setRoute(kind: SettableRouteKind, id: string | undefined): void {
+      if (id === undefined) delete view[kind];
+      else view[kind] = id;
+      // The same eviction `rebind` performs: both caches, wholesale. A kind
+      // that fell back to `main` cached main's spec under its own key, and an
+      // unset tier memoises the *subagent* route under its own name — rather
+      // than duplicate that fallback knowledge here (and serve stale specs
+      // the day it changes), drop everything and let the lazy resolution
+      // re-derive it. `mainOverride` is untouched: a cheap-route change is
+      // not a model pick.
+      cache.clear();
+      tierCache.clear();
+    },
+    isRouted(kind: RouteKind): boolean {
+      // Explicit per-kind policy only. A standing `route.main` makes the
+      // fallback CHAIN resolve differently, but it is not a decision about
+      // this kind — reporting it as routed is what let an unrouted agent's
+      // compaction get silently upgraded to route.main's flagship.
+      if (kind === "main") return mainOverride !== undefined;
+      return view[kind] !== undefined;
+    },
   };
 }
 
 /**
- * Heuristic pick of a cheaper stand-in for `main`, for a `/model route
- * --auto` sketch (not applied automatically — see `INTEGRATION-router.md`).
+ * The catalog vendor namespace of a spec: the segment before the first `/`
+ * in its id (`"zai-api"` for `zai-api/glm-4.7-flash`), or `undefined` for an
+ * id with no namespace. All catalog ids are `vendor/model`-shaped, including
+ * every preset model (`presetSpec` builds `<preset>/<model>` ids).
+ */
+function vendorNamespace(spec: ModelSpec): string | undefined {
+  const slash = spec.id.indexOf("/");
+  return slash > 0 ? spec.id.slice(0, slash) : undefined;
+}
+
+/**
+ * Heuristic pick of a cheaper stand-in for `main` — the engine behind
+ * `/model route --auto`, which applies the pick to the `subagent` and
+ * `compaction` routes (live via {@link ModelRouter.setRoute}, persisted via
+ * `persistRoutePatch`). Still never applied without that explicit command:
+ * a heuristic must not silently change what a sub-agent run costs.
  *
  * Restricted to candidates that:
- * - share `main`'s provider (a cross-provider swap needs a new API key and a
- *   human decision, not a heuristic);
+ * - share `main`'s catalog vendor namespace (the segment before the `/` in
+ *   the id). The `provider` field is NOT enough: every openai-protocol
+ *   preset model is stamped `provider: "openai-compatible"`, so provider
+ *   equality would happily route a `deepseek/*` main onto another vendor's
+ *   endpoint — a different API key, or the same key on a differently billed
+ *   endpoint (`zai/*` vs `zai-api/*`). A cross-vendor swap needs a human
+ *   decision, not a heuristic. Ids without a namespace fall back to the
+ *   provider comparison;
  * - report `capabilities.tools` (a sub-agent or compaction call that cannot
  *   call tools is not a candidate, since sub-agents run the full tool loop
  *   and compaction/title calls are plain completions but routing a
  *   tools-incapable model into the sub-agent slot would silently break it);
  * - are not `main` itself;
  * - carry known `cost.input` — a model with no cost data is never guessed
- *   at, it is simply excluded.
+ *   at, it is simply excluded;
+ * - when `main` publishes `cost`, are strictly cheaper than it
+ *   (`cost.input < main.cost.input`) — "optimising" the bill upward is not a
+ *   suggestion. An unpriced `main` accepts any priced same-namespace
+ *   candidate; the caller owes the user an honest caveat that no comparison
+ *   was possible.
  *
  * Ties (equal `cost.input`) keep whichever candidate was seen first.
  *
@@ -276,12 +377,19 @@ export function createModelRouter(
  *   when none qualify.
  */
 export function suggestCheapModel(candidates: ModelSpec[], main: ModelSpec): ModelSpec | undefined {
+  const mainVendor = vendorNamespace(main);
   let best: ModelSpec | undefined;
   for (const candidate of candidates) {
     if (candidate.id === main.id) continue;
-    if (candidate.provider !== main.provider) continue;
+    const candidateVendor = vendorNamespace(candidate);
+    if (mainVendor !== undefined && candidateVendor !== undefined) {
+      if (candidateVendor !== mainVendor) continue;
+    } else if (candidate.provider !== main.provider) {
+      continue;
+    }
     if (!candidate.capabilities.tools) continue;
     if (candidate.cost === undefined) continue;
+    if (main.cost !== undefined && candidate.cost.input >= main.cost.input) continue;
     if (best === undefined || candidate.cost.input < best.cost!.input) {
       best = candidate;
     }

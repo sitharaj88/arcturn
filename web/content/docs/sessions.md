@@ -59,6 +59,22 @@ skipped rather than failing the whole listing. `setTitle` rewrites the header li
 a temp file plus rename, so a crash mid-write can't corrupt it) — that's how a session
 picks up a human-readable title.
 
+## Session titles
+
+After an **interactive** session's first **completed** run, Arcturn makes one small LLM
+call — on the `title` route, so it can be a cheap model (see
+[Model routing](/docs/model-routing#route-kinds)) — and writes a short generated title
+onto the header. That title is what `/sessions` and the startup splash's recent-sessions
+block show instead of a bare session id. The call is fire-and-forget: a failed title never
+breaks or slows a run, and a session is never re-titled — one attempt, first completed run
+only. Sessions that already carry a title (resumed ones, sub-agent scratch sessions) are
+left alone, and nothing retroactively scans old sessions: an untitled session from before
+this feature keeps its first prompt as its label until the next time it completes a run
+interactively. Only the interactive TUI titles sessions — `--print`, `serve` and `acp`
+runs never make the extra call, because their provider-visible request streams are
+contractual (cassettes, replay, request-count guarantees). Set `"sessionTitles": false`
+in `.arcturn/config.json` to turn the call off entirely.
+
 A crash mid-append leaves a torn last line. `entries()` recovers from that by dropping an
 unparsable *final* line and returning everything before it; a parse failure anywhere
 earlier in the file is treated as real corruption and throws.
@@ -104,8 +120,9 @@ you're already in the session (see [Checkpoints & /rewind](/docs/checkpoints)), 
 forks the conversation at a chosen turn rather than continuing from the newest one.
 
 Inside a running session, `/sessions` lists up to 50 stored sessions for the current
-directory (newest first, each row showing its creation time and title) and resumes
-whichever one you pick — the interactive equivalent of `--resume`.
+directory (newest first, each row showing its creation time and its
+[generated title](#session-titles) — or its id, for sessions that never got one) and
+resumes whichever one you pick — the interactive equivalent of `--resume`.
 
 ## Exporting a transcript
 

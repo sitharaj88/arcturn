@@ -188,6 +188,63 @@ describe("suggestCheapModel", () => {
   it("excludes main itself even if present in the pool", () => {
     expect(suggestCheapModel([FLAGSHIP, HAIKU], FLAGSHIP)).toBe(HAIKU);
   });
+
+  it("refuses a cross-vendor candidate even when both carry the same protocol provider id", () => {
+    // Every openai-protocol preset model is stamped provider
+    // "openai-compatible" (presetSpec in @arcturn/ai), so the provider field
+    // alone cannot tell deepseek/* from zai-api/* — the id namespace can.
+    const deepseekMain = spec({
+      id: "deepseek/deepseek-chat",
+      provider: "openai-compatible",
+      cost: { input: 0.28, output: 0.42 },
+    });
+    const zaiFlash = spec({
+      id: "zai-api/glm-4.7-flash",
+      provider: "openai-compatible",
+      cost: { input: 0, output: 0 },
+    });
+    expect(suggestCheapModel([zaiFlash], deepseekMain)).toBeUndefined();
+  });
+
+  it("returns undefined when the best same-namespace candidate is not cheaper than a priced main", () => {
+    const cheapMain = spec({
+      id: "duo/cheap-main",
+      provider: "duo",
+      cost: { input: 0.1, output: 0.2 },
+    });
+    const pricy = spec({
+      id: "duo/pricy-sibling",
+      provider: "duo",
+      cost: { input: 5, output: 10 },
+    });
+    const equal = spec({
+      id: "duo/equal-sibling",
+      provider: "duo",
+      cost: { input: 0.1, output: 0.2 },
+    });
+    expect(suggestCheapModel([pricy, equal], cheapMain)).toBeUndefined();
+  });
+
+  it("still suggests a same-namespace priced candidate when main publishes no pricing", () => {
+    // FLAGSHIP has no cost data: there is nothing to compare against, so a
+    // priced sibling is eligible — the command's caveat covers the honesty.
+    expect(suggestCheapModel([HAIKU], FLAGSHIP)).toBe(HAIKU);
+  });
+
+  it("falls back to the provider comparison for ids without a vendor namespace", () => {
+    const bareMain = spec({ id: "bare-main", provider: "custom" });
+    const bareCheap = spec({
+      id: "bare-cheap",
+      provider: "custom",
+      cost: { input: 0.1, output: 0.2 },
+    });
+    const bareOther = spec({
+      id: "other-bare",
+      provider: "elsewhere",
+      cost: { input: 0.05, output: 0.1 },
+    });
+    expect(suggestCheapModel([bareCheap, bareOther], bareMain)).toBe(bareCheap);
+  });
 });
 
 describe("describeRoutes", () => {
@@ -303,6 +360,132 @@ describe("ModelRouter.specForTier", () => {
     expect(router.specFor("main")).toBe(OPUS);
     expect(router.specFor("subagent")).toBe(HAIKU);
     expect(router.specForTier("judgment")).toBe(HAIKU);
+  });
+});
+
+describe("ModelRouter.setRoute", () => {
+  it("applies live: the next specFor sees the new route, and describeRoutes reflects it", () => {
+    const resolve = catalogResolver([FLAGSHIP, HAIKU]);
+    const router = createModelRouter({}, resolve, FLAGSHIP);
+    expect(router.specFor("subagent")).toBe(FLAGSHIP);
+
+    router.setRoute("subagent", HAIKU.id);
+    expect(router.specFor("subagent")).toBe(HAIKU);
+    const lines = describeRoutes(router);
+    expect(lines.find((line) => line.startsWith("subagent"))).toContain(HAIKU.id);
+  });
+
+  it("clears the caches like rebind — every kind re-derives, and none serves a stale spec", () => {
+    const resolve = catalogResolver([FLAGSHIP, HAIKU, OPUS]);
+    const router = createModelRouter({ main: FLAGSHIP.id, compaction: OPUS.id }, resolve, FLAGSHIP);
+    // Warm every kind first, so the change below has stale entries to beat.
+    router.specFor("main");
+    router.specFor("subagent");
+    router.specFor("compaction");
+
+    router.setRoute("subagent", HAIKU.id);
+    // The changed kind reflects the new route, and the untouched kinds still
+    // resolve to exactly what their config says — lazily re-derived rather
+    // than answered from a cache whose fallback knowledge could go stale.
+    expect(router.specFor("subagent")).toBe(HAIKU);
+    expect(router.specFor("main")).toBe(FLAGSHIP);
+    expect(router.specFor("compaction")).toBe(OPUS);
+  });
+
+  it("clears an override with undefined, falling back to the main route again", () => {
+    const resolve = catalogResolver([FLAGSHIP, HAIKU]);
+    const router = createModelRouter({ subagent: HAIKU.id }, resolve, FLAGSHIP);
+    expect(router.specFor("subagent")).toBe(HAIKU);
+    router.setRoute("subagent", undefined);
+    expect(router.specFor("subagent")).toBe(FLAGSHIP);
+  });
+
+  it("leaves the main override and tiers standing", () => {
+    const resolve = catalogResolver([FLAGSHIP, HAIKU, OPUS]);
+    const router = createModelRouter(
+      { main: OPUS.id, tiers: { judgment: OPUS.id } },
+      resolve,
+      FLAGSHIP,
+    );
+    router.setRoute("subagent", HAIKU.id);
+    router.setRoute("compaction", HAIKU.id);
+    // The configured main override still governs the main route…
+    expect(router.specFor("main")).toBe(OPUS);
+    // …and configured tiers are their own policy, untouched.
+    expect(router.specForTier("judgment")).toBe(OPUS);
+  });
+
+  it("re-derives unset tiers (which memoise the subagent route) after a subagent change", () => {
+    const resolve = catalogResolver([FLAGSHIP, HAIKU, OPUS]);
+    const router = createModelRouter({ tiers: { judgment: OPUS.id } }, resolve, FLAGSHIP);
+    expect(router.specForTier("untuned")).toBe(FLAGSHIP);
+    router.setRoute("subagent", HAIKU.id);
+    // The unset tier follows the new subagent route; the configured one does not.
+    expect(router.specForTier("untuned")).toBe(HAIKU);
+    expect(router.specForTier("judgment")).toBe(OPUS);
+  });
+
+  it("survives a rebind: setRoute overrides are policy, like configured kinds", () => {
+    const resolve = catalogResolver([FLAGSHIP, HAIKU, OPUS]);
+    const router = createModelRouter({}, resolve, FLAGSHIP);
+    router.setRoute("subagent", HAIKU.id);
+    router.rebind(OPUS);
+    expect(router.specFor("main")).toBe(OPUS);
+    expect(router.specFor("subagent")).toBe(HAIKU);
+    expect(router.specFor("compaction")).toBe(OPUS);
+  });
+
+  it("tolerates an unresolvable id exactly like a configured one: falls back and warns", () => {
+    const resolve = catalogResolver([FLAGSHIP]);
+    const router = createModelRouter({}, resolve, FLAGSHIP);
+    router.setRoute("subagent", "nope/nope");
+    expect(() => router.specFor("subagent")).not.toThrow();
+    expect(router.specFor("subagent")).toBe(FLAGSHIP);
+    expect(router.warnings().join("\n")).toContain("nope/nope");
+  });
+});
+
+describe("ModelRouter.isRouted", () => {
+  it("is false for every kind on an empty config", () => {
+    const router = createModelRouter({}, catalogResolver([FLAGSHIP]), FLAGSHIP);
+    for (const kind of ROUTE_KINDS) expect(router.isRouted(kind)).toBe(false);
+  });
+
+  it("is true for a configured kind, and for main only while its own override stands", () => {
+    const resolve = catalogResolver([FLAGSHIP, HAIKU, OPUS]);
+    const configured = createModelRouter({ compaction: HAIKU.id }, resolve, FLAGSHIP);
+    expect(configured.isRouted("compaction")).toBe(true);
+    expect(configured.isRouted("subagent")).toBe(false);
+
+    const pinned = createModelRouter({ main: OPUS.id }, resolve, FLAGSHIP);
+    expect(pinned.isRouted("main")).toBe(true);
+    // rebind (an explicit model switch) withdraws the main override.
+    pinned.rebind(HAIKU);
+    expect(pinned.isRouted("main")).toBe(false);
+  });
+
+  it("tracks setRoute in both directions", () => {
+    const router = createModelRouter({}, catalogResolver([FLAGSHIP, HAIKU]), FLAGSHIP);
+    router.setRoute("subagent", HAIKU.id);
+    expect(router.isRouted("subagent")).toBe(true);
+    router.setRoute("subagent", undefined);
+    expect(router.isRouted("subagent")).toBe(false);
+  });
+
+  it("never reports a cheap kind as routed on the strength of route.main alone", () => {
+    // route.main governs what the compaction ROUTE resolves to, but it is not
+    // per-kind policy: an agent whose kind is unrouted must keep using its own
+    // seat model (routedCompactionOptions defers on this exact answer), or a
+    // sub-agent on the cheap route silently compacts on the flagship again.
+    const pinned = createModelRouter(
+      { main: OPUS.id },
+      catalogResolver([FLAGSHIP, HAIKU, OPUS]),
+      FLAGSHIP,
+    );
+    expect(pinned.isRouted("main")).toBe(true);
+    expect(pinned.isRouted("compaction")).toBe(false);
+    expect(pinned.isRouted("subagent")).toBe(false);
+    expect(pinned.isRouted("title")).toBe(false);
   });
 });
 

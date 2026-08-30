@@ -102,6 +102,12 @@ import { type ArcturnPaths, cwdHash, type EnvMap, resolveArcturnPaths } from "./
 import { createPolicyLearner, type PolicyLearner } from "./policy-learn.js";
 import { createProvenanceStore, type ProvenanceStore, provenanceObserver } from "./provenance.js";
 import { createModelRouter, type ModelRouter } from "./router.js";
+import {
+  createTitleGenerator,
+  TITLE_MAX_OUTPUT_TOKENS,
+  TITLE_SYSTEM_PROMPT,
+  titleRequestPrompt,
+} from "./session-title.js";
 import { createSkillTool } from "./skill-tool.js";
 import { loadSkills, type Skill } from "./skills.js";
 import {
@@ -363,6 +369,11 @@ export function formatProviderCatalog(env: EnvMap = process.env): string {
  * agent tries (and fails) to compact an empty conversation. Capping both to a
  * fraction of the window keeps the behaviour sane at any size.
  *
+ * This only *sizes* the budget; which model performs the summarization call
+ * is `CompactionOptions.model`, which {@link routedCompactionOptions} fills
+ * in from the `compaction` route. The budget deliberately stays sized to the
+ * model whose window the conversation actually lives in.
+ *
  * @param model - The model whose context window sets the budget.
  */
 export function compactionOptionsFor(model: ModelSpec): CompactionOptions {
@@ -373,6 +384,39 @@ export function compactionOptionsFor(model: ModelSpec): CompactionOptions {
       2_048,
       Math.min(DEFAULT_KEEP_RECENT_TOKENS, Math.floor(window * 0.4)),
     ),
+  };
+}
+
+/**
+ * {@link compactionOptionsFor}, plus the `compaction` route as the
+ * summarizer model — the seam that finally consumes `specFor("compaction")`.
+ *
+ * `model` is a live getter, not a value: core re-reads the raw options
+ * object at each compact (`resolveCompactionOptions(input.options)` in
+ * `compaction.ts`), so reading the router *then* means a `/model route
+ * --auto` or a `/model <id>` rebind mid-session governs the very next
+ * compaction, on every agent already constructed — the exact staleness class
+ * `correctness-review-2.test.ts` exists to catch. The getter also defers to
+ * the seat when no per-kind policy exists: unless {@link ModelRouter.isRouted}
+ * says a `compaction` route was EXPLICITLY configured (in config, or via
+ * `/model route`), it yields `undefined` and core falls back to the agent's
+ * own current model — every agent compacts with the model in its own seat. A
+ * standing `route.main` deliberately does not count: it would upgrade a
+ * sub-agent on the cheap `subagent` route (or a served session on its own
+ * per-session model) to the flagship's compaction, and `/model route clear
+ * compaction` could never restore seat-model compaction while it stood.
+ * Behaviour with no explicit `compaction` route is byte-for-byte what it was
+ * before this seam existed.
+ *
+ * @param seat - The model the agent itself runs; sizes the budget.
+ * @param router - Supplies the `compaction` route, read at compact time.
+ */
+export function routedCompactionOptions(seat: ModelSpec, router: ModelRouter): CompactionOptions {
+  return {
+    ...compactionOptionsFor(seat),
+    get model(): ModelSpec | undefined {
+      return router.isRouted("compaction") ? router.specFor("compaction") : undefined;
+    },
   };
 }
 
@@ -502,6 +546,17 @@ export class ArcturnRuntime {
    * just now. Set by `buildRuntime`; `false` for a runtime built without one.
    */
   modelPinned = false;
+  /**
+   * Whether this runtime's live agent belongs to an interactive human
+   * session. Set (once, at startup) by the interactive app; read lazily by
+   * the session-title wiring in `buildRuntime`. Deliberately never set on
+   * the `--print`, serve or acp paths: their provider-visible request
+   * streams are contractual — cassettes, replay, the e2e pins on "exactly
+   * one request reached the provider" — and a fire-and-forget title call
+   * would pollute them. Interactive sessions are also exactly the ones a
+   * human later browses in `/sessions`, where a title earns its cost.
+   */
+  sessionTitlesEligible = false;
   /** Running token/cost totals for the live session. */
   metrics: SessionMetrics = { turns: 0, usage: emptyUsage(), costUsd: 0, unpricedTurns: 0 };
 
@@ -1068,7 +1123,7 @@ export class ArcturnRuntime {
         rules: this.livePermissionRules(),
         onPersistRule: (rule: PermissionRule) => this.#persistRule(rule),
       },
-      compaction: compactionOptionsFor(model),
+      compaction: routedCompactionOptions(model, this.router),
       ...(this.config.contextEditing === undefined
         ? {}
         : { contextEditing: this.config.contextEditing }),
@@ -1437,7 +1492,10 @@ export class ArcturnRuntime {
       ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
       ...(options.model === undefined
         ? {}
-        : { model: options.model, compaction: compactionOptionsFor(options.model) }),
+        : {
+            model: options.model,
+            compaction: routedCompactionOptions(options.model, this.router),
+          }),
       ...("maxTurns" in options
         ? {
             maxTurns: Math.min(
@@ -1511,7 +1569,7 @@ export class ArcturnRuntime {
       cwd: this.cwd,
       thinking: this.config.thinking,
       sessionStore: this.store,
-      compaction: compactionOptionsFor(this.model),
+      compaction: routedCompactionOptions(this.model, this.router),
       ...(this.config.contextEditing === undefined
         ? {}
         : { contextEditing: this.config.contextEditing }),
@@ -1831,6 +1889,16 @@ export interface BuildRuntimeOptions {
   maxCostUsd?: number;
   /** Route file mutations to a shadow tree (`--dry-run`). */
   dryRun?: boolean;
+  /**
+   * Host-level default for LLM-generated session titles when no config layer
+   * sets `sessionTitles`. Deliberately the OPPOSITE precedence of the other
+   * flags here — the config key wins — because this is "what this host wants
+   * when the user has not said", not a per-invocation override. A test or
+   * embedder that injects a scripted `llm` passes `false` so the
+   * fire-and-forget title call cannot consume a scripted turn or race an
+   * assertion; the CLI never sets it, so real sessions default to on.
+   */
+  sessionTitles?: boolean;
   /**
    * Build a runtime for REPLAY: no lifecycle hooks, no language servers, no
    * verify command, no audit/provenance writes. Tool neutralisation is
@@ -2284,6 +2352,62 @@ export async function buildRuntime(options: BuildRuntimeOptions = {}): Promise<A
     notify: (message) => runtime.notify("warn", message),
   });
   runtime.subscribe((event) => costGuard.onEvent(event));
+
+  // Session titles: after the first COMPLETED run of an untitled session,
+  // one small call on the `title` route names it for /sessions and the
+  // recent-sessions splash. Wired beside the cost guard, but armed only for
+  // interactive sessions (`sessionTitlesEligible`, set by the interactive
+  // app — `--print`/serve/acp keep their contractual request streams). The
+  // generator checks the STORED header at trigger time — never an id prefix
+  // — so `subagent:`/`background:` scratch sessions and resumed
+  // already-titled sessions are left alone; and it hands the captured
+  // session id through the deps, so a `/clear` racing the fire-and-forget
+  // call cannot stamp the old session's title onto the new one. Every
+  // failure is swallowed inside the generator: a missing title must never
+  // break a run.
+  const titles = createTitleGenerator({
+    shouldTitle: async (titleSessionId) => {
+      // Only an interactive session titles itself — see the field's doc.
+      if (!runtime.sessionTitlesEligible) return false;
+      // The config key wins over the host default on purpose: the option is
+      // "what this host wants when the user has not said", the config key is
+      // the user saying.
+      if ((config.sessionTitles ?? options.sessionTitles ?? true) === false) return false;
+      try {
+        const header = await store.open(titleSessionId);
+        return header.title === undefined || header.title.trim() === "";
+      } catch {
+        // No header on disk — a run that never persisted has nothing to
+        // retitle.
+        return false;
+      }
+    },
+    // The BASE client, not `runtime.llm`: the failover chain exists to keep
+    // the *conversation* alive and the consensus panel to verify substance —
+    // a title is a nicety, and burning a whole chain of providers (or a
+    // panel of models) on one that failed would be spend with no upside. A
+    // title call that fails, fails once, cheaply, and is swallowed.
+    generate: async (promptText, replyText) => {
+      const message = await baseClient.complete({
+        model: runtime.router.specFor("title"),
+        system: TITLE_SYSTEM_PROMPT,
+        messages: [
+          {
+            role: "user",
+            content: [{ type: "text", text: titleRequestPrompt(promptText, replyText) }],
+            timestamp: Date.now(),
+          },
+        ],
+        maxOutputTokens: TITLE_MAX_OUTPUT_TOKENS,
+      });
+      return message.content
+        .map((block) => (block.type === "text" ? block.text : ""))
+        .join("")
+        .trim();
+    },
+    setTitle: (titleSessionId, title) => store.setTitle(titleSessionId, title),
+  });
+  runtime.subscribe((event) => titles.onEvent(event));
 
   let sessionId = options.resume;
   if (!sessionId && options.continueSession) {

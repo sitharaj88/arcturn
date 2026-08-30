@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
-import { registerModel, unregisterModel } from "@arcturn/ai";
+import { join } from "node:path";
+import { listModels, registerModel, unregisterModel } from "@arcturn/ai";
 import type { PermissionMode } from "@arcturn/types";
 import { describe, expect, it } from "vitest";
 import {
@@ -9,8 +10,9 @@ import {
   type SelectOption,
 } from "./commands.js";
 import type { ExtensionCommand } from "./extensions.js";
-import type { ArcturnRuntime } from "./runtime.js";
-import { buildTestRuntime, makeScratch } from "./test-helpers/scratch.js";
+import { suggestCheapModel } from "./router.js";
+import { type ArcturnRuntime, routedCompactionOptions } from "./runtime.js";
+import { buildTestRuntime, makeScratch, writeFileAt } from "./test-helpers/scratch.js";
 
 interface FakeUi extends CommandUi {
   lines: string[];
@@ -261,6 +263,224 @@ describe("built-in commands", () => {
       model: string;
     };
     expect(after.model).toBe("anthropic/claude-opus-4-5");
+    await runtime.dispose();
+  });
+
+  it("/model route prints the effective routes and any router warnings", async () => {
+    const scratch = await makeScratch();
+    const runtime = await buildTestRuntime(scratch);
+    const { ui } = await run(runtime, "/model route");
+    const text = ui.lines.join("\n");
+    expect(text).toContain("Model routes");
+    for (const kind of ["main", "subagent", "compaction", "title"]) {
+      expect(text).toContain(kind);
+    }
+    // Nothing routed: every kind resolves to the session model.
+    expect(text).toContain(runtime.model.id);
+    expect(ui.notices).toEqual([]);
+    await runtime.dispose();
+  });
+
+  it("/model route --auto applies the cheap pick to subagent and compaction, live and persisted", async () => {
+    const scratch = await makeScratch();
+    const runtime = await buildTestRuntime(scratch);
+    // The command must agree with the heuristic over the live catalog, so
+    // the expectation is computed the same way rather than hard-coding a
+    // model the catalog may re-price tomorrow.
+    const expected = suggestCheapModel(listModels(), runtime.model);
+    expect(expected).toBeDefined();
+    expect(runtime.router.specFor("subagent").id).toBe(runtime.model.id);
+    expect(runtime.router.specFor("compaction").id).toBe(runtime.model.id);
+
+    const ui = fakeUi();
+    await run(runtime, "/model route --auto", ui);
+
+    // Live: the router answers with the pick at once, for exactly the two
+    // cheap routes; title and main are untouched.
+    expect(runtime.router.specFor("subagent").id).toBe(expected?.id);
+    expect(runtime.router.specFor("compaction").id).toBe(expected?.id);
+    expect(runtime.router.specFor("title").id).toBe(runtime.model.id);
+    expect(runtime.router.specFor("main").id).toBe(runtime.model.id);
+    // Persisted: the user config carries the two routes and nothing else.
+    const stored = JSON.parse(await readFile(runtime.paths.userConfig, "utf8")) as {
+      route?: Record<string, string>;
+    };
+    expect(stored.route).toEqual({ subagent: expected?.id, compaction: expected?.id });
+    expect(ui.notices[0]?.level).toBe("info");
+    expect(ui.notices[0]?.text).toContain(expected?.id ?? "");
+    expect(ui.notices[0]?.text).toContain("Saved as your default");
+    await runtime.dispose();
+  });
+
+  it("/model route --auto warns and changes nothing when no candidate qualifies", async () => {
+    registerModel({
+      id: "solo/only-model",
+      provider: "solo",
+      model: "only-model",
+      displayName: "Solo Only",
+      contextWindow: 128_000,
+      maxOutputTokens: 8_192,
+      apiKeyEnv: "SOLO_API_KEY",
+      capabilities: { tools: true, vision: false, thinking: false, caching: false },
+    });
+    const scratch = await makeScratch();
+    scratch.env.SOLO_API_KEY = "test-key";
+    const runtime = await buildTestRuntime(scratch, [{ text: "hi" }], {
+      model: "solo/only-model",
+    });
+    const ui = fakeUi();
+    await run(runtime, "/model route --auto", ui);
+    expect(ui.notices[0]?.level).toBe("warn");
+    expect(ui.notices[0]?.text).toContain("No cheap stand-in");
+    expect(runtime.router.specFor("subagent").id).toBe("solo/only-model");
+    // Nothing was persisted either.
+    const raw = await readFile(runtime.paths.userConfig, "utf8").catch(() => "{}");
+    expect((JSON.parse(raw) as { route?: unknown }).route).toBeUndefined();
+    await runtime.dispose();
+    unregisterModel("solo/only-model");
+  });
+
+  it("/model route --auto refuses a candidate that is not actually cheaper", async () => {
+    registerModel({
+      id: "duo/cheap-main",
+      provider: "duo",
+      model: "cheap-main",
+      displayName: "Duo Cheap",
+      contextWindow: 128_000,
+      maxOutputTokens: 8_192,
+      apiKeyEnv: "DUO_API_KEY",
+      cost: { input: 0.1, output: 0.2 },
+      capabilities: { tools: true, vision: false, thinking: false, caching: false },
+    });
+    registerModel({
+      id: "duo/pricy-sibling",
+      provider: "duo",
+      model: "pricy-sibling",
+      displayName: "Duo Pricy",
+      contextWindow: 128_000,
+      maxOutputTokens: 8_192,
+      apiKeyEnv: "DUO_API_KEY",
+      cost: { input: 5, output: 10 },
+      capabilities: { tools: true, vision: false, thinking: false, caching: false },
+    });
+    const scratch = await makeScratch();
+    scratch.env.DUO_API_KEY = "test-key";
+    const runtime = await buildTestRuntime(scratch, [{ text: "hi" }], {
+      model: "duo/cheap-main",
+    });
+    const ui = fakeUi();
+    await run(runtime, "/model route --auto", ui);
+    // The heuristic's cheapest sibling costs MORE than the main model:
+    // "optimising" the bill upward is refused inside suggestCheapModel
+    // itself, so no candidate comes back at all and nothing is applied.
+    expect(ui.notices[0]?.level).toBe("warn");
+    expect(ui.notices[0]?.text).toContain("No cheap stand-in");
+    expect(runtime.router.specFor("subagent").id).toBe("duo/cheap-main");
+    // Nothing was persisted either.
+    const raw = await readFile(runtime.paths.userConfig, "utf8").catch(() => "{}");
+    expect((JSON.parse(raw) as { route?: unknown }).route).toBeUndefined();
+    await runtime.dispose();
+    unregisterModel("duo/cheap-main");
+    unregisterModel("duo/pricy-sibling");
+  });
+
+  it("/model route --auto never routes across vendors sharing the openai-compatible provider id", async () => {
+    // Every openai-protocol preset model carries provider "openai-compatible",
+    // so provider equality alone would let --auto route a deepseek-shaped main
+    // model onto another vendor's endpoint (zai-api publishes $0 input
+    // pricing) — applied live AND persisted, with no key check to refuse it.
+    registerModel({
+      id: "crossvendor/main-model",
+      provider: "openai-compatible",
+      model: "main-model",
+      displayName: "Crossvendor Main",
+      contextWindow: 128_000,
+      maxOutputTokens: 8_192,
+      cost: { input: 1, output: 2 },
+      capabilities: { tools: true, vision: false, thinking: false, caching: false },
+    });
+    const scratch = await makeScratch();
+    const runtime = await buildTestRuntime(scratch, [{ text: "hi" }], {
+      model: "crossvendor/main-model",
+    });
+    // Sanity: the live catalog really does carry a cheaper tool-capable
+    // openai-compatible model from another vendor, so only the namespace rule
+    // stands between --auto and a cross-vendor persist.
+    expect(
+      listModels().some(
+        (candidate) =>
+          candidate.provider === "openai-compatible" &&
+          !candidate.id.startsWith("crossvendor/") &&
+          candidate.capabilities.tools &&
+          (candidate.cost?.input ?? Number.POSITIVE_INFINITY) < 1,
+      ),
+    ).toBe(true);
+
+    const ui = fakeUi();
+    await run(runtime, "/model route --auto", ui);
+    expect(ui.notices[0]?.level).toBe("warn");
+    expect(ui.notices[0]?.text).toContain("Nothing changed");
+    expect(runtime.router.specFor("subagent").id).toBe("crossvendor/main-model");
+    expect(runtime.router.specFor("compaction").id).toBe("crossvendor/main-model");
+    // And NOTHING was persisted to the user config.
+    const raw = await readFile(runtime.paths.userConfig, "utf8").catch(() => "{}");
+    expect((JSON.parse(raw) as { route?: unknown }).route).toBeUndefined();
+    await runtime.dispose();
+    unregisterModel("crossvendor/main-model");
+  });
+
+  it("/model route clear compaction restores seat-model compaction even while route.main stands", async () => {
+    const scratch = await makeScratch();
+    await writeFileAt(
+      join(scratch.home, "config.json"),
+      JSON.stringify({ route: { main: "anthropic/claude-opus-4-5" } }),
+    );
+    const runtime = await buildTestRuntime(scratch);
+    // The standing route.main governs what the compaction ROUTE resolves to…
+    expect(runtime.router.specFor("compaction").id).toBe("anthropic/claude-opus-4-5");
+
+    const ui = fakeUi();
+    await run(runtime, "/model route compaction anthropic/claude-haiku-4-5", ui);
+    expect(routedCompactionOptions(runtime.model, runtime.router).model?.id).toBe(
+      "anthropic/claude-haiku-4-5",
+    );
+
+    await run(runtime, "/model route clear compaction", ui);
+    // …but an agent's compaction CALL uses a routed model only while the
+    // compaction route is explicitly configured. After clear, the "falling
+    // back" notice must be the truth: the seat model compacts itself again,
+    // not route.main's flagship.
+    expect(routedCompactionOptions(runtime.model, runtime.router).model).toBeUndefined();
+    await runtime.dispose();
+  });
+
+  it("/model route <kind> <id> sets one route by hand, and clear withdraws it", async () => {
+    const scratch = await makeScratch();
+    const runtime = await buildTestRuntime(scratch);
+    const ui = fakeUi();
+
+    await run(runtime, "/model route title anthropic/claude-haiku-4-5", ui);
+    expect(runtime.router.specFor("title").id).toBe("anthropic/claude-haiku-4-5");
+    let stored = JSON.parse(await readFile(runtime.paths.userConfig, "utf8")) as {
+      route?: Record<string, string>;
+    };
+    expect(stored.route).toEqual({ title: "anthropic/claude-haiku-4-5" });
+
+    await run(runtime, "/model route clear title", ui);
+    expect(runtime.router.specFor("title").id).toBe(runtime.model.id);
+    stored = JSON.parse(await readFile(runtime.paths.userConfig, "utf8")) as {
+      route?: Record<string, string>;
+    };
+    expect(stored.route).toBeUndefined();
+
+    // `main` belongs to the pick, and an unknown model id fails eagerly with
+    // the catalog error rather than landing as a quietly ineffective route.
+    await run(runtime, "/model route main anthropic/claude-haiku-4-5", ui);
+    expect(ui.notices.at(-1)?.level).toBe("error");
+    expect(ui.notices.at(-1)?.text).toContain("/model <id>");
+    await run(runtime, "/model route subagent nope/nope", ui);
+    expect(ui.notices.at(-1)?.level).toBe("error");
+    expect(runtime.router.specFor("subagent").id).toBe(runtime.model.id);
     await runtime.dispose();
   });
 

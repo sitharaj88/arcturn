@@ -1,10 +1,17 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { getModel, registerModel, unregisterModel } from "@arcturn/ai";
-import type { PermissionPrompt, PermissionRequest, PermissionRule } from "@arcturn/types";
+import type {
+  ModelSpec,
+  PermissionPrompt,
+  PermissionRequest,
+  PermissionRule,
+  SessionHeader,
+} from "@arcturn/types";
 import { describe, expect, it } from "vitest";
 import type { AgentDef } from "./agents.js";
 import { resolveArcturnPaths } from "./paths.js";
+import { createModelRouter } from "./router.js";
 import {
   BUILT_IN_TOOL_NAMES,
   buildRuntime,
@@ -16,9 +23,10 @@ import {
   modelCatalogEntries,
   registerBundledCatalog,
   resolveModelSpec,
+  routedCompactionOptions,
   subagentSystemPrompt,
 } from "./runtime.js";
-import { fakeLLM } from "./test-helpers/fake-llm.js";
+import { type FakeLLM, fakeLLM } from "./test-helpers/fake-llm.js";
 import { buildTestRuntime, makeScratch, writeFileAt } from "./test-helpers/scratch.js";
 
 describe("resolveModelSpec", () => {
@@ -232,6 +240,166 @@ describe("subagentSystemPrompt", () => {
   it("describes the read-only child by default and the full toolset under yolo", () => {
     expect(subagentSystemPrompt("/repo", false)).toContain("read-only tools");
     expect(subagentSystemPrompt("/repo", true)).toContain("full tool set");
+  });
+});
+
+describe("routedCompactionOptions", () => {
+  const spec = (id: string, contextWindow = 200_000): ModelSpec => ({
+    id,
+    provider: "openai-compatible",
+    model: id,
+    displayName: id,
+    contextWindow,
+    maxOutputTokens: 1_024,
+    capabilities: { tools: true, vision: false, thinking: false, caching: false },
+  });
+  const seat = spec("seat/model");
+  const cheap = spec("cheap/model");
+  const routedMain = spec("route-main/model");
+  const resolver = (id: string): ModelSpec => {
+    if (id === cheap.id) return cheap;
+    if (id === routedMain.id) return routedMain;
+    throw new Error(`unknown ${id}`);
+  };
+
+  it("sizes the budget from the seat, exactly as compactionOptionsFor does", () => {
+    const router = createModelRouter({}, resolver, seat);
+    const options = routedCompactionOptions(seat, router);
+    const sized = compactionOptionsFor(seat);
+    expect(options.reserveTokens).toBe(sized.reserveTokens);
+    expect(options.keepRecentTokens).toBe(sized.keepRecentTokens);
+  });
+
+  it("leaves model undefined when nothing routes compaction — the seat keeps compacting itself", () => {
+    const router = createModelRouter({}, resolver, seat);
+    expect(routedCompactionOptions(seat, router).model).toBeUndefined();
+  });
+
+  it("hands core the routed model when a compaction route is configured", () => {
+    const router = createModelRouter({ compaction: cheap.id }, resolver, seat);
+    expect(routedCompactionOptions(seat, router).model).toBe(cheap);
+  });
+
+  it("never upgrades an unrouted agent's compaction to route.main — the seat compacts itself", () => {
+    // Config `{route: {main, subagent}}`, compaction NOT routed. The exact
+    // silent-upgrade this seam's own comments promise cannot happen: a
+    // sub-agent seated on the cheap `subagent` route must not compact on
+    // route.main's flagship just because route.main stands.
+    const router = createModelRouter({ main: routedMain.id, subagent: cheap.id }, resolver, seat);
+    expect(routedCompactionOptions(cheap, router).model).toBeUndefined();
+    // Same for a served session running its own per-session model: without an
+    // explicit compaction route, its compaction stays on its own model, never
+    // route.main's (possibly different provider/credential) endpoint.
+    expect(routedCompactionOptions(seat, router).model).toBeUndefined();
+  });
+
+  it("reads the router LIVE: a setRoute after construction governs the next compact", () => {
+    const router = createModelRouter({}, resolver, seat);
+    const options = routedCompactionOptions(seat, router);
+    expect(options.model).toBeUndefined();
+    // `/model route --auto` mid-session: agents already constructed must see
+    // it, because core re-reads the options object at each compact.
+    router.setRoute("compaction", cheap.id);
+    expect(options.model).toBe(cheap);
+    router.setRoute("compaction", undefined);
+    expect(options.model).toBeUndefined();
+  });
+});
+
+describe("session titles (runtime wiring)", () => {
+  /** Poll the store until the fire-and-forget title write lands. */
+  async function waitForTitle(
+    runtime: Awaited<ReturnType<typeof buildTestRuntime>>,
+  ): Promise<SessionHeader> {
+    for (let i = 0; i < 300; i++) {
+      const header = await runtime.store.open(runtime.agent.sessionId);
+      if (header.title !== undefined) return header;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    throw new Error("the session was never titled");
+  }
+
+  it("titles the session after the first completed run, using the title route's model", async () => {
+    const scratch = await makeScratch();
+    await writeFileAt(
+      join(scratch.cwd, ".arcturn", "config.json"),
+      JSON.stringify({ route: { title: "anthropic/claude-haiku-4-5" } }),
+    );
+    const runtime = await buildTestRuntime(
+      scratch,
+      [{ text: "The login bug is fixed." }, { text: "Fixing the login bug" }],
+      // buildTestRuntime defaults titling off so scripted suites stay
+      // deterministic; this suite is the one that scripts the title turn.
+      { sessionTitles: true },
+    );
+    // Stand in for the interactive app, the one host that arms titling.
+    runtime.sessionTitlesEligible = true;
+    await runtime.agent.prompt("please fix the login bug");
+
+    const header = await waitForTitle(runtime);
+    expect(header.title).toBe("Fixing the login bug");
+
+    const llm = runtime.llm as FakeLLM;
+    expect(llm.requests).toHaveLength(2);
+    // The main turn ran on the session model; the title call on the route.
+    expect(llm.requests[0]?.model.id).toBe("anthropic/claude-sonnet-4-5");
+    expect(llm.requests[1]?.model.id).toBe("anthropic/claude-haiku-4-5");
+    // The title request carried the exchange, not the whole transcript shape.
+    expect(JSON.stringify(llm.requests[1]?.messages)).toContain("please fix the login bug");
+    await runtime.dispose();
+  });
+
+  it("fires once per session: a second completed run makes no second call", async () => {
+    const scratch = await makeScratch();
+    const runtime = await buildTestRuntime(scratch, [{ text: "done" }], { sessionTitles: true });
+    // Stand in for the interactive app, the one host that arms titling.
+    runtime.sessionTitlesEligible = true;
+    await runtime.agent.prompt("first");
+    await waitForTitle(runtime);
+    const llm = runtime.llm as FakeLLM;
+    const after = llm.requests.length;
+    await runtime.agent.prompt("second");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    // Exactly one more request — the second run itself, no second title call.
+    expect(llm.requests.length).toBe(after + 1);
+    await runtime.dispose();
+  });
+
+  it("a config sessionTitles: true wins over a host default of off", async () => {
+    const scratch = await makeScratch();
+    await writeFileAt(
+      join(scratch.cwd, ".arcturn", "config.json"),
+      JSON.stringify({ sessionTitles: true }),
+    );
+    // No option passed: buildTestRuntime defaults titling off, and the
+    // config layer — the user's explicit choice — turns it back on.
+    const runtime = await buildTestRuntime(scratch, [{ text: "done" }, { text: "A Small Title" }]);
+    // Stand in for the interactive app, the one host that arms titling.
+    runtime.sessionTitlesEligible = true;
+    await runtime.agent.prompt("name me");
+    const header = await waitForTitle(runtime);
+    expect(header.title).toBe("A Small Title");
+    await runtime.dispose();
+  });
+
+  it("sessionTitles: false makes no title call, winning over the host default", async () => {
+    const scratch = await makeScratch();
+    await writeFileAt(
+      join(scratch.cwd, ".arcturn", "config.json"),
+      JSON.stringify({ sessionTitles: false }),
+    );
+    // The host option says on; the config kill switch must still win.
+    const runtime = await buildTestRuntime(scratch, [{ text: "done" }], { sessionTitles: true });
+    // Stand in for the interactive app, the one host that arms titling.
+    runtime.sessionTitlesEligible = true;
+    await runtime.agent.prompt("hello there");
+    // Give the (absent) fire-and-forget path every chance to misbehave.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const llm = runtime.llm as FakeLLM;
+    expect(llm.requests).toHaveLength(1);
+    const header = await runtime.store.open(runtime.agent.sessionId);
+    expect(header.title).toBeUndefined();
+    await runtime.dispose();
   });
 });
 

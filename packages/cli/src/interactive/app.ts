@@ -400,6 +400,9 @@ export class InteractiveApp {
 
     this.#unsubscribe = this.#runtime.subscribe((event) => this.#onEvent(event));
     this.#runtime.setPermissionRequester((request) => this.#requestPermission(request));
+    // A human is at this runtime, so its sessions may be titled — see the
+    // field's doc in runtime.ts for why --print/serve/acp never set this.
+    this.#runtime.sessionTitlesEligible = true;
     this.#unsubscribeResize = this.#terminal.onResize(() => this.#refresh());
     this.#unsubscribeTheme = onThemeChange(() => this.#onThemeSwitch());
     void this.#gitStatus.refresh().then(() => this.#refresh());
@@ -741,7 +744,9 @@ export class InteractiveApp {
         // The just-created session and sub-agent scratch sessions are noise.
         if (header.sessionId === current) continue;
         if (header.title?.startsWith("subagent:")) continue;
-        // Main sessions carry no title; their first prompt is the label.
+        // A generated title (session-title.ts) is the label when the header
+        // carries one; sessions from before titling — or with it switched
+        // off — fall back to their first user prompt, as they always did.
         let label = header.title ?? "";
         if (label.trim() === "") {
           const entries = await store.entries(header.sessionId);
