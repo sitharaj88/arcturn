@@ -36,7 +36,7 @@ export const metadata: Metadata = {
 const SEEDS = [
   { kit: "enterprise-org", name: "bug-fix", label: "bug-fix — four sequential stages" },
   { kit: "enterprise-org", name: "release-check", label: "release-check — parallel oracle lanes" },
-  { kit: "rag-blueprint", name: "rag-setup", label: "rag-setup — nine stages, long preamble" },
+  { kit: "rag-blueprint", name: "rag-setup", label: "rag-setup — thirteen stages, long preamble" },
 ];
 
 function loadExamples(): BuilderExample[] {

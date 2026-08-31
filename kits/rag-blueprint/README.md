@@ -67,12 +67,16 @@ Or reach one skill directly, without a pipeline: `/rag-architecture`,
 | 1 | `rag-surveyor` | read | fast | Sources, formats, ACL model, cadence, infra, constraints — gaps marked UNKNOWN |
 | 2 | `rag-threat-modeler` | read | judgment | Threats with blast radius, demanded mitigation, and the drill that proves each |
 | 3 | `rag-architect` | write | judgment | The ADR, written to `docs/adr/rag-architecture.md` |
-| 4 | `rag-builder` | write | build | Ingestion slice, tests watched failing first |
-| 5 | `rag-builder` | write | build | Retrieval slice, on top of ingestion's schema |
-| 6 | `rag-builder` | write | build | Observability slice, instrumenting both |
-| 7 | `rag-eval-author` | write | build | The suite, the labelled set, the thresholds — **no shell** |
-| 8 | `rag-red-teamer` ∥ `rag-eval-runner` | exec ∥ exec | judgment ∥ build | Drills with reproductions ∥ measured numbers |
-| 9 | `rag-lead` | read | build | The go-live packet and one DECISION-REQUEST |
+| 4 | `rag-builder` | write | build | Ingestion 1/3: source connectors, per-format chunking, chunk-window and table-intact tests |
+| 5 | `rag-builder` | write | build | Ingestion 2/3: redaction pass and chunk provenance keyed to parent-doc id |
+| 6 | `rag-builder` | write | build | Ingestion 3/3: index update and deletion propagation by parent-doc id, deletion-within-bound test |
+| 7 | `rag-builder` | write | build | Retrieval 1/2: query rewriting, multi-turn condensation, the retrieve-k → rerank-n cascade |
+| 8 | `rag-builder` | write | build | Retrieval 2/2: entitlement filter, entitlement-keyed cache, model routing, the two entitlement tests |
+| 9 | `rag-builder` | write | build | Observability 1/2: per-query cost/token by routing class and cache hit, latency decomposed |
+| 10 | `rag-builder` | write | build | Observability 2/2: retrieval-quality and freshness signals, eval-facing logs, no-credential-in-logs test |
+| 11 | `rag-eval-author` | write | build | The suite, the labelled set, the thresholds — **no shell** |
+| 12 | `rag-red-teamer` ∥ `rag-eval-runner` | exec ∥ exec | judgment ∥ build | Drills with reproductions ∥ measured numbers |
+| 13 | `rag-lead` | read | build | The go-live packet and one DECISION-REQUEST |
 
 `rag-review` is the same discipline pointed at a system that already exists:
 survey → threat model → build the missing suite → measure and attack in
@@ -81,13 +85,18 @@ parallel → a ranked fix list split BLOCKING / HIGH / COST.
 ### Three structural choices, and why
 
 **Writes are single-threaded.** Every write-lane step's diff is replayed into
-your checkout with `git apply` — never a three-way merge — so two steps that
-touched one file fail at apply time. The three build slices also have a real
-dependency order: retrieval must match the schema ingestion created, and
-observability instruments both. Stage 8's two branches are the only parallel
-pair, and they are **disjoint by construction**: both hold `bash` with neither
-`write` nor `edit`, so both are on the exec lane, neither can land a change,
-and there is no shared scope to partition.
+your checkout with `git apply` — never a three-way merge — so two *concurrent*
+steps over one file fail at apply time; the build steps run one after another,
+each worktree seeded from the last, so a later step extends what an earlier one
+landed. The three build slices also have a real dependency order: retrieval
+must match the schema ingestion created, and observability instruments both.
+Each slice is cut into two or three small steps (ingestion 4–6, retrieval 7–8,
+observability 9–10) so that no step is scoped as an entire subsystem in one
+turn budget — the defect that made this stage retry three times before it was
+re-sized. Stage 12's two branches are the only parallel pair, and they are
+**disjoint by construction**: both hold `bash` with neither `write` nor
+`edit`, so both are on the exec lane, neither can land a change, and there is
+no shared scope to partition.
 
 **The ADR is carried by a file.** `{{prev}}` holds only the immediately
 previous stage, so an ADR that lived only in step output would be gone by the
@@ -147,7 +156,7 @@ where a dollar ceiling never can.
 
 Two limits are not going away, and should not:
 
-**No step in this kit decides anything.** Stage 9 ends in a `DECISION-REQUEST`
+**No step in this kit decides anything.** Stage 13 ends in a `DECISION-REQUEST`
 naming what a person is approving. Nothing here deploys, tags, publishes or
 signs off, and the red-teamer's vocabulary contains no verdict that clears.
 
@@ -162,8 +171,16 @@ your checkout; adding `bash` to `rag-eval-author` destroys the split that
 keeps the gate honest. Everything else in these files is prose that shapes a
 model's behaviour, and prose can be improved freely.
 
-Keep `maxTurns` at or under 50: the session clamps subagents at 64, and a
-larger number advertises a budget the role never receives.
+Right-size `maxTurns` to the step, not to the subsystem. The build and eval
+roles declare `maxTurns: 80`; the session clamps every subagent at
+`subagentMaxTurns` (default 64) and a role file may only narrow that, so 80
+resolves to an effective `min(80, 64) = 64` unless a deployment raises the
+session ceiling, and a human's run-scoped raise at a parked run lifts both
+halves. The ceiling's job is to trip a runaway loop, not to size honest work —
+a step scoped this small finishes well under 64, so the real lever is keeping
+steps small, not ceilings large. A slice scoped as a whole subsystem in one
+step is the defect this kit was re-sized to remove; do not merge the build
+steps back together.
 
 If you add a role, re-run the validation below and the hub catalog build
 (`node editors/vscode/scripts/build-catalog.mjs`) so the registry disclosure
@@ -204,15 +221,15 @@ What it printed here, verbatim:
 
 ```
 rag-architect        write  tier:judgment   maxTurns=60
-rag-builder          write  tier:build      maxTurns=50
-rag-eval-author      write  tier:build      maxTurns=50
-rag-eval-runner      exec   tier:build      maxTurns=50
+rag-builder          write  tier:build      maxTurns=80
+rag-eval-author      write  tier:build      maxTurns=80
+rag-eval-runner      exec   tier:build      maxTurns=80
 rag-lead             read   tier:build      maxTurns=40
 rag-red-teamer       exec   tier:judgment   maxTurns=50
 rag-surveyor         read   tier:fast       maxTurns=40
 rag-threat-modeler   read   tier:judgment   maxTurns=40
 role warnings: none
-rag-setup    stages=9 steps/stage=1,1,1,1,1,1,1,2p,1 budgetUsd=40 unresolved-roles=none
+rag-setup    stages=13 steps/stage=1,1,1,1,1,1,1,1,1,1,1,2p,1 budgetUsd=40 unresolved-roles=none
 rag-review   stages=5 steps/stage=1,1,1,2p,1 budgetUsd=20 unresolved-roles=none
 ```
 

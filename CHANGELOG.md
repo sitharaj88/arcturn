@@ -10,6 +10,22 @@ CLI, the SDK, or the wire protocol.
 
 ## [Unreleased]
 
+### Changed
+
+- **A build stage that took three tries to pass is now three steps that
+  pass once.** `rag-blueprint`'s `rag-setup` scoped each of its three build
+  slices — ingestion, retrieval, observability — as one agent step spanning
+  an entire subsystem, and stage four failed three real runs: once on the
+  40-minute deadline, twice on the turn ceiling, 24 files written and still
+  not done. Each slice is now cut into two or three named sequential steps
+  (rag-setup grows from nine stages to thirteen), each sized to finish well
+  inside its ceiling, and the build roles' `maxTurns` rises from 50 to 80 so
+  the session's 64-turn clamp — not a tighter role cap — is the only wall.
+  The tests still run, but once: a step writes them beside the code and
+  reports real pass/fail counts and exit codes, instead of paying a separate
+  run-to-red then run-to-green round trip for every assertion.
+
+
 ## [0.5.8] — 2026-08-30
 
 A run that ran out of rope now asks for more, instead of dying.

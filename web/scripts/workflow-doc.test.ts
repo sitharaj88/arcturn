@@ -525,7 +525,7 @@ describe("real kit workflows, read from disk", () => {
     ).toBe(true);
 
     const ragSetup = parseOk(readFileSync(files[2] ?? "", "utf8"));
-    expect(ragSetup.doc.stages).toHaveLength(9);
+    expect(ragSetup.doc.stages).toHaveLength(13);
     expect(ragSetup.doc.stages.some((stage) => stage.parallel)).toBe(true);
   });
 });
