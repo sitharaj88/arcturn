@@ -28,6 +28,7 @@ import {
   createWorkflowCommands,
   DEFAULT_WORKFLOW_STEP_TIMEOUT_MS,
   discoverWorkflows,
+  emptyStepError,
   expandStepPrompt,
   finalWordsExcerpt,
   formatWriteLaneTrailer,
@@ -43,6 +44,7 @@ import {
   roleDispatch,
   roleLane,
   runWorkflow,
+  stepProducedNothing,
   turnCeilingFromCause,
   type Workflow,
   type WorkflowAgentHost,
@@ -7067,6 +7069,282 @@ describe("runWorkflow — the step-failure park", () => {
     );
 
     await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+  });
+});
+
+describe("stepProducedNothing — what counts as nothing", () => {
+  const rec = (status: WorkflowPatchRecord["status"], files: number): WorkflowPatchRecord => ({
+    status,
+    role: "architect",
+    stepId: "3",
+    files,
+  });
+
+  it("is nothing only when no word was said AND no file was changed", () => {
+    expect(stepProducedNothing("", rec("empty", 0))).toBe(true);
+    expect(stepProducedNothing("   \n\n  ", rec("empty", 0))).toBe(true);
+    // The read lane has no record at all; its text is the whole product.
+    expect(stepProducedNothing("")).toBe(true);
+    // An exec-lane worktree is thrown away unread, so a step that changed
+    // nothing in it and said nothing is just as empty as a write step's void.
+    expect(stepProducedNothing("", rec("discarded", 0))).toBe(true);
+  });
+
+  it("is not nothing when the step spoke, or when it changed a file", () => {
+    expect(stepProducedNothing("Reviewed; no changes needed.")).toBe(false);
+    expect(stepProducedNothing("Reviewed; no changes needed.", rec("empty", 0))).toBe(false);
+    // A builder that reports entirely through its diff has still produced.
+    expect(stepProducedNothing("", rec("applied", 3))).toBe(false);
+    expect(stepProducedNothing("", rec("discarded", 2))).toBe(false);
+  });
+});
+
+describe("runWorkflow — a step that produced nothing is not `done`", () => {
+  /**
+   * The run this exists for. Stage 2's entire job is to write one file; the
+   * stages after it quote that file by path. When stage 2 came back with no
+   * file and no words and the engine called it `done`, every later stage
+   * re-invented the architecture from an empty `{{prev}}` — independently,
+   * incompatibly, and for seven stages.
+   */
+  const THREE_STAGES = parseOk(
+    [
+      FRONT,
+      "1. @surveyor survey the options",
+      "2. @architect write the ADR to docs/adr/rag-architecture.md {{prev}}",
+      "3. @builder build, following the ADR at docs/adr/rag-architecture.md {{prev}}",
+    ].join("\n"),
+  );
+  const RESOLVE: AgentRoleResolver = (name) => role(name, ["read", "grep"]);
+  const NAMES = () => ["surveyor", "architect", "builder"];
+
+  /** The exact record the real run's void carried: nothing changed, nothing said. */
+  const VOID: WorkflowPatchRecord = {
+    status: "empty",
+    role: "architect",
+    stepId: "2",
+    files: 0,
+  };
+
+  /** Stage 1 reports; stage 2 is the void; stage 3, if it ever runs, builds. */
+  function voidRunner(
+    calls: string[],
+    step2: Partial<WorkflowStepOutcome> = {},
+  ): WorkflowStepRunner {
+    return async (request) => {
+      calls.push(request.step.id);
+      if (request.step.id === "2") {
+        return { text: "", usage: usage(16389, 2409), isError: false, record: VOID, ...step2 };
+      }
+      return { text: `<${request.step.id}>`, usage: usage(1, 1), isError: false };
+    };
+  }
+
+  it("fails the step and parks the run instead of reporting `done`", async () => {
+    const { sink, lines } = memoryJournal();
+    const calls: string[] = [];
+    const result = await runWorkflow(THREE_STAGES, {
+      journal: sink,
+      runStep: voidRunner(calls),
+      resolveAgent: RESOLVE,
+      agentNames: NAMES,
+    });
+
+    // FAIL-FIRST: step 2 was `done` and the run ran on to stage 3 with an
+    // empty `{{prev}}` and a promised file that does not exist.
+    expect(result.steps.map((step) => step.status)).toEqual(["done", "failed", "skipped"]);
+    expect(result.status).toBe("paused");
+    // Stage 3 was never dispatched: the void does not get to seed anything.
+    expect(calls).toEqual(["1", "2"]);
+
+    // The durable record, which is what a resume and `/workflow status` read.
+    const terminals = lines.filter(
+      (line): line is Extract<JournalLine, { kind: "stepEnd" }> => line.kind === "stepEnd",
+    );
+    expect(terminals.map((line) => [line.id, line.status])).toEqual([
+      ["1", "done"],
+      ["2", "failed"],
+    ]);
+    expect(lines.find((line) => line.kind === "runEnd")).toMatchObject({ status: "paused" });
+
+    // The park is armed and answerable, and it says what went wrong.
+    const ask = lines.find(
+      (line): line is Extract<JournalLine, { kind: "stepFailAsk" }> => line.kind === "stepFailAsk",
+    );
+    expect(ask).toMatchObject({ stepId: "2", role: "architect", attempts: 1 });
+    expect(ask?.cause).toBe(emptyStepError("2", "architect"));
+    expect(ask?.failureKind).toBeUndefined(); // not a turn ceiling; `raise` fixes nothing
+    expect(result.pause?.stepId).toBe("2");
+    expect(result.pause?.reason).toBe("step-failure");
+
+    // And stage 1's paid work is banked, not thrown away.
+    const state = buildResumeState(lines);
+    expect(state.endedStatus).toBe("paused");
+    expect(state.completed.has("1")).toBe(true);
+    expect(state.completed.has("2")).toBe(false);
+  });
+
+  it("keeps a step that spoke but wrote nothing — the read lane's whole life", async () => {
+    const { sink, lines } = memoryJournal();
+    const result = await runWorkflow(THREE_STAGES, {
+      journal: sink,
+      // No record at all (the read lane has no diff), and a real report.
+      runStep: async (request) => ({
+        text: `<${request.step.id}: reviewed, no changes needed>`,
+        usage: usage(1, 1),
+        isError: false,
+      }),
+      resolveAgent: RESOLVE,
+      agentNames: NAMES,
+    });
+
+    expect(result.status).toBe("done");
+    expect(result.steps.map((step) => step.status)).toEqual(["done", "done", "done"]);
+    expect(lines.some((line) => line.kind === "stepFailAsk")).toBe(false);
+  });
+
+  it("keeps a step that wrote files but said nothing — a builder reporting by diff", async () => {
+    const { sink, lines } = memoryJournal();
+    const calls: string[] = [];
+    const result = await runWorkflow(THREE_STAGES, {
+      journal: sink,
+      runStep: voidRunner(calls, {
+        text: "",
+        record: {
+          status: "applied",
+          role: "architect",
+          stepId: "2",
+          files: 1,
+          patchPath: "/runs/r1/2-architect.patch",
+        },
+      }),
+      resolveAgent: RESOLVE,
+      agentNames: NAMES,
+    });
+
+    expect(result.status).toBe("done");
+    expect(result.steps.map((step) => step.status)).toEqual(["done", "done", "done"]);
+    expect(calls).toEqual(["1", "2", "3"]);
+    expect(lines.some((line) => line.kind === "stepFailAsk")).toBe(false);
+  });
+
+  it("continues past it under `continueOnError: true`, exactly like any other failure", async () => {
+    const workflow = parseOk(
+      [
+        "---",
+        "name: demo",
+        "description: A demo",
+        "continueOnError: true",
+        "---",
+        "1. @surveyor survey the options",
+        "2. @architect write the ADR to docs/adr/rag-architecture.md {{prev}}",
+        "3. @builder build {{prev}}",
+      ].join("\n"),
+    );
+    const { sink, lines } = memoryJournal();
+    const calls: string[] = [];
+    const result = await runWorkflow(workflow, {
+      journal: sink,
+      runStep: voidRunner(calls),
+      resolveAgent: RESOLVE,
+      agentNames: NAMES,
+    });
+
+    // Unchanged from every other failed step under this flag: it runs on and
+    // ends `failed`, and nothing parks.
+    expect(calls).toEqual(["1", "2", "3"]);
+    expect(result.status).toBe("failed");
+    expect(result.steps.map((step) => step.status)).toEqual(["done", "failed", "done"]);
+    expect(result.error).toBe(emptyStepError("2", "architect"));
+    expect(lines.some((line) => line.kind === "stepFailAsk")).toBe(false);
+  });
+
+  it("answers `retry` by re-running only that step — the architect gets a second go", async () => {
+    const { sink, lines } = memoryJournal();
+    await runWorkflow(THREE_STAGES, {
+      journal: sink,
+      runStep: voidRunner([]),
+      resolveAgent: RESOLVE,
+      agentNames: NAMES,
+    });
+    const state = buildResumeState(lines);
+    expect(state.stepFailAsk?.stepId).toBe("2");
+
+    const calls: string[] = [];
+    const resumed = await runWorkflow(THREE_STAGES, {
+      journal: sink,
+      // THE REAL RECOVERY PATH: the same role, asked again, writes the file.
+      runStep: async (request) => {
+        calls.push(request.step.id);
+        return request.step.id === "2"
+          ? {
+              text: "ADR written to docs/adr/rag-architecture.md",
+              usage: usage(1, 1),
+              isError: false,
+              record: {
+                status: "applied" as const,
+                role: "architect",
+                stepId: "2",
+                files: 1,
+                patchPath: "/runs/r1/2-architect.patch",
+              },
+            }
+          : { text: "<3>", usage: usage(1, 1), isError: false };
+      },
+      resolveAgent: RESOLVE,
+      agentNames: NAMES,
+      resumeFrom: { ...state, stepFailAnswer: { text: "retry" } },
+    });
+
+    expect(resumed.status).toBe("done");
+    // Stage 1 was replayed off the journal; only the void was re-bought.
+    expect(calls).toEqual(["2", "3"]);
+    expect(resumed.steps.map((step) => step.status)).toEqual(["done", "done", "done"]);
+    expect(resumed.steps[1]?.text).toContain("docs/adr/rag-architecture.md");
+  });
+
+  it("leaves an ORG-HALT step to its own gate — the halt reason is what a human reads", async () => {
+    const { sink, lines } = memoryJournal();
+    const result = await runWorkflow(THREE_STAGES, {
+      journal: sink,
+      runStep: async (request) =>
+        request.step.id === "2"
+          ? {
+              text: "ORG-HALT: the spec contradicts itself on retention",
+              usage: usage(1, 1),
+              isError: false,
+            }
+          : { text: `<${request.step.id}>`, usage: usage(1, 1), isError: false },
+      resolveAgent: RESOLVE,
+      agentNames: NAMES,
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.steps.map((step) => step.status)).toEqual(["done", "failed", "skipped"]);
+    expect(result.error).toContain("the spec contradicts itself on retention");
+    expect(result.error).not.toContain("produced nothing");
+    // A declared halt is unparkable: no ask, by design.
+    expect(lines.some((line) => line.kind === "stepFailAsk")).toBe(false);
+  });
+
+  it("leaves an ORG-ASK step paused, not failed", async () => {
+    const { sink, lines } = memoryJournal();
+    const result = await runWorkflow(THREE_STAGES, {
+      journal: sink,
+      runStep: async (request) =>
+        request.step.id === "2"
+          ? { text: "ORG-ASK: pgvector or a hosted index?", usage: usage(1, 1), isError: false }
+          : { text: `<${request.step.id}>`, usage: usage(1, 1), isError: false },
+      resolveAgent: RESOLVE,
+      agentNames: NAMES,
+    });
+
+    expect(result.status).toBe("paused");
+    expect(result.steps.map((step) => step.status)).toEqual(["done", "paused", "skipped"]);
+    expect(result.pause?.stepId).toBe("2");
+    expect(result.pause?.reason).toBeUndefined(); // a role's question, not a failure
+    expect(result.pause?.question).toContain("pgvector");
+    expect(lines.some((line) => line.kind === "stepFailAsk")).toBe(false);
   });
 });
 

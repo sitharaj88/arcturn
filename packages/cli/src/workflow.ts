@@ -3777,7 +3777,9 @@ export async function runWorkflow(
           // not the agent's self-reported status — owns the decision (the same
           // rule patch records follow). A fatal `ORG-HALT` becomes a `failed`
           // step (no resume-with-answer); an `ORG-ASK` becomes a `paused` step
-          // whose question is carried on the durable terminal.
+          // whose question is carried on the durable terminal. The same gate
+          // catches the opposite fault — a step that raised nothing at all
+          // because it did nothing at all (see {@link stepProducedNothing}).
           if (result.status === "done") {
             const halt = classifyStepHalt(result.text);
             if (halt?.kind === "halt") {
@@ -3788,6 +3790,21 @@ export async function runWorkflow(
               unparkableSteps.add(step.id);
             } else if (halt?.kind === "ask") {
               result = { ...result, status: "paused", question: halt.question.question };
+            } else if (stepProducedNothing(result.text, result.record)) {
+              // THE VOID GATE (see {@link stepProducedNothing}): a step that
+              // changed no file and said nothing has produced nothing, and
+              // `done` is a lie the next seven stages build on. It fails —
+              // which, on the park machinery above, means the run stops and
+              // ASKS rather than dying, and `retry` is a real answer. Last of
+              // the three arms on purpose: an `ORG-HALT` or `ORG-ASK` step has
+              // already spoken and is settled by its own branch, and only a
+              // step this gate can still see as `done` is judged here.
+              result = {
+                ...result,
+                status: "failed",
+                text: "",
+                error: emptyStepError(step.id, step.agent),
+              };
             }
           }
           runTurns += stepTurns;
@@ -4927,6 +4944,57 @@ function turnCeilingCause(roleName: string | undefined, message: string | undefi
         "the step"
     : `role "${roleName}" hit ${ceiling} before finishing; raise maxTurns in the role file or ` +
         "narrow the step";
+}
+
+/**
+ * Did this settled step have anything at all to show for itself?
+ *
+ * THE VOID. A step whose whole job was "produce the ADR and write it to
+ * `docs/adr/rag-architecture.md`" came back `done` having written no file and
+ * said no word: `record{status:"empty", files:0}`, `text: ""`. Seven later
+ * stages then cited an ADR that was never written, each re-deriving the
+ * architecture from an empty `{{prev}}` and disagreeing with the last, and the
+ * run burned hours and millions of tokens before anyone looked back at stage
+ * 3. Nothing in the engine had asked the only question that catches it: did
+ * this step produce anything observable?
+ *
+ * "Anything" is deliberately generous, because the strict reading breaks every
+ * honest step. ANY non-empty text means the step spoke — a read-lane reviewer
+ * that changes no file is the common case, not a fault — and any changed file
+ * means it acted, even if it reported entirely through its diff. Only the
+ * intersection, no words *and* no file, is nothing.
+ *
+ * The file half is asked of the engine's own {@link WorkflowPatchRecord}
+ * rather than of the agent: a role cannot mint one (see
+ * {@link stripPatchTrailers}), so `files` is what git actually saw. An absent
+ * record is the read lane, which has no diff to report and is judged on its
+ * text alone.
+ *
+ * @param text - The step's final text, after trailer stripping.
+ * @param record - What the lane recorded about its diff, when it had one.
+ */
+export function stepProducedNothing(text: string, record?: WorkflowPatchRecord): boolean {
+  return text.trim() === "" && (record === undefined || record.files === 0);
+}
+
+/**
+ * The message an empty step fails with — see {@link stepProducedNothing}.
+ *
+ * Written to be read by whoever finds the parked run: it names what was
+ * expected (a file, or failing that a reason), what came back (neither), and
+ * the two levers that work — run it again, or ask it for less. Retry really is
+ * the recovery path here: the architect that returned this void produced the
+ * ADR on the very next attempt.
+ *
+ * @param stepId - The step that produced nothing.
+ * @param role - The role it dispatched to, when it named one.
+ */
+export function emptyStepError(stepId: string, role: string | undefined): string {
+  return (
+    `step ${stepId}${role === undefined ? "" : ` (@${role})`} produced nothing — no file was ` +
+    "changed and no text was returned. A step that reports neither a result nor a reason has " +
+    "not run; retry it, or narrow what it was asked to do."
+  );
 }
 
 /**

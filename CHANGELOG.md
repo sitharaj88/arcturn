@@ -10,6 +10,25 @@ CLI, the SDK, or the wire protocol.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A step that produced nothing is no longer reported `done`.** A stage
+  whose whole job was "write the ADR to `docs/adr/rag-architecture.md`" came
+  back having written no file and said no word — `record{status:"empty",
+  files:0}`, zero characters of text — and the engine called it a success.
+  Seven later stages then cited an ADR that was never written, each
+  re-deriving the architecture from an empty `{{prev}}` and disagreeing with
+  the last; the run parked three times on ceilings that were never the real
+  problem and burned hours before anyone looked back at the void. A step
+  that changed no file *and* returned no text now fails, which on the park
+  machinery means the run stops and asks: `retry` gives the role a second
+  attempt, `abandon` ends it. Any non-empty text still counts — a read-lane
+  reviewer that changes nothing is the common case, not a fault — and so
+  does any changed file, for a builder that reports through its diff.
+  `continueOnError: true` continues past it exactly as it does past any
+  other failed step.
+
+
 ### Changed
 
 - **A build stage that took three tries to pass is now three steps that

@@ -1166,6 +1166,131 @@ describe("a failed step parks the run, and the run really is recoverable", () =>
   });
 });
 
+describe("a step that produced nothing is caught where it happened, not seven stages later", () => {
+  itPosix(
+    "parks at the void instead of handing the next stage a file that was never written",
+    async () => {
+      const scratch = await gitScratch();
+      // The run this is drawn from: stage 2's entire job was to write one ADR.
+      // It wrote nothing, said nothing, and was marked `done`; stage 3 onward
+      // then quoted `docs/adr/rag-architecture.md` at each other for hours.
+      const llm = fakeLLM([
+        // Stage 1, the surveyor: a real file and a real report.
+        {
+          toolCalls: [
+            { id: "s1", name: "write", arguments: { path: "SURVEY.md", content: "the survey\n" } },
+          ],
+        },
+        { text: "survey done" },
+        // Stage 2, the architect: THE VOID. No tool call, no words — the model
+        // simply ends its turn. This is the outcome that used to be `done`.
+        { text: "" },
+        // Everything below belongs to the RETRY. Stage 3 must never reach it on
+        // run one — the request count below is what proves it did not.
+        {
+          toolCalls: [
+            {
+              id: "a1",
+              name: "write",
+              arguments: {
+                path: "docs/adr/rag-architecture.md",
+                content: "# RAG architecture\n\npgvector, one index.\n",
+              },
+            },
+          ],
+        },
+        { text: "ADR written to docs/adr/rag-architecture.md" },
+        { text: "built against the ADR" },
+      ]);
+      const runtime = await runtimeWith(scratch, llm);
+
+      const surveyor = role("surveyor", ["read", "write", "edit"]);
+      const architect = role("architect", ["read", "write", "edit"]);
+      const builder = role("builder", ["read", "write", "edit"]);
+      const resolve = (name: string): AgentDef =>
+        name === "surveyor" ? surveyor : name === "architect" ? architect : builder;
+      const workflow = parseOk(
+        [
+          "---",
+          "name: pipeline",
+          "---",
+          "1. @surveyor survey the options",
+          "2. @architect write the ADR to docs/adr/rag-architecture.md {{prev}}",
+          "3. @builder build, following the ADR at docs/adr/rag-architecture.md {{prev}}",
+          "",
+        ].join("\n"),
+      );
+      const runId = "run-void";
+      const journalDir = join(scratch.home, "void-journal");
+      const drive = (resumeFrom?: ResumeState) =>
+        runWorkflow(workflow, {
+          resolveAgent: resolve,
+          agentNames: () => ["surveyor", "architect", "builder"],
+          journal: createFileRunJournal(journalDir),
+          runId,
+          ...(resumeFrom === undefined ? {} : { resumeFrom }),
+          runStep: createRuntimeRunStep(runtime, {
+            resolveAgent: resolve,
+            writeLane: laneFor(runtime, runId),
+          }),
+        });
+
+      // ---- run one: the void is caught, and the run parks on it.
+      const parked = await drive();
+
+      // FAIL-FIRST: step 2 was `done` and the run ran on to a stage that would
+      // read an ADR nobody wrote.
+      expect(parked.steps.map((step) => step.status)).toEqual(["done", "failed", "skipped"]);
+      expect(parked.status).toBe("paused");
+      // THE EFFECT THE OLD RUN PAID FOR: the promised file is not there. What
+      // changed is that the pipeline now stops at that fact instead of quoting
+      // the path for seven more stages.
+      expect(await exists(join(scratch.cwd, "docs", "adr", "rag-architecture.md"))).toBe(false);
+      // Stage 1's real work is in the real checkout and is not being re-bought…
+      expect(await readFile(join(scratch.cwd, "SURVEY.md"), "utf8")).toBe("the survey\n");
+      // …and stage 3's model was never asked a single question.
+      expect(llm.requests).toHaveLength(3);
+
+      const lines = await journalOnceEnded(journalDir);
+      const terminals = lines.filter(
+        (line): line is Extract<JournalLine, { kind: "stepEnd" }> => line.kind === "stepEnd",
+      );
+      expect(terminals.map((line) => [line.id, line.status])).toEqual([
+        ["1", "done"],
+        ["2", "failed"],
+      ]);
+      expect(lines.findLast((line) => line.kind === "runEnd")).toMatchObject({ status: "paused" });
+      const ask = lines.find(
+        (line): line is Extract<JournalLine, { kind: "stepFailAsk" }> =>
+          line.kind === "stepFailAsk",
+      );
+      expect(ask).toMatchObject({ stepId: "2", role: "architect" });
+      expect(ask?.cause).toContain("produced nothing");
+      const state = buildResumeState(lines);
+      expect(state.endedStatus).toBe("paused");
+      expect([...state.completed.keys()]).toEqual(["1"]);
+
+      // ---- run two: `retry`. The architect gets its second attempt and takes
+      // it — which is exactly why this parks rather than dies.
+      const resumed = await drive({ ...state, stepFailAnswer: { text: "retry" } });
+
+      expect(resumed.status).toBe("done");
+      expect(resumed.steps.map((step) => step.status)).toEqual(["done", "done", "done"]);
+      // The ADR is now bytes in the user's checkout, applied off the write lane.
+      expect(
+        await readFile(join(scratch.cwd, "docs", "adr", "rag-architecture.md"), "utf8"),
+      ).toContain("# RAG architecture");
+      // Only the void was re-bought: 3 from run one, plus the architect's two
+      // turns and the builder's one. Stage 1 was replayed from the journal.
+      expect(llm.requests).toHaveLength(6);
+      // And the handoff the old run never had: the builder's prompt carries the
+      // architect's report, not an empty `{{prev}}`.
+      const built = llm.requests.at(-1);
+      expect(JSON.stringify(built?.messages ?? [])).toContain("ADR written to docs/adr");
+    },
+  );
+});
+
 describe("ORG-HALT short-circuits every later stage — nothing is dispatched", () => {
   it("never builds the later role's agent, never asks its model, never makes its worktree", async () => {
     const scratch = await gitScratch();
