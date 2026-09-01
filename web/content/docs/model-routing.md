@@ -62,7 +62,7 @@ names the tier instead of the vendor:
     "tiers": {
       "judgment": "zai/glm-5.3",
       "build": "zai/glm-4.7",
-      "cheap": "zai/glm-4.6"
+      "cheap": "zai/glm-5.3-flash"
     }
   }
 }

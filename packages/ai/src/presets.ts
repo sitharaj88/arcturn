@@ -470,6 +470,84 @@ const TOOLS_THINK: ModelCapabilities = { ...TOOLS, thinking: true };
 const TOOLS_VISION_THINK: ModelCapabilities = { ...TOOLS, vision: true, thinking: true };
 
 /**
+ * The GLM coding-plan lineup, shared by the global (`zai`) and China
+ * (`zai-cn`) endpoints — the same subscription sold behind two hosts.
+ *
+ * Every fact here was read off the endpoint on 2026-09-02, not inferred: the
+ * `/models` listing, a one-token completion per id to prove the plan actually
+ * covers it, and a deliberately over-large `max_tokens` per id so the ceiling
+ * comes from the API's own range error rather than a guess.
+ *
+ * The China host could not be probed from here (no CN key), so `zai-cn`
+ * mirrors this list on the strength of it being the same plan. That only
+ * affects discovery: preset ids pass through verbatim either way, so an id
+ * that turns out not to exist there fails at request time exactly as an
+ * unlisted one would.
+ */
+const ZAI_CODING_MODELS: readonly CuratedModel[] = Object.freeze([
+  {
+    model: "glm-5.3-flash",
+    displayName: "GLM-5.3 Flash (coding plan)",
+    contextWindow: 1_000_000,
+    maxOutputTokens: 131_072,
+    capabilities: TOOLS_THINK,
+  },
+  {
+    model: "glm-5.3",
+    displayName: "GLM-5.3 (coding plan)",
+    contextWindow: 1_000_000,
+    maxOutputTokens: 131_072,
+    capabilities: TOOLS_THINK,
+  },
+  {
+    model: "glm-5-turbo",
+    displayName: "GLM-5 Turbo (coding plan)",
+    contextWindow: 200_000,
+    maxOutputTokens: 131_072,
+    capabilities: TOOLS_THINK,
+  },
+  {
+    model: "glm-4.7",
+    displayName: "GLM-4.7 (coding plan)",
+    contextWindow: 200_000,
+    maxOutputTokens: 131_072,
+    capabilities: TOOLS_THINK,
+  },
+  {
+    model: "glm-4.7-flash",
+    displayName: "GLM-4.7 Flash (coding plan)",
+    contextWindow: 200_000,
+    maxOutputTokens: 131_072,
+    capabilities: TOOLS_THINK,
+  },
+  {
+    model: "glm-4.6",
+    displayName: "GLM-4.6 (coding plan)",
+    contextWindow: 200_000,
+    maxOutputTokens: 131_072,
+    capabilities: TOOLS_THINK,
+  },
+  // The vision pair answers on the coding endpoint too, and is the only way a
+  // plan-only account gets an image-capable model at all. Their max_tokens
+  // ceiling is a quarter of the text models' — 32_768, per the API's own
+  // range error — so they are not interchangeable with GLM-5.3 for long output.
+  {
+    model: "glm-4.6v",
+    displayName: "GLM-4.6V Vision (coding plan)",
+    contextWindow: 128_000,
+    maxOutputTokens: 32_768,
+    capabilities: TOOLS_VISION_THINK,
+  },
+  {
+    model: "glm-4.6v-flash",
+    displayName: "GLM-4.6V Flash Vision (coding plan)",
+    contextWindow: 128_000,
+    maxOutputTokens: 32_768,
+    capabilities: TOOLS_VISION_THINK,
+  },
+]);
+
+/**
  * A curated, deliberately small set of notable models per preset.
  *
  * Sourced from each provider's public model documentation, not from the reference harness's
@@ -617,62 +695,64 @@ const CURATED_MODELS: Readonly<Record<string, readonly CuratedModel[]>> = Object
       capabilities: TOOLS,
     },
   ],
-  // Coding-plan lineup as of 2026-08: GLM-5.3 (launched 2026-08-14), GLM-5
-  // Turbo and GLM-4.7; requests for GLM-5.2/5.1 are auto-routed to 5.3 on this
-  // endpoint, so they are not listed here. GLM-4.6 is kept for older plans.
+  // Coding-plan lineup, shared with the China host below. Requests for
+  // GLM-5.2/5.1/5 are auto-routed to 5.3 on this endpoint — the response
+  // echoes `model: "glm-5.3"` — so they are not listed; glm-4.5-air likewise
+  // answers as glm-4.7. GLM-4.7-FlashX is absent for the opposite reason: the
+  // coding endpoint bills it separately (error 1113, "insufficient balance"),
+  // so it appears under `zai-api` only.
   //
   // Deliberately unpriced: the coding plan is a subscription, so a per-token
   // cost for these is not a number that exists — your plan covers the turn
   // whatever it weighed. See the `subscription` flag on the preset.
-  zai: [
-    {
-      model: "glm-5.3",
-      displayName: "GLM-5.3 (coding plan)",
-      contextWindow: 1_000_000,
-      maxOutputTokens: 128_000,
-      capabilities: TOOLS_THINK,
-    },
-    {
-      model: "glm-5-turbo",
-      displayName: "GLM-5 Turbo (coding plan)",
-      contextWindow: 200_000,
-      maxOutputTokens: 128_000,
-      capabilities: TOOLS_THINK,
-    },
-    {
-      model: "glm-4.7",
-      displayName: "GLM-4.7 (coding plan)",
-      contextWindow: 200_000,
-      maxOutputTokens: 128_000,
-      capabilities: TOOLS_THINK,
-    },
-    {
-      model: "glm-4.6",
-      displayName: "GLM-4.6 (coding plan)",
-      contextWindow: 200_000,
-      maxOutputTokens: 128_000,
-      capabilities: TOOLS_THINK,
-    },
-  ],
+  //
+  // One consequence of that worth knowing: `/model route --auto` only picks
+  // candidates that publish a cost, so it never fires for a coding-plan main.
+  // Name the cheap tier yourself — `route.tiers.cheap: "zai/glm-5.3-flash"`.
+  zai: ZAI_CODING_MODELS,
+  // Same plan, China host. Unverifiable from outside China; see
+  // ZAI_CODING_MODELS for what that does and does not mean.
+  "zai-cn": ZAI_CODING_MODELS,
   // The general pay-as-you-go endpoint, which is what a key from Z.AI's
   // console reaches. Registered separately because the coding-plan path above
-  // is a different URL and rejects general keys. GLM-5.3 is deliberately
-  // absent: as of 2026-08-18 its general-API access is still rolling out
-  // (coding plan only) — it can be used by id once Z.AI lists it, since preset
-  // model ids pass through verbatim.
+  // is a different URL and rejects general keys — and the reverse: a
+  // pay-as-you-go key on the coding path is a 404, not a billing error.
   //
   // Prices below are USD per million tokens, read from Z.AI's own rate card at
-  // https://docs.z.ai/guides/overview/pricing on 2026-08-24. `cacheRead` is
+  // https://docs.z.ai/guides/overview/pricing on 2026-09-02. `cacheRead` is
   // Z.AI's "cached input" column; they publish no separate cache-write rate,
   // so that field is left off and `calculateCostUsd` falls back to the input
   // rate for it. Re-check the page before trusting these for billing — a rate
   // card is a moving target, and a stale price is a quiet wrong answer.
+  //
+  // Where Z.AI shows a promotional price next to a struck-through list price,
+  // the LIST price is what is recorded. A promo that lapses would otherwise
+  // leave every install quietly under-reporting spend, and under-reporting is
+  // the direction that lets a budget ceiling fail to trip.
   "zai-api": [
     {
       model: "glm-5.3",
       displayName: "GLM-5.3",
       contextWindow: 1_000_000,
-      maxOutputTokens: 128_000,
+      maxOutputTokens: 131_072,
+      capabilities: TOOLS_THINK,
+      cost: { input: 1.4, output: 4.4, cacheRead: 0.26 },
+    },
+    {
+      // Half these rates until 2026-09-09 (Z.AI's launch promotion); the list
+      // price is recorded per the note above.
+      model: "glm-5.3-flash",
+      displayName: "GLM-5.3 Flash",
+      contextWindow: 1_000_000,
+      maxOutputTokens: 131_072,
+      capabilities: TOOLS_THINK,
+      cost: { input: 0.15, output: 0.5, cacheRead: 0.03 },
+    },
+    {
+      model: "glm-5.2",
+      displayName: "GLM-5.2",
+      contextWindow: 1_000_000,
+      maxOutputTokens: 131_072,
       capabilities: TOOLS_THINK,
       cost: { input: 1.4, output: 4.4, cacheRead: 0.26 },
     },
@@ -680,7 +760,7 @@ const CURATED_MODELS: Readonly<Record<string, readonly CuratedModel[]>> = Object
       model: "glm-5.1",
       displayName: "GLM-5.1",
       contextWindow: 1_000_000,
-      maxOutputTokens: 128_000,
+      maxOutputTokens: 131_072,
       capabilities: TOOLS_THINK,
       cost: { input: 1.4, output: 4.4, cacheRead: 0.26 },
     },
@@ -688,23 +768,15 @@ const CURATED_MODELS: Readonly<Record<string, readonly CuratedModel[]>> = Object
       model: "glm-5",
       displayName: "GLM-5",
       contextWindow: 1_000_000,
-      maxOutputTokens: 128_000,
+      maxOutputTokens: 131_072,
       capabilities: TOOLS_THINK,
       cost: { input: 1, output: 3.2, cacheRead: 0.2 },
-    },
-    {
-      model: "glm-5.2",
-      displayName: "GLM-5.2",
-      contextWindow: 1_000_000,
-      maxOutputTokens: 128_000,
-      capabilities: TOOLS_THINK,
-      cost: { input: 1.4, output: 4.4, cacheRead: 0.26 },
     },
     {
       model: "glm-5-turbo",
       displayName: "GLM-5 Turbo",
       contextWindow: 200_000,
-      maxOutputTokens: 128_000,
+      maxOutputTokens: 131_072,
       capabilities: TOOLS_THINK,
       cost: { input: 1.2, output: 4, cacheRead: 0.24 },
     },
@@ -712,9 +784,17 @@ const CURATED_MODELS: Readonly<Record<string, readonly CuratedModel[]>> = Object
       model: "glm-4.7",
       displayName: "GLM-4.7",
       contextWindow: 200_000,
-      maxOutputTokens: 128_000,
+      maxOutputTokens: 131_072,
       capabilities: TOOLS_THINK,
       cost: { input: 0.6, output: 2.2, cacheRead: 0.11 },
+    },
+    {
+      model: "glm-4.7-flashx",
+      displayName: "GLM-4.7 FlashX",
+      contextWindow: 200_000,
+      maxOutputTokens: 131_072,
+      capabilities: TOOLS_THINK,
+      cost: { input: 0.07, output: 0.4, cacheRead: 0.01 },
     },
     {
       model: "glm-4.7-flash",
@@ -723,7 +803,7 @@ const CURATED_MODELS: Readonly<Record<string, readonly CuratedModel[]>> = Object
       // for "unknown".
       displayName: "GLM-4.7 Flash (free)",
       contextWindow: 200_000,
-      maxOutputTokens: 128_000,
+      maxOutputTokens: 131_072,
       capabilities: TOOLS_THINK,
       cost: { input: 0, output: 0, cacheRead: 0 },
     },
@@ -731,9 +811,25 @@ const CURATED_MODELS: Readonly<Record<string, readonly CuratedModel[]>> = Object
       model: "glm-4.6",
       displayName: "GLM-4.6",
       contextWindow: 200_000,
-      maxOutputTokens: 128_000,
+      maxOutputTokens: 131_072,
       capabilities: TOOLS_THINK,
       cost: { input: 0.6, output: 2.2, cacheRead: 0.11 },
+    },
+    {
+      model: "glm-4.6v",
+      displayName: "GLM-4.6V Vision",
+      contextWindow: 128_000,
+      maxOutputTokens: 32_768,
+      capabilities: TOOLS_VISION_THINK,
+      cost: { input: 0.3, output: 0.9, cacheRead: 0.05 },
+    },
+    {
+      model: "glm-4.6v-flash",
+      displayName: "GLM-4.6V Flash Vision (free)",
+      contextWindow: 128_000,
+      maxOutputTokens: 32_768,
+      capabilities: TOOLS_VISION_THINK,
+      cost: { input: 0, output: 0, cacheRead: 0 },
     },
   ],
   qwen: [

@@ -161,6 +161,54 @@ describe("registerPresetModels", () => {
     expect(getModel("zai/glm-5.3")?.cost).toBeUndefined();
   });
 
+  it("offers GLM-5.3 Flash on the coding plan and the general API alike", () => {
+    registerPresetModels();
+    // Probed against both Z.AI endpoints on 2026-09-02: the coding path
+    // answers `model: "glm-5.3-flash"` under a plan key, and the id is in the
+    // general API's /models listing. A user on either billing model must be
+    // able to reach the fast tier by name.
+    for (const id of ["zai/glm-5.3-flash", "zai-cn/glm-5.3-flash", "zai-api/glm-5.3-flash"]) {
+      expect(getModel(id), id).toBeDefined();
+      expect(getModel(id)?.capabilities.tools, id).toBe(true);
+    }
+  });
+
+  it("records GLM-5.3 Flash at its list price, not the launch promotion", () => {
+    registerPresetModels();
+    // Z.AI halves these until 2026-09-09. Recording the promo would leave
+    // every install under-reporting spend the day it lapses, and a budget
+    // ceiling that reads low is one that fails to trip.
+    expect(getModel("zai-api/glm-5.3-flash")?.cost).toEqual({
+      input: 0.15,
+      output: 0.5,
+      cacheRead: 0.03,
+    });
+  });
+
+  it("gives the two coding-plan hosts the same lineup", () => {
+    const ids = (preset: string) =>
+      registerPresetModels()
+        .filter((spec) => spec.id.startsWith(`${preset}/`))
+        .map((spec) => spec.model)
+        .sort();
+    // `zai` and `zai-cn` are the same subscription behind two hosts, so a
+    // model reachable on one and missing from the other is a listing bug, not
+    // a product difference.
+    expect(ids("zai-cn")).toEqual(ids("zai"));
+    expect(ids("zai")).toContain("glm-5.3-flash");
+  });
+
+  it("keeps the GLM vision pair honest about output length", () => {
+    registerPresetModels();
+    // The only image-capable models a coding-plan key can reach. Their
+    // max_tokens ceiling is 32_768 — a quarter of the text models' — per the
+    // endpoint's own range error, so they are not drop-in substitutes.
+    for (const id of ["zai/glm-4.6v", "zai-api/glm-4.6v-flash"]) {
+      expect(getModel(id)?.capabilities.vision, id).toBe(true);
+      expect(getModel(id)?.maxOutputTokens, id).toBe(32_768);
+    }
+  });
+
   it("only ever registers models under a known preset", () => {
     for (const spec of registerPresetModels()) {
       const preset = spec.id.split("/")[0] ?? "";

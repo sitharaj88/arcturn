@@ -170,12 +170,47 @@ Model ids pass through verbatim, so anything the endpoint serves works:
 
 ```bash
 export ZAI_API_KEY=...
-arcturn --model zai/glm-5.3        # coding plan
-arcturn --model zai-api/glm-5.2    # general API
+arcturn --model zai/glm-5.3-flash    # coding plan, fast tier
+arcturn --model zai/glm-5.3          # coding plan, flagship
+arcturn --model zai-api/glm-5.2      # general API
 ```
 
 Z.AI is split deliberately: `zai` is the coding-plan path and `zai-api` the general
 pay-as-you-go API. They are different URLs, and the wrong one 404s.
+
+The curated GLM lineup, verified against both endpoints on 2026-09-02:
+
+| Model | Coding plan (`zai`, `zai-cn`) | General API (`zai-api`) | Context / max out |
+| --- | --- | --- | --- |
+| `glm-5.3-flash` | yes — 3x the plan quota of GLM-5.3 | $0.15 / $0.50 per MTok | 1M / 131,072 |
+| `glm-5.3` | yes | $1.40 / $4.40 | 1M / 131,072 |
+| `glm-5.2`, `glm-5.1`, `glm-5` | auto-routed to `glm-5.3` | $1.40 / $4.40 (`glm-5`: $1.00 / $3.20) | 1M / 131,072 |
+| `glm-5-turbo` | yes | $1.20 / $4.00 | 200K / 131,072 |
+| `glm-4.7` | yes | $0.60 / $2.20 | 200K / 131,072 |
+| `glm-4.7-flashx` | no — billed separately | $0.07 / $0.40 | 200K / 131,072 |
+| `glm-4.7-flash` | yes | free | 200K / 131,072 |
+| `glm-4.6` | yes | $0.60 / $2.20 | 200K / 131,072 |
+| `glm-4.6v` (vision) | yes | $0.30 / $0.90 | 128K / 32,768 |
+| `glm-4.6v-flash` (vision) | yes | free | 128K / 32,768 |
+
+Three things in that table are load-bearing:
+
+- **The coding plan carries no prices, on purpose.** It is a subscription, so a per-token
+  figure for `zai/*` is not a number that exists; cost surfaces say "your plan covers it"
+  rather than `$0.00`, which would read as free. The side effect is that
+  `/model route --auto` never fires for a coding-plan main — it only picks candidates
+  that publish a cost. Name the cheap tier yourself: `"cheap": "zai/glm-5.3-flash"`.
+- **`glm-5.2`, `glm-5.1` and `glm-5` are not distinct models on the coding endpoint.**
+  Asking for one returns a response stamped `model: "glm-5.3"`. They are listed under
+  `zai-api` only, where they bill as themselves.
+- **The vision pair caps output at 32,768 tokens**, a quarter of the text models'. They
+  are the only image-capable models a plan-only key can reach, but they are not a drop-in
+  substitute for GLM-5.3 on long output.
+
+Prices are USD per million tokens (input / output) from Z.AI's rate card and are recorded
+at **list** price — GLM-5.3-Flash runs at half these until 2026-09-09, and baking a
+promotion into the catalog would leave every install under-reporting spend the day it
+lapses.
 
 Nothing here is a gate. Any endpoint works without a preset, from configuration or from
 code.

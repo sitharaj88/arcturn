@@ -10,6 +10,31 @@ CLI, the SDK, or the wire protocol.
 
 ## [Unreleased]
 
+### Added
+
+- **GLM-5.3 Flash, and the rest of the GLM lineup on both Z.AI endpoints.**
+  `glm-5.3-flash` — a 1M-context, tool-calling, thinking model that Z.AI
+  gives three times the coding-plan quota of GLM-5.3 — is now a curated model
+  under `zai`, `zai-cn` and `zai-api`, so it is reachable by name whichever
+  way you are billed. Alongside it: `glm-4.7-flash` and the `glm-4.6v` /
+  `glm-4.6v-flash` vision pair join the coding-plan lineup (previously the
+  plan offered no image-capable model at all), `glm-4.7-flashx` joins the
+  general API, and `zai-cn` — which listed *no* models despite being the same
+  subscription as `zai` behind a China host — now mirrors the full list.
+  Twelve curated Z.AI models become twenty-eight.
+
+  Every fact came off the endpoints rather than a guess: the `/models`
+  listing, a one-token completion per id to prove the plan actually covers it,
+  and a deliberately over-large `max_tokens` per id so each ceiling is quoted
+  back by the API's own range error. That last probe corrected every GLM
+  entry's `maxOutputTokens` from 128,000 to the real 131,072 (32,768 for the
+  vision pair), and it is what keeps `glm-4.7-flashx` off the coding plan —
+  it answers there with a billing error, not a completion. GLM-5.3-Flash is
+  priced at Z.AI's **list** rate, not the half-price launch promotion that
+  ends 2026-09-09: a promo baked into the catalog would leave every install
+  under-reporting spend the day it lapsed, and a budget ceiling that reads
+  low is one that fails to trip.
+
 ### Fixed
 
 - **A step that produced nothing is no longer reported `done`.** A stage
