@@ -477,6 +477,37 @@ async function settleDanglingCalls(
 }
 
 /**
+ * The prompt sent when a turn delivers nothing — see {@link producedNothingVisible}.
+ *
+ * Deliberately does not tell the model what its answer should be. It reports
+ * the fact ("nothing was recorded") and hands the turn back, because the thing
+ * that failed was delivery, not reasoning: the model has already decided what
+ * to do and only needs to do it.
+ */
+export const SILENT_TURN_NUDGE =
+  "Your last turn ended without producing anything: no text and no tool call. " +
+  "Nothing was recorded, so from the outside it looks like the step never ran. " +
+  "Act on what you had settled on — make the tool call, or write the answer. " +
+  "If the work is genuinely finished, say so in one line.";
+
+/**
+ * Whether an assistant turn delivered nothing a caller can see.
+ *
+ * True for a message carrying no content at all, and for one carrying only
+ * reasoning: a `thinking` block is not a deliverable, and a whitespace-only
+ * `text` block is not either. Tool calls are checked by the caller, which has
+ * already extracted them.
+ *
+ * This is a real failure mode, not a hypothetical. A model can reason for
+ * seventy thousand characters, close with "Now write.", and then end its turn
+ * without emitting the call — leaving a step that read as complete while
+ * having produced literally nothing.
+ */
+export function producedNothingVisible(message: AssistantMessage): boolean {
+  return !message.content.some((block) => block.type === "text" && block.text.trim().length > 0);
+}
+
+/**
  * Drive the agent until the model stops requesting tools, the run is aborted,
  * or something fails.
  *
@@ -487,6 +518,11 @@ export async function runLoop(rt: LoopRuntime): Promise<LoopResult> {
   // The turn-budget warning fires at most once per run: repeating it every
   // remaining turn would teach the model to ignore it.
   let warnedOfCeiling = false;
+  // Set only by the silent-turn nudge below, and cleared by any turn that
+  // produced something. A model that answers the nudge with a second silence
+  // is not glitching, it is finished (or stuck), and nudging it again would
+  // spend turns to hear the same nothing.
+  let justNudged = false;
   const warnAt = turnWarningThreshold(rt.maxTurns);
 
   while (true) {
@@ -592,6 +628,7 @@ export async function runLoop(rt: LoopRuntime): Promise<LoopResult> {
       const steering = rt.takeSteering();
       for (const message of steering) await rt.appendMessage(message);
 
+      justNudged = false;
       endTurn();
       if (rt.signal.aborted) return { reason: "aborted" };
       turnIndex++;
@@ -601,6 +638,30 @@ export async function runLoop(rt: LoopRuntime): Promise<LoopResult> {
     const steering = rt.takeSteering();
     if (steering.length > 0) {
       for (const message of steering) await rt.appendMessage(message);
+      justNudged = false;
+      endTurn();
+      turnIndex++;
+      continue;
+    }
+
+    // A turn with no tool call and no text has ended the run with nothing to
+    // show for it. Treat that as the delivery glitch it usually is and hand
+    // the turn straight back, once. The alternative is what shipped before:
+    // the run returns `completed`, every consumer reads silence as an answer,
+    // and whatever depended on the output builds on a void.
+    //
+    // Not gated on `stopReason`: `aborted` and `error` returned above, so what
+    // reaches here is `endTurn` (the model thinks it is done) or `maxTokens`
+    // (reasoning consumed the whole budget). Both leave the caller empty
+    // handed, and both are worth exactly one more turn.
+    if (!justNudged && producedNothingVisible(assistant)) {
+      justNudged = true;
+      await rt.appendMessage(userMessage(SILENT_TURN_NUDGE));
+      rt.emit({
+        type: "notice",
+        level: "warn",
+        text: "The model ended a turn without any output; asking it once to continue.",
+      });
       endTurn();
       turnIndex++;
       continue;

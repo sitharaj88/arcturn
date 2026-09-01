@@ -1184,6 +1184,12 @@ describe("a step that produced nothing is caught where it happened, not seven st
         { text: "survey done" },
         // Stage 2, the architect: THE VOID. No tool call, no words — the model
         // simply ends its turn. This is the outcome that used to be `done`.
+        //
+        // Twice, because the loop now hands a silent turn back once before
+        // accepting it (see `SILENT_TURN_NUDGE`). A model that recovers on the
+        // nudge never reaches this machinery at all; what parks a run is a
+        // model that answers the nudge with a second silence.
+        { text: "" },
         { text: "" },
         // Everything below belongs to the RETRY. Stage 3 must never reach it on
         // run one — the request count below is what proves it did not.
@@ -1248,8 +1254,10 @@ describe("a step that produced nothing is caught where it happened, not seven st
       expect(await exists(join(scratch.cwd, "docs", "adr", "rag-architecture.md"))).toBe(false);
       // Stage 1's real work is in the real checkout and is not being re-bought…
       expect(await readFile(join(scratch.cwd, "SURVEY.md"), "utf8")).toBe("the survey\n");
-      // …and stage 3's model was never asked a single question.
-      expect(llm.requests).toHaveLength(3);
+      // …and stage 3's model was never asked a single question. Four requests:
+      // the surveyor's two turns, then the architect's void and the one nudged
+      // retry the loop spends before giving up on it.
+      expect(llm.requests).toHaveLength(4);
 
       const lines = await journalOnceEnded(journalDir);
       const terminals = lines.filter(
@@ -1280,13 +1288,96 @@ describe("a step that produced nothing is caught where it happened, not seven st
       expect(
         await readFile(join(scratch.cwd, "docs", "adr", "rag-architecture.md"), "utf8"),
       ).toContain("# RAG architecture");
-      // Only the void was re-bought: 3 from run one, plus the architect's two
+      // Only the void was re-bought: 4 from run one, plus the architect's two
       // turns and the builder's one. Stage 1 was replayed from the journal.
-      expect(llm.requests).toHaveLength(6);
+      expect(llm.requests).toHaveLength(7);
       // And the handoff the old run never had: the builder's prompt carries the
       // architect's report, not an empty `{{prev}}`.
       const built = llm.requests.at(-1);
       expect(JSON.stringify(built?.messages ?? [])).toContain("ADR written to docs/adr");
+    },
+  );
+
+  itPosix(
+    "recovers a one-off void inside the step, so the human is never asked at all",
+    async () => {
+      const scratch = await gitScratch();
+      // The same void, from the same real run — but this model does what the
+      // observed one did *not*: asked again, it makes the call it had already
+      // decided on. Parking is the fallback; this is the common case, and it
+      // costs one extra turn instead of a stopped pipeline and a human.
+      const llm = fakeLLM([
+        {
+          toolCalls: [
+            { id: "s1", name: "write", arguments: { path: "SURVEY.md", content: "the survey\n" } },
+          ],
+        },
+        { text: "survey done" },
+        // The void.
+        { text: "" },
+        // The nudge lands, and the architect writes the file it went quiet on.
+        {
+          toolCalls: [
+            {
+              id: "a1",
+              name: "write",
+              arguments: {
+                path: "docs/adr/rag-architecture.md",
+                content: "# RAG architecture\n\npgvector, one index.\n",
+              },
+            },
+          ],
+        },
+        { text: "ADR written to docs/adr/rag-architecture.md" },
+        { text: "built against the ADR" },
+      ]);
+      const runtime = await runtimeWith(scratch, llm);
+
+      const surveyor = role("surveyor", ["read", "write", "edit"]);
+      const architect = role("architect", ["read", "write", "edit"]);
+      const builder = role("builder", ["read", "write", "edit"]);
+      const resolve = (name: string): AgentDef =>
+        name === "surveyor" ? surveyor : name === "architect" ? architect : builder;
+      const workflow = parseOk(
+        [
+          "---",
+          "name: pipeline",
+          "---",
+          "1. @surveyor survey the options",
+          "2. @architect write the ADR to docs/adr/rag-architecture.md {{prev}}",
+          "3. @builder build, following the ADR at docs/adr/rag-architecture.md {{prev}}",
+          "",
+        ].join("\n"),
+      );
+      const runId = "run-void-recovered";
+      const journalDir = join(scratch.home, "recovered-journal");
+      const result = await runWorkflow(workflow, {
+        resolveAgent: resolve,
+        agentNames: () => ["surveyor", "architect", "builder"],
+        journal: createFileRunJournal(journalDir),
+        runId,
+        runStep: createRuntimeRunStep(runtime, {
+          resolveAgent: resolve,
+          writeLane: laneFor(runtime, runId),
+        }),
+      });
+
+      // No park, no question, no second run: the pipeline just finished.
+      expect(result.status).toBe("done");
+      expect(result.steps.map((step) => step.status)).toEqual(["done", "done", "done"]);
+      expect(
+        await readFile(join(scratch.cwd, "docs", "adr", "rag-architecture.md"), "utf8"),
+      ).toContain("# RAG architecture");
+
+      const lines = await journalOnceEnded(journalDir);
+      expect(lines.some((line) => line.kind === "stepFailAsk")).toBe(false);
+      expect(lines.findLast((line) => line.kind === "runEnd")).toMatchObject({ status: "done" });
+      // The whole cost of the rescue: one extra request.
+      expect(llm.requests).toHaveLength(6);
+      // And stage 3 was handed the architect's real report.
+      expect(JSON.stringify(llm.requests.at(-1)?.messages ?? [])).toContain(
+        "ADR written to docs/adr",
+      );
     },
   );
 });

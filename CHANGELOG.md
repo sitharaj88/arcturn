@@ -37,6 +37,26 @@ CLI, the SDK, or the wire protocol.
 
 ### Fixed
 
+- **A turn that returns nothing is handed back once, instead of ending the
+  run.** A model can reason at length, close its thinking with "Now write.",
+  and then end the turn emitting nothing at all — no text, no tool call,
+  `stopReason: endTurn`. Not truncation, not the turn ceiling: it simply skips
+  the act it just decided on. Observed twice in a row on one step of a real
+  run, whose reasoning ran to 69,786 characters before going silent. The loop
+  read that silence as a finished answer and returned `completed`, so the step
+  reported success having produced literally nothing. Such a turn is now
+  handed straight back with a prompt that reports the fact and supplies no
+  content of its own — the model had already decided what to do, it only
+  failed to do it. One nudge per silence: a model that answers with a second
+  silence is finished or stuck, and the run stops rather than spending its
+  budget to hear the same nothing. A turn that produced anything re-arms it,
+  so a later void in a long run is caught too.
+
+  This is the layer beneath the empty-step guard below. That guard stops a
+  void from poisoning the seven stages after it; this stops most voids from
+  happening. In the pipeline test drawn from the original run, the same
+  failure now costs one extra request rather than a parked run and a human.
+
 - **A step that produced nothing is no longer reported `done`.** A stage
   whose whole job was "write the ADR to `docs/adr/rag-architecture.md`" came
   back having written no file and said no word — `record{status:"empty",

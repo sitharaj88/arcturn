@@ -61,7 +61,13 @@ export {
 } from "./deferred-tools.js";
 export type { AgentHooks, BeforeToolCallResult, ToolCallInfo } from "./hooks.js";
 export type { LoopResult, LoopRuntime } from "./loop.js";
-export { isTurnCeilingError, runLoop, turnWarningThreshold } from "./loop.js";
+export {
+  isTurnCeilingError,
+  producedNothingVisible,
+  runLoop,
+  SILENT_TURN_NUDGE,
+  turnWarningThreshold,
+} from "./loop.js";
 export type { OffloadDetails, OffloadFileSystem, OffloadOptions } from "./offload.js";
 export {
   buildOffloadStub,

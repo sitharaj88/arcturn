@@ -483,18 +483,25 @@ const TOOLS_VISION_THINK: ModelCapabilities = { ...TOOLS, vision: true, thinking
  * affects discovery: preset ids pass through verbatim either way, so an id
  * that turns out not to exist there fails at request time exactly as an
  * unlisted one would.
+ *
+ * Order matters: the first entry is the preset's head — what `arcturn doctor`
+ * probes and what listing surfaces show first — so the flagship leads and the
+ * fast tier follows it. GLM-5.3-Flash is the better default for read-and-
+ * summarise work, but it has been observed ending a long write-lane turn with
+ * reasoning alone and no tool call, which is not what you want at the top of a
+ * picker. See the silent-turn nudge in `@arcturn/core`'s loop.
  */
 const ZAI_CODING_MODELS: readonly CuratedModel[] = Object.freeze([
   {
-    model: "glm-5.3-flash",
-    displayName: "GLM-5.3 Flash (coding plan)",
+    model: "glm-5.3",
+    displayName: "GLM-5.3 (coding plan)",
     contextWindow: 1_000_000,
     maxOutputTokens: 131_072,
     capabilities: TOOLS_THINK,
   },
   {
-    model: "glm-5.3",
-    displayName: "GLM-5.3 (coding plan)",
+    model: "glm-5.3-flash",
+    displayName: "GLM-5.3 Flash (coding plan)",
     contextWindow: 1_000_000,
     maxOutputTokens: 131_072,
     capabilities: TOOLS_THINK,
