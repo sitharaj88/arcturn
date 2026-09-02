@@ -193,9 +193,11 @@ with the attempt count in the question, so nobody feeds a hole without being tol
 **`raise <n>` is the turn ceiling's lever and nothing else's.** It is offered only when the
 step actually ran out of turns, must be a positive whole number strictly above the ceiling
 that just tripped, and is **run-scoped**: no file is rewritten, and a fresh run starts from
-the role file's own number again. It applies to the role, so a later stage dispatching the
-same role inherits the rope rather than parking again for an answer you already gave — and
-it lifts *both* halves of the ceiling the child actually runs under, the role's own
+the role file's own number again. It applies to **the step you were asked about, and to no
+other** — a later stage dispatching the same role runs under its role file's own number and
+parks with its own question if that is not enough, because a raise is an answer to one park
+and answering it should not quietly re-budget steps nobody mentioned. It does lift *both*
+halves of the ceiling the child actually runs under, the role's own
 `maxTurns:` and the session's `subagentMaxTurns` clamp. That last part is the trap it
 exists to close: those two are combined with `Math.min`, so editing the role file alone
 leaves a 64-turn wall exactly where it was.
@@ -299,12 +301,26 @@ them:
   step. The worktree itself is removed only on success; a failed or cancelled step keeps it
   on disk for forensics and says where.
 
-  A write-lane step that has only been reading gets one mid-run nudge telling it so: after
-  12 turns without a write, or halfway to the ceiling, whichever comes first — the smaller
-  of the two once a human raises a step's ceiling at a park, so the check still fires while
-  there is budget left to act on it rather than waiting for a turn the step's own deadline
-  will never let it reach. It fires once and never repeats, and it never fires once the step
-  has actually changed a file.
+  A write-lane step that has only been reading is put on a schedule, and the schedule ends
+  in a stop. At **12 turns** without a write — or halfway to the ceiling, whichever comes
+  first — it is told so once. At **24** it is told again, and that message names the
+  consequence. At **36 turns with no file changed the step is stopped**: the child is
+  aborted, the step fails as `no-progress`, and the run parks. Every one of those numbers is
+  a count of turns and nothing else, so **a raised ceiling does not defer any of them** — a
+  `raise 1000` buys a step rope to finish work it has started, not an hour of reading. Each
+  message is sent once and never repeats, and nothing on the schedule fires at all once the
+  step has actually changed a file. Read and exec lanes are never warned and never stopped:
+  their product is a report, and their diff is discarded unread.
+
+  A stopped step does not go straight to a human. It — like a step that produced nothing at
+  all — gets **one automatic fresh attempt first**: a new worktree seeded from the same
+  applied patches, a new child agent, the same prompt. On the runs this comes from that is
+  usually the whole fix (a builder that stalled twice finished in 82 turns with 30 writes on
+  a fresh try). Only if the second attempt fails the same way does the run park, and the
+  park then says so, with what each attempt did. This is the only failure class that retries
+  automatically without being transient: a turn ceiling, a refused patch and a config error
+  are still settled on the first attempt, and `maxStepRetries:` neither grants nor withholds
+  this one attempt.
 
 One entry in those lists is a name and nothing more. `multiedit` appears in the write-tool
 set the lane classifier matches against, but [no package registers a tool by that

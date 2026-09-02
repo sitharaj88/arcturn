@@ -587,9 +587,15 @@ describe("rag-blueprint/rag-setup: the architect goes silent, as it did for real
   );
 
   itPosix(
-    "parks at stage 3 on a second silence, with stages 1-2 kept and no ADR in the checkout",
+    "parks at stage 3 when it goes silent on both attempts, with stages 1-2 kept and no ADR",
     async () => {
-      const llm = silentArchitect(2);
+      // FOUR silences, not two. Two is one failed attempt — a silence and the
+      // nudge answered with a second silence — and the engine now spends one
+      // automatic fresh attempt on a void before it will trouble a human, so
+      // an architect that recovers on the retry never reaches a park at all
+      // (which is the point of the retry, and the test above it). What parks
+      // this pipeline is a role that produces nothing on both attempts.
+      const llm = silentArchitect(4);
       const { result, lines, scratch } = await conformanceRun(ragSetup(), llm, "silent-twice");
 
       // The void is caught where it happened: step 3 failed, the run parked
@@ -610,20 +616,24 @@ describe("rag-blueprint/rag-setup: the architect goes silent, as it did for real
         (line): line is Extract<JournalLine, { kind: "stepFailAsk" }> =>
           line.kind === "stepFailAsk",
       );
-      expect(ask).toMatchObject({ stepId: "3", role: "rag-architect" });
+      expect(ask).toMatchObject({ stepId: "3", role: "rag-architect", attempts: 2 });
       expect(ask?.cause).toContain("produced nothing");
+      // …and the park says the engine already tried again, so nobody answers
+      // `retry` believing it is the untried option.
+      expect(ask?.cause).toContain("retried automatically once and failed both times");
       expect(lines.findLast((line) => line.kind === "runEnd")).toMatchObject({ status: "paused" });
 
       // The file the whole pipeline is built on was never written — and the
       // failed step's worktree delivered nothing to the checkout either.
       expect(await exists(join(scratch.cwd, "docs", "adr", "rag-architecture.md"))).toBe(false);
       expect(await exists(join(scratch.cwd, "out"))).toBe(false);
-      // Stages 1-2 (read lane) and the architect's two silences: nothing after.
+      // Stages 1-2 (read lane) and the architect's two attempts of two
+      // silences each: nothing after.
       const architectRequests = llm.requests.filter((request) =>
         isRoleSession(request, RAG_ARCHITECT_MARKER),
       );
-      expect(architectRequests).toHaveLength(2);
-      expect(llm.requests.at(-1)).toBe(architectRequests[1]);
+      expect(architectRequests).toHaveLength(4);
+      expect(llm.requests.at(-1)).toBe(architectRequests[3]);
     },
     DYNAMIC_TIMEOUT_MS,
   );

@@ -568,7 +568,10 @@ describe("runWorkflow", () => {
       resolveModel: (tag) => (tag === "fast" ? spec : undefined),
       runStep: async (request) => {
         seen.push(request.model);
-        return { text: "", usage: usage(), isError: false };
+        // Non-empty on purpose: a step that returns nothing at all is THE VOID
+        // and now buys itself one automatic fresh attempt, which would put a
+        // second (correct) entry in `seen` and say nothing about models.
+        return { text: "ok", usage: usage(), isError: false };
       },
     });
     expect(seen).toEqual([spec]);
@@ -6494,10 +6497,12 @@ describe("runWorkflow — the step-failure park", () => {
     expect(RESOLVE("builder")?.maxTurns).toBeUndefined();
   });
 
-  it("carries a granted ceiling to every later step of the same role, and to no other role", async () => {
-    // The grant is a statement about the ROLE — a later stage dispatching
-    // `@builder` would otherwise walk into the same wall and park again for an
-    // answer the human has already given.
+  it("keeps a granted ceiling on the step that was asked about — a later step of the same role does not inherit it", async () => {
+    // RED FIRST: the key was `role:<name>`, so this answered a question about
+    // step 2 and then silently governed step 3 as well. On the run that found
+    // it, one `raise 1000` at step 5's park became the ceiling of steps 6, 7
+    // and 8; step 7 ran 204 turns and step 8 185, neither of them a step
+    // anybody had been asked about.
     const workflow = parseOk(
       [
         FRONT,
@@ -6527,10 +6532,21 @@ describe("runWorkflow — the step-failure park", () => {
       resumeFrom: { ...buildResumeState(lines), stepFailAnswer: { text: "raise 200" } },
     });
     expect(resumed.status).toBe("done");
+    // The step the human answered about runs under the rope they granted…
     expect(seen.get("2")).toBe(200);
-    expect(seen.get("3")).toBe(200);
+    // …and step 3, same role, runs under its role file's own number. If it
+    // needs more it parks and asks its own question, which is the gesture the
+    // park exists to require.
+    expect(seen.get("3")).toBeUndefined();
     // Stage 1 (@surveyor) was replayed and never asked for a ceiling at all.
     expect(seen.has("1")).toBe(false);
+    // The role is still on the journal line, for the human reading it — it is
+    // just not what the grant is keyed by.
+    expect(
+      lines.find(
+        (line): line is Extract<JournalLine, { kind: "turnRaise" }> => line.kind === "turnRaise",
+      ),
+    ).toMatchObject({ stepId: "2", role: "builder", value: 200 });
   });
 
   it("takes an EMPTY resume as no answer at all — a nudge cannot buy a rerun", async () => {
@@ -7167,7 +7183,10 @@ describe("runWorkflow — a step that produced nothing is not `done`", () => {
     expect(result.steps.map((step) => step.status)).toEqual(["done", "failed", "skipped"]);
     expect(result.status).toBe("paused");
     // Stage 3 was never dispatched: the void does not get to seed anything.
-    expect(calls).toEqual(["1", "2"]);
+    // Step 2 appears TWICE because the engine spends its one automatic fresh
+    // attempt before troubling a human — this runner voids on both, which is
+    // what a park is for.
+    expect(calls).toEqual(["1", "2", "2"]);
 
     // The durable record, which is what a resume and `/workflow status` read.
     const terminals = lines.filter(
@@ -7183,8 +7202,12 @@ describe("runWorkflow — a step that produced nothing is not `done`", () => {
     const ask = lines.find(
       (line): line is Extract<JournalLine, { kind: "stepFailAsk" }> => line.kind === "stepFailAsk",
     );
-    expect(ask).toMatchObject({ stepId: "2", role: "architect", attempts: 1 });
-    expect(ask?.cause).toBe(emptyStepError("2", "architect"));
+    expect(ask).toMatchObject({ stepId: "2", role: "architect", attempts: 2 });
+    // The void's own words, plus the receipt for the attempt the engine
+    // already spent — without it the park would read like a first failure and
+    // steer a person straight at `retry`, the one thing already tried.
+    expect(ask?.cause).toContain(emptyStepError("2", "architect"));
+    expect(ask?.cause).toContain("retried automatically once and failed both times");
     expect(ask?.failureKind).toBeUndefined(); // not a turn ceiling; `raise` fixes nothing
     expect(result.pause?.stepId).toBe("2");
     expect(result.pause?.reason).toBe("step-failure");
@@ -7263,11 +7286,14 @@ describe("runWorkflow — a step that produced nothing is not `done`", () => {
     });
 
     // Unchanged from every other failed step under this flag: it runs on and
-    // ends `failed`, and nothing parks.
-    expect(calls).toEqual(["1", "2", "3"]);
+    // ends `failed`, and nothing parks. The automatic fresh attempt still
+    // happens — it is cheap, and the whole point of `continueOnError` is to
+    // finish, so a free chance to actually produce the ADR is worth more here
+    // than anywhere else — but it changes nothing about the flag's semantics.
+    expect(calls).toEqual(["1", "2", "2", "3"]);
     expect(result.status).toBe("failed");
     expect(result.steps.map((step) => step.status)).toEqual(["done", "failed", "done"]);
-    expect(result.error).toBe(emptyStepError("2", "architect"));
+    expect(result.error).toContain(emptyStepError("2", "architect"));
     expect(lines.some((line) => line.kind === "stepFailAsk")).toBe(false);
   });
 

@@ -46,17 +46,19 @@ import {
 } from "./insights.js";
 import type { ArcturnRuntime } from "./runtime.js";
 import { resolveWindow } from "./stats.js";
-import { type FakeLLM, fakeLLM } from "./test-helpers/fake-llm.js";
+import { type FakeLLM, fakeLLM, respondingLLM } from "./test-helpers/fake-llm.js";
 import { buildTestRuntime, makeScratch, type Scratch } from "./test-helpers/scratch.js";
 import {
   createRuntimeRunStep,
   createRuntimeWriteLane,
   isWorkflowParseError,
+  noProgressCause,
   parseWorkflow,
   runWorkflow,
   type Workflow,
   type WorkflowStepRequest,
   WRITE_LANE_PROGRESS_TURNS,
+  WRITE_LANE_STALL_TURNS,
   type WriteLane,
   type WriteLaneHost,
   writeLaneProgressCheck,
@@ -173,6 +175,15 @@ function laneFor(runtime: ArcturnRuntime, runId: string): WriteLane {
 function lastMessageText(request: LLMRequest): string {
   const last = request.messages.at(-1);
   return last === undefined ? "" : contentText(last.content);
+}
+
+/** `git status --porcelain` for a checkout — empty means nothing moved. */
+async function porcelain(cwd: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile("git", ["status", "--porcelain"], { cwd }, (error, stdout) =>
+      error ? reject(error) : resolve(stdout.trim()),
+    );
+  });
 }
 
 /** Does this path exist at all? */
@@ -672,6 +683,103 @@ describe("the write lane's mid-run progress check", () => {
       ).toBeUndefined();
     }
   });
+
+  /**
+   * RED FIRST: there was exactly one message and then silence. The run this
+   * closes answered that one message in its own reasoning ("The pipeline wants
+   * me to get moving") and then ran another 170 shell reads with zero writes,
+   * because nothing in the schedule ever said what would happen if it did not.
+   */
+  it("speaks a second time at twice the cap, and that one names the turn it will be stopped on", () => {
+    const second = writeLaneProgressCheck({
+      turnIndex: WRITE_LANE_PROGRESS_TURNS * 2,
+      maxTurns: 1000,
+      toolCalls: reading,
+    });
+    expect(second).toContain(
+      `Progress check: ${WRITE_LANE_PROGRESS_TURNS * 2} of 1000 turns are spent`,
+    );
+    expect(second).toContain("still no file has been changed");
+    // The consequence, in the message, with the real number off the constant.
+    expect(second).toContain(`by turn ${WRITE_LANE_STALL_TURNS} this step will be stopped`);
+    expect(second).toContain("parked for a human");
+    // Not the first message again: a repeat teaches the model to skip both.
+    expect(second).not.toContain("This is a write-lane step");
+    // Every turn between the two, and every turn after, is silent.
+    for (const turnIndex of [WRITE_LANE_PROGRESS_TURNS + 1, 23, 25, WRITE_LANE_STALL_TURNS, 99]) {
+      expect(writeLaneProgressCheck({ turnIndex, maxTurns: 1000, toolCalls: reading })).toBe(
+        undefined,
+      );
+    }
+  });
+
+  it("puts the stop three caps out, and neither warning nor stop moves with the ceiling", () => {
+    expect(WRITE_LANE_STALL_TURNS).toBe(WRITE_LANE_PROGRESS_TURNS * 3);
+    // The two ceilings from the two real runs. A raise multiplies the ceiling
+    // by 12.5 and moves not one threshold: that is the property, asserted.
+    for (const maxTurns of [80, 1000]) {
+      expect(
+        writeLaneProgressCheck({
+          turnIndex: WRITE_LANE_PROGRESS_TURNS,
+          maxTurns,
+          toolCalls: reading,
+        }),
+      ).toContain("This is a write-lane step");
+      expect(
+        writeLaneProgressCheck({
+          turnIndex: WRITE_LANE_PROGRESS_TURNS * 2,
+          maxTurns,
+          toolCalls: reading,
+        }),
+      ).toContain(`by turn ${WRITE_LANE_STALL_TURNS}`);
+    }
+  });
+
+  it("says nothing at all, on any turn, once a file has been authored", () => {
+    for (const turnIndex of [WRITE_LANE_PROGRESS_TURNS, WRITE_LANE_PROGRESS_TURNS * 2]) {
+      expect(
+        writeLaneProgressCheck({ turnIndex, maxTurns: 1000, toolCalls: { ...reading, write: 1 } }),
+      ).toBeUndefined();
+    }
+  });
+});
+
+describe("what the park says when the stall guard stopped a step", () => {
+  /**
+   * RED FIRST: this sentence did not exist. The nearest thing a person got was
+   * "step 8 (@rag-builder) was cancelled" — which is a lie about who stopped
+   * it, and says nothing about the 36 turns of reading that preceded it.
+   */
+  it("names the step, the turns, what it did instead, and both ways out", () => {
+    expect(
+      noProgressCause("8", "rag-builder", {
+        turns: 36,
+        toolCalls: { read: 114, bash: 75 },
+        writes: 0,
+      }),
+    ).toBe(
+      "step 8 (@rag-builder) was stopped after 36 turns without changing a file — it read 114 " +
+        "files and ran 75 shell commands and wrote nothing. Retry it (a fresh attempt usually " +
+        "writes early), or narrow what it was asked to do.",
+    );
+  });
+
+  it("counts honestly for the shapes that are not that one", () => {
+    // One tool, singular nouns.
+    expect(
+      noProgressCause("2", "builder", { turns: 36, toolCalls: { read: 1 }, writes: 0 }),
+    ).toContain("it read 1 file and wrote nothing");
+    // Anything that is not `read` or `bash` is still counted, never dropped.
+    expect(
+      noProgressCause("2", "builder", { turns: 36, toolCalls: { grep: 3, glob: 1 }, writes: 0 }),
+    ).toContain("it made 4 other tool calls and wrote nothing");
+    // A child that called nothing at all still gets a true sentence.
+    expect(noProgressCause("2", undefined, { turns: 36, toolCalls: {}, writes: 0 })).toBe(
+      "step 2 was stopped after 36 turns without changing a file — it called no tool and wrote " +
+        "nothing. Retry it (a fresh attempt usually writes early), or narrow what it was asked " +
+        "to do.",
+    );
+  });
 });
 
 // ===========================================================================
@@ -739,9 +847,11 @@ describe("a real parked run writes its own autopsy to the ledger", () => {
     const { events, skippedLines } = await readInsightsLedger(scratch.home);
     expect(skippedLines).toBe(0);
 
-    // ---- the silences: twice, nudged then accepted, attributed to the step.
+    // ---- the silences: twice per attempt, nudged then accepted, attributed
+    // to the step. Four in all, because a void step is given one automatic
+    // fresh attempt before the run parks — and this model is silent on both.
     const silences = events.filter((e): e is SilentTurnRecord => e.kind === "silent-turn");
-    expect(silences).toHaveLength(2);
+    expect(silences).toHaveLength(4);
     for (const silence of silences) {
       expect(silence.origin).toBe("workflow");
       expect(silence.workflow).toBe("pipeline");
@@ -750,15 +860,19 @@ describe("a real parked run writes its own autopsy to the ledger", () => {
       expect(silence.role).toBe("architect");
       expect(silence.model).not.toBe("");
     }
-    expect(silences.map((s) => s.nudged)).toEqual([true, false]);
+    expect(silences.map((s) => s.nudged)).toEqual([true, false, true, false]);
 
-    // ---- the terminals: BOTH steps, not only the failed one.
+    // ---- the terminals: every step, and every ATTEMPT of a step that took
+    // more than one. "This step took two attempts" is a number; "the first one
+    // also produced nothing" is the finding, and it needs its own record.
     const terminals = events.filter((e): e is StepEndRecord => e.kind === "step-end");
     expect(terminals.map((step) => [step.stepId, step.status])).toEqual([
       ["1", "done"],
       ["2", "failed"],
+      ["2", "failed"],
     ]);
-    const failed = terminals[1];
+    expect(terminals.map((step) => step.attempts)).toEqual([1, 1, 2]);
+    const failed = terminals[2];
     expect(failed?.runId).toBe(runId);
     expect(failed?.role).toBe("architect");
     expect(failed?.lastTurn?.stopReason).toBe("endTurn");
@@ -777,6 +891,8 @@ describe("a real parked run writes its own autopsy to the ledger", () => {
       stepId: "2",
       role: "architect",
       causeKind: "produced-nothing",
+      // Both attempts, so nobody reads this as a first failure.
+      attempts: 2,
     });
     expect(parks[0]?.activity?.writes).toBe(0);
 
@@ -838,16 +954,27 @@ describe("a real parked run writes its own autopsy to the ledger", () => {
     const ask = lines.find(
       (line): line is Extract<JournalLine, { kind: "stepFailAsk" }> => line.kind === "stepFailAsk",
     );
-    // Two reads, four turns (two tool turns plus the silence and its nudge),
-    // and no file written — the whole diagnosis, on the line a human reads.
-    expect(ask?.activity).toEqual({ turns: 4, toolCalls: { read: 2 }, writes: 0 });
+    // The step ran twice — the void buys one automatic fresh attempt — so the
+    // `activity` on the line is the FINAL attempt's: two silent turns, no tool
+    // call, no file. (`fakeLLM` repeats its last entry, so attempt 2 is silence
+    // from its first turn.)
+    expect(ask?.activity).toEqual({ turns: 2, toolCalls: {}, writes: 0 });
+    // …and the cause accounts for BOTH, which is the only way a person can see
+    // that `retry` has already been tried once on their behalf. Attempt 1: two
+    // reads over four turns (the two tool turns plus the silence and its
+    // nudge). Attempt 2: the silence and its nudge.
+    expect(ask?.cause).toContain("attempt 1 — activity: 4 turns · read 2 · no file written");
+    expect(ask?.cause).toContain("attempt 2 — activity: 2 turns · no tool call · no file written");
     expect(describeActivity(ask?.activity ?? { turns: 0, toolCalls: {}, writes: 0 })).toBe(
-      "activity: 4 turns · read 2 · no file written",
+      "activity: 2 turns · no tool call · no file written",
     );
-    const stepEnd = lines.find(
+    // One durable terminal per step, and it agrees with the ask.
+    const stepEnds = lines.filter(
       (line): line is Extract<JournalLine, { kind: "stepEnd" }> => line.kind === "stepEnd",
     );
-    expect(stepEnd?.activity).toEqual(ask?.activity);
+    expect(stepEnds).toHaveLength(1);
+    expect(stepEnds[0]?.attempts).toBe(2);
+    expect(stepEnds[0]?.activity).toEqual(ask?.activity);
   });
 });
 
@@ -953,6 +1080,259 @@ describe("a write-lane role that is only reading is told so, while it can still 
     const { events } = await readInsightsLedger(scratch.home);
     expect(events.filter((e) => e.kind === "progress-warning")).toHaveLength(0);
   });
+});
+
+describe("a write-lane role that will not start is stopped, not asked twice and left alone", () => {
+  /** A builder that never stops reading — the shape of the run this exists for. */
+  const readForever = (): FakeLLM =>
+    fakeLLM([{ toolCalls: [{ id: "c", name: "read", arguments: { path: "seed.txt" } }] }]);
+
+  /** A 1000-turn ceiling, exactly as `raise 1000` at a park produces. */
+  const raisedCeiling = async (scratch: Scratch): Promise<void> => {
+    await mkdir(join(scratch.cwd, ".arcturn"), { recursive: true });
+    await writeFile(
+      join(scratch.cwd, ".arcturn", "config.json"),
+      JSON.stringify({ subagentMaxTurns: 1000 }),
+      "utf8",
+    );
+  };
+
+  /**
+   * RED FIRST: the check was advisory and the model could acknowledge it and
+   * keep reading — which is exactly what tonight's step 8 did. It was warned
+   * at turn 12, answered in its own reasoning that "the pipeline wants me to
+   * get moving", and then ran another 170 shell reads with zero writes until
+   * the 90-minute step deadline. Nothing between turn 12 and the deadline
+   * could stop it. Now turn 36 can.
+   */
+  itPosix(
+    "warns at 12, warns with the consequence at 24, and stops the child at 36",
+    async () => {
+      const scratch = await gitScratch();
+      await raisedCeiling(scratch);
+      const llm = readForever();
+      const runtime = await runtimeWith(scratch, llm);
+      expect(runtime.config.subagentMaxTurns).toBe(1000);
+
+      const builder = role("rag-builder", ["read", "write", "edit"], { maxTurns: 1000 });
+      const workflow = parseOk("---\nname: pipeline\n---\n1. @rag-builder build the index\n");
+      const runId = "run-stall";
+      const journalDir = join(scratch.home, "stall-journal");
+      const parked = await runWorkflow(workflow, {
+        resolveAgent: () => builder,
+        agentNames: () => ["rag-builder"],
+        journal: createFileRunJournal(journalDir),
+        runId,
+        insights: runtime.insights,
+        runStep: createRuntimeRunStep(runtime, {
+          resolveAgent: () => builder,
+          writeLane: laneFor(runtime, runId),
+          insights: { recorder: runtime.insights, workflow: workflow.name, runId },
+        }),
+      });
+      await runtime.insights.flush();
+
+      // THE MONEY, counted at the provider. Two attempts of exactly 36 turns:
+      // the ceiling is a thousand and the deadline is ninety minutes, and
+      // neither of them is what stopped this.
+      expect(llm.requests).toHaveLength(WRITE_LANE_STALL_TURNS * 2);
+
+      // The schedule, as the model actually received it. `progressCheck` runs
+      // at the TOP of a turn, so the message rides that turn's request.
+      const first = llm.requests[WRITE_LANE_PROGRESS_TURNS]!;
+      expect(lastMessageText(llm.requests[WRITE_LANE_PROGRESS_TURNS - 1]!)).not.toContain(
+        "Progress check:",
+      );
+      expect(lastMessageText(first)).toContain(
+        `Progress check: ${WRITE_LANE_PROGRESS_TURNS} of 1000 turns are spent`,
+      );
+      expect(lastMessageText(first)).toContain("This is a write-lane step");
+      const second = llm.requests[WRITE_LANE_PROGRESS_TURNS * 2]!;
+      expect(lastMessageText(second)).toContain(
+        `Progress check: ${WRITE_LANE_PROGRESS_TURNS * 2} of 1000 turns are spent`,
+      );
+      expect(lastMessageText(second)).toContain(
+        `by turn ${WRITE_LANE_STALL_TURNS} this step will be stopped`,
+      );
+
+      // The step failed — not "cancelled", which is what an `agent.abort()`
+      // reads as everywhere else in this engine.
+      expect(parked.steps.map((step) => step.status)).toEqual(["failed"]);
+      expect(parked.status).toBe("paused");
+      expect(parked.steps[0]?.error).toContain(
+        `was stopped after ${WRITE_LANE_STALL_TURNS} turns without changing a file`,
+      );
+      // Both attempts are accounted for in the words a person reads.
+      expect(parked.steps[0]?.error).toContain("retried automatically once and failed both times");
+      expect(parked.steps[0]?.attempts).toBe(2);
+      // Nothing was written: the user's tracked checkout is byte-for-byte what
+      // it was (the untracked `.arcturn/` this test wrote its config into is
+      // the only thing git has to say about the tree).
+      expect(
+        (await porcelain(scratch.cwd))
+          .split("\n")
+          .filter((line) => line.trim() !== "" && !line.includes(".arcturn/")),
+      ).toEqual([]);
+
+      const lines = await readJournalLines(journalDir);
+      const ask = lines.find(
+        (line): line is Extract<JournalLine, { kind: "stepFailAsk" }> =>
+          line.kind === "stepFailAsk",
+      );
+      expect(ask).toMatchObject({ stepId: "1", role: "rag-builder", failureKind: "no-progress" });
+      expect(ask?.cause).toContain(`${WRITE_LANE_STALL_TURNS} turns without changing a file`);
+      // `raise <n>` is not offered: more rope is the one thing this step does
+      // not need, and the question must not sell it.
+      expect(ask?.ceiling).toBeUndefined();
+      expect(parked.pause?.question).not.toContain("raise <n>");
+      expect(parked.pause?.question).toContain("it changed no file, it did not crash");
+      // The journal keeps ONE terminal per step (a second would tell a resumed
+      // run the step is finished), carrying the attempt count and the counts.
+      const stepEnds = lines.filter(
+        (line): line is Extract<JournalLine, { kind: "stepEnd" }> => line.kind === "stepEnd",
+      );
+      expect(stepEnds).toHaveLength(1);
+      expect(stepEnds[0]).toMatchObject({
+        status: "failed",
+        attempts: 2,
+        activity: { turns: WRITE_LANE_STALL_TURNS, toolCalls: { read: WRITE_LANE_STALL_TURNS } },
+      });
+
+      // The ledger: one terminal per ATTEMPT, and one park bucketed as its own
+      // kind rather than folded in with the turn ceilings it looks like.
+      const { events } = await readInsightsLedger(scratch.home);
+      const terminals = events.filter((e): e is StepEndRecord => e.kind === "step-end");
+      expect(terminals).toHaveLength(2);
+      for (const terminal of terminals) {
+        expect(terminal).toMatchObject({
+          stepId: "1",
+          status: "failed",
+          failureKind: "no-progress",
+        });
+        expect(terminal.activity).toMatchObject({
+          turns: WRITE_LANE_STALL_TURNS,
+          writes: 0,
+          toolCalls: { read: WRITE_LANE_STALL_TURNS },
+        });
+      }
+      const parks = events.filter((e): e is ParkRecord => e.kind === "park");
+      expect(parks).toHaveLength(1);
+      expect(parks[0]).toMatchObject({ causeKind: "no-progress", stepId: "1", attempts: 2 });
+      // Two warnings per attempt, four in all — attributed, and textless.
+      expect(events.filter((e) => e.kind === "progress-warning")).toHaveLength(4);
+    },
+    60_000,
+  );
+
+  /**
+   * The control that keeps the guard from being "abort every long step". A
+   * role that starts writing is a role doing its job, however long it takes.
+   */
+  itPosix(
+    "never speaks twice, and never stops, a builder that writes before the second notice",
+    async () => {
+      const scratch = await gitScratch();
+      await raisedCeiling(scratch);
+      // Reads until turn 20, then writes, then lands the plane: past the first
+      // notice, before the second, and well past the stop turn in wall time.
+      let turn = 0;
+      const llm = respondingLLM(() => {
+        turn += 1;
+        if (turn <= 20) {
+          return { toolCalls: [{ id: `r${turn}`, name: "read", arguments: { path: "seed.txt" } }] };
+        }
+        if (turn === 21) {
+          return {
+            toolCalls: [
+              { id: "w", name: "write", arguments: { path: "OUT.md", content: "the section\n" } },
+            ],
+          };
+        }
+        return { text: "done" };
+      });
+      const runtime = await runtimeWith(scratch, llm);
+      const builder = role("builder", ["read", "write", "edit"], { maxTurns: 1000 });
+      const workflow = parseOk("---\nname: wf\n---\n1. @builder ship the change\n");
+
+      const outcome = await createRuntimeRunStep(runtime, {
+        resolveAgent: () => builder,
+        writeLane: laneFor(runtime, "run-late-write"),
+        insights: { recorder: runtime.insights, workflow: "wf", runId: "run-late-write" },
+      })(firstRequest(workflow));
+      await runtime.insights.flush();
+
+      expect(outcome.isError).toBe(false);
+      expect(await readFile(join(scratch.cwd, "OUT.md"), "utf8")).toBe("the section\n");
+      // 22 turns: it ran past the stop turn only because it had written.
+      expect(llm.requests).toHaveLength(22);
+      const sent = new Set(
+        llm.requests
+          .flatMap((request) => request.messages.map((message) => contentText(message.content)))
+          .filter((text) => text.startsWith("Progress check:")),
+      );
+      expect(sent.size).toBe(1);
+      expect([...sent][0]).toContain("This is a write-lane step");
+      expect(JSON.stringify([...sent])).not.toContain("will be stopped and parked");
+      const { events } = await readInsightsLedger(scratch.home);
+      expect(events.filter((e) => e.kind === "progress-warning")).toHaveLength(1);
+    },
+    60_000,
+  );
+
+  /**
+   * The lane walls, restated as "who may be stopped". A read-lane role's whole
+   * product is a report; stopping it for not writing would be stopping it for
+   * doing its job. It reads past the stop turn and nothing happens.
+   */
+  itPosix(
+    "never warns and never stops a read-lane role, however long it reads",
+    async () => {
+      const scratch = await gitScratch();
+      const llm = readForever();
+      const runtime = await runtimeWith(scratch, llm);
+      // No write tool: the read lane, dispatched through `createSubagent`.
+      const analyst = role("analyst", ["read", "grep"], { maxTurns: 40 });
+      const workflow = parseOk("---\nname: wf\n---\n1. @analyst survey the corpus\n");
+
+      const outcome = await createRuntimeRunStep(runtime, {
+        resolveAgent: () => analyst,
+        writeLane: laneFor(runtime, "run-read-lane"),
+      })(firstRequest(workflow));
+
+      // 40 requests — its own ceiling, four past the stop turn.
+      expect(llm.requests).toHaveLength(40);
+      expect(outcome.failureKind).toBe("turn-ceiling");
+      expect(outcome.failureKind).not.toBe("no-progress");
+      expect(JSON.stringify(llm.requests)).not.toContain("Progress check:");
+    },
+    60_000,
+  );
+
+  /** And the same for the exec lane, whose diff is discarded unread. */
+  itPosix(
+    "never warns and never stops an exec-lane role either",
+    async () => {
+      const scratch = await gitScratch();
+      const llm = readForever();
+      const runtime = await runtimeWith(scratch, llm);
+      // `bash` and no authoring tool: the exec lane. It gets a worktree, and
+      // that worktree's diff is thrown away — so "no file changed" is its
+      // contract, not its fault.
+      const reviewer = role("reviewer", ["bash", "read"], { maxTurns: 40 });
+      const workflow = parseOk("---\nname: wf\n---\n1. @reviewer audit the corpus\n");
+
+      const outcome = await createRuntimeRunStep(runtime, {
+        resolveAgent: () => reviewer,
+        writeLane: laneFor(runtime, "run-exec-lane"),
+      })(firstRequest(workflow));
+
+      expect(llm.requests).toHaveLength(40);
+      expect(outcome.failureKind).toBe("turn-ceiling");
+      expect(outcome.failureKind).not.toBe("no-progress");
+      expect(JSON.stringify(llm.requests)).not.toContain("Progress check:");
+    },
+    60_000,
+  );
 });
 
 // ===========================================================================

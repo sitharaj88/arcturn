@@ -144,9 +144,32 @@ CLI, the SDK, or the wire protocol.
   per-tool call counts and how many of those calls authored a file, rendered
   wherever the last turn already was: `activity: 80 turns · bash 77 · read 17 ·
   no file written`. Counts and tool names only. And the write lane wires the
-  new `progressCheck` to that same evidence: a role that has spent 12 turns,
-  or half its ceiling, whichever comes first, with nothing written is told so
-  once, in the request, while budget is still left to act on it.
+  new `progressCheck` to that same evidence — as a schedule that ends in a
+  stop, because a notice a model can acknowledge and ignore is not a guard
+  rail. A role that has changed no file is told so at **12 turns** (or half its
+  ceiling, whichever is sooner), told again at **24** in a message that names
+  the consequence, and **stopped at 36**: the child is aborted, the step fails
+  as the new `no-progress` kind, and the run parks with what it did instead —
+  `step 8 (@rag-builder) was stopped after 36 turns without changing a file —
+  it read 114 files and ran 75 shell commands and wrote nothing`. Every
+  threshold is a turn count, never a fraction of the ceiling, so a `raise 1000`
+  answered at a park defers none of them. Read and exec lanes are never warned
+  and never stopped — their diff is discarded unread, so writing nothing is
+  their contract, not their fault.
+
+  The step is not handed to a person first. A `no-progress` stall and the void
+  (a step that changed no file and said no word) each buy **one automatic fresh
+  attempt** — new worktree, new child agent, same prompt — before any park.
+  That is the shape of every recovery on the runs behind this: a builder that
+  stalled twice went on to finish in 82 turns with 30 writes on a fresh try,
+  and an architect that went silent twice wrote its ADR on the next attempt,
+  while the steps nobody retried burned ninety minutes each and then asked a
+  human for the one thing the engine could have done itself. It is the only
+  non-transient class that retries: a turn ceiling, a refused patch and a
+  config error are still settled on the first attempt, and `maxStepRetries:`
+  neither grants nor withholds this one. If the second attempt fails the same
+  way the run parks as before, with `attempts: 2` and a cause naming what each
+  attempt did, so nobody is steered at a `retry` that has already been tried.
 
 - **`arcturn serve --allow-ceiling-raise`, and a parked run's diagnosis on the
   wire.** A `raise <n>` reply used to be refused outright over the wire, no
@@ -168,6 +191,20 @@ CLI, the SDK, or the wire protocol.
   the park support it.
 
 ### Fixed
+
+- **A `raise <n>` at a parked step no longer re-budgets every later step of
+  that role.** The run-scoped grant was keyed by the step's `@role` when it had
+  one, on the theory that a person who granted `@rag-builder` more turns had
+  said something about the role. They had not: they had answered one question
+  about one step. On a nine-stage pipeline a single `raise 1000` answered at
+  step 5's park silently became the ceiling of steps 6, 7 and 8 as well —
+  none of which anybody had been asked about — and steps 7 and 8 then ran 204
+  and 185 turns with the 90-minute step deadline as their only remaining
+  backstop. The grant is now keyed by step id: the step that was asked about
+  gets the rope, and a later step of the same role runs under its role file's
+  own number and parks with its own question if that is not enough, which is
+  the explicit gesture the park exists to require. The role still rides the
+  journal line, for the person reading it.
 
 - **Scrolling the transcript is smooth, and stays smooth on a slow
   terminal.** Three measured causes, on the shipped binary under a

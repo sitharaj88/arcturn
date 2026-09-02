@@ -412,7 +412,7 @@ export interface StepAbandonLine {
 }
 
 /**
- * A human raised a role's turn ceiling *for this run* in answer to a
+ * A human raised one step's turn ceiling *for this run* in answer to a
  * step-failure ask.
  *
  * Run-scoped exactly as {@link BudgetRaiseLine} is: the role file on disk is
@@ -420,13 +420,14 @@ export interface StepAbandonLine {
  * run gets the file's number back. Written only by the terminal resume path;
  * the wire may never raise a ceiling.
  *
- * Keyed by {@link turnRaiseKey} on the fold — the ROLE when the step named
- * one, so a second step dispatching the same role inherits the rope the human
- * granted it, and the step itself otherwise.
+ * Keyed by {@link turnRaiseKey} on the fold — by STEP ID, because a raise is
+ * the answer to one park and to nothing else. `role` rides the line for the
+ * human reading it, and is not part of the key.
  */
 export interface TurnRaiseLine {
   readonly kind: "turnRaise";
   readonly stepId: string;
+  /** The step's `@role`, for a human reading the journal. Never the key. */
   readonly role?: string;
   /** The new ceiling, validated above the one that just tripped. */
   readonly value: number;
@@ -1026,19 +1027,25 @@ export interface StepFailReply {
 }
 
 /**
- * The key a run-scoped turn raise is stored under.
+ * The key a run-scoped turn raise is stored under: THE STEP, always.
  *
- * The ROLE when the step named one: a human who granted `@rag-builder` 120
- * turns at stage 5 has said something about the role, and a later stage
- * dispatching the same role would otherwise walk into the same 64-turn wall
- * and park again for the same answer. A step with no role is keyed by itself,
- * because there is nothing else to key it by.
+ * It used to be the role when the step named one, on the theory that a human
+ * who granted `@rag-builder` 120 turns at stage 5 had said something about the
+ * role and a later stage dispatching it should inherit the rope. That reading
+ * is wrong, and it cost a real run: a `raise 1000` answered at step 5's park
+ * silently became the ceiling of steps 6, 7 and 8 as well, and step 7 then ran
+ * 204 turns and step 8 185 — neither of them a step anybody had been asked
+ * about — with only the 90-minute step deadline left as a backstop.
+ *
+ * A raise is an answer to ONE park. It buys that step's retries more rope and
+ * nothing else; a later step of the same role that runs out of turns parks and
+ * asks its own question, which is the gesture the park exists to require. The
+ * role still rides the {@link TurnRaiseLine} for the human reading it.
  *
  * @param stepId - The step the ask named.
- * @param role - Its `@role`, when it had one.
  */
-export function turnRaiseKey(stepId: string, role?: string): string {
-  return role === undefined || role === "" ? `step:${stepId}` : `role:${role}`;
+export function turnRaiseKey(stepId: string): string {
+  return `step:${stepId}`;
 }
 
 /**
@@ -1132,7 +1139,16 @@ export function stepFailAskQuestion(
     role === undefined || role === "" ? `Step ${ask.stepId}` : `Step ${ask.stepId} (@${role})`;
   const who = named(ask.role);
   const turnCeiling = ask.failureKind === "turn-ceiling";
-  const stopped = turnCeiling ? "ran out of turns" : "failed";
+  // The write lane's stall guard. Named apart from a plain failure for the
+  // reason the turn ceiling is: "it failed" sends a person hunting for a
+  // crash that never happened, and the one true sentence — it read for turns
+  // on end and changed nothing — is the sentence that decides what to do next.
+  const noProgress = ask.failureKind === "no-progress";
+  const stopped = turnCeiling
+    ? "ran out of turns"
+    : noProgress
+      ? "was stopped after changing no file"
+      : "failed";
   // The wire's sentence is the terser of the two, exactly as the budget ask's
   // is and for exactly its reason: a question crossing the seam is capped by
   // `sanitizeDescription` (first line, 160 characters), and the half that says
@@ -1156,7 +1172,9 @@ export function stepFailAskQuestion(
   const tries = ask.attempts === 1 ? "" : ` after ${String(ask.attempts)} attempts`;
   const headline = turnCeiling
     ? `${who} ran out of turns${tries} — it hit a turn ceiling, it did not crash.`
-    : `${who} failed${tries}.`;
+    : noProgress
+      ? `${who} was stopped${tries} — it changed no file, it did not crash.`
+      : `${who} failed${tries}.`;
   // The cause is the lane's own honest text and is MULTI-LINE by construction:
   // a failed step's message carries the agent's preserved final words on a
   // second line. Flattening it with a blind `\s+ → " "` ran two sentences
@@ -1884,7 +1902,7 @@ export function buildResumeState(lines: readonly JournalLine[]): ResumeState {
         // that is not a usable positive count is no grant, not a ceiling of
         // `NaN` handed to a child agent.
         if (typeof line.value === "number" && Number.isFinite(line.value) && line.value > 0) {
-          turnRaises.set(turnRaiseKey(line.stepId, line.role), Math.floor(line.value));
+          turnRaises.set(turnRaiseKey(line.stepId), Math.floor(line.value));
         }
         break;
       case "runEnd":
@@ -2004,8 +2022,13 @@ export type WorkflowFailureClass = "transient" | "deterministic";
  * child agent exhausting its `maxTurns` (recognised via `@arcturn/core`'s
  * `isTurnCeilingError`) — deterministic on purpose: a rerun of the same step
  * under the same ceiling runs out of the same rope, so the fix is the role
- * file's `maxTurns:` or a narrower step, never a retry. The rest label the
- * deterministic refusals the runtime already produces.
+ * file's `maxTurns:` or a narrower step, never a retry. `no-progress` is the
+ * write lane's stall guard stopping a role that spent its turns reading and
+ * changed no file, and it is deterministic for a blunter reason: the
+ * self-healing loop re-runs the *same* prompt against the *same* model, which
+ * is the run that just proved it reads for 36 turns. Only a human's `retry` at
+ * the park — a fresh attempt, or a narrower brief — is the recovery. The rest
+ * label the deterministic refusals the runtime already produces.
  */
 export type WorkflowFailureKind =
   | "network"
@@ -2017,6 +2040,7 @@ export type WorkflowFailureKind =
   | "config"
   | "agent-error"
   | "turn-ceiling"
+  | "no-progress"
   | "cancelled";
 
 /** The transient kinds, in one place so the classifier and tests agree. */

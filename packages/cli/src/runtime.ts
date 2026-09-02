@@ -666,9 +666,12 @@ export interface SessionAgentSpec {
    *
    * The only caller today is the `/workflow` WRITE lane
    * (`workflow.ts`'s `writeLaneProgressCheck`), which uses it to tell a role
-   * that has spent `WRITE_LANE_PROGRESS_TURNS` turns, or half its ceiling —
-   * whichever comes first — without changing a file. Every other session
-   * agent passes nothing and behaves exactly as it did.
+   * that has changed no file so — twice, at `WRITE_LANE_PROGRESS_TURNS` turns
+   * (or half its ceiling, whichever comes first) and again at twice that, the
+   * second time naming the turn the lane will stop it on. The stop itself is
+   * not this hook's: it may only return a string, so the write lane's own
+   * stall guard is what aborts the child. Every other session agent passes
+   * nothing and behaves exactly as it did.
    */
   progressCheck?: (progress: TurnProgress) => string | undefined;
 }

@@ -74,6 +74,7 @@ export type InsightsOrigin = "main" | "subagent" | "workflow";
 export type ParkCauseKind =
   | "produced-nothing"
   | "turn-ceiling"
+  | "no-progress"
   | "timeout"
   | "patch-refused"
   | "agent-error"
@@ -440,6 +441,13 @@ export function parkCauseKind(failureKind: string | undefined, cause: string): P
   switch (failureKind) {
     case "turn-ceiling":
       return "turn-ceiling";
+    // Its own bucket, never folded into `turn-ceiling`: they look alike (a
+    // step that read and read) and the answer to them is opposite. A ceiling
+    // says "this step needed more rope"; a stall says "more rope is exactly
+    // what it does not need". A pipeline whose parks are mostly this one is a
+    // pipeline with steps briefed too broadly to start.
+    case "no-progress":
+      return "no-progress";
     case "timeout":
       return "timeout";
     case "patch-refused":

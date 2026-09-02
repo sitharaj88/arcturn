@@ -2262,28 +2262,95 @@ async function runStepWithDeadline(
   }
 }
 
-/** How one attempt of a step ended, for the self-healing retry decision. */
-type AttemptClass = "ok" | "transient" | "deterministic";
+/**
+ * How one attempt of a step ended, for the self-healing retry decision.
+ *
+ * `retry-fresh` is the third class, and it is neither of the other two. A
+ * transient failure is retried because the *world* might have changed (a
+ * socket, a rate limit, a git lock) and it backs off before trying again; a
+ * deterministic failure is not retried at all because nothing can change. A
+ * `retry-fresh` failure is retried because the *model* might do something else
+ * this time, with no backoff (there is nothing to wait for) and exactly once
+ * (see {@link AUTOMATIC_FRESH_ATTEMPTS}).
+ */
+type AttemptClass = "ok" | "transient" | "retry-fresh" | "deterministic";
 
 /**
- * Classify one raced step attempt for the retry loop.
+ * Failures a fresh attempt is genuinely likely to fix, and their evidence.
  *
- * A `timeout` is a transient wall-clock stall the retry loop *may* re-attempt
- * (only if budget remains — see {@link runStepAttempts}); a `budget` breach is
- * deterministic on purpose — a role's ceiling is a per-*assignment* limit
- * (RFC 0001 §7.4), so retrying it would only spend past it again, never heal
- * it; a `threw` is an exceptional, unclassified fault treated as
- * deterministic (safer to fail fast than to loop on an unknown throw); a
- * `settled` outcome defers to the `failureKind` the runner threaded, via
- * {@link classifyFailureKind}. A successful settle is `ok`.
+ * Both are the same shape of fault: the model got into a state it could not
+ * get out of, and a clean context is the cure. Neither is a fault in the
+ * world, so backing off changes nothing; neither is settled, so refusing to
+ * retry hands a person a question the engine could have answered.
+ *
+ * - `no-progress` — the write lane's stall guard. On the run this comes from,
+ *   step 5 stalled the identical way on two attempts and then succeeded on a
+ *   fresh retry in 82 turns with 30 writes.
+ * - the VOID (`stepProducedNothing`, {@link emptyStepError}) — a step that
+ *   changed no file and said no word. The architect that returned the void
+ *   produced its ADR on the very next attempt.
+ *
+ * A turn ceiling is deliberately NOT here: the same rope runs out the same
+ * way, and the lever is `raise <n>` or a narrower step, which only a person
+ * can choose.
+ */
+const FRESH_RETRY_KINDS: ReadonlySet<WorkflowFailureKind> = new Set<WorkflowFailureKind>([
+  "no-progress",
+]);
+
+/**
+ * How many automatic fresh attempts a {@link FRESH_RETRY_KINDS} failure buys —
+ * **one**, and never a second, whatever `maxStepRetries:` says.
+ *
+ * One, because the evidence says one is what works: on the run this comes
+ * from, every step that recovered recovered on its *next* attempt. And never
+ * more than one, because the failure it retries is the expensive kind — a
+ * stalled write-lane builder burns a full ceiling of turns before the guard
+ * stops it — so a budget of three would spend an hour proving what two
+ * attempts already showed. The second failure is the one a person needs to
+ * see, and that is what the park is for.
+ *
+ * Deliberately independent of `maxStepRetries:`, in both directions: a
+ * workflow that set it to 0 (a common "no flakiness, please" setting) still
+ * gets this one attempt, and a workflow that set it to 5 does not get five
+ * stalls.
+ */
+const AUTOMATIC_FRESH_ATTEMPTS = 1;
+
+/**
+ * The retry budget, by failure class — the whole policy in one place.
+ *
+ * | class | automatic attempts after the first |
+ * | ----- | ---------------------------------- |
+ * | `ok` | — |
+ * | `transient` (`network`, `rateLimit`, `overloaded`, `timeout`, `git-lock`) | `maxStepRetries:`, with backoff, sharing the step's one deadline |
+ * | `retry-fresh` (`no-progress`, the void) | exactly {@link AUTOMATIC_FRESH_ATTEMPTS}, no backoff |
+ * | `deterministic` (`config`, `patch-refused`, `turn-ceiling`, `agent-error`, `cancelled`, a budget breach, a throw) | none |
  *
  * @param attempt - The raced attempt from {@link runStepWithDeadline}.
+ * @param isVoid - Does this settled, non-error outcome amount to nothing at
+ *   all? Injected because the void gate is the *engine's* judgement of a step
+ *   that reported success, and this loop must reach the same verdict the gate
+ *   downstream will — see {@link stepOutcomeIsVoid}.
  */
-function classifyAttempt(attempt: StepAttempt): AttemptClass {
+function classifyAttempt(
+  attempt: StepAttempt,
+  isVoid: (outcome: WorkflowStepOutcome) => boolean = () => false,
+): AttemptClass {
   if (attempt.kind === "timeout") return "transient";
   if (attempt.kind === "budget") return "deterministic";
   if (attempt.kind === "threw") return "deterministic";
-  if (!attempt.outcome.isError) return "ok";
+  // THE VOID, judged here rather than only at the gate downstream. A step that
+  // came back `isError: false` with nothing to show for itself has not
+  // succeeded, and waiting for the gate to say so means waiting until after
+  // the only place that could cheaply try again has returned.
+  if (!attempt.outcome.isError) return isVoid(attempt.outcome) ? "retry-fresh" : "ok";
+  if (
+    attempt.outcome.failureKind !== undefined &&
+    FRESH_RETRY_KINDS.has(attempt.outcome.failureKind)
+  ) {
+    return "retry-fresh";
+  }
   return classifyFailureKind(attempt.outcome.failureKind);
 }
 
@@ -2307,6 +2374,37 @@ interface StepAttemptResult {
   readonly usage: Usage;
   /** Model turns observed across every attempt (see {@link StepAttemptRun}). */
   readonly turns: number;
+  /**
+   * How many of the attempts above were automatic FRESH retries — a
+   * {@link FRESH_RETRY_KINDS} failure, or the void, given another go with a
+   * clean context. Zero for every step that succeeded first time and for every
+   * step that only ever flapped transiently.
+   *
+   * Read by the caller for exactly one purpose: a step that ends up parked
+   * after burning one of these owes the person reading the park an account of
+   * *both* attempts, not just the last one.
+   */
+  readonly freshRetries: number;
+  /**
+   * What each failed attempt before the last one did, oldest first.
+   *
+   * Counts only — the same `activity` record the journal and the ledger carry.
+   * Empty for a step that never needed a second attempt, which is nearly all
+   * of them.
+   */
+  readonly earlier: readonly EarlierAttempt[];
+}
+
+/** One superseded attempt of a step, for the record a park is built from. */
+interface EarlierAttempt {
+  /** 1-based, matching the `attempts` count a person sees. */
+  readonly attempt: number;
+  /** The kind it failed with, when it settled with one. */
+  readonly failureKind?: WorkflowFailureKind;
+  /** What it spent its turns on, when the lane counted. */
+  readonly activity?: StepActivity;
+  /** THIS attempt's spend — not the step's running total, which the step keeps. */
+  readonly usage: Usage;
 }
 
 /**
@@ -2334,6 +2432,22 @@ interface StepAttemptResult {
  * (ENFORCED PER-ROLE BUDGETS, RFC 0001 §8.4) is deterministic for the same
  * reason — see {@link classifyAttempt}.
  *
+ * THE THIRD CLASS: a step that stalled without writing (`no-progress`) or came
+ * back with nothing at all (the void) gets exactly one automatic FRESH attempt
+ * — a new worktree seeded from the same applied patches, a new child agent,
+ * the same prompt — before it is allowed to reach a human. It is not a
+ * transient class: there is no backoff, because nothing in the world is
+ * broken, and the budget is {@link AUTOMATIC_FRESH_ATTEMPTS} rather than
+ * `maxStepRetries:`, in both directions. The evidence is one real run, where
+ * every step that failed this way and was retried succeeded on its next
+ * attempt while the ones nobody retried burned ninety minutes each. The park
+ * still exists, and the *second* failure is what reaches it.
+ *
+ * Note that a fresh attempt draws on the same shared wall clock as everything
+ * else here — `stepTimeoutMs` bounds the STEP, not each attempt — so a step
+ * that stalled for its whole deadline has nothing left to retry with and is
+ * parked at once, which is the correct outcome.
+ *
  * `roleBudgetLimitUsd`, when given, is the role's own per-*assignment*
  * ceiling — i.e. across every attempt of this one step, not a fresh
  * allowance each retry. `spent.costUsd` (this loop's own running ledger) is
@@ -2351,6 +2465,14 @@ interface StepAttemptResult {
  * @param roleBudgetLimitUsd - The step's role's `budget:` ceiling, already
  *   validated positive by {@link roleBudgetUsd}; `undefined` for a step with
  *   no `@role` or a role that declared none, which disables this check.
+ * @param isVoid - The void gate's verdict on a settled, non-error outcome —
+ *   see {@link stepOutcomeIsVoid}. Injected (and defaulting to "never") so the
+ *   loop stays a pure retry policy and the *engine* keeps ownership of what
+ *   "produced nothing" means.
+ * @param onAttemptEnd - Called once for each attempt the loop supersedes,
+ *   before the next one starts. The insights ledger's hook: a step that took
+ *   two attempts is two step terminals in the ledger, and the count alone
+ *   cannot say what the first one did.
  */
 async function runStepAttempts(
   runStep: WorkflowStepRunner,
@@ -2361,6 +2483,8 @@ async function runStepAttempts(
   policy: Required<Pick<WorkflowRetryPolicy, "sleep" | "computeDelay">>,
   now: () => number,
   roleBudgetLimitUsd: number | undefined,
+  isVoid: (outcome: WorkflowStepOutcome) => boolean = () => false,
+  onAttemptEnd?: (attempt: EarlierAttempt) => void,
 ): Promise<StepAttemptResult> {
   const absoluteDeadline = now() + stepTimeoutMs;
   let attempts = 0;
@@ -2370,12 +2494,17 @@ async function runStepAttempts(
   // the whole step cost — not just what its final attempt cost.
   let spent = emptyUsage();
   let turns = 0;
+  /** Automatic fresh attempts spent so far — see {@link AUTOMATIC_FRESH_ATTEMPTS}. */
+  let freshRetries = 0;
+  const earlier: EarlierAttempt[] = [];
   /** Close the step out with the running ledger attached. */
   const done = (attempt: StepAttempt): StepAttemptResult => ({
     attempt,
     attempts,
     usage: spent,
     turns,
+    freshRetries,
+    earlier,
   });
 
   for (;;) {
@@ -2417,8 +2546,39 @@ async function runStepAttempts(
 
     // A cancelled run never retries — the outcome is the cancellation itself.
     if (parentSignal.aborted) return done(attempt);
-    const cls = classifyAttempt(attempt);
+    const cls = classifyAttempt(attempt, isVoid);
     if (cls === "ok" || cls === "deterministic") return done(attempt);
+
+    /** Remember what this attempt did before the next one supersedes it. */
+    const record = (): void => {
+      const superseded: EarlierAttempt = {
+        attempt: attempts,
+        ...(attempt.kind === "settled" && attempt.outcome.failureKind !== undefined
+          ? { failureKind: attempt.outcome.failureKind }
+          : {}),
+        ...(attempt.kind === "settled" && attempt.outcome.activity !== undefined
+          ? { activity: attempt.outcome.activity }
+          : {}),
+        usage: run.usage,
+      };
+      earlier.push(superseded);
+      try {
+        onAttemptEnd?.(superseded);
+      } catch {
+        // A ledger must never be able to fail a step.
+      }
+    };
+
+    // THE AUTOMATIC FRESH RETRY. No backoff: nothing in the world is going to
+    // heal, and every second of a sleep here is a second the step's shared
+    // deadline does not get back. One attempt only, whatever `maxStepRetries:`
+    // says in either direction — see {@link AUTOMATIC_FRESH_ATTEMPTS}.
+    if (cls === "retry-fresh") {
+      if (freshRetries >= AUTOMATIC_FRESH_ATTEMPTS) return done(attempt);
+      freshRetries += 1;
+      record();
+      continue;
+    }
     // Transient, but out of retries.
     if (attempts > maxRetries) return done(attempt);
 
@@ -2434,6 +2594,9 @@ async function runStepAttempts(
       return done(attempt);
     }
     if (parentSignal.aborted) return done(attempt);
+    // Only now is this attempt genuinely superseded: every `return` above ends
+    // the step ON it, and an attempt the step ended on is not an *earlier* one.
+    record();
   }
 }
 
@@ -2883,11 +3046,11 @@ export async function runWorkflow(
 
   // -------------------------------------- the step-failure gate, on resume
   /**
-   * Run-scoped turn grants, by {@link turnRaiseKey}. Seeded from the journal
-   * so a grant made two resumes ago still governs, and added to below when
-   * THIS resume's reply grants one. Never by editing a role file: the file is
-   * the authority for every *fresh* run, and this run's grant lives in its own
-   * journal.
+   * Run-scoped turn grants, by {@link turnRaiseKey} — one entry per *step*
+   * that was raised, never per role. Seeded from the journal so a grant made
+   * two resumes ago still governs, and added to below when THIS resume's reply
+   * grants one. Never by editing a role file: the file is the authority for
+   * every *fresh* run, and this run's grant lives in its own journal.
    */
   const turnRaises = new Map<string, number>(resumeFrom?.turnRaises ?? []);
   /**
@@ -2981,7 +3144,7 @@ export async function runWorkflow(
       // and the step is retried. Durable because the grant must survive a
       // crash — a resumed run that forgot its raise would walk into the same
       // wall the human already lifted.
-      turnRaises.set(turnRaiseKey(pendingFailAsk.stepId, pendingFailAsk.role), raise.value);
+      turnRaises.set(turnRaiseKey(pendingFailAsk.stepId), raise.value);
       try {
         await journalDurable({
           kind: "turnRaise",
@@ -3156,12 +3319,13 @@ export async function runWorkflow(
   /**
    * The run-scoped turn ceiling a human granted for this step, if any.
    *
-   * Keyed by {@link turnRaiseKey} — the role when the step named one, so a
-   * later stage dispatching the same role inherits the rope rather than
-   * parking again for the answer that was already given.
+   * Keyed by {@link turnRaiseKey} — THIS step and no other. A raise answers
+   * one park; a later step of the same role runs under its role file's own
+   * number and parks with its own question if that is not enough. See
+   * {@link turnRaiseKey} for the run that made the role-wide reading a bug.
    */
   const turnCeilingFor = (step: WorkflowStep): number | undefined =>
-    turnRaises.get(turnRaiseKey(step.id, step.agent));
+    turnRaises.get(turnRaiseKey(step.id));
   /**
    * How many times this step has already been run and failed in this run,
    * across resumes — the base the retry loop's own index continues from.
@@ -3279,6 +3443,16 @@ export async function runWorkflow(
    * with nothing louder to report.
    */
   const turnCeilingSteps = new Set<string>();
+  /**
+   * Steps the write lane's stall guard stopped, by id.
+   *
+   * {@link turnCeilingSteps}' sibling, and carried for the same reason: the
+   * step-failure park is built at the stage boundary out of a
+   * {@link WorkflowStepResult}, which has no machine-readable kind on it, so
+   * the one word that tells `no-progress` from a plain agent error has to be
+   * remembered here or it is lost between the lane and the question.
+   */
+  const noProgressSteps = new Set<string>();
   /**
    * Step failures the run must NOT park on, by id.
    *
@@ -3780,6 +3954,8 @@ export async function runWorkflow(
             attempts,
             usage: spent,
             turns: stepTurns,
+            freshRetries,
+            earlier: earlierAttempts,
           } = await runStepAttempts(
             context.runStep,
             stepRequest,
@@ -3789,6 +3965,30 @@ export async function runWorkflow(
             retryPolicy,
             now,
             roleBudget,
+            // The void gate's own verdict, so the loop can spend this step's
+            // one free attempt on a step that produced nothing rather than
+            // handing it to a human. See {@link stepOutcomeIsVoid}.
+            stepOutcomeIsVoid,
+            // Each superseded attempt reaches the ledger as its own terminal:
+            // "this step took two attempts" is a number, and "the first one
+            // read for 36 turns and wrote nothing" is the finding.
+            (superseded) =>
+              insights?.record({
+                kind: "step-end",
+                workflow: workflow.name,
+                runId: insightsRunId,
+                stepId: step.id,
+                ...(step.agent === undefined ? {} : { role: step.agent }),
+                status: "failed",
+                ...(superseded.failureKind === undefined
+                  ? {}
+                  : { failureKind: superseded.failureKind }),
+                ...(stepModel === undefined ? {} : { model: stepModel }),
+                durationMs: Math.max(0, now() - stepStartedAt),
+                usage: superseded.usage,
+                attempts: superseded.attempt,
+                ...(superseded.activity === undefined ? {} : { activity: superseded.activity }),
+              }),
           );
           if (attempt.kind === "settled") {
             const outcome = attempt.outcome;
@@ -3810,6 +4010,13 @@ export async function runWorkflow(
             // ceiling actually killed. See the resolution below `finally`.
             if (status === "failed" && outcome.failureKind === "turn-ceiling") {
               turnCeilingSteps.add(step.id);
+            }
+            // The same trick for the same reason: the park is assembled at the
+            // stage boundary from the step *result*, which carries no machine
+            // kind, and "was stopped for making no progress" is exactly the
+            // fact a person needs the park (and the ledger) to name.
+            if (status === "failed" && outcome.failureKind === "no-progress") {
+              noProgressSteps.add(step.id);
             }
             if (status === "failed") stepFailureKind = outcome.failureKind;
             result = {
@@ -3940,17 +4147,18 @@ export async function runWorkflow(
             } else if (halt?.kind === "ask") {
               result = { ...result, status: "paused", question: halt.question.question };
             } else if (
-              stepProducedNothing(result.text, result.record) ||
-              (result.lastTurn !== undefined &&
-                lastTurnDeliveredNothing(result.lastTurn) &&
-                (result.record === undefined || result.record.files === 0))
+              stepOutcomeIsVoid({
+                text: result.text,
+                usage: result.usage,
+                isError: false,
+                ...(result.record === undefined ? {} : { record: result.record }),
+                ...(result.lastTurn === undefined ? {} : { lastTurn: result.lastTurn }),
+              })
             ) {
-              // The second arm is the same void seen from the last turn: a
-              // step whose first turn said "I'll read the survey, then write"
-              // and whose last two turns were reasoning alone has a non-empty
-              // `text` — that preamble — and still produced nothing. Judged
-              // on the turn the run ended on, with the diff as the tiebreak:
-              // a role that wrote a file and then went quiet delivered.
+              // The predicate is shared with the retry loop, which has already
+              // spent this step's one automatic fresh attempt on exactly this
+              // verdict — so what reaches here is a step that produced nothing
+              // TWICE. See {@link stepOutcomeIsVoid}.
               // THE VOID GATE (see {@link stepProducedNothing}): a step that
               // changed no file and said nothing has produced nothing, and
               // `done` is a lie the next seven stages build on. It fails —
@@ -3964,6 +4172,23 @@ export async function runWorkflow(
                 status: "failed",
                 text: "",
                 error: emptyStepError(step.id, step.agent),
+              };
+            }
+          }
+          // THE AUTOMATIC FRESH RETRY'S RECEIPT. The engine has already spent
+          // this step's free attempt, so a park built from this message must
+          // not read like a first failure — the obvious answer, `retry`, is
+          // then the one thing already known not to work. Appended after the
+          // gate above so the void's own message gets it too.
+          if (result.status === "failed" && freshRetries > 0) {
+            const note = retriedAttemptsNote([
+              ...earlierAttempts.map((superseded) => superseded.activity),
+              result.activity,
+            ]);
+            if (note !== undefined) {
+              result = {
+                ...result,
+                error: `${result.error ?? `step ${step.id} failed`}\n${note}`,
               };
             }
           }
@@ -4148,10 +4373,18 @@ export async function runWorkflow(
         // Only meaningful for a turn ceiling, and only when the lane's own
         // cause named the number — it is what a `raise <n>` must exceed.
         const tripped = turnCeiling ? turnCeilingFromCause(broken.error) : undefined;
+        // Mutually exclusive by construction (one lane outcome, one kind), and
+        // ordered so that if they ever were not, the ceiling — which alone
+        // offers `raise <n>` — is not quietly shadowed.
+        const askKind: WorkflowFailureKind | undefined = turnCeiling
+          ? "turn-ceiling"
+          : noProgressSteps.has(broken.id)
+            ? "no-progress"
+            : undefined;
         const ask: PendingStepFailAsk = {
           stepId: broken.id,
           ...(broken.agent === undefined ? {} : { role: broken.agent }),
-          ...(turnCeiling ? { failureKind: "turn-ceiling" as const } : {}),
+          ...(askKind === undefined ? {} : { failureKind: askKind }),
           cause: failure,
           ...(captured === undefined ? {} : { patchPath: captured }),
           ...(tripped === undefined ? {} : { ceiling: tripped }),
@@ -4839,47 +5072,142 @@ const WRITE_LANE_PROGRESS_FRACTION = 0.5;
  * and clamped to `[8, 40]`: never so low that a role reading first before an
  * eight- or twelve-turn step gets hectored on turn three, never so high that
  * a raised ceiling can hide a stall past forty turns again.
+ *
+ * Also the unit of the whole schedule: the second warning is 2 × this and the
+ * hard stop is 3 × this ({@link WRITE_LANE_STALL_TURNS}). See
+ * {@link writeLaneProgressCheck}.
  */
 export const WRITE_LANE_PROGRESS_TURNS = 12;
 
 /**
- * The write lane's mid-run progress check: **you have spent N turns, or half
- * your ceiling — whichever comes first — and changed no file.**
+ * The turn the write lane stops asking and pulls the plug: **3 ×
+ * {@link WRITE_LANE_PROGRESS_TURNS}**, so 36.
  *
- * Every guard rail the engine had otherwise fired *after* the money was
- * gone — the turn ceiling, the void gate, the park. None of them could say
- * the one thing that would have changed the outcome while there was still
- * budget left to change it. See {@link WRITE_LANE_PROGRESS_TURNS} for the two
- * real runs (an 80-turn ceiling, and a 1000-turn one raised at a park) this
- * threshold is calibrated against.
+ * A COUNT OF TURNS, NEVER A FRACTION OF THE CEILING. That is the whole
+ * property: `maxTurns` does not appear in it, so a `raise 1000` answered at a
+ * park cannot defer it by one turn — the stop lands on turn 36 whether the
+ * child was granted 40 turns or a thousand. The `maxTurns` half of the first
+ * warning below exists only to pull that warning *earlier* on a short ceiling;
+ * nothing anywhere in this schedule can push a threshold later.
+ *
+ * Why a hard stop at all, when the check already speaks twice. Tonight's step
+ * 8 was sent the turn-12 notice, answered it in its own reasoning ("The
+ * pipeline wants me to get moving"), and then ran another 170 shell reads with
+ * zero writes until the 90-minute deadline. An advisory a model can
+ * acknowledge and ignore is not a guard rail. Meanwhile step 5 of the same run
+ * — which had stalled the identical way on two attempts — succeeded on a fresh
+ * retry in 82 turns with 30 writes. A cheap failure and a retry beats a
+ * 90-minute burn every time, so the lane spends 36 turns finding out and then
+ * parks for a human.
+ */
+export const WRITE_LANE_STALL_TURNS = WRITE_LANE_PROGRESS_TURNS * 3;
+
+/**
+ * The write lane's progress schedule, as one pure function of the turn about
+ * to start: **warn, warn with the consequence, and then (in the lane, not
+ * here) stop.**
+ *
+ * | turn | what happens |
+ * | ---- | ------------ |
+ * | {@link WRITE_LANE_PROGRESS_TURNS} (12), or half the ceiling if that is sooner | "no file has been changed" — make the smallest change now |
+ * | 2 × (24) | the same fact plus the consequence, naming turn {@link WRITE_LANE_STALL_TURNS} |
+ * | {@link WRITE_LANE_STALL_TURNS} (36) | the lane aborts the child — see the stall guard on `driveAgent`, not this function |
+ *
+ * The third row is deliberately not this function's job: the core hook may
+ * only return *strings*, so the only thing that can actually stop a child is
+ * the lane that spawned it. This function's contract is unchanged — a message
+ * or nothing.
+ *
+ * Every threshold except the first is a plain turn count, and the first can
+ * only move *earlier* (a 12-turn role hears it at turn 6). A raised ceiling
+ * therefore changes nothing about any of them: `raise 1000` buys a step more
+ * rope to finish work it has started, not permission to read for an hour.
+ *
+ * Each message is sent at most once — the loop dedupes by exact text, and each
+ * names the turn it fired on, so a `>=` test would mint fresh wording every
+ * remaining turn. That is precisely how the turn-ceiling warning beside it
+ * earned its once-per-run rule: a notice that repeats teaches the model to
+ * skip it.
  *
  * WRITE LANE ONLY. A read-lane or exec-lane role produces a *report*, and its
  * diff is discarded unread; telling one of those to "write a file now" would be
  * telling it to do the one thing its lane forbids.
  *
- * Exported so the threshold and the wording are one testable thing rather than
- * a condition buried in a spawn call.
+ * Exported so the thresholds and the wording are one testable thing rather
+ * than a condition buried in a spawn call.
  *
  * @param progress - The turn about to start, and the calls made so far.
- * @returns The nudge, or `undefined` when the step is on track.
+ * @returns The nudge for this turn, or `undefined` when there is none.
  */
 export function writeLaneProgressCheck(progress: TurnProgress): string | undefined {
-  const threshold = Math.min(
+  if (countWrites(progress.toolCalls) > 0) return undefined;
+  const first = Math.min(
     Math.floor(progress.maxTurns * WRITE_LANE_PROGRESS_FRACTION),
     WRITE_LANE_PROGRESS_TURNS,
   );
-  // ONE turn, not "this turn and every one after". The loop dedupes a warning
-  // by its exact text and this message names the turn it fired on, so a
-  // `>=` test would re-fire with fresh wording every remaining turn — which is
-  // precisely how the turn-ceiling warning next to it earned its once-per-run
-  // rule: a notice that repeats teaches the model to skip it.
-  if (progress.turnIndex !== threshold) return undefined;
-  if (countWrites(progress.toolCalls) > 0) return undefined;
+  const spent = `Progress check: ${progress.turnIndex} of ${progress.maxTurns} turns are spent`;
+  if (progress.turnIndex === first) {
+    return (
+      `${spent} and no file has been changed. This is a write-lane step — its result is a ` +
+      "diff, and reading further will not produce one. Make the smallest change that moves " +
+      "the step forward now (create the file, or write its first section), then continue."
+    );
+  }
+  // The second notice is the one with teeth, and it is worded as a deadline
+  // rather than as advice because the first one was answered and ignored.
+  if (progress.turnIndex === WRITE_LANE_PROGRESS_TURNS * 2) {
+    return (
+      `${spent} and still no file has been changed. This is the last warning: if no file has ` +
+      `been changed by turn ${WRITE_LANE_STALL_TURNS} this step will be stopped and parked for ` +
+      "a human, and the reading done so far will be thrown away. Write the smallest real " +
+      "change now — create the file, or write its first section — and continue from there."
+    );
+  }
+  return undefined;
+}
+
+/**
+ * What the park says when the stall guard stopped a step, in the park's own
+ * words and built from the counts the run actually recorded.
+ *
+ * The sentence a person needs is not "the agent was aborted": it is what the
+ * step did with its 36 turns, and what to do next. Both levers are named
+ * because both worked on the run this comes from — step 5 stalled twice the
+ * same way and then succeeded on a fresh retry in 82 turns with 30 writes, and
+ * the steps that never stalled were the ones with the narrowest briefs.
+ *
+ * @example
+ * step 8 (@rag-builder) was stopped after 36 turns without changing a file —
+ * it read 114 files and ran 75 shell commands and wrote nothing. Retry it (a
+ * fresh attempt usually writes early), or narrow what it was asked to do.
+ *
+ * @param stepId - The stalled step.
+ * @param role - Its `@role`, when it had one.
+ * @param activity - The counts `driveAgent` kept while it ran.
+ */
+export function noProgressCause(
+  stepId: string,
+  role: string | undefined,
+  activity: StepActivity,
+): string {
+  const who = role === undefined || role === "" ? `step ${stepId}` : `step ${stepId} (@${role})`;
+  const reads = activity.toolCalls.read ?? 0;
+  const shell = activity.toolCalls.bash ?? 0;
+  const others = Object.entries(activity.toolCalls)
+    .filter(([name]) => name !== "read" && name !== "bash")
+    .reduce((total, [, count]) => total + count, 0);
+  const did: string[] = [];
+  if (reads > 0) did.push(`read ${reads} file${reads === 1 ? "" : "s"}`);
+  if (shell > 0) did.push(`ran ${shell} shell command${shell === 1 ? "" : "s"}`);
+  if (others > 0) did.push(`made ${others} other tool call${others === 1 ? "" : "s"}`);
+  // "wrote nothing" is the clause the whole sentence turns on, so it is always
+  // last and always present — a step that called no tool at all still gets a
+  // truthful "it called no tool and wrote nothing".
+  did.push("wrote nothing");
   return (
-    `Progress check: ${progress.turnIndex} of ${progress.maxTurns} turns are spent and no ` +
-    "file has been changed. This is a write-lane step — its result is a diff, and reading " +
-    "further will not produce one. Make the smallest change that moves the step forward now " +
-    "(create the file, or write its first section), then continue."
+    `${who} was stopped after ${activity.turns} turns without changing a file — it ` +
+    `${did.length === 1 ? "called no tool and " : ""}${did.join(" and ")}. Retry it (a fresh ` +
+    "attempt usually writes early), or narrow what it was asked to do."
   );
 }
 
@@ -5107,6 +5435,16 @@ interface AgentRunOutcome {
    * for a child that did nothing, because "zero" is the answer that matters.
    */
   activity: StepActivity;
+  /**
+   * True when {@link AgentStallGuard} is what ended this run.
+   *
+   * The distinction the lane cannot otherwise make: the guard stops a child by
+   * calling `agent.abort()`, so the run comes back `reason: "aborted"` — the
+   * same word an operator pressing Esc produces. One is a cancellation and the
+   * other is a `no-progress` failure the run must park on, and only the drive
+   * that fired the guard knows which.
+   */
+  stalled?: boolean;
 }
 
 /**
@@ -5122,6 +5460,39 @@ interface AgentRunSignals {
   silentTurn(model: string, nudged: boolean): void;
   /** A progress check fired and its message was sent to the model. */
   progressWarning(turnIndex: number): void;
+}
+
+/**
+ * A lane's hard stop for a child that is going nowhere.
+ *
+ * The counterpart to {@link WorkflowProgressCheck}, and the reason it has to
+ * live out here rather than in the core hook: `progressCheck` may only return
+ * a *string*, so it can advise and nothing more — and the run this exists for
+ * proved advice is not enough. Step 8 was told at turn 12 that it had changed
+ * no file, wrote in its own reasoning that "the pipeline wants me to get
+ * moving", and then ran another 170 shell reads with zero writes. Only the
+ * thing holding the agent handle can stop it, and that is {@link driveAgent}.
+ *
+ * Evaluated on `turnEnd` — after the turn's tool calls have been counted, so
+ * a child that writes on the very turn that would have stopped it is spared —
+ * and it fires at most once, because `agent.abort()` is idempotent but the
+ * outcome flag it sets is not something to re-decide.
+ *
+ * `afterTurns` is a TURN COUNT and never a fraction of `maxTurns`: a ceiling a
+ * human raised at a park buys the step rope to finish work it has started, not
+ * permission to keep reading, so a `raise 1000` moves this threshold by
+ * exactly zero turns. See {@link WRITE_LANE_STALL_TURNS}.
+ */
+interface AgentStallGuard {
+  /** Stop the child once this many turns have ended with nothing written. */
+  readonly afterTurns: number;
+  /**
+   * How many writes the run has to its name, read off the same tool histogram
+   * the drive is already keeping. Injected rather than hard-coded to
+   * {@link countWrites} so "what counts as progress" stays the lane's
+   * question, not this function's.
+   */
+  readonly writes: (toolCalls: Readonly<Record<string, number>>) => number;
 }
 
 /**
@@ -5176,6 +5547,10 @@ function insightsSignals(
  *   real spend instead of {@link emptyUsage}, even when `agent.prompt` below
  *   never returns: the turn that was in flight when the deadline fired has
  *   already been reported by the time it does.
+ * @param signals - Insight events this child's lane wants recorded, if any.
+ * @param stall - The lane's hard stop for a child making no progress, if any.
+ *   Installed by the WRITE dispatch and by nothing else — see
+ *   {@link AgentStallGuard}.
  */
 async function driveAgent(
   agent: WorkflowChildAgent,
@@ -5184,6 +5559,7 @@ async function driveAgent(
   live?: StepLiveRow,
   onUsage?: (usage: Usage) => void,
   signals?: AgentRunSignals,
+  stall?: AgentStallGuard,
 ): Promise<AgentRunOutcome> {
   let usage = emptyUsage();
   let reason: "completed" | "aborted" | "error" = "completed";
@@ -5201,6 +5577,8 @@ async function driveAgent(
    */
   let turns = 0;
   const toolCalls: Record<string, number> = {};
+  /** Set once, by the stall guard below, so the lane can tell it from an Esc. */
+  let stalled = false;
   live?.start();
   try {
     const unsubscribe = agent.subscribe((event) => {
@@ -5233,6 +5611,19 @@ async function driveAgent(
         turns += 1;
         usage = addUsage(usage, event.usage);
         onUsage?.(usage);
+        // THE HARD STOP. Evaluated here, on the turn boundary, because this is
+        // the one moment where the turn's own tool calls have all been counted
+        // (`toolStart` precedes `turnEnd`) and the next turn has not started:
+        // the loop's tool-call path re-checks its signal immediately after
+        // emitting `turnEnd`, so aborting from inside this handler costs no
+        // further request. A child that finally wrote something on the very
+        // turn that would have stopped it is therefore spared.
+        if (!stalled && stall !== undefined && turns >= stall.afterTurns) {
+          if (stall.writes(toolCalls) === 0) {
+            stalled = true;
+            agent.abort();
+          }
+        }
       } else if (event.type === "runEnd") {
         reason = event.reason;
         errorMessage = event.errorMessage;
@@ -5278,6 +5669,7 @@ async function driveAgent(
     text,
     ...(lastMessage === undefined ? {} : { lastTurn: turnShapeOf(lastMessage) }),
     activity: { turns, toolCalls, writes: countWrites(toolCalls) },
+    ...(stalled ? { stalled: true } : {}),
   };
 }
 
@@ -5389,6 +5781,41 @@ export function stepProducedNothing(text: string, record?: WorkflowPatchRecord):
 }
 
 /**
+ * THE VOID GATE'S VERDICT, as a pure predicate on a lane outcome.
+ *
+ * Extracted so that the two places that need it cannot drift apart: the retry
+ * loop, which asks *before* the step is settled so it can spend one free
+ * attempt on it ({@link classifyAttempt}), and the gate itself, which asks
+ * after and turns a `done` step into a `failed` one. Two copies of this
+ * judgement would be two different definitions of "produced nothing", and the
+ * first one to disagree would either retry a step the gate then passes, or
+ * park a step the loop could have fixed.
+ *
+ * Both arms of the original gate, unchanged. The first is the plain void — no
+ * text, no file. The second is the same void seen from the last turn: a step
+ * whose opening turn said "I'll read the survey, then write" and whose closing
+ * turns were reasoning alone has a non-empty `text` (that preamble) and still
+ * produced nothing; the diff is the tiebreak, because a role that wrote a file
+ * and then went quiet delivered.
+ *
+ * A step that raised `ORG-HALT` or `ORG-ASK` is never void: it spoke, it is
+ * settled by its own branch of the gate, and re-running it would re-ask a
+ * question or re-declare a halt.
+ *
+ * @param outcome - What a lane came back with.
+ */
+export function stepOutcomeIsVoid(outcome: WorkflowStepOutcome): boolean {
+  if (outcome.isError) return false;
+  if (classifyStepHalt(outcome.text) !== undefined) return false;
+  return (
+    stepProducedNothing(outcome.text, outcome.record) ||
+    (outcome.lastTurn !== undefined &&
+      lastTurnDeliveredNothing(outcome.lastTurn) &&
+      (outcome.record === undefined || outcome.record.files === 0))
+  );
+}
+
+/**
  * The message an empty step fails with — see {@link stepProducedNothing}.
  *
  * Written to be read by whoever finds the parked run: it names what was
@@ -5405,6 +5832,41 @@ export function emptyStepError(stepId: string, role: string | undefined): string
     `step ${stepId}${role === undefined ? "" : ` (@${role})`} produced nothing — no file was ` +
     "changed and no text was returned. A step that reports neither a result nor a reason has " +
     "not run; retry it, or narrow what it was asked to do."
+  );
+}
+
+/**
+ * "It was already tried twice, and here is what each try did."
+ *
+ * The sentence a park owes a person once the engine has spent a step's
+ * automatic fresh attempt on their behalf (see {@link AUTOMATIC_FRESH_ATTEMPTS}).
+ * Without it the park reads exactly like a first failure, and the obvious
+ * answer — `retry` — is the one thing already known not to work.
+ *
+ * Counts only, through {@link describeActivity}: the same tool names and
+ * numbers the journal and the ledger carry, and no prompt, path or word of
+ * model output.
+ *
+ * @example
+ * This step was retried automatically once and failed both times (attempt 1 —
+ * activity: 36 turns · read 36 · no file written; attempt 2 — activity: 36
+ * turns · bash 30 · read 6 · no file written).
+ *
+ * @param activities - Each attempt's activity, oldest first, `undefined` where
+ *   a lane recorded none. Fewer than two attempts produces nothing: there is
+ *   no trail to tell.
+ */
+export function retriedAttemptsNote(
+  activities: readonly (StepActivity | undefined)[],
+): string | undefined {
+  if (activities.length < 2) return undefined;
+  const parts = activities.map(
+    (activity, index) =>
+      `attempt ${index + 1} — ${activity === undefined ? "no activity recorded" : describeActivity(activity)}`,
+  );
+  return (
+    `This step was retried automatically once and failed both times ` +
+    `(${parts.join("; ")}). A third identical attempt is unlikely to differ.`
   );
 }
 
@@ -5705,6 +6167,12 @@ async function runWorktreeStep(
       stepLiveRow(options.emit, step, prompt, def.name),
       onUsage,
       insightsSignals(options.insights, step.id, def.name),
+      // WRITE lane only, exactly like the progress check above and for the
+      // same reason: an exec-lane role's diff is discarded unread, so "you
+      // have written no file" is not a fault there — it is the contract.
+      dispatch === "write"
+        ? { afterTurns: WRITE_LANE_STALL_TURNS, writes: countWrites }
+        : undefined,
     );
     usage = run.usage;
     // The agent has stopped, so anything it left running is orphaned by
@@ -5721,14 +6189,21 @@ async function runWorktreeStep(
     // `agent-error`. Read where the step's error result is built.
     /** Read once: every branch below asks the same question of the same run. */
     const turnCeiling = isTurnCeilingError(run.errorMessage);
+    // Ahead of every other kind, including `cancelled`: the stall guard stops
+    // a child with the same `agent.abort()` an Esc uses, and only `run.stalled`
+    // can tell the two apart. Deterministic, so the self-healing retry loop
+    // will not quietly re-run it — a step that read for 36 turns will read for
+    // 36 more, and the recovery is a human's `retry` at the park.
     const laneFailureKind = (): WorkflowFailureKind =>
-      run.reason === "aborted"
-        ? "cancelled"
-        : turnCeiling
-          ? "turn-ceiling"
-          : run.errorKind !== undefined
-            ? failureKindFromAIError(run.errorKind)
-            : "agent-error";
+      run.stalled === true
+        ? "no-progress"
+        : run.reason === "aborted"
+          ? "cancelled"
+          : turnCeiling
+            ? "turn-ceiling"
+            : run.errorKind !== undefined
+              ? failureKindFromAIError(run.errorKind)
+              : "agent-error";
 
     /**
      * The `: cause` fragment a lane's failure message interpolates. Turn
@@ -5835,6 +6310,15 @@ async function runWorktreeStep(
           ? ""
           : ` Patch preserved at ${patchFile}.\n${formatWriteLaneTrailer(captured)}`;
       const finalWords = laneFinalWords();
+      // A stalled child says what it did in its own sentence, not "was
+      // cancelled": nobody cancelled it, and the park's whole value is that a
+      // person reads the counts and decides between a retry and a narrower
+      // brief. See {@link noProgressCause}.
+      const headline =
+        run.stalled === true
+          ? noProgressCause(step.id, def.name, run.activity)
+          : `step ${step.id} (@${def.name}) ${run.reason === "completed" || run.reason === "aborted" ? "was cancelled" : "failed"}` +
+            `${laneCause()}.`;
       return {
         text: "",
         usage,
@@ -5843,9 +6327,7 @@ async function runWorktreeStep(
         isError: true,
         record: captured,
         error: withTasks(
-          `step ${step.id} (@${def.name}) ${run.reason === "completed" || run.reason === "aborted" ? "was cancelled" : "failed"}` +
-            `${laneCause()}. Nothing was applied.` +
-            ` Worktree kept at ${worktree.dir}.${kept}`,
+          `${headline} Nothing was applied. Worktree kept at ${worktree.dir}.${kept}`,
         ),
         ...(finalWords === undefined ? {} : { finalText: finalWords }),
         // `signal.aborted` here reads as a cancellation the driver records as

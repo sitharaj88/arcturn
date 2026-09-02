@@ -31,7 +31,7 @@ import {
   writeOrgMemory,
 } from "./org-memory.js";
 import type { ArcturnRuntime } from "./runtime.js";
-import { type FakeLLM, fakeLLM } from "./test-helpers/fake-llm.js";
+import { type FakeLLM, fakeLLM, respondingLLM } from "./test-helpers/fake-llm.js";
 import { buildTestRuntime, makeScratch, type Scratch } from "./test-helpers/scratch.js";
 import {
   createRuntimeRunStep,
@@ -1166,6 +1166,403 @@ describe("a failed step parks the run, and the run really is recoverable", () =>
   });
 });
 
+// ======================================== a raise is an answer to ONE park
+
+describe("a turn raise answers the park it was asked at, and no other step", () => {
+  /**
+   * FAIL-FIRST, from tonight's run. The grant was keyed by ROLE, so the
+   * `raise 1000` a person answered at step 5's park silently became the
+   * ceiling of steps 6, 7 and 8 as well — none of which anybody had been asked
+   * about. Step 7 then ran 204 turns and step 8 185, each with the 90-minute
+   * step deadline as its only remaining backstop.
+   *
+   * Every claim here is an effect: the journal is built by hand and folded
+   * with the real `buildResumeState`, and the ceiling each step actually ran
+   * under is counted as requests that reached the provider.
+   */
+  itPosix(
+    "gives the asked step the rope, and leaves the next step of the same role alone",
+    async () => {
+      const scratch = await gitScratch();
+      // The session's ceiling above the grant, so the count can tell all three
+      // apart: 3 is the role file's, 8 is the grant, 12 is the session clamp.
+      await mkdir(join(scratch.cwd, ".arcturn"), { recursive: true });
+      await writeFile(
+        join(scratch.cwd, ".arcturn", "config.json"),
+        JSON.stringify({ subagentMaxTurns: 12 }),
+        "utf8",
+      );
+
+      let buildTurn = 0;
+      const llm = respondingLLM((request) => {
+        const conversation = request.messages
+          .map((message) => contentText(message.content))
+          .join("\n");
+        // Step 2 never stops reading, so its request count IS its ceiling.
+        if (conversation.includes("POLISH THIS")) {
+          return { toolCalls: [{ id: "p", name: "read", arguments: { path: "seed.txt" } }] };
+        }
+        // Step 1's retry reads five times — past the role file's own three —
+        // and only then writes. It can only finish under the raised ceiling.
+        buildTurn += 1;
+        if (buildTurn <= 5) {
+          return {
+            toolCalls: [{ id: `b${buildTurn}`, name: "read", arguments: { path: "seed.txt" } }],
+          };
+        }
+        if (buildTurn === 6) {
+          return {
+            toolCalls: [
+              { id: "w", name: "write", arguments: { path: "BUILD.md", content: "built\n" } },
+            ],
+          };
+        }
+        return { text: "built" };
+      });
+      const runtime = await runtimeWith(scratch, llm);
+
+      const builder = role("builder", ["read", "write", "edit"], { maxTurns: 3 });
+      const workflow = parseOk(
+        "---\nname: pipeline\n---\n1. @builder build it\n2. @builder POLISH THIS {{prev}}\n",
+      );
+      const runId = "run-raise-scope";
+      const journalDir = join(scratch.home, "raise-scope-journal");
+
+      // The park a first run leaves behind when step 1 runs out of its three
+      // turns, written by hand and folded by the real thing.
+      const parkedLines: JournalLine[] = [
+        {
+          kind: "run",
+          v: 1,
+          runId,
+          workflow: "pipeline",
+          source: "<test>",
+          input: "",
+          stepTimeoutMs: 600_000,
+          maxStepRetries: 0,
+          startedAt: 1,
+        },
+        {
+          kind: "stepFailAsk",
+          stepId: "1",
+          role: "builder",
+          failureKind: "turn-ceiling",
+          cause: 'step 1 (@builder) failed: role "builder" hit its 3-turn ceiling before finishing',
+          ceiling: 3,
+          attempts: 1,
+          ts: 2,
+        },
+        { kind: "runEnd", status: "paused", ts: 3 },
+      ];
+      const state = buildResumeState(parkedLines);
+      expect(state.stepFailAsk).toMatchObject({ stepId: "1", role: "builder", ceiling: 3 });
+
+      const resumed = await runWorkflow(workflow, {
+        resolveAgent: () => builder,
+        agentNames: () => ["builder"],
+        journal: createFileRunJournal(journalDir),
+        runId,
+        resumeFrom: { ...state, stepFailAnswer: { text: "raise 8" } },
+        runStep: createRuntimeRunStep(runtime, {
+          resolveAgent: () => builder,
+          writeLane: laneFor(runtime, runId),
+        }),
+      });
+
+      const polish = llm.requests.filter((request) =>
+        request.messages.some((message) => contentText(message.content).includes("POLISH THIS")),
+      );
+      const build = llm.requests.length - polish.length;
+
+      // THE GRANT REACHED THE STEP IT WAS GIVEN FOR: seven turns, which is four
+      // more than the role file allows. Its bytes are in the user's checkout.
+      expect(build).toBe(7);
+      expect(await readFile(join(scratch.cwd, "BUILD.md"), "utf8")).toBe("built\n");
+      // AND IT REACHED NOTHING ELSE. Three turns — the role file's own number.
+      // Eight would be the leak; twelve would be the session clamp.
+      expect(polish).toHaveLength(3);
+
+      // Step 2 therefore parks and asks its OWN question, naming its own
+      // ceiling, which is the gesture the park exists to require.
+      expect(resumed.status).toBe("paused");
+      expect(resumed.steps.map((step) => step.status)).toEqual(["done", "failed"]);
+      const lines = await journalOnceEnded(journalDir, "paused");
+      const asks = lines.filter(
+        (line): line is Extract<JournalLine, { kind: "stepFailAsk" }> =>
+          line.kind === "stepFailAsk",
+      );
+      expect(asks).toHaveLength(1);
+      expect(asks[0]).toMatchObject({ stepId: "2", role: "builder", ceiling: 3, attempts: 1 });
+
+      // The fold agrees, and it is keyed by STEP. The role is still on the line
+      // for the human reading it — it is simply not what the grant is keyed by.
+      expect([...(buildResumeState(lines).turnRaises ?? [])]).toEqual([["step:1", 8]]);
+      expect(
+        lines.find(
+          (line): line is Extract<JournalLine, { kind: "turnRaise" }> => line.kind === "turnRaise",
+        ),
+      ).toMatchObject({ stepId: "1", role: "builder", value: 8 });
+    },
+    60_000,
+  );
+});
+
+// =============================== the automatic fresh retry, before any park
+
+/**
+ * A shipped workflow is supposed to finish without a person in the loop, and
+ * the evidence says one more attempt is usually all it takes.
+ *
+ * FAIL-FIRST, from tonight's run: every step that stalled or went silent and
+ * was *retried* succeeded on its next attempt — step 5 stalled twice and then
+ * finished in 82 turns with 30 writes; the architect went silent twice and
+ * then wrote its ADR. The steps nobody retried burned ninety minutes each and
+ * then asked a human for the one thing the engine could have done itself. So
+ * two failure kinds — a write-lane stall and the void — now buy exactly one
+ * automatic fresh attempt (new worktree, new child, same prompt) before the
+ * run is allowed to park.
+ */
+describe("a stalled or empty step retries itself once before it troubles anyone", () => {
+  /** The three roles these workflows dispatch. */
+  const builderRole = (extra: Partial<AgentDef> = {}): AgentDef =>
+    role("builder", ["read", "write", "edit"], extra);
+
+  itPosix(
+    "recovers a write-lane stall on the automatic attempt: no park, and the run just finishes",
+    async () => {
+      const scratch = await gitScratch();
+      await mkdir(join(scratch.cwd, ".arcturn"), { recursive: true });
+      await writeFile(
+        join(scratch.cwd, ".arcturn", "config.json"),
+        JSON.stringify({ subagentMaxTurns: 200 }),
+        "utf8",
+      );
+      // Attempt 1 reads and never writes, so the stall guard stops it at 36.
+      // Attempt 2 — the automatic one — writes on its third turn, which is
+      // exactly what the two roles that succeeded on the real run did.
+      let turn = 0;
+      const llm = respondingLLM(() => {
+        turn += 1;
+        if (turn <= 36 || turn === 37 || turn === 38) {
+          return { toolCalls: [{ id: `r${turn}`, name: "read", arguments: { path: "seed.txt" } }] };
+        }
+        if (turn === 39) {
+          return {
+            toolCalls: [
+              { id: "w", name: "write", arguments: { path: "BUILD.md", content: "built\n" } },
+            ],
+          };
+        }
+        return { text: "built it" };
+      });
+      const runtime = await runtimeWith(scratch, llm);
+      const builder = builderRole({ maxTurns: 200 });
+      const workflow = parseOk("---\nname: pipeline\n---\n1. @builder build the index\n");
+      const runId = "run-stall-recovered";
+      const journalDir = join(scratch.home, "stall-recovered-journal");
+
+      const result = await runWorkflow(workflow, {
+        resolveAgent: () => builder,
+        agentNames: () => ["builder"],
+        journal: createFileRunJournal(journalDir),
+        runId,
+        runStep: createRuntimeRunStep(runtime, {
+          resolveAgent: () => builder,
+          writeLane: laneFor(runtime, runId),
+        }),
+      });
+
+      // THE WHOLE POINT: nobody was asked anything, and the file is real.
+      expect(result.status).toBe("done");
+      expect(result.steps.map((step) => step.status)).toEqual(["done"]);
+      expect(await readFile(join(scratch.cwd, "BUILD.md"), "utf8")).toBe("built\n");
+      // 36 wasted turns, then 4 useful ones (two reads, the write, the report).
+      // No backoff was slept: a stall is not a flaky socket, and there is
+      // nothing in the world to wait for.
+      expect(llm.requests).toHaveLength(40);
+
+      const lines = await journalOnceEnded(journalDir, "done");
+      expect(lines.some((line) => line.kind === "stepFailAsk")).toBe(false);
+      const terminals = lines.filter(
+        (line): line is Extract<JournalLine, { kind: "stepEnd" }> => line.kind === "stepEnd",
+      );
+      // One durable terminal, carrying the attempt count — a second terminal
+      // line would tell a resumed run this step had already finished.
+      expect(terminals).toHaveLength(1);
+      expect(terminals[0]).toMatchObject({ id: "1", status: "done", attempts: 2 });
+      // Both attempts' write-ahead intents are on disk, each under its own
+      // attempt index, so a crash in either window is still recoverable.
+      const intents = lines.filter(
+        (line): line is Extract<JournalLine, { kind: "stepIntent" }> => line.kind === "stepIntent",
+      );
+      expect(intents.map((line) => line.attempt)).toContain(1);
+    },
+    60_000,
+  );
+
+  itPosix(
+    "parks only after BOTH attempts stalled, and says what each of them did",
+    async () => {
+      const scratch = await gitScratch();
+      const llm = fakeLLM([
+        { toolCalls: [{ id: "c", name: "read", arguments: { path: "seed.txt" } }] },
+      ]);
+      const runtime = await runtimeWith(scratch, llm);
+      const builder = builderRole({ maxTurns: 200 });
+      const workflow = parseOk("---\nname: pipeline\n---\n1. @builder build the index\n");
+      const runId = "run-stall-twice";
+      const journalDir = join(scratch.home, "stall-twice-journal");
+
+      const result = await runWorkflow(workflow, {
+        resolveAgent: () => builder,
+        agentNames: () => ["builder"],
+        journal: createFileRunJournal(journalDir),
+        runId,
+        runStep: createRuntimeRunStep(runtime, {
+          resolveAgent: () => builder,
+          writeLane: laneFor(runtime, runId),
+        }),
+      });
+
+      expect(result.status).toBe("paused");
+      expect(result.steps[0]?.attempts).toBe(2);
+      // Two stalls of 36 turns, and not one turn more.
+      expect(llm.requests).toHaveLength(72);
+
+      const ask = (await journalOnceEnded(journalDir, "paused")).find(
+        (line): line is Extract<JournalLine, { kind: "stepFailAsk" }> =>
+          line.kind === "stepFailAsk",
+      );
+      expect(ask).toMatchObject({ stepId: "1", failureKind: "no-progress", attempts: 2 });
+      expect(ask?.cause).toContain("36 turns without changing a file");
+      // BOTH attempts, each with its own counts: a park that reads like a
+      // first failure would send a person straight at `retry`, which is the
+      // one thing already known not to have worked.
+      expect(ask?.cause).toContain("retried automatically once and failed both times");
+      expect(ask?.cause).toContain("attempt 1 — activity: 36 turns · read 36 · no file written");
+      expect(ask?.cause).toContain("attempt 2 — activity: 36 turns · read 36 · no file written");
+    },
+    60_000,
+  );
+
+  itPosix(
+    "recovers the VOID on the automatic attempt, so nobody is ever asked about it",
+    async () => {
+      const scratch = await gitScratch();
+      // The architect that motivated the void gate, and what it actually did
+      // on the run: nothing at all on its first attempt (a silence, and a
+      // second silence answering the nudge), and then — asked again from a
+      // clean context — the ADR it had been sent to write.
+      const llm = fakeLLM([
+        {
+          toolCalls: [
+            { id: "s1", name: "write", arguments: { path: "SURVEY.md", content: "the survey\n" } },
+          ],
+        },
+        { text: "survey done" },
+        // Attempt 1: THE VOID, and the nudge answered with more of it.
+        { text: "" },
+        { text: "" },
+        // Attempt 2, automatic: it writes.
+        {
+          toolCalls: [
+            {
+              id: "a1",
+              name: "write",
+              arguments: {
+                path: "docs/adr/rag-architecture.md",
+                content: "# RAG architecture\n\npgvector, one index.\n",
+              },
+            },
+          ],
+        },
+        { text: "ADR written to docs/adr/rag-architecture.md" },
+        { text: "built against the ADR" },
+      ]);
+      const runtime = await runtimeWith(scratch, llm);
+      const surveyor = role("surveyor", ["read", "write", "edit"]);
+      const architect = role("architect", ["read", "write", "edit"]);
+      const builder = builderRole();
+      const resolve = (name: string): AgentDef =>
+        name === "surveyor" ? surveyor : name === "architect" ? architect : builder;
+      const workflow = parseOk(
+        [
+          "---",
+          "name: pipeline",
+          "---",
+          "1. @surveyor survey the options",
+          "2. @architect write the ADR to docs/adr/rag-architecture.md {{prev}}",
+          "3. @builder build, following the ADR {{prev}}",
+          "",
+        ].join("\n"),
+      );
+      const runId = "run-void-auto";
+      const journalDir = join(scratch.home, "void-auto-journal");
+      const result = await runWorkflow(workflow, {
+        resolveAgent: resolve,
+        agentNames: () => ["surveyor", "architect", "builder"],
+        journal: createFileRunJournal(journalDir),
+        runId,
+        runStep: createRuntimeRunStep(runtime, {
+          resolveAgent: resolve,
+          writeLane: laneFor(runtime, runId),
+        }),
+      });
+
+      // No park, no question, no second run — and the nine-stage pipeline this
+      // models would have carried on unattended.
+      expect(result.status).toBe("done");
+      expect(result.steps.map((step) => step.status)).toEqual(["done", "done", "done"]);
+      expect(
+        await readFile(join(scratch.cwd, "docs", "adr", "rag-architecture.md"), "utf8"),
+      ).toContain("# RAG architecture");
+      // The whole cost of the rescue: the two turns the void burned.
+      expect(llm.requests).toHaveLength(7);
+      const lines = await journalOnceEnded(journalDir, "done");
+      expect(lines.some((line) => line.kind === "stepFailAsk")).toBe(false);
+      const architectEnd = lines.find(
+        (line): line is Extract<JournalLine, { kind: "stepEnd" }> =>
+          line.kind === "stepEnd" && line.id === "2",
+      );
+      expect(architectEnd).toMatchObject({ status: "done", attempts: 2 });
+      // And stage 3 was handed a real report, not an empty `{{prev}}`.
+      expect(JSON.stringify(llm.requests.at(-1)?.messages ?? [])).toContain(
+        "ADR written to docs/adr",
+      );
+    },
+    60_000,
+  );
+
+  it("never spends a free attempt on a failure a rerun cannot change", async () => {
+    // `patch-refused` is the control: a role whose diff escapes the checkout
+    // produces the identical diff on a rerun, so the engine refuses to buy one.
+    const calls: string[] = [];
+    const workflow = parseOk("---\nname: demo\n---\n1. @builder build it\n");
+    const result = await runWorkflow(workflow, {
+      resolveAgent: (name) => role(name, ["read", "write"]),
+      agentNames: () => ["builder"],
+      runStep: async (request) => {
+        calls.push(request.step.id);
+        return {
+          text: "",
+          usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 },
+          isError: true,
+          error: "step 1 (@builder): the captured patch targets paths outside this checkout",
+          failureKind: "patch-refused" as const,
+        };
+      },
+    });
+
+    expect(result.status).toBe("paused");
+    // ONE dispatch. The two kinds that buy a free attempt are named, and this
+    // is not one of them.
+    expect(calls).toEqual(["1"]);
+    // `attempts` is carried on a result only when there was more than one.
+    expect(result.steps[0]?.attempts).toBeUndefined();
+    expect(result.steps[0]?.error).not.toContain("retried automatically once");
+  });
+});
+
 describe("a step that produced nothing is caught where it happened, not seven stages later", () => {
   itPosix(
     "parks at the void instead of handing the next stage a file that was never written",
@@ -1185,14 +1582,19 @@ describe("a step that produced nothing is caught where it happened, not seven st
         // Stage 2, the architect: THE VOID. No tool call, no words — the model
         // simply ends its turn. This is the outcome that used to be `done`.
         //
-        // Twice, because the loop now hands a silent turn back once before
+        // Twice, because the loop hands a silent turn back once before
         // accepting it (see `SILENT_TURN_NUDGE`). A model that recovers on the
-        // nudge never reaches this machinery at all; what parks a run is a
+        // nudge never reaches this machinery at all; what fails an ATTEMPT is a
         // model that answers the nudge with a second silence.
         { text: "" },
         { text: "" },
-        // Everything below belongs to the RETRY. Stage 3 must never reach it on
-        // run one — the request count below is what proves it did not.
+        // …and twice again, because the engine now spends one automatic FRESH
+        // attempt on a void before it will trouble a person. What parks a run
+        // is a step that produced nothing on both attempts, which is this.
+        { text: "" },
+        { text: "" },
+        // Everything below belongs to the HUMAN'S retry. Stage 3 must never
+        // reach it on run one — the request count below proves it did not.
         {
           toolCalls: [
             {
@@ -1254,10 +1656,11 @@ describe("a step that produced nothing is caught where it happened, not seven st
       expect(await exists(join(scratch.cwd, "docs", "adr", "rag-architecture.md"))).toBe(false);
       // Stage 1's real work is in the real checkout and is not being re-bought…
       expect(await readFile(join(scratch.cwd, "SURVEY.md"), "utf8")).toBe("the survey\n");
-      // …and stage 3's model was never asked a single question. Four requests:
-      // the surveyor's two turns, then the architect's void and the one nudged
-      // retry the loop spends before giving up on it.
-      expect(llm.requests).toHaveLength(4);
+      // …and stage 3's model was never asked a single question. Six requests:
+      // the surveyor's two turns, then the architect's void and its nudged
+      // second silence — twice over, because the engine buys this step one
+      // fresh attempt of its own before it will park for a human.
+      expect(llm.requests).toHaveLength(6);
 
       const lines = await journalOnceEnded(journalDir);
       const terminals = lines.filter(
@@ -1272,8 +1675,11 @@ describe("a step that produced nothing is caught where it happened, not seven st
         (line): line is Extract<JournalLine, { kind: "stepFailAsk" }> =>
           line.kind === "stepFailAsk",
       );
-      expect(ask).toMatchObject({ stepId: "2", role: "architect" });
+      expect(ask).toMatchObject({ stepId: "2", role: "architect", attempts: 2 });
       expect(ask?.cause).toContain("produced nothing");
+      // The receipt for the attempt the engine already spent on the human's
+      // behalf: the park must not read like a first failure.
+      expect(ask?.cause).toContain("retried automatically once and failed both times");
       // THE DIAGNOSIS RIDES THE PARK: the park line says what the model
       // emitted on the turn it went quiet on, so nobody has to open the
       // session JSONL to learn it. A scripted `{ text: "" }` is a text block
@@ -1293,8 +1699,8 @@ describe("a step that produced nothing is caught where it happened, not seven st
       expect(state.endedStatus).toBe("paused");
       expect([...state.completed.keys()]).toEqual(["1"]);
 
-      // ---- run two: `retry`. The architect gets its second attempt and takes
-      // it — which is exactly why this parks rather than dies.
+      // ---- run two: `retry`. The architect gets a third go and takes it —
+      // which is exactly why this parks rather than dies.
       const resumed = await drive({ ...state, stepFailAnswer: { text: "retry" } });
 
       expect(resumed.status).toBe("done");
@@ -1303,9 +1709,9 @@ describe("a step that produced nothing is caught where it happened, not seven st
       expect(
         await readFile(join(scratch.cwd, "docs", "adr", "rag-architecture.md"), "utf8"),
       ).toContain("# RAG architecture");
-      // Only the void was re-bought: 4 from run one, plus the architect's two
+      // Only the void was re-bought: 6 from run one, plus the architect's two
       // turns and the builder's one. Stage 1 was replayed from the journal.
-      expect(llm.requests).toHaveLength(7);
+      expect(llm.requests).toHaveLength(9);
       // And the handoff the old run never had: the builder's prompt carries the
       // architect's report, not an empty `{{prev}}`.
       const built = llm.requests.at(-1);
@@ -1330,8 +1736,12 @@ describe("a step that produced nothing is caught where it happened, not seven st
           toolCalls: [{ id: "r1", name: "read", arguments: { path: "seed.txt" } }],
         },
         { text: "" },
+        // The engine spends one automatic fresh attempt before parking, and
+        // this model does the identical thing on it. `fakeLLM` repeats its last
+        // entry, so every turn from here is another silence — the second
+        // attempt's preamble is simply skipped, which changes nothing: the
+        // verdict is the same, twice.
         { text: "" },
-        { text: "STAGE TWO MUST NEVER RUN" },
       ]);
       const runtime = await runtimeWith(scratch, llm);
       const architect = role("architect", ["read", "write", "edit"]);
@@ -1362,8 +1772,10 @@ describe("a step that produced nothing is caught where it happened, not seven st
 
       expect(result.status).toBe("paused");
       expect(result.steps.map((step) => step.status)).toEqual(["failed", "skipped"]);
-      // The preamble turn, the silence, the nudged silence — and nothing for stage 2.
-      expect(llm.requests).toHaveLength(3);
+      // Attempt 1: the preamble turn, the silence, the nudged silence. Attempt
+      // 2 (automatic): a silence and its nudged silence. And nothing at all
+      // for stage 2, which is the claim that matters.
+      expect(llm.requests).toHaveLength(5);
       const lines = await journalOnceEnded(journalDir);
       const ask = lines.find(
         (line): line is Extract<JournalLine, { kind: "stepFailAsk" }> =>
