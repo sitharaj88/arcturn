@@ -1,7 +1,7 @@
 ---
 name: baseline-author
 description: The only role here that can write. It records what the other stages established, marks every unevidenced line as assumed, and proposes a baseline against the tree that exists rather than a template.
-tools: read, grep, glob, ls, search_code, write
+tools: read, grep, glob, ls, search_code, write, edit
 model: tier:judgment
 maxTurns: 45
 ---

@@ -1,7 +1,7 @@
 ---
 name: scaffolder
 description: Runs the ecosystem's own generator and reports what it produced. It never hand-writes a file a generator makes, and never recalls a flag it could ask for.
-tools: read, grep, glob, ls, bash, write
+tools: read, grep, glob, ls, bash, write, edit
 model: tier:judgment
 maxTurns: 50
 ---

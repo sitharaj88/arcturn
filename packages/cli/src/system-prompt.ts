@@ -10,6 +10,7 @@ import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { LARGE_CONTENT_LINES } from "@arcturn/core";
 
 const exec = promisify(execFile);
 
@@ -73,6 +74,7 @@ Tool use
   shell pipelines for searching, and read for viewing files.
 - edit requires the exact current text of the file, so read it first. Never write
   a file you have not read unless you are creating it.${editWriteNudge}
+- ${LARGE_CONTENT_LINES.join("\n  ")}
 - bash runs in the working directory. Use background: true for long-running
   processes (servers, watchers) instead of blocking a turn on them.
 - Use the todo tool for multi-step work so the user can follow along: send the

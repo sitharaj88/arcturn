@@ -107,6 +107,27 @@ function parseShipped(shipped: ShippedWorkflow): Workflow {
   return parsed;
 }
 
+/**
+ * Tools that can fill in part of an existing file without re-emitting all of
+ * it. `multiedit` is the same capability in bulk.
+ */
+const PARTIAL_WRITE_TOOLS: ReadonlySet<string> = new Set(["edit", "multiedit"]);
+
+/**
+ * True when a role can create a file but has no way to fill one in stages.
+ *
+ * The failure this names is structural, not stylistic: a document larger than
+ * a single tool-call argument comfortably carries has to be built up across
+ * calls, and a role holding `write` alone has exactly one call available. It
+ * either emits the whole thing or — as four real runs did — emits nothing.
+ *
+ * @param def - The role, as the loader read it.
+ */
+function cannotWriteInParts(def: AgentDef): boolean {
+  if (def.tools === undefined || !def.tools.includes("write")) return false;
+  return !def.tools.some((name) => PARTIAL_WRITE_TOOLS.has(name));
+}
+
 /** A kit's roles, loaded by the real loader, keyed by name. */
 async function kitRoles(kit: string): Promise<Map<string, AgentDef>> {
   const warnings: string[] = [];
@@ -192,6 +213,51 @@ describe("every shipped kit, as the engine would read it", () => {
         expect(def.name, `${file} is named after its file`).toBe(basename(def.source, ".md"));
       }
     }
+  });
+
+  it("gives every role that can write a way to write in parts", async () => {
+    // A role holding `write` and nothing else can only ever replace a file
+    // whole, so the one shape that survives a large document — land the
+    // headings, then fill one section per `edit` — is unavailable to it. That
+    // is not a prompt problem a kit author can fix in prose: four real runs on
+    // two models ended with a 30 KB document reasoned out in full and never
+    // emitted, because the only call on offer had to carry all of it. The
+    // engine states the rule in every lane contract; the tool list has to make
+    // it followable.
+    const offenders: string[] = [];
+    for (const kit of KITS_WITH_AGENTS) {
+      for (const def of (await kitRoles(kit)).values()) {
+        if (!cannotWriteInParts(def)) continue;
+        offenders.push(
+          `${kit}/agents/${basename(def.source)} — tools: ${def.tools?.join(", ")} ` +
+            "(holds write, no edit)",
+        );
+      }
+    }
+    expect(offenders, offenders.join("\n")).toEqual([]);
+  });
+
+  it("would catch a write-only role, so the check above is not vacuous", () => {
+    // In memory, not by breaking a shipped kit: the assertion above is only
+    // worth anything if it can still go red once every kit is conformant.
+    const role = (tools: string[] | undefined): AgentDef => ({
+      name: "doc-author",
+      description: "Writes a long design document.",
+      systemPrompt: "Write the ADR.",
+      ...(tools === undefined ? {} : { tools }),
+      source: "/synthetic/agents/doc-author.md",
+    });
+
+    expect(cannotWriteInParts(role(["read", "grep", "write"]))).toBe(true);
+    expect(cannotWriteInParts(role(["read", "grep", "write", "edit"]))).toBe(false);
+    // `multiedit` is the same capability in bulk, and satisfies the rule too.
+    expect(cannotWriteInParts(role(["write", "multiedit"]))).toBe(false);
+    // A role that cannot write at all is not implicated — there is no
+    // oversized argument for it to fail to emit.
+    expect(cannotWriteInParts(role(["read", "grep"]))).toBe(false);
+    expect(cannotWriteInParts(role(["read", "bash"]))).toBe(false);
+    // An undeclared tool list is refused at dispatch by a different check.
+    expect(cannotWriteInParts(role(undefined))).toBe(false);
   });
 
   it("declares only finite, positive budgets and deadlines", () => {

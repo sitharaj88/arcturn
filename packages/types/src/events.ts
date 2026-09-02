@@ -40,7 +40,23 @@ export type AgentEvent =
   | { type: "turnEnd"; turnIndex: number; usage: Usage }
   | { type: "runEnd"; reason: "completed" | "aborted" | "error"; errorMessage?: string }
   /** Non-fatal diagnostics surfaced to the user. */
-  | { type: "notice"; level: "info" | "warn" | "error"; text: string };
+  | { type: "notice"; level: "info" | "warn" | "error"; text: string }
+  /**
+   * A per-turn progress check judged the run to be spending its budget on the
+   * wrong thing — a write-lane agent forty turns in with nothing written, say
+   * — and said so to the model. `text` is the message it was sent, verbatim,
+   * and each distinct wording is sent at most once per run. Structured so a
+   * host can report "never started writing" instead of "hit its turn ceiling".
+   */
+  | { type: "progressWarning"; turnIndex: number; text: string }
+  /**
+   * The model ended a turn with nothing a caller can act on — no text and no
+   * tool call. `nudged` is true when the loop handed the turn back once to
+   * ask again, false when this was the second silence in a row and the run
+   * accepted it. Structured so a host can count them: which models go quiet,
+   * how often, and whether the nudge recovered it.
+   */
+  | { type: "silentTurn"; turnIndex: number; nudged: boolean; model: string };
 
 /**
  * The discriminant of {@link AgentEvent} — every event type name as a

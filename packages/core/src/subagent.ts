@@ -9,6 +9,7 @@
 
 import type { ToolResult } from "@arcturn/types";
 import type { Agent } from "./agent.js";
+import { LARGE_CONTENT_RULE } from "./large-content.js";
 import type { AgentStateController, BindableTool } from "./state.js";
 import { errorText, text } from "./util/content.js";
 import { createId } from "./util/ids.js";
@@ -40,6 +41,21 @@ const DEFAULT_DESCRIPTION =
   "Use it for wide searches or independent chunks of work whose intermediate " +
   "output you do not need to see. The child cannot ask you questions, so state " +
   "the task and the expected result in full.";
+
+/**
+ * The brief a child agent receives, ahead of its task.
+ *
+ * A delegated child is exactly where the large-content failure bites hardest:
+ * it is usually the one asked to *produce* a document, it reasons alone, and a
+ * turn it ends without emitting the call is invisible to the parent until an
+ * empty result comes back. So the rule travels with the task rather than
+ * depending on whichever system prompt the host happened to give the child.
+ *
+ * @param task - The caller's task, verbatim.
+ */
+export function subagentBrief(task: string): string {
+  return `${task}\n\n${LARGE_CONTENT_RULE}`;
+}
 
 /**
  * Create the sub-agent tool.
@@ -138,7 +154,7 @@ export function createSubagentTool(options: SubagentToolOptions): BindableTool {
       if (ctx.signal.aborted) child.abort();
 
       try {
-        await child.prompt(task);
+        await child.prompt(subagentBrief(task));
       } catch (error) {
         failure = errorText(error);
       } finally {

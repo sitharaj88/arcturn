@@ -75,6 +75,32 @@ is therefore looking at what stages 1–3 actually produced, not at untouched `H
 A role that declares no `tools:` at all is refused at dispatch rather than defaulted to
 anything.
 
+## Writing large files
+
+**No tool-call argument should have to carry more than about 6,000 characters — roughly
+100 lines.** To produce a bigger file, a role makes one `write` call carrying only the
+title and section headings, then fills one section per `edit` call, never holding more
+than one section in a call; when the last one is in, it reads the file back once and
+reports the path and the sections it filled.
+
+This is not style advice. Four runs in one week ended with a write-lane role reasoning for
+35–70K characters about a ~30 KB document, closing its thinking with "Write the file now.",
+and then ending the turn with no text and no tool call at all — and doing it again when
+nudged. The same model on a read-lane role emitted 23K characters of plain *text* after 38K
+of reasoning without trouble. What does not survive is the single oversized argument. Split
+into 13 calls of 1.5–5.5 KB, the same step passed first time.
+
+You do not have to write any of that into your role file. The engine states the rule in the
+CLI system prompt, in the brief every `subagent` child receives, in every worktree lane
+contract, and in the `write` and `edit` tool descriptions themselves. What a role file
+*does* owe it is the tool to obey it with: **a role that declares `write` must also declare
+`edit`**, or it has no way to fill a file in stages, and the kit conformance suite fails the
+kit if it does not.
+
+```markdown
+tools: read, grep, glob, ls, search_code, write, edit   # write creates it, edit fills it
+```
+
 ## Asking a human, without failing the run
 
 Some questions a model should not answer on its own — single-tenant or multi-tenant, which

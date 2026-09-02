@@ -1,6 +1,7 @@
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { LARGE_CONTENT_CHARS, LARGE_CONTENT_LINES } from "@arcturn/core";
 import { describe, expect, it } from "vitest";
 import {
   buildSystemPrompt,
@@ -40,6 +41,20 @@ describe("buildSystemPrompt", () => {
     expect(editOnly).not.toContain("use edit's targeted replacement");
     expect(writeOnly).not.toContain("use edit's targeted replacement");
     expect(neither).not.toContain("use edit's targeted replacement");
+  });
+
+  it("carries the engine's large-content rule verbatim, for every session", () => {
+    // Not a kit's problem and not this prompt's own wording: one rule, defined
+    // in `@arcturn/core`, spliced here as-is. A model that meets it in the
+    // system prompt, in a lane contract and in the write tool must meet the
+    // same sentences each time.
+    const prompt = buildSystemPrompt(base);
+    for (const line of LARGE_CONTENT_LINES) expect(prompt).toContain(line);
+    expect(prompt).toContain(String(LARGE_CONTENT_CHARS.toLocaleString("en-US")));
+    // It sits with the other tool-use guidance, not in some section of its own.
+    expect(prompt.indexOf(LARGE_CONTENT_LINES[0] ?? "")).toBeGreaterThan(
+      prompt.indexOf("Tool use"),
+    );
   });
 
   it("omits optional sections when they are absent", () => {

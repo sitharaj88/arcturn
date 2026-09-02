@@ -12,7 +12,7 @@
  * A turn like that now gets handed straight back, once.
  */
 
-import type { AssistantMessage, StreamEvent, Tool } from "@arcturn/types";
+import type { AgentEvent, AssistantMessage, StreamEvent, Tool } from "@arcturn/types";
 import { describe, expect, it } from "vitest";
 import { Agent } from "./agent.js";
 import { producedNothingVisible, SILENT_TURN_NUDGE } from "./loop.js";
@@ -200,9 +200,28 @@ describe("a turn that delivered nothing", () => {
     expect(SILENT_TURN_NUDGE).toContain("If the work is genuinely finished");
   });
 
+  it("names the shape a silent turn usually died on: a whole file in one call", () => {
+    // The commonest thing to go quiet on is a thirty-kilobyte document the
+    // model meant to hand to a single `write`. Handing the turn back without
+    // saying that gets the same silence again — which is exactly what four
+    // real runs did. Telling it *how* to deliver is not telling it *what*.
+    expect(SILENT_TURN_NUDGE).toContain("fill one section per edit");
+  });
+
   it("gives up after a second silence rather than spending the whole budget", async () => {
     const agent = agentWith([silentTurn("thinking"), silentTurn("still thinking")]);
+    const silences: Extract<AgentEvent, { type: "silentTurn" }>[] = [];
+    agent.subscribe((event) => {
+      if (event.type === "silentTurn") silences.push(event);
+    });
     await agent.prompt("write the ADR");
+    // Both silences are reported, and the report says which one was nudged:
+    // that is the count a host needs to say "this model goes quiet, and the
+    // nudge recovers it N% of the time".
+    expect(silences).toEqual([
+      { type: "silentTurn", turnIndex: 0, nudged: true, model: TEST_MODEL.id },
+      { type: "silentTurn", turnIndex: 1, nudged: false, model: TEST_MODEL.id },
+    ]);
 
     // One nudge, one retry, then the loop accepts the answer it is given.
     expect(nudges(agent)).toBe(1);

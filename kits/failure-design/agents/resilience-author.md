@@ -1,7 +1,7 @@
 ---
 name: resilience-author
 description: The only role here that can write. It records the failure map and the decisions taken, and cannot mark a retry safe unless the oracle proved the operation idempotent.
-tools: read, grep, glob, ls, search_code, write
+tools: read, grep, glob, ls, search_code, write, edit
 model: tier:judgment
 maxTurns: 45
 ---

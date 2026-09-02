@@ -2,8 +2,9 @@ import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createEditTool } from "./edit.js";
 import { createFakeContext, denyAllPermissions } from "./test-utils.js";
-import { createWriteTool } from "./write.js";
+import { createWriteTool, LARGE_CONTENT_CHARS } from "./write.js";
 
 describe("write tool", () => {
   let dir: string;
@@ -121,5 +122,48 @@ describe("write tool — bytes on disk", () => {
 
     expect(result.isError).toBe(true);
     expect(await readFile(blocker, "utf8")).toBe("important\n");
+  });
+});
+
+/**
+ * The rule a model reads before it fills in `content`.
+ *
+ * Four times in one week a write-lane role reasoned for 35–70K characters,
+ * decided to write a ~30 KB document, and then ended its turn without emitting
+ * the `write` call at all. Nothing here refuses a large `content` — an 8 KB
+ * source file in one call is legitimate — but the tool's own description is
+ * the last place the model looks before making the call that fails, so the
+ * way out is written there.
+ */
+describe("write tool — the large-content rule in its own definition", () => {
+  it("names the threshold and the way out, in the tool description", () => {
+    const { description } = createWriteTool().definition;
+    expect(description).toContain(LARGE_CONTENT_CHARS.toLocaleString("en-US"));
+    expect(description).toContain("in parts");
+    expect(description).toContain("`edit`");
+  });
+
+  it("says it again on `content`, which is the argument that overflows", () => {
+    const properties = createWriteTool().definition.parameters.properties as Record<
+      string,
+      { description?: string }
+    >;
+    expect(properties.content?.description).toContain(LARGE_CONTENT_CHARS.toLocaleString("en-US"));
+    expect(properties.content?.description).toContain("headings or skeleton");
+  });
+
+  it("points edit at the other half of the same rule", () => {
+    // A model that read only `edit` still has to learn that filling a large
+    // file one section at a time is what this tool is for.
+    const { description } = createEditTool().definition;
+    expect(description).toContain(LARGE_CONTENT_CHARS.toLocaleString("en-US"));
+    expect(description).toContain("one section per call");
+  });
+
+  it("quotes the same number `@arcturn/core` prompts with", () => {
+    // This package depends on `@arcturn/types` alone, so the constant is
+    // duplicated rather than imported. If the two ever disagree the prompts
+    // and the tool schema tell the model different things.
+    expect(LARGE_CONTENT_CHARS).toBe(6_000);
   });
 });

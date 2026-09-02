@@ -20,3 +20,6 @@ runs/
 # isolated profiles, generated fixture workspaces, and the compiled test files.
 .vscode-test/
 editors/vscode/out/
+
+# Agent worktrees the harness parks inside the checkout
+.claude/worktrees/

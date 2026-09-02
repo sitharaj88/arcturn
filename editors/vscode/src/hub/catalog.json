@@ -107,7 +107,7 @@
         {
           "name": "design-author",
           "lane": "write",
-          "tools": ["read", "grep", "glob", "ls", "search_code", "write"]
+          "tools": ["read", "grep", "glob", "ls", "search_code", "write", "edit"]
         },
         {
           "name": "design-lead",
@@ -259,7 +259,7 @@
         {
           "name": "resilience-author",
           "lane": "write",
-          "tools": ["read", "grep", "glob", "ls", "search_code", "write"]
+          "tools": ["read", "grep", "glob", "ls", "search_code", "write", "edit"]
         }
       ],
       "workflows": [
@@ -332,7 +332,7 @@
         {
           "name": "baseline-author",
           "lane": "write",
-          "tools": ["read", "grep", "glob", "ls", "search_code", "write"]
+          "tools": ["read", "grep", "glob", "ls", "search_code", "write", "edit"]
         },
         {
           "name": "stack-surveyor",
@@ -447,7 +447,7 @@
         {
           "name": "scaffolder",
           "lane": "write",
-          "tools": ["read", "grep", "glob", "ls", "bash", "write"]
+          "tools": ["read", "grep", "glob", "ls", "bash", "write", "edit"]
         },
         {
           "name": "stack-advisor",

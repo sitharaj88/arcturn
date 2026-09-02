@@ -60,7 +60,12 @@ export {
   DeferredToolset,
 } from "./deferred-tools.js";
 export type { AgentHooks, BeforeToolCallResult, ToolCallInfo } from "./hooks.js";
-export type { LoopResult, LoopRuntime } from "./loop.js";
+export {
+  LARGE_CONTENT_CHARS,
+  LARGE_CONTENT_LINES,
+  LARGE_CONTENT_RULE,
+} from "./large-content.js";
+export type { LoopResult, LoopRuntime, TurnProgress } from "./loop.js";
 export {
   isTurnCeilingError,
   producedNothingVisible,
@@ -121,7 +126,7 @@ export { isBindableTool } from "./state.js";
 export type { PlanToolOptions, TodoToolOptions } from "./state-tools.js";
 export { createPlanTool, createTodoTool, isStateToolName } from "./state-tools.js";
 export type { SubagentToolOptions } from "./subagent.js";
-export { createSubagentTool } from "./subagent.js";
+export { createSubagentTool, subagentBrief } from "./subagent.js";
 export { resolveSubjectPath } from "./subject-path.js";
 export type {
   AgentMetric,

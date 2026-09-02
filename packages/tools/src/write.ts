@@ -12,6 +12,22 @@ export interface WriteToolDetails {
   bytes: number;
 }
 
+/**
+ * Guidance threshold for one tool-call argument, in characters.
+ *
+ * Duplicated from `LARGE_CONTENT_CHARS` in `@arcturn/core`
+ * (`packages/core/src/large-content.ts`), which is the source of truth: this
+ * package deliberately depends on nothing but `@arcturn/types`, so the tools
+ * stay usable outside the runtime. Keep the two in step — `write.test.ts`
+ * quotes this one, and the prompts quote the other.
+ *
+ * Advisory only. Nothing here refuses a larger `content`: an 8 KB source file
+ * written in one call is legitimate, and a hard limit would break it. What is
+ * not legitimate is a thirty-kilobyte document after fifty thousand
+ * characters of reasoning, which models have repeatedly failed to emit at all.
+ */
+export const LARGE_CONTENT_CHARS = 6_000;
+
 /** Create the `write` tool. Always requests permission before touching disk. */
 export function createWriteTool(): Tool {
   return {
@@ -19,7 +35,10 @@ export function createWriteTool(): Tool {
       name: "write",
       description:
         "Write content to a file, creating it (and any missing parent directories) if it does not " +
-        "exist, or overwriting it if it does. Requires user permission before writing.",
+        "exist, or overwriting it if it does. Requires user permission before writing. " +
+        `Content over about ${LARGE_CONTENT_CHARS.toLocaleString("en-US")} characters should be ` +
+        "written in parts: one call carrying the file's headings or skeleton, then one `edit` " +
+        "call per section.",
       parameters: {
         type: "object",
         properties: {
@@ -30,7 +49,11 @@ export function createWriteTool(): Tool {
           },
           content: {
             type: "string",
-            description: "The full text content to write to the file.",
+            description:
+              "The full text content to write to the file. Keep it under about " +
+              `${LARGE_CONTENT_CHARS.toLocaleString("en-US")} characters — roughly 100 lines. ` +
+              "For a larger file, put only its headings or skeleton here and fill each section " +
+              "with a separate `edit` call.",
           },
         },
         required: ["path", "content"],

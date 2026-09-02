@@ -502,6 +502,13 @@ export function reduceChat(state: ChatState, event: AgentEvent): ChatState {
     }
     case "notice":
       return notice(state, event.level, event.text);
+    // Both are structured twins of a notice the engine emits alongside them —
+    // the silent-turn nudge and the write-lane progress check each arrive as
+    // a `notice` too — so the transcript already shows the words. These
+    // exist for counting (the insights ledger), not for rendering.
+    case "silentTurn":
+    case "progressWarning":
+      return state;
   }
 }
 

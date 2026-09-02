@@ -79,7 +79,7 @@ export {
   parseDuckDuckGoHtml,
 } from "./websearch.js";
 export type { WriteToolDetails } from "./write.js";
-export { createWriteTool } from "./write.js";
+export { createWriteTool, LARGE_CONTENT_CHARS } from "./write.js";
 
 export interface CreateDefaultToolsOptions {
   /**

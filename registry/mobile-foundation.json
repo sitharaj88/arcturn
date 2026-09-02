@@ -17,7 +17,7 @@
       {
         "name": "baseline-author",
         "lane": "write",
-        "tools": ["read", "grep", "glob", "ls", "search_code", "write"]
+        "tools": ["read", "grep", "glob", "ls", "search_code", "write", "edit"]
       },
       {
         "name": "stack-surveyor",

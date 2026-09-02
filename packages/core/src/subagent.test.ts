@@ -1,6 +1,7 @@
 import type { AgentEvent, Tool, ToolResult } from "@arcturn/types";
 import { describe, expect, it, vi } from "vitest";
 import { Agent } from "./agent.js";
+import { LARGE_CONTENT_RULE } from "./large-content.js";
 import { createSubagentTool } from "./subagent.js";
 import { createScriptedLLM, TEST_MODEL, textTurn, toolCallTurn } from "./test-helpers/fake-llm.js";
 import { contentText, text } from "./util/content.js";
@@ -256,6 +257,35 @@ describe("createSubagentTool", () => {
     if (toolEnd?.type !== "toolEnd") throw new Error("missing toolEnd");
     expect(toolEnd.result.isError).toBe(true);
     expect(contentText(toolEnd.result.content)).toContain("no budget left");
+  });
+
+  it("briefs the child on writing large files, without disturbing its task", async () => {
+    // A delegated child is where this bites hardest: it is usually the one
+    // asked to *produce* the document, it reasons alone, and a turn it ends
+    // without emitting the call reaches the parent as an empty result with no
+    // explanation. So the rule travels with the task rather than depending on
+    // whatever system prompt the host happened to hand the child.
+    const child = childAgent([textTurn("done")]);
+    const parent = new Agent({
+      llm: createScriptedLLM([
+        toolCallTurn([{ id: "c1", name: "subagent", arguments: { task: "write the ADR" } }]),
+        textTurn("ok"),
+      ]),
+      model: TEST_MODEL,
+      systemPrompt: "parent",
+      tools: [createSubagentTool({ factory: () => child })],
+      cwd: "/work",
+      permissions: { mode: "yolo" },
+    });
+
+    await parent.prompt("go");
+
+    const brief = contentText(child.messages[0]?.content ?? []);
+    expect(brief).toContain("write the ADR");
+    expect(brief).toContain(LARGE_CONTENT_RULE);
+    // The task comes first and is untouched — the rule is an appendix to it,
+    // never a preamble the child has to read past to find its instructions.
+    expect(brief.startsWith("write the ADR")).toBe(true);
   });
 
   it("rejects an empty task through schema validation", async () => {

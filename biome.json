@@ -14,7 +14,9 @@
       "!web/out",
       "!web/public",
       "!design",
-      "!kits/*/validation/fixtures"
+      "!kits/*/validation/fixtures",
+      "!**/.claude/worktrees",
+      "!.claude/worktrees"
     ]
   },
   "formatter": {

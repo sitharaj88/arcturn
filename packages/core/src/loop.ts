@@ -90,6 +90,24 @@ export function turnWarningThreshold(maxTurns: number): number {
   return threshold < maxTurns ? threshold : 0;
 }
 
+/**
+ * What a run has spent so far, handed to {@link LoopRuntime.progressCheck} at
+ * the top of every turn after the first.
+ *
+ * Turn count alone cannot tell "working" from "circling": a write-lane builder
+ * that has made 77 `bash` calls, 17 `read` calls and 0 `write` calls is about
+ * to fail, and it looks exactly like a busy one until the ceiling. The tool
+ * histogram is what makes that visible while there is still budget to act on.
+ */
+export interface TurnProgress {
+  /** The turn about to start, zero-based. Never `0` — the hook runs from turn 1. */
+  readonly turnIndex: number;
+  /** The run's turn ceiling. */
+  readonly maxTurns: number;
+  /** Tool calls dispatched so far in this run, by tool name. Attempts, not successes. */
+  readonly toolCalls: Readonly<Record<string, number>>;
+}
+
 /** Everything {@link runLoop} needs from the owning {@link Agent}. */
 export interface LoopRuntime {
   llm: LLMClient;
@@ -114,6 +132,17 @@ export interface LoopRuntime {
   takeSteering(): UserMessage[];
   /** Runs before every LLM call; the agent uses it to auto-compact. */
   beforeTurn(): Promise<void>;
+  /**
+   * Judge how the run is going, at the top of every turn after the first.
+   *
+   * A returned non-empty string is appended as a user message — riding the
+   * next request without spending a turn, exactly like the turn-budget
+   * warning — and surfaced as a `warn` notice plus a `progressWarning` event.
+   * The same wording is sent at most once per run, so a hook may return it
+   * unconditionally from the moment it first applies. Omitted means no check
+   * and no behaviour change.
+   */
+  progressCheck?: (progress: TurnProgress) => string | undefined;
   /** Shapes the outgoing message list (context editing). Must not mutate history. */
   prepareMessages(messages: readonly Message[]): Message[];
 }
@@ -444,12 +473,27 @@ async function executeToolCall(rt: LoopRuntime, call: ToolCallContent): Promise<
   }
 }
 
+/**
+ * Run one turn's tool calls.
+ *
+ * @param countCall - Told the name of every call actually dispatched, before
+ *   it runs. Attempts, not successes: a call refused by a hook or by
+ *   permissions still says what the model was trying to do, which is the whole
+ *   point of {@link TurnProgress.toolCalls}. A call the abort path answers
+ *   without running is not dispatched and is not counted.
+ */
 async function runToolBatch(
   rt: LoopRuntime,
   calls: readonly ToolCallContent[],
+  countCall: (name: string) => void,
 ): Promise<ToolResultMessage[]> {
   if (rt.parallelTools) {
-    return Promise.all(calls.map((call) => executeToolCall(rt, call)));
+    return Promise.all(
+      calls.map((call) => {
+        countCall(call.name);
+        return executeToolCall(rt, call);
+      }),
+    );
   }
   const results: ToolResultMessage[] = [];
   for (const call of calls) {
@@ -457,6 +501,7 @@ async function runToolBatch(
       results.push(errorToolResult(call.id, call.name, "Aborted by the user.", { aborted: true }));
       continue;
     }
+    countCall(call.name);
     results.push(await executeToolCall(rt, call));
   }
   return results;
@@ -483,11 +528,18 @@ async function settleDanglingCalls(
  * the fact ("nothing was recorded") and hands the turn back, because the thing
  * that failed was delivery, not reasoning: the model has already decided what
  * to do and only needs to do it.
+ *
+ * The one exception is *shape*: the commonest thing a turn goes silent on is a
+ * large document it meant to hand to a single call, so the nudge names the way
+ * out (see `large-content.ts`). That is not content — it is how to deliver
+ * whatever content the model already chose.
  */
 export const SILENT_TURN_NUDGE =
   "Your last turn ended without producing anything: no text and no tool call. " +
   "Nothing was recorded, so from the outside it looks like the step never ran. " +
   "Act on what you had settled on — make the tool call, or write the answer. " +
+  "If what you settled on is a large file, do not emit it in one call — create it " +
+  "with its headings first, then fill one section per edit. " +
   "If the work is genuinely finished, say so in one line.";
 
 /**
@@ -524,6 +576,16 @@ export async function runLoop(rt: LoopRuntime): Promise<LoopResult> {
   // spend turns to hear the same nothing.
   let justNudged = false;
   const warnAt = turnWarningThreshold(rt.maxTurns);
+  // What the run has actually done, by tool name — the evidence
+  // `progressCheck` judges on. Per run, not per turn.
+  const toolCalls: Record<string, number> = {};
+  const countCall = (name: string): void => {
+    toolCalls[name] = (toolCalls[name] ?? 0) + 1;
+  };
+  // Progress warnings already sent, verbatim. A check that fires on a standing
+  // condition ("still no writes") would otherwise repeat every turn and teach
+  // the model to skip it, the same reason the ceiling warning fires once.
+  const sentProgressWarnings = new Set<string>();
 
   while (true) {
     if (rt.signal.aborted) return { reason: "aborted" };
@@ -556,6 +618,27 @@ export async function runLoop(rt: LoopRuntime): Promise<LoopResult> {
         "its work uncommitted.";
       await rt.appendMessage(userMessage(warning));
       rt.emit({ type: "notice", level: "warn", text: warning });
+    }
+
+    // The ceiling warning above says how much rope is left; this says whether
+    // the run is using it on the right thing. A write-lane builder spent all
+    // 80 of its turns reading — 77 `bash` calls, 17 `read` calls, zero
+    // writes, 23 minutes, 330K tokens — and the only diagnosis anyone got was
+    // "hit its 80-turn ceiling". The host knows what the step was *for*, so it
+    // supplies the judgement; the loop supplies the evidence and the delivery.
+    // Skipped on turn 0, where there is no history to judge.
+    if (turnIndex >= 1 && rt.progressCheck !== undefined) {
+      const notice = rt.progressCheck({
+        turnIndex,
+        maxTurns: rt.maxTurns,
+        toolCalls: { ...toolCalls },
+      });
+      if (notice !== undefined && notice.trim().length > 0 && !sentProgressWarnings.has(notice)) {
+        sentProgressWarnings.add(notice);
+        await rt.appendMessage(userMessage(notice));
+        rt.emit({ type: "notice", level: "warn", text: notice });
+        rt.emit({ type: "progressWarning", turnIndex, text: notice });
+      }
     }
 
     await rt.beforeTurn();
@@ -622,7 +705,7 @@ export async function runLoop(rt: LoopRuntime): Promise<LoopResult> {
     }
 
     if (calls.length > 0) {
-      const results = await runToolBatch(rt, calls);
+      const results = await runToolBatch(rt, calls, countCall);
       for (const result of results) await rt.appendMessage(result);
 
       const steering = rt.takeSteering();
@@ -657,6 +740,12 @@ export async function runLoop(rt: LoopRuntime): Promise<LoopResult> {
     // `turnIndex + 1 < rt.maxTurns`: a nudge spends a turn, and spending the
     // last one on it would end the run as "turn ceiling" — steering the
     // operator to raise `maxTurns` against a model that emits nothing.
+    if (producedNothingVisible(assistant)) {
+      // Counted whether or not it is nudged: the second silence in a row is
+      // the one that ends a run empty-handed, and a host wants to know both.
+      const nudged = !justNudged && turnIndex + 1 < rt.maxTurns;
+      rt.emit({ type: "silentTurn", turnIndex, nudged, model: model.id });
+    }
     if (!justNudged && turnIndex + 1 < rt.maxTurns && producedNothingVisible(assistant)) {
       justNudged = true;
       await rt.appendMessage(userMessage(SILENT_TURN_NUDGE));

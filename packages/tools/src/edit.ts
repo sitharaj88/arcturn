@@ -5,6 +5,7 @@ import type { Tool, ToolResult } from "@arcturn/types";
 import { createUnifiedDiff } from "./diff.js";
 import { resolvePath, resolveSubjectPath } from "./path-utils.js";
 import { abortedResult, errorResult, textResult } from "./result-utils.js";
+import { LARGE_CONTENT_CHARS } from "./write.js";
 
 export interface EditToolDetails {
   path: string;
@@ -72,7 +73,10 @@ export function createEditTool(): Tool {
         "exactly (including whitespace) and, unless `replaceAll` is set, must occur exactly once. " +
         "A multi-line `oldText` may use `\\n` line breaks even if the file on disk uses `\\r\\n` " +
         "(CRLF) — the match still succeeds and the file's existing line endings are preserved. " +
-        "Fails if the file does not exist, if `oldText` is not found, or if it is ambiguous.",
+        "Fails if the file does not exist, if `oldText` is not found, or if it is ambiguous. " +
+        "This is also how a large file gets written: create it with `write` carrying only its " +
+        "headings, then fill one section per call here, keeping each `newText` under about " +
+        `${LARGE_CONTENT_CHARS.toLocaleString("en-US")} characters.`,
       parameters: {
         type: "object",
         properties: {

@@ -39,7 +39,7 @@ import {
   resolveContextEditOptions,
 } from "./context-edit.js";
 import type { AgentHooks } from "./hooks.js";
-import { type LoopResult, type LoopRuntime, runLoop } from "./loop.js";
+import { type LoopResult, type LoopRuntime, runLoop, type TurnProgress } from "./loop.js";
 import { PermissionEngine, type PermissionEngineOptions } from "./permissions.js";
 import { JsonlSessionStore, SessionStoreError } from "./session/jsonl-store.js";
 import { latestEntryId, materializeBranch, pathToLeaf } from "./session/tree.js";
@@ -88,6 +88,20 @@ export interface AgentOptions {
   hooks?: AgentHooks;
   /** Run a turn's tool calls concurrently. Defaults to sequential. */
   parallelTools?: boolean;
+  /**
+   * Judge how the run is going, at the top of every turn after the first.
+   *
+   * A returned non-empty string is sent to the model once as a user message —
+   * riding the next request without spending a turn — and surfaced as a `warn`
+   * notice and a `progressWarning` event. The same wording is never sent
+   * twice in one run, so the check may return it unconditionally once its
+   * condition holds. Omitted means no check and no behaviour change.
+   *
+   * Exists because a turn ceiling is a lagging indicator: a builder that spent
+   * all 80 turns reading and wrote nothing fails identically to one that ran
+   * out of room mid-write, and only the host knows which one it asked for.
+   */
+  progressCheck?: (progress: TurnProgress) => string | undefined;
   /** External abort signal; aborting it aborts the current run. */
   signal?: AbortSignal;
   /** Seed conversation, e.g. when resuming a branch. */
@@ -145,6 +159,7 @@ export class Agent {
   readonly #hooks: AgentHooks | undefined;
   readonly #maxTurns: number;
   readonly #parallelTools: boolean;
+  readonly #progressCheck: ((progress: TurnProgress) => string | undefined) | undefined;
   readonly #externalSignal: AbortSignal | undefined;
   readonly #systemPrompt: string | (() => string);
   readonly #permissions: PermissionEngine;
@@ -181,6 +196,7 @@ export class Agent {
     this.#maxTurns = options.maxTurns ?? DEFAULT_MAX_TURNS;
     this.#thinking = options.thinking ?? "off";
     this.#parallelTools = options.parallelTools ?? false;
+    this.#progressCheck = options.progressCheck;
     this.#externalSignal = options.signal;
     this.#messages = [...(options.messages ?? [])];
     this.#todos = [...(options.todos ?? [])];
@@ -544,6 +560,7 @@ export class Agent {
       signal,
       maxTurns: this.#maxTurns,
       parallelTools: this.#parallelTools,
+      ...(this.#progressCheck ? { progressCheck: this.#progressCheck } : {}),
       takeSteering: () => this.#steering.splice(0, this.#steering.length),
       beforeTurn: async () => {
         if (!this.#compaction.enabled) return;

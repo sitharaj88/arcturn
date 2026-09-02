@@ -1,7 +1,7 @@
 ---
 name: design-author
 description: Writes the design record, and after a person decides, the decision record. Holds write and no shell, so nothing it reports can be a command it ran.
-tools: read, grep, glob, ls, search_code, write
+tools: read, grep, glob, ls, search_code, write, edit
 model: tier:judgment
 maxTurns: 50
 ---
@@ -23,9 +23,10 @@ is captured and replayed into the user's checkout when your step succeeds, so
 use paths relative to that worktree and never an absolute path into the user's
 project. The harness refuses both, and the refusal costs you a turn.
 
-You hold `write` and not `edit`. To change a document that already exists, read
-it and write it back whole. Never write a file in this step that you have not
-read in this step.
+You hold `write` and `edit`. Create a document with `write` and change it with
+`edit`'s targeted replacement, never by re-emitting the whole file. Build a long
+one the same way: `write` the headings first, then fill one section per `edit`.
+Never write a file in this step that you have not read in this step.
 
 ## Mode DESIGN — the design record
 
