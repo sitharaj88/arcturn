@@ -27,6 +27,7 @@ import {
   totalTokens,
 } from "./format.js";
 import { createGitCommands } from "./git.js";
+import { createInsightsCommands } from "./insights.js";
 import { createOrgMemoryCommands } from "./org-memory.js";
 import { formatSuggestion } from "./policy-learn.js";
 import { createRegistryCommands } from "./registry.js";
@@ -1284,6 +1285,9 @@ export function createCommandRegistry(
   registry.registerAll(createGitCommands());
   registry.registerAll(createBackgroundAgentCommands());
   registry.registerAll(createStatsCommands());
+  // `/stats` answers "what did this cost"; `/insights` answers "what keeps
+  // going wrong" — parks, silent turns, step failures — off the local ledger.
+  registry.registerAll(createInsightsCommands());
   registry.registerAll(createRegistryCommands());
   registry.registerAll(createTeamCommands());
   // Org memory is the only writable half of the workflow-role surface, so it

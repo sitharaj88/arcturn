@@ -275,6 +275,16 @@ export const DEFAULT_COMPLETION_SPEC: CompletionSpec = {
       description: "Re-run a session's prompts, optionally on another model.",
     },
     { name: "audit", description: "Print the audit trail for a session." },
+    {
+      name: "insights",
+      description: "What has been going wrong locally: parks, silent turns, step failures.",
+      children: [
+        { name: "--since", description: "Window: 7d, 30d, all (default 7d)." },
+        { name: "--workflow", description: "Only this workflow's runs." },
+        { name: "--json", description: "Print the aggregate as one JSON object." },
+        { name: "--share", description: "Markdown block plus a pre-filled issue link." },
+      ],
+    },
     { name: "blame", description: "Explain which turn and evidence wrote each line." },
     { name: "bisect", description: "Find the turn where behaviour left a recording." },
     { name: "serve", description: "Host sessions over WebSocket for remote attach." },

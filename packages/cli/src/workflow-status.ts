@@ -29,6 +29,7 @@ import {
   budgetAskFacts,
   budgetAskQuestion,
   budgetAskResumeHint,
+  describeActivity,
   describeLastTurn,
   type JournalLine,
   type PendingStepFailAsk,
@@ -596,6 +597,12 @@ export function formatRunDetail(
         for (const line of describeLastTurn(run.parkedStep.lastTurn).split("\n")) {
           lines.push(`  ${line}`);
         }
+      }
+      // …and what the step spent its turns on, under the same park. A role
+      // that burned its whole ceiling reading says so here rather than in a
+      // session file nobody opens.
+      if (run.parkedStep?.activity !== undefined) {
+        lines.push(`  ${describeActivity(run.parkedStep.activity)}`);
       }
     } else if (run.pendingQuestions.length > 1) {
       lines.push(`Awaiting ${run.pendingQuestions.length} human answers:`);

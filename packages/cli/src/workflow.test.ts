@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, stat, symlink, utimes, writeFile } from "
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
-import { isTurnCeilingError, PermissionEngine } from "@arcturn/core";
+import { isTurnCeilingError, LARGE_CONTENT_LINES, PermissionEngine } from "@arcturn/core";
 import type {
   AgentEvent,
   ModelSpec,
@@ -2086,6 +2086,18 @@ describe("createRuntimeRunStep — exec lane", () => {
     expect(buildWriteLanePrompt(role("developer", ["edit"]), "do it", "/wt")).toMatch(
       /replayed into the user's checkout/,
     );
+  });
+
+  it("carries the engine's large-content rule on the write lane, and not on the exec lane", () => {
+    // The rule that stopped a role from asking one tool call to carry a 30 KB
+    // document lives in the engine now — every write lane hears it, whatever
+    // kit the role came from. The exec lane never delivers a diff, so it is
+    // not told how to write one.
+    const def = role("author", ["write", "edit"]);
+    const write = buildWriteLanePrompt(def, "write the ADR", "/wt", "write");
+    const exec = buildWriteLanePrompt(def, "run the tests", "/wt", "exec");
+    for (const line of LARGE_CONTENT_LINES) expect(write).toContain(line);
+    expect(exec).not.toContain(LARGE_CONTENT_LINES[0]);
   });
 
   it("keeps a failed exec worktree, labelled inspect-only, and still applies nothing", async () => {

@@ -359,6 +359,12 @@ naming the role and telling you to approve the plan or leave plan mode and re-ru
 /workflow resume <run-id>          # re-enter an interrupted run where it left off
 ```
 
+`/workflow status` answers "what happened to *this* run". The question it cannot answer —
+"which step keeps parking, which model keeps going quiet, and what have these runs been
+costing" — is [`/insights`](/docs/insights), which folds a small local ledger of parks,
+silent turns, step failures and step durations into one report. Nothing leaves the
+machine, and `"insights": false` turns the recording off entirely.
+
 Every one of those runs without a terminal too. `arcturn -p "/workflow ship-fix …"` runs
 the pipeline non-interactively — in CI, from a script, from cron — with the run's notices on
 stderr and, under `--output-format json`, every workflow event as NDJSON on stdout. The exit

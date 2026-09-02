@@ -315,6 +315,16 @@ export async function runCli(args: CliArgs, options: RunCliOptions = {}): Promis
     });
   }
 
+  if (args.command?.kind === "insights") {
+    const { runInsightsCommand } = await import("./insights.js");
+    return runInsightsCommand({
+      ...(args.command.since === undefined ? {} : { since: args.command.since }),
+      ...(args.command.workflow === undefined ? {} : { workflow: args.command.workflow }),
+      ...(args.command.json === undefined ? {} : { json: args.command.json }),
+      ...(args.command.share === undefined ? {} : { share: args.command.share }),
+    });
+  }
+
   if (args.command?.kind === "trust") {
     const { runTrustCommand } = await import("./project-trust.js");
     return runTrustCommand({

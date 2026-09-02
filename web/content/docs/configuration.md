@@ -60,6 +60,7 @@ Every key `.arcturn/config.json` accepts, in both user and project files:
 | `requestStallTimeoutMs` | `integer ≥ 0` | `120000` | Abort a streaming LLM request that emits **no event** for this long — a stalled/dead socket, not a slow one — and retry or fail it over as a transient network error. **Not** a total-duration cap: a long, actively streaming turn (extended thinking, a big response) is never interrupted, because the timer resets on every event. `0` disables the guard. |
 | `verify` | `string \| VerifyConfig` | *(unset)* | Command run after edits; failures are fed back to the model. String is sugar for `{ command }`. See below. |
 | `audit` | `boolean` | `false` | Record an append-only audit trail per session. See [Audit trail](/docs/audit-cost) and `arcturn audit`. |
+| `insights` | `boolean` | `true` | Keep the local insights ledger (`~/.arcturn/insights/`) — parks, silent turns, step failures, run costs. Names and numbers only; no prompts, reasoning, paths or content. `false` writes nothing at all. See [Insights](/docs/insights). |
 | `provenance` | `boolean` | `false` | Record reasoning-level provenance so `arcturn blame <file>` can explain a line. See [Provenance](/docs/provenance). |
 | `dryRun` | `boolean` | `false` | Route file mutations to a shadow copy for review instead of the real tree. Same as `--dry-run`. See [Dry-run mode](/docs/dry-run). |
 | `speculation` | `boolean` | `false` | Keep editing speculatively while a permission prompt is open. |
@@ -274,7 +275,7 @@ boolean flags accept a `--no-` prefix.
 | `--version` | `-v` | — | Print the version. |
 
 Positional commands (`arcturn <command> ...`) take the place of a prompt: `auth`,
-`completions`, `replay`, `audit`, `blame`, `bisect`, `serve`, `acp`, `attach`. See `arcturn
+`completions`, `replay`, `audit`, `insights`, `blame`, `bisect`, `serve`, `acp`, `attach`. See `arcturn
 --help` for each, and [Sessions](/docs/sessions), [Replay & bisect](/docs/replay-bisect),
 [Provenance](/docs/provenance), and [Audit trail](/docs/audit-cost) for the ones owned by
 other pages.

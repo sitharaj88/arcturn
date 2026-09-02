@@ -229,7 +229,9 @@ import {
   emptyUsage,
   errorText,
   isTurnCeilingError,
+  LARGE_CONTENT_LINES,
   shellSegments,
+  type TurnProgress,
 } from "@arcturn/core";
 import type {
   AgentEvent,
@@ -244,6 +246,7 @@ import type { AgentDef } from "./agents.js";
 import type { CommandContext, CommandUi, SlashCommand } from "./commands.js";
 import { nearingCeiling, shouldAbortForCost, shouldAbortForTokens } from "./cost-guard.js";
 import { formatCost, formatDuration, oneLine, totalTokens } from "./format.js";
+import { type InsightsRecorder, type InsightsRunScope, parkCauseKind } from "./insights.js";
 import { loadOrgMemoryInjector, orgMemoryPath, renderRunJournalDigest } from "./org-memory.js";
 import { createWorktree } from "./scouts.js";
 import {
@@ -254,9 +257,11 @@ import {
   budgetAskResumeHint,
   buildResumeState,
   classifyFailureKind,
+  countWrites,
   createFileRunJournal,
   DURABLE_JOURNAL_KINDS,
   decideInterruptedStep,
+  describeActivity,
   describeLastTurn,
   failureKindFromAIError,
   hashPatch,
@@ -276,6 +281,7 @@ import {
   readJournalLines,
   STEP_ABANDON_ANSWER,
   STEP_RETRY_ANSWER,
+  type StepActivity,
   stepFailAskQuestion,
   stepFailAskResumeHint,
   turnRaiseKey,
@@ -621,6 +627,13 @@ export interface WorkflowStepOutcome {
    * human most needs to see. See {@link LastTurnShape}.
    */
   readonly lastTurn?: LastTurnShape;
+  /**
+   * What the step's agent spent its turns on — turn count, per-tool call
+   * counts, and how many of those calls authored a file. Carried on every
+   * outcome a lane actually drove an agent for; absent only where no agent
+   * ran at all (a refusal, a cancelled step). See {@link StepActivity}.
+   */
+  readonly activity?: StepActivity;
 }
 
 /** Executes one step. Injected so the engine is testable without an LLM. */
@@ -725,6 +738,11 @@ export interface WorkflowStepResult {
    * here on every result so the void gate's reclassification keeps it.
    */
   readonly lastTurn?: LastTurnShape;
+  /**
+   * What this step's agent spent its turns on — journalled on every terminal,
+   * not just a failed one. See {@link StepActivity}.
+   */
+  readonly activity?: StepActivity;
 }
 
 /** The record of one workflow run. */
@@ -798,6 +816,8 @@ export interface WorkflowPause {
   readonly reason?: "step-failure";
   /** For a step-failure park: the failed step's last turn, when recorded. */
   readonly lastTurn?: LastTurnShape;
+  /** For a step-failure park: what the failed step spent its turns on. */
+  readonly activity?: StepActivity;
 }
 
 /**
@@ -942,6 +962,22 @@ export interface WorkflowRunContext {
    * sets it.
    */
   budgetCapUsd?: number;
+  /**
+   * The local insights ledger (`~/.arcturn/insights/events.jsonl`), when the
+   * host wired one.
+   *
+   * Written beside four of this engine's durable journal writes — a step
+   * terminal, a park, a budget checkpoint, the run's end — with names and
+   * numbers only (see `insights.ts`'s privacy section). Every write is
+   * fire-and-forget: a ledger that cannot be written is a warning, never a run
+   * failure. Absent means "do not record this run", which is also what
+   * `"insights": false` in config produces.
+   *
+   * Only recorded for a run with a {@link WorkflowRunContext.runId}: the whole
+   * value of the ledger is correlating a silence with the step terminal that
+   * followed it, and an anonymous run has nothing to correlate on.
+   */
+  insights?: InsightsRecorder;
 }
 
 /**
@@ -2627,6 +2663,20 @@ export async function runWorkflow(
     if (!DURABLE_JOURNAL_KINDS.has(line.kind)) return journalAppend(line);
     return journal.appendDurable ? journal.appendDurable(line) : journal.append(line);
   };
+  /**
+   * The insights ledger for this run, when the host wired one AND this run has
+   * an id to correlate on. Every use below is fire-and-forget: `record` never
+   * throws and never blocks, so a diagnostic cannot slow — let alone fail — a
+   * pipeline. See `insights.ts`.
+   */
+  const insightsRunId = context.runId ?? "";
+  const insights =
+    insightsRunId !== "" && context.insights?.enabled === true ? context.insights : undefined;
+  /** Distinct model ids this run's steps actually ran on, for its `run-end`. */
+  const insightsModels = new Set<string>();
+  /** How many times this run parked on a failed step, for its `run-end`. */
+  let insightsParks = 0;
+
   const resumeFrom = context.resumeFrom;
   // A resumed run appends to the *existing* journal; its `run` header is already
   // on disk, so writing a second one would be wrong — true whenever a resume
@@ -2997,6 +3047,23 @@ export async function runWorkflow(
     // journal directory in a `finally` must tolerate this trailing write (see
     // the `rm(..., { maxRetries })` calls in `workflow.test.ts`).
     void journalAppend({ kind: "runEnd", status, ts: now() });
+    // The ledger's own terminal, beside the journal's. Everything on it is a
+    // name or a number: no prompt, no output, no path, no session id.
+    insights?.record({
+      kind: "run-end",
+      workflow: workflow.name,
+      runId: insightsRunId,
+      status,
+      ...(stopReason === undefined ? {} : { stopReason }),
+      durationMs: Math.max(0, now() - startedAt),
+      usage,
+      ...(usage.costUsd === undefined ? {} : { costUsd: usage.costUsd }),
+      models: [...insightsModels],
+      // Steps that actually reached a terminal — a run short-circuited at
+      // stage 2 did not "run" the nine steps it skipped.
+      steps: steps.filter((step) => step.status !== "skipped").length,
+      parks: insightsParks,
+    });
     emit({ type: "workflowEnd", result });
     return result;
   };
@@ -3189,9 +3256,12 @@ export async function runWorkflow(
    * @param reason - Why the pipeline stopped.
    */
   let stopRecorded = false;
+  /** The reason recorded above, so the run's `run-end` insight can carry it. */
+  let stopReason: WorkflowStopReason | undefined;
   const recordStop = (reason: WorkflowStopReason): void => {
     if (stopRecorded) return;
     stopRecorded = true;
+    stopReason = reason;
     void journalAppend({ kind: "stop", reason, ts: now() });
   };
   /**
@@ -3288,7 +3358,31 @@ export async function runWorkflow(
    */
   let journalEstablished = false;
   /** Commit a step's terminal durably, remembering a failure to do so. */
-  const commitStepEnd = async (line: Extract<JournalLine, { kind: "stepEnd" }>): Promise<void> => {
+  const commitStepEnd = async (
+    line: Extract<JournalLine, { kind: "stepEnd" }>,
+    /** Facts the journal line does not carry but the ledger wants. */
+    facts: { failureKind?: WorkflowFailureKind; model?: string } = {},
+  ): Promise<void> => {
+    // The ledger first, and unconditionally: the step DID end, whatever the
+    // journal manages to do about it below. Names and numbers only — the
+    // line's `text`, `finalText`, `question` and `promptHash` never travel.
+    const model = facts.model ?? line.lastTurn?.model;
+    if (model !== undefined && model !== "") insightsModels.add(model);
+    insights?.record({
+      kind: "step-end",
+      workflow: workflow.name,
+      runId: insightsRunId,
+      stepId: line.id,
+      ...(line.agent === undefined ? {} : { role: line.agent }),
+      status: line.status,
+      ...(facts.failureKind === undefined ? {} : { failureKind: facts.failureKind }),
+      ...(model === undefined || model === "" ? {} : { model }),
+      durationMs: Math.max(0, line.endedAt - line.startedAt),
+      usage: line.usage,
+      attempts: line.attempts,
+      ...(line.lastTurn === undefined ? {} : { lastTurn: line.lastTurn }),
+      ...(line.activity === undefined ? {} : { activity: line.activity }),
+    });
     try {
       await journalDurable(line);
       journalEstablished = true;
@@ -3601,6 +3695,15 @@ export async function runWorkflow(
             ts: now(),
           });
           const stepStartedAt = now();
+          /**
+           * The machine-readable cause of this step's failure, when it failed.
+           *
+           * It never reaches the journal line ({@link StepEndLine} carries the
+           * human cause instead), so the insights ledger — whose whole "which
+           * failures keep happening" table is built on it — has to pick it up
+           * here, where the lane's outcome is still in scope.
+           */
+          let stepFailureKind: WorkflowFailureKind | undefined;
           const model = step.modelTag === undefined ? undefined : models.get(step.modelTag);
           // `signal` here is a placeholder: `runStepWithDeadline` overwrites it
           // with a controller derived from `controller.signal` so the deadline
@@ -3708,6 +3811,7 @@ export async function runWorkflow(
             if (status === "failed" && outcome.failureKind === "turn-ceiling") {
               turnCeilingSteps.add(step.id);
             }
+            if (status === "failed") stepFailureKind = outcome.failureKind;
             result = {
               ...base,
               status,
@@ -3730,6 +3834,7 @@ export async function runWorkflow(
                 : {}),
               ...(finalWords === undefined ? {} : { finalText: finalWords }),
               ...(outcome.lastTurn === undefined ? {} : { lastTurn: outcome.lastTurn }),
+              ...(outcome.activity === undefined ? {} : { activity: outcome.activity }),
               startedAt: stepStartedAt,
               endedAt: now(),
             };
@@ -3746,6 +3851,10 @@ export async function runWorkflow(
             // deadline exists to catch (and report) that cost, not hide it.
             // `spent` carries that same last-known figure plus every earlier
             // attempt's, so a step that flapped and *then* hung reports both.
+            // The deadline is a named failure kind, exactly as the lane's own
+            // are — the ledger's failure table would otherwise show every
+            // wall-clock stop as "unclassified".
+            stepFailureKind = controller.signal.aborted ? "cancelled" : "timeout";
             result = {
               ...base,
               status: controller.signal.aborted ? "cancelled" : "failed",
@@ -3867,34 +3976,46 @@ export async function runWorkflow(
           // already journaled, so it took the early return above and skips this.
           // Durable, and a failure to write it stops the run (see
           // {@link commitStepEnd}) rather than vanishing into a swallowed catch.
-          await commitStepEnd({
-            kind: "stepEnd",
-            id: step.id,
-            stage: step.stageIndex,
-            branch: step.branchIndex,
-            status: result.status,
-            ...(step.agent === undefined ? {} : { agent: step.agent }),
-            ...(step.modelTag === undefined ? {} : { modelTag: step.modelTag }),
-            usage: result.usage,
-            ...(result.record === undefined ? {} : { record: result.record }),
-            text: result.text,
-            // A paused step carries its question on the durable terminal, so the
-            // pause — and what it asked — survive the process dying; a failed
-            // one carries the agent's final words for the same reason.
-            ...(result.status === "paused" && result.question !== undefined
-              ? { question: result.question }
-              : {}),
-            ...(result.finalText === undefined ? {} : { finalText: result.finalText }),
-            // The last turn's shape rides the failed terminal beside the final
-            // words: together they say how far it got and what came back.
-            ...(result.status === "failed" && result.lastTurn !== undefined
-              ? { lastTurn: result.lastTurn }
-              : {}),
-            promptHash,
-            attempts,
-            startedAt: stepStartedAt,
-            endedAt: result.endedAt ?? now(),
-          });
+          await commitStepEnd(
+            {
+              kind: "stepEnd",
+              id: step.id,
+              stage: step.stageIndex,
+              branch: step.branchIndex,
+              status: result.status,
+              ...(step.agent === undefined ? {} : { agent: step.agent }),
+              ...(step.modelTag === undefined ? {} : { modelTag: step.modelTag }),
+              usage: result.usage,
+              ...(result.record === undefined ? {} : { record: result.record }),
+              text: result.text,
+              // A paused step carries its question on the durable terminal, so the
+              // pause — and what it asked — survive the process dying; a failed
+              // one carries the agent's final words for the same reason.
+              ...(result.status === "paused" && result.question !== undefined
+                ? { question: result.question }
+                : {}),
+              ...(result.finalText === undefined ? {} : { finalText: result.finalText }),
+              // The last turn's shape rides the failed terminal beside the final
+              // words: together they say how far it got and what came back.
+              ...(result.status === "failed" && result.lastTurn !== undefined
+                ? { lastTurn: result.lastTurn }
+                : {}),
+              // ALWAYS, unlike `lastTurn`: a step that succeeded after eighty
+              // turns of reading is the one a retrospective wants to find, and
+              // it is a handful of integers.
+              ...(result.activity === undefined ? {} : { activity: result.activity }),
+              promptHash,
+              attempts,
+              startedAt: stepStartedAt,
+              endedAt: result.endedAt ?? now(),
+            },
+            {
+              // Neither rides the journal line, and both are what the ledger's
+              // "which failures keep happening, on which model" tables are made of.
+              ...(stepFailureKind === undefined ? {} : { failureKind: stepFailureKind }),
+              ...(stepModel === undefined ? {} : { model: stepModel }),
+            },
+          );
           return result;
         }),
       );
@@ -4036,6 +4157,7 @@ export async function runWorkflow(
           ...(tripped === undefined ? {} : { ceiling: tripped }),
           attempts: priorAttempts + (broken.attempts ?? 1),
           ...(broken.lastTurn === undefined ? {} : { lastTurn: broken.lastTurn }),
+          ...(broken.activity === undefined ? {} : { activity: broken.activity }),
         };
         let parked = true;
         try {
@@ -4049,6 +4171,21 @@ export async function runWorkflow(
           parked = false;
         }
         if (parked) {
+          insightsParks += 1;
+          // Beside the durable ask, and with the same facts minus the words:
+          // the cause TEXT is read (to bucket it) and never stored.
+          insights?.record({
+            kind: "park",
+            workflow: workflow.name,
+            runId: insightsRunId,
+            stepId: ask.stepId,
+            ...(ask.role === undefined ? {} : { role: ask.role }),
+            ...(ask.failureKind === undefined ? {} : { failureKind: ask.failureKind }),
+            attempts: ask.attempts,
+            ...(ask.lastTurn === undefined ? {} : { lastTurn: ask.lastTurn }),
+            ...(ask.activity === undefined ? {} : { activity: ask.activity }),
+            causeKind: parkCauseKind(ask.failureKind, ask.cause),
+          });
           // The failure is now a question. The STEP's own status stays
           // `failed` — it did fail, and `--print`/CI still see that — but the
           // RUN stops resumably instead of writing its own tombstone.
@@ -4063,6 +4200,7 @@ export async function runWorkflow(
             promptHash: "",
             reason: "step-failure",
             ...(ask.lastTurn === undefined ? {} : { lastTurn: ask.lastTurn }),
+            ...(ask.activity === undefined ? {} : { activity: ask.activity }),
           });
         }
       }
@@ -4124,6 +4262,14 @@ export async function runWorkflow(
             parked = false;
           }
           if (parked) {
+            insights?.record({
+              kind: "budget-ask",
+              workflow: workflow.name,
+              runId: insightsRunId,
+              ceiling: ask.ceiling,
+              spent: ask.spent,
+              limit: ask.limit,
+            });
             pauses.push({
               stepId: BUDGET_ASK_STEP_ID,
               // The stage's *position*, which is what the durable ask line
@@ -4318,6 +4464,16 @@ export interface RuntimeRunStepOptions {
    * {@link import("./org-memory.js").loadOrgMemoryInjector}.
    */
   orgMemory?: (role: string) => string | undefined;
+  /**
+   * The insights ledger plus this run's coordinates, so a step's own child
+   * agent can record a silent turn or a progress warning WITH the step it
+   * belongs to.
+   *
+   * Threaded through the options rather than read from a module global: a host
+   * running two pipelines at once (`arcturn serve`) must never attribute one
+   * run's silence to the other.
+   */
+  insights?: InsightsRunScope;
 }
 
 // ---------------------------------------------------------------- three lanes
@@ -4647,6 +4803,59 @@ export interface WriteLaneSeed {
 }
 
 /** What {@link WriteLane.spawn} is asked to build. */
+/**
+ * A mid-run nudge, evaluated at the top of every turn after the first. A
+ * non-blank return is sent to the model once as a user message (the loop
+ * dedupes by exact text) and surfaced as a `progressWarning` event.
+ */
+export type WorkflowProgressCheck = (progress: TurnProgress) => string | undefined;
+
+/**
+ * How far into its ceiling a write-lane role may get with nothing written
+ * before the loop says so out loud. Half: late enough that a role which reads
+ * first is not hectored on turn three, early enough that the other half of the
+ * budget can still produce a diff.
+ */
+const WRITE_LANE_PROGRESS_FRACTION = 0.5;
+
+/**
+ * The write lane's mid-run progress check: **you have spent half your turns and
+ * changed no file.**
+ *
+ * The run this exists for: a stage-5 builder spent all eighty of its turns on
+ * `bash` (77 calls) and `read` (17), twenty-four minutes and 330K tokens, and
+ * hit its ceiling having written nothing. Every guard rail the engine had
+ * fired *after* the money was gone — the turn ceiling, the void gate, the park.
+ * None of them could say the one thing that would have changed the outcome
+ * while there were still forty turns left to change it.
+ *
+ * WRITE LANE ONLY. A read-lane or exec-lane role produces a *report*, and its
+ * diff is discarded unread; telling one of those to "write a file now" would be
+ * telling it to do the one thing its lane forbids.
+ *
+ * Exported so the threshold and the wording are one testable thing rather than
+ * a condition buried in a spawn call.
+ *
+ * @param progress - The turn about to start, and the calls made so far.
+ * @returns The nudge, or `undefined` when the step is on track.
+ */
+export function writeLaneProgressCheck(progress: TurnProgress): string | undefined {
+  const threshold = Math.floor(progress.maxTurns * WRITE_LANE_PROGRESS_FRACTION);
+  // ONE turn, not "this turn and every one after". The loop dedupes a warning
+  // by its exact text and this message names the turn it fired on, so a
+  // `>=` test would re-fire with fresh wording every remaining turn — which is
+  // precisely how the turn-ceiling warning next to it earned its once-per-run
+  // rule: a notice that repeats teaches the model to skip it.
+  if (progress.turnIndex !== threshold) return undefined;
+  if (countWrites(progress.toolCalls) > 0) return undefined;
+  return (
+    `Progress check: ${progress.turnIndex} of ${progress.maxTurns} turns are spent and no ` +
+    "file has been changed. This is a write-lane step — its result is a diff, and reading " +
+    "further will not produce one. Make the smallest change that moves the step forward now " +
+    "(create the file, or write its first section), then continue."
+  );
+}
+
 export interface WriteLaneSpawnRequest {
   /** The role, including the `tools:` the agent must be narrowed to. */
   readonly def: AgentDef;
@@ -4664,6 +4873,14 @@ export interface WriteLaneSpawnRequest {
    * other.
    */
   readonly turnCeiling?: number;
+  /**
+   * Mid-run progress check for this child (see {@link writeLaneProgressCheck}).
+   *
+   * Only the WRITE dispatch passes one: it is the only lane whose result is a
+   * diff. A lane implementation that cannot install one simply ignores it, and
+   * the step runs exactly as it did before.
+   */
+  readonly progressCheck?: WorkflowProgressCheck;
 }
 
 /**
@@ -4856,6 +5073,59 @@ interface AgentRunOutcome {
    * is the turn the run actually ended on. See {@link LastTurnShape}.
    */
   lastTurn?: LastTurnShape;
+  /**
+   * What the child spent its turns on: how many turns it took, how many times
+   * it called each tool, and how many of those calls authored a file. Counted
+   * from the child's own `toolStart`/`turnEnd` events — always present, even
+   * for a child that did nothing, because "zero" is the answer that matters.
+   */
+  activity: StepActivity;
+}
+
+/**
+ * What a lane wants to hear about its child's turns, beyond usage.
+ *
+ * Two events, both of which used to exist only in a person's memory of a run:
+ * the model that ended a turn saying nothing, and the mid-run progress check
+ * that told a role it had written no file. Handed in rather than read from a
+ * global so a lane that has no ledger passes nothing.
+ */
+interface AgentRunSignals {
+  /** The model ended a turn with no text and no tool call. */
+  silentTurn(model: string, nudged: boolean): void;
+  /** A progress check fired and its message was sent to the model. */
+  progressWarning(turnIndex: number): void;
+}
+
+/**
+ * Build the insights signals for one step's child, when a ledger is wired.
+ *
+ * The step's attribution is captured once here, so every event this child
+ * emits lands under the right workflow, run, step and role.
+ *
+ * @param scope - The ledger plus this run's coordinates, when the host wired one.
+ * @param stepId - The step whose child this is.
+ * @param role - The step's `@role`, when it named one.
+ */
+function insightsSignals(
+  scope: InsightsRunScope | undefined,
+  stepId: string,
+  role: string | undefined,
+): AgentRunSignals | undefined {
+  if (scope === undefined || !scope.recorder.enabled) return undefined;
+  const attribution = {
+    origin: "workflow" as const,
+    workflow: scope.workflow,
+    runId: scope.runId,
+    stepId,
+    ...(role === undefined ? {} : { role }),
+  };
+  return {
+    silentTurn: (model, nudged) =>
+      scope.recorder.record({ kind: "silent-turn", model, nudged, ...attribution }),
+    progressWarning: (turnIndex) =>
+      scope.recorder.record({ kind: "progress-warning", turnIndex, ...attribution }),
+  };
 }
 
 /**
@@ -4886,6 +5156,7 @@ async function driveAgent(
   signal: AbortSignal,
   live?: StepLiveRow,
   onUsage?: (usage: Usage) => void,
+  signals?: AgentRunSignals,
 ): Promise<AgentRunOutcome> {
   let usage = emptyUsage();
   let reason: "completed" | "aborted" | "error" = "completed";
@@ -4893,6 +5164,16 @@ async function driveAgent(
   let errorKind: AIError["kind"] | undefined;
   let text = "";
   let lastMessage: AssistantMessage | undefined;
+  /**
+   * What this child actually did, counted as it happens.
+   *
+   * Tool NAMES and call counts only — never an argument, a path or a result.
+   * The eighty-turn builder that read for twenty-four minutes and wrote
+   * nothing is invisible in every other record this run keeps, and this is the
+   * cheapest possible way to see it.
+   */
+  let turns = 0;
+  const toolCalls: Record<string, number> = {};
   live?.start();
   try {
     const unsubscribe = agent.subscribe((event) => {
@@ -4902,7 +5183,27 @@ async function driveAgent(
       live?.relay(event);
       // The turn the run ends on is the one a parked step is diagnosed from.
       if (event.type === "messageEnd") lastMessage = event.message;
+      if (event.type === "toolStart") {
+        toolCalls[event.toolName] = (toolCalls[event.toolName] ?? 0) + 1;
+      }
+      // The two events that used to leave no trace outside a person's memory
+      // of the run. Both are diagnostics, so both are swallowed if the ledger
+      // throws — a step must not fail over its own telemetry.
+      if (event.type === "silentTurn") {
+        try {
+          signals?.silentTurn(event.model, event.nudged);
+        } catch {
+          // A recorder must never be able to fail a step.
+        }
+      } else if (event.type === "progressWarning") {
+        try {
+          signals?.progressWarning(event.turnIndex);
+        } catch {
+          // Same.
+        }
+      }
       if (event.type === "turnEnd") {
+        turns += 1;
         usage = addUsage(usage, event.usage);
         onUsage?.(usage);
       } else if (event.type === "runEnd") {
@@ -4949,12 +5250,22 @@ async function driveAgent(
     ...(errorKind === undefined ? {} : { errorKind }),
     text,
     ...(lastMessage === undefined ? {} : { lastTurn: turnShapeOf(lastMessage) }),
+    activity: { turns, toolCalls, writes: countWrites(toolCalls) },
   };
 }
 
 /** The `lastTurn` spread every lane outcome carries, when the run saw a turn. */
 function lastTurnOf(run: AgentRunOutcome): { lastTurn?: LastTurnShape } {
   return run.lastTurn === undefined ? {} : { lastTurn: run.lastTurn };
+}
+
+/**
+ * The `activity` spread every lane outcome carries — always, unlike
+ * {@link lastTurnOf}. A child that took no turns and called no tool is not an
+ * absence of data; it is the loudest datum this record has.
+ */
+function activityOf(run: AgentRunOutcome): { activity: StepActivity } {
+  return { activity: run.activity };
 }
 
 /**
@@ -5354,6 +5665,9 @@ async function runWorktreeStep(
       stepId: step.id,
       // The human's run-scoped grant, carried onto the expensive lane too.
       ...(request.turnCeiling === undefined ? {} : { turnCeiling: request.turnCeiling }),
+      // WRITE lane only: the exec lane's diff is discarded unread, so a role
+      // there is *supposed* to finish with a report and no file.
+      ...(dispatch === "write" ? { progressCheck: writeLaneProgressCheck } : {}),
     });
     const run = await driveAgent(
       agent,
@@ -5363,6 +5677,7 @@ async function runWorktreeStep(
       // around it — and it opens here, once there is an agent to watch.
       stepLiveRow(options.emit, step, prompt, def.name),
       onUsage,
+      insightsSignals(options.insights, step.id, def.name),
     );
     usage = run.usage;
     // The agent has stopped, so anything it left running is orphaned by
@@ -5466,6 +5781,7 @@ async function runWorktreeStep(
         text: [run.text.trim(), tasks, trailer].filter((part) => part !== "").join("\n\n"),
         usage,
         ...lastTurnOf(run),
+        ...activityOf(run),
         isError: false,
         record: discarded,
       };
@@ -5496,6 +5812,7 @@ async function runWorktreeStep(
         text: "",
         usage,
         ...lastTurnOf(run),
+        ...activityOf(run),
         isError: true,
         record: captured,
         error: withTasks(
@@ -5519,6 +5836,7 @@ async function runWorktreeStep(
           .join("\n\n"),
         usage,
         ...lastTurnOf(run),
+        ...activityOf(run),
         isError: false,
         record: empty,
       };
@@ -5531,6 +5849,7 @@ async function runWorktreeStep(
         text: "",
         usage,
         ...lastTurnOf(run),
+        ...activityOf(run),
         isError: true,
         record: refused,
         error: withTasks(
@@ -5569,6 +5888,7 @@ async function runWorktreeStep(
         text: "",
         usage,
         ...lastTurnOf(run),
+        ...activityOf(run),
         isError: true,
         record: captured,
         error: withTasks(
@@ -5608,6 +5928,7 @@ async function runWorktreeStep(
         text: "",
         usage,
         ...lastTurnOf(run),
+        ...activityOf(run),
         isError: true,
         record: settled,
         error: withTasks(
@@ -5627,6 +5948,7 @@ async function runWorktreeStep(
         text: "",
         usage,
         ...lastTurnOf(run),
+        ...activityOf(run),
         isError: true,
         record: refused,
         error: withTasks(
@@ -5659,6 +5981,7 @@ async function runWorktreeStep(
         .filter((part) => part !== "")
         .join("\n\n"),
       usage,
+      ...activityOf(run),
       isError: false,
       record: landed,
     };
@@ -5847,6 +6170,8 @@ export function buildWriteLanePrompt(
           "change minimal and inside your scope, and finish with a short report: what you changed,",
           "which files, and how you verified it.",
           ...worktreeContractLines(worktreeDir),
+          // The engine's own rule, in every write lane — see @arcturn/core large-content.ts.
+          ...LARGE_CONTENT_LINES,
         ]
       : [
           `You are in an isolated git worktree at ${worktreeDir} — a detached checkout of the`,
@@ -5973,6 +6298,7 @@ export function createRuntimeRunStep(
       signal,
       stepLiveRow(options.emit, step, prompt, role?.name),
       onUsage,
+      insightsSignals(options.insights, step.id, role?.name),
     );
 
     const isError = run.reason !== "completed";
@@ -5998,6 +6324,7 @@ export function createRuntimeRunStep(
       text: isError ? "" : run.text,
       usage: run.usage,
       ...lastTurnOf(run),
+      ...activityOf(run),
       isError,
       ...(isError
         ? {
@@ -6113,6 +6440,12 @@ export interface WriteLaneHost {
      * clamp byte-for-byte what it was.
      */
     turnCeiling?: number | undefined;
+    /**
+     * Mid-run progress check for this child, when the lane installs one (see
+     * {@link writeLaneProgressCheck}). Optional on the host so a runtime whose
+     * agent loop predates the option still satisfies the shape.
+     */
+    progressCheck?: WorkflowProgressCheck | undefined;
     /**
      * {@link workflowStepOrigin} for the step this agent serves. A worktree
      * role prompts as readily as a read-lane one — more so, since it holds
@@ -7774,7 +8107,7 @@ export function createRuntimeWriteLane(host: WriteLaneHost, runId = createRunId(
         );
       }
     },
-    spawn({ def, cwd, model, stepId, turnCeiling }) {
+    spawn({ def, cwd, model, stepId, turnCeiling, progressCheck }) {
       const agent = host.buildSessionAgent({
         sessionId: createSessionId(),
         cwd,
@@ -7792,6 +8125,10 @@ export function createRuntimeWriteLane(host: WriteLaneHost, runId = createRunId(
         // Lifting one alone leaves `Math.min` where it was, which is exactly
         // the trap that made a hand-edited role file change nothing.
         ...(turnCeiling === undefined ? {} : { turnCeiling }),
+        // The mid-run nudge for a role that is reading instead of writing —
+        // see {@link writeLaneProgressCheck}. Only the write dispatch supplies
+        // one, so the exec lane's children are untouched.
+        ...(progressCheck === undefined ? {} : { progressCheck }),
         // The narrowing, the confinement guard and the background tracking
         // below are all installed with `setTools`, and a deferred toolset
         // would quietly outrank every one of them. This child's tools are
@@ -7955,6 +8292,12 @@ export interface WorkflowCommandRuntime extends WorkflowAgentHost {
    * with no live region omits it and a pipeline runs exactly as before.
    */
   emit?(event: AgentEvent): void;
+  /**
+   * The local insights ledger this runtime built from `paths.home` and config
+   * (see `runtime.ts`). Optional: a host without one records nothing and every
+   * pipeline behaves exactly as it did.
+   */
+  readonly insights?: InsightsRecorder;
 }
 
 /** Options for {@link createWorkflowCommands}. */
@@ -8262,6 +8605,19 @@ export function createWorkflowCommands(
               // run's artifact dir — the ones a resume re-seeds worktrees from.
               ...(lane === undefined ? {} : { writeLane: lane }),
               orgMemory,
+              // The ledger plus this run's coordinates, so a step's own child
+              // agent records its silences and progress warnings under the
+              // step they belong to. `enabled: false` (or no ledger at all)
+              // makes every one of those calls a no-op.
+              ...(runtime.insights === undefined
+                ? {}
+                : {
+                    insights: {
+                      recorder: runtime.insights,
+                      workflow: wf.name,
+                      runId,
+                    },
+                  }),
               ...(options.step ?? {}),
             }),
             input: runInput,
@@ -8271,6 +8627,7 @@ export function createWorkflowCommands(
             signal: controller.signal,
             runId,
             journal,
+            ...(runtime.insights === undefined ? {} : { insights: runtime.insights }),
             // Resume's reality check. Without a lane there is no checkout to
             // probe, and an ambiguous step is recovered rather than repeated.
             ...(lane === undefined ? {} : { verifyPatch: createPatchVerifier(lane) }),
@@ -8315,10 +8672,18 @@ export function createWorkflowCommands(
             // line that used to live in an engineer's head after an hour with
             // the session JSONL.
             const shape = result.pauses[0]?.lastTurn;
+            // …and what it spent those turns on, on the line below. "80 turns,
+            // zero files written" is the half of the diagnosis the last turn
+            // alone cannot show.
+            const spentOn = result.pauses[0]?.activity;
             const summary = result.error ?? pauseSummary(result.pauses);
             ui.notice(
               "warn",
-              shape === undefined ? summary : `${summary}\n${describeLastTurn(shape)}`,
+              [
+                summary,
+                ...(shape === undefined ? [] : [describeLastTurn(shape)]),
+                ...(spentOn === undefined ? [] : [describeActivity(spentOn)]),
+              ].join("\n"),
             );
           }
           return result;
@@ -8502,6 +8867,9 @@ export function createWorkflowCommands(
             );
             if (state.stepFailAsk.lastTurn !== undefined) {
               ui.notice("warn", describeLastTurn(state.stepFailAsk.lastTurn));
+            }
+            if (state.stepFailAsk.activity !== undefined) {
+              ui.notice("warn", describeActivity(state.stepFailAsk.activity));
             }
             ui.notice("info", stepFailAskResumeHint(runId, state.stepFailAsk));
             ui.setInput(`/workflow resume ${runId} `);

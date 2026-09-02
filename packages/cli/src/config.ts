@@ -258,6 +258,19 @@ export interface ArcturnConfig {
   /** Record an append-only audit trail per session (default `false`). */
   audit: boolean;
   /**
+   * Keep the local insights ledger — `~/.arcturn/insights/events.jsonl`
+   * (default `true`).
+   *
+   * On by default, unlike `audit`, because it costs a few hundred bytes per
+   * workflow run and it is the only record of the faults this tool actually
+   * has: which model went quiet on which step, what parked a run, what a run
+   * spent before it stopped. Names and numbers only — no prompts, no
+   * reasoning, no paths, no content, no session ids (see `insights.ts`).
+   * `false` disables recording entirely; nothing is written and no directory
+   * is created.
+   */
+  insights: boolean;
+  /**
    * Once a day, ask npm whether a newer `arcturn` exists and say so in one
    * line (default `true`). A notice, never an install: replacing a binary
    * out from under its own running process is not this tool's call. The
@@ -365,6 +378,7 @@ export const DEFAULT_CONFIG: Readonly<ArcturnConfig> = Object.freeze({
   ui: "screen" as const,
   hooks: EMPTY_HOOK_CONFIG,
   audit: false,
+  insights: true,
   updateCheck: true,
   notify: true,
   provenance: false,
@@ -401,6 +415,7 @@ const KNOWN_KEYS = new Set([
   "requestStallTimeoutMs",
   "verify",
   "audit",
+  "insights",
   "updateCheck",
   "notify",
   "provenance",
@@ -1026,6 +1041,10 @@ export function parseConfigFile(
     if (typeof raw.audit === "boolean") out.audit = raw.audit;
     else warnings.push(`${where}: "audit" must be a boolean`);
   }
+  if (raw.insights !== undefined) {
+    if (typeof raw.insights === "boolean") out.insights = raw.insights;
+    else warnings.push(`${where}: "insights" must be a boolean`);
+  }
   if (raw.updateCheck !== undefined) {
     if (typeof raw.updateCheck === "boolean") out.updateCheck = raw.updateCheck;
     else warnings.push(`${where}: "updateCheck" must be a boolean`);
@@ -1358,6 +1377,7 @@ export function mergeConfig(
     theme: layer.theme ?? base.theme,
     ui: layer.ui ?? base.ui,
     audit: layer.audit ?? base.audit,
+    insights: layer.insights ?? base.insights,
     updateCheck: layer.updateCheck ?? base.updateCheck,
     notify: layer.notify ?? base.notify,
     provenance: layer.provenance ?? base.provenance,

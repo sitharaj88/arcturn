@@ -88,6 +88,7 @@ The same table is in `arcturn --help`.
 | `arcturn completions <shell>` | Print a bash, zsh or fish completion script |
 | `arcturn trust [--list\|--allow\|--deny\|--revoke]` | Show or decide whether this project's declared code runs — see [Permissions](/docs/permissions#project-code) |
 | `arcturn doctor [preset]` | Probe each configured provider endpoint with its real key (a one-token completion) and print a per-endpoint verdict — auth failed, no balance, rate limited, network. An endpoint declared by a project config you have not approved is reported `not enabled` and never probed |
+| `arcturn insights [--since <w>] [--workflow <name>] [--json] [--share]` | What has been going wrong locally — parks, silent turns, step failures, slow roles — from `~/.arcturn/insights`. `--share` prints a markdown block and a pre-filled issue link and sends nothing. See [Insights](/docs/insights) |
 | `arcturn blame` · `arcturn replay` · `arcturn bisect` | Provenance and replay — see [Provenance](/docs/provenance) and [Replay & bisect](/docs/replay-bisect) |
 
 **`arcturn add` never links a package's executable code without being told to.** A package
@@ -172,6 +173,7 @@ exist so it can happen without leaving a session.
 | `/workflow list` | List discovered workflows |
 | `/workflow status [runId]` | What a run reached, its spend and turns, and why it stopped |
 | `/workflow resume <runId> [answer]` | Re-enter an interrupted run, or answer what it parked on: an `ORG-ASK:` (free text), a budget checkpoint (`continue` / `raise <n>`), or a failed step (`retry` / `abandon` / `raise <n>`) |
+| `/insights [--since <w>] [--workflow <name>] [--json] [--share]` | Across runs: which step keeps parking, which model keeps going quiet, what runs cost — see [Insights](/docs/insights) |
 | `/org memory` | Inspect per-role lessons injected into later runs — see [Agent organizations](/docs/agent-organizations) |
 | `/org memory add\|propose\|approve\|revoke\|rm` | Edit that store |
 

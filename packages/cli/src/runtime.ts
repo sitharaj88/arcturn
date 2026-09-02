@@ -47,6 +47,7 @@ import {
   latestEntryId,
   materializeBranch,
   pathToLeaf,
+  type TurnProgress,
   wrapToolsWithOffload,
 } from "@arcturn/core";
 import { createSearchCodeTool } from "@arcturn/index";
@@ -98,6 +99,7 @@ import {
 import { createCostGuard } from "./cost-guard.js";
 import { type ExtensionCommand, ExtensionHost, loadExtensions } from "./extensions.js";
 import { createHookRunner, type HookRunner, wrapToolsWithHooks } from "./hooks.js";
+import { createInsightsRecorder, type InsightsRecorder } from "./insights.js";
 import { createLspManager, type LspManager } from "./lsp/manager.js";
 import { createSymbolsTool } from "./lsp/symbols.js";
 import { wrapToolsWithLsp } from "./lsp/wrap.js";
@@ -656,6 +658,18 @@ export interface SessionAgentSpec {
   origin?: string;
   fixedToolset?: boolean;
   checkpoints?: CheckpointStore;
+  /**
+   * A mid-run check the agent loop calls at the top of every turn after the
+   * first; a non-blank return is sent to the model once (the loop dedupes by
+   * exact text), surfaced as a warn notice, and emitted as a `progressWarning`
+   * event.
+   *
+   * The only caller today is the `/workflow` WRITE lane
+   * (`workflow.ts`'s `writeLaneProgressCheck`), which uses it to tell a role
+   * that has spent half its turns without changing a file. Every other session
+   * agent passes nothing and behaves exactly as it did.
+   */
+  progressCheck?: (progress: TurnProgress) => string | undefined;
 }
 
 /** The assembled agent plus everything the UI and commands need. */
@@ -725,6 +739,17 @@ export class ArcturnRuntime {
   readonly lsp: LspManager | undefined;
   /** Append-only audit trail for the CURRENT session when `audit: true`. */
   audit: AuditLog | undefined;
+  /**
+   * The local insights ledger (`~/.arcturn/insights/events.jsonl`).
+   *
+   * Session-independent, unlike {@link ArcturnRuntime.audit}: it answers "what
+   * keeps going wrong on this machine", which is a question across sessions
+   * rather than within one. Always present — `"insights": false` yields a
+   * recorder that writes nothing rather than an absent one, so no call site
+   * needs a null check. Read by `/workflow` (which hands it to the engine) and
+   * by `/insights`.
+   */
+  readonly insights: InsightsRecorder;
   /** Reasoning-level provenance for the CURRENT session when `provenance: true`. */
   provenance: ProvenanceStore | undefined;
   #openProvenance: ((sessionId: string) => ProvenanceStore) | undefined;
@@ -849,6 +874,31 @@ export class ArcturnRuntime {
     this.#maxTurns = init.maxTurns;
     this.#requester = init.onPermissionAsk;
     this.#offloadDir = join(init.paths.home, "offload", init.sessionId ?? createSessionId());
+    // THE FEEDBACK LOOP. Built here rather than in `buildRuntime` because it is
+    // wanted by every entry point that has a runtime at all (the terminal,
+    // `--print`, serve, acp), and because `insights: false` produces a recorder
+    // that touches no disk — so there is nothing to conditionally construct.
+    this.insights = createInsightsRecorder({
+      home: init.paths.home,
+      enabled: init.config.insights !== false,
+      // One warning, ever, and only through the UI channel: a ledger that
+      // cannot be written must not become a per-event log spam, and it must
+      // never fail a run.
+      onWarn: (message) => this.notify("warn", message),
+    });
+    // The MAIN agent's silences. `subscribe` follows session swaps, so this
+    // survives `/clear` and `/resume` the way the audit observer does.
+    // Sub-agents and workflow steps are recorded at their own sites, with the
+    // attribution only they have.
+    this.subscribe((event) => {
+      if (event.type !== "silentTurn") return;
+      this.insights.record({
+        kind: "silent-turn",
+        model: event.model,
+        nudged: event.nudged,
+        origin: "main",
+      });
+    });
     this.agent = this.#createAgent(
       init.sessionId === undefined ? {} : { sessionId: init.sessionId },
     );
@@ -1364,6 +1414,23 @@ export class ArcturnRuntime {
     // subscribed directly, which covers children built outside a tool call
     // too. `subscribe` only ever sees this runtime's current agent.
     if (this.audit) child.subscribe(auditObserver(this.audit));
+    // A DELEGATED silence, recorded exactly once. `origin` is the signal that
+    // tells the two callers of this method apart: the `subagent` TOOL passes
+    // none, while `/workflow`'s read lane always passes
+    // `workflowStepOrigin(...)` — and a workflow step's silences are already
+    // recorded by the engine, with the workflow, run, step and role attached.
+    // Recording here too would double-count every one of them.
+    if (options?.origin === undefined && this.insights.enabled) {
+      child.subscribe((event) => {
+        if (event.type !== "silentTurn") return;
+        this.insights.record({
+          kind: "silent-turn",
+          model: event.model,
+          nudged: event.nudged,
+          origin: "subagent",
+        });
+      });
+    }
     // Delegated spend counts against the session: a child's turns never
     // surface as a top-level `turnEnd`, so without this `/cost` and
     // `--max-cost` treat sub-agent work as free.
@@ -1720,6 +1787,8 @@ export class ArcturnRuntime {
     );
     return {
       ...base,
+      // The write lane's mid-run nudge, when the caller installed one.
+      ...(options.progressCheck === undefined ? {} : { progressCheck: options.progressCheck }),
       ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
       ...(options.model === undefined
         ? {}

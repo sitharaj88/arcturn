@@ -22,7 +22,8 @@
  * would reject every one of them as an unknown option. Keeping the argument
  * list whole also means `registry.ts` and `scaffold.ts` each hold the single
  * parser for their own flags — the same one their `/add`-family slash commands
- * use — so `arcturn add` and `/add` cannot drift apart.
+ * use — so `arcturn add` and `/add` cannot drift apart. `trust` and `insights`
+ * own theirs for the same reason.
  */
 
 import type { McpServerConfig, PermissionMode } from "@arcturn/types";
@@ -96,6 +97,20 @@ export interface DoctorCommand {
   readonly kind: "doctor";
   /** Probe only this preset; every configured endpoint when omitted. */
   readonly preset?: string;
+}
+
+/** A parsed `insights [--since <w>] [--workflow <name>] [--json] [--share]` command. */
+export interface InsightsCommand {
+  /** Command family. */
+  readonly kind: "insights";
+  /** `"7d"`, `"30d"`, `"all"`, ...; the runner defaults it to `"7d"`. */
+  readonly since?: string;
+  /** Restrict the report to one workflow by name. */
+  readonly workflow?: string;
+  /** Print the aggregate as one JSON object. */
+  readonly json?: boolean;
+  /** Print a markdown block and a pre-filled issue URL. Sends nothing. */
+  readonly share?: boolean;
 }
 
 /** A parsed `serve` command. */
@@ -182,6 +197,7 @@ export type CliCommand =
   | BlameCommand
   | BisectCommand
   | DoctorCommand
+  | InsightsCommand
   | TrustCommand
   | McpCliCommand
   | RegistryCliCommand;
@@ -325,6 +341,9 @@ export const ATTACH_COMMAND_NAME = "attach";
 
 /** First positional that switches into doctor-command parsing. */
 export const DOCTOR_COMMAND_NAME = "doctor";
+
+/** First positional that switches into insights-command parsing. */
+export const INSIGHTS_COMMAND_NAME = "insights";
 
 /** First positional that switches into trust-command parsing. */
 export const TRUST_COMMAND_NAME = "trust";
@@ -611,6 +630,57 @@ export function parseArgs(
       return { ok: true, args };
     }
     args.command = { kind: "registry", verb, argv: rest };
+    args.prompt = "";
+    return { ok: true, args };
+  }
+
+  // `insights` owns its argument list too: `--since`, `--workflow`, `--json`
+  // and `--share` are flags of THIS command, and the global loop would reject
+  // every one of them as an unknown option. Same escape as every other
+  // positional verb — quoting makes it a prompt.
+  if (argv[0] === INSIGHTS_COMMAND_NAME) {
+    const rest = argv.slice(1);
+    if (rest.includes("--help") || rest.includes("-h")) {
+      args.help = true;
+      return { ok: true, args };
+    }
+    let since: string | undefined;
+    let workflow: string | undefined;
+    let json = false;
+    let share = false;
+    for (let i = 0; i < rest.length; i++) {
+      const token = rest[i];
+      if (token === "--json") {
+        json = true;
+      } else if (token === "--share") {
+        share = true;
+      } else if (token === "--since" || token === "--workflow") {
+        const value = rest[i + 1];
+        if (value === undefined) return { ok: false, error: `${token} requires a value` };
+        if (token === "--since") since = value;
+        else workflow = value;
+        i++;
+      } else if (token?.startsWith("--since=")) {
+        since = token.slice("--since=".length);
+      } else if (token?.startsWith("--workflow=")) {
+        workflow = token.slice("--workflow=".length);
+      } else {
+        return {
+          ok: false,
+          error:
+            `unknown argument "${token}" for insights. ` +
+            "Usage: arcturn insights [--since 7d|30d|all] [--workflow <name>] [--json] [--share]. " +
+            'To send this as a prompt instead, quote it: arcturn "insights ..."',
+        };
+      }
+    }
+    args.command = {
+      kind: "insights",
+      ...(since === undefined ? {} : { since }),
+      ...(workflow === undefined ? {} : { workflow }),
+      ...(json ? { json } : {}),
+      ...(share ? { share } : {}),
+    };
     args.prompt = "";
     return { ok: true, args };
   }
@@ -1005,6 +1075,10 @@ Commands
   completions <shell>           Print a bash, zsh or fish completion script.
   replay <session|file>         Re-run a session's prompts, optionally on another model.
   audit [session]               Print the audit trail for a session.
+  insights [--since <window>]   What has been going wrong locally: parks, silent turns,
+           [--workflow <name>]  step failures and slow roles, from
+           [--json] [--share]   ~/.arcturn/insights. --share prints a markdown block
+                                and a pre-filled issue link; it sends nothing.
   blame <file> [session]        Explain which turn and evidence wrote each line.
   bisect <session>              Find the turn where behaviour left a recording.
   serve                         Host sessions over WebSocket for remote attach.

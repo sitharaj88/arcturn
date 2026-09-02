@@ -213,6 +213,12 @@ export interface StepEndLine {
    * terminal. See {@link LastTurnShape}.
    */
   readonly lastTurn?: LastTurnShape;
+  /**
+   * What the step's agent spent its turns on, on EVERY terminal — not just a
+   * failed one. See {@link StepActivity} for why the succeeded-but-thrashed
+   * step is the one worth being able to find later.
+   */
+  readonly activity?: StepActivity;
 }
 
 /**
@@ -385,6 +391,8 @@ export interface StepFailAskLine {
   readonly attempts: number;
   /** The failed step's last turn, when the lane saw one. See {@link StepEndLine.lastTurn}. */
   readonly lastTurn?: LastTurnShape;
+  /** What the failed step spent its turns on. See {@link StepActivity}. */
+  readonly activity?: StepActivity;
   readonly ts: number;
 }
 
@@ -695,6 +703,8 @@ export interface PendingStepFailAsk {
   readonly attempts: number;
   /** What the failed step's model emitted on its last turn, when recorded. */
   readonly lastTurn?: LastTurnShape;
+  /** What the failed step spent its turns on, when recorded. */
+  readonly activity?: StepActivity;
 }
 
 /* ------------------------------------------------------------------ *
@@ -894,6 +904,114 @@ export function describeLastTurn(shape: LastTurnShape): string {
   return `${head}\nreasoning ended: ${JSON.stringify(shape.reasoningTail)}`;
 }
 
+/* ------------------------------------------------------------------ *
+ * What the step actually DID
+ * ------------------------------------------------------------------ */
+
+/**
+ * What a step's agent spent its turns on — counts and tool names, nothing else.
+ *
+ * The fact that was missing when a write-lane builder burned all eighty of its
+ * turns reading. The park said "hit its 80-turn ceiling", which is true and
+ * useless; "80 turns · bash 77 · read 17 · no file written" is the same event
+ * with the diagnosis attached, and it is the difference between "re-run it with
+ * more rope" and "this role never started writing".
+ *
+ * Recorded on EVERY step, not only failed ones: it costs a few integers, and a
+ * succeeded-but-thrashed step is exactly the one a retrospective wants to find
+ * before it becomes a failure. Deliberately counts only — a tool NAME and how
+ * many times it was called. No arguments, no paths, no output.
+ */
+export interface StepActivity {
+  /** Turns the child agent completed. */
+  readonly turns: number;
+  /** How many times each tool was called, by tool name. */
+  readonly toolCalls: Readonly<Record<string, number>>;
+  /** Calls to a tool that authors files (`write`, `edit`, `multiedit`). */
+  readonly writes: number;
+}
+
+/** Tools whose call means a file was authored. Mirrors `workflow.ts`'s `WRITE_TOOLS`. */
+const AUTHORING_TOOLS: ReadonlySet<string> = new Set(["write", "edit", "multiedit"]);
+
+/**
+ * How many of a tool-call tally were authoring calls.
+ *
+ * One helper so the activity record and the write-lane progress check can never
+ * disagree about what "wrote something" means.
+ *
+ * @param toolCalls - Call counts by tool name.
+ */
+export function countWrites(toolCalls: Readonly<Record<string, number>>): number {
+  let writes = 0;
+  for (const [name, count] of Object.entries(toolCalls)) {
+    if (AUTHORING_TOOLS.has(name)) writes += count;
+  }
+  return writes;
+}
+
+/** How many distinct tools {@link describeActivity} names before it summarises. */
+const ACTIVITY_TOOLS_SHOWN = 6;
+
+/**
+ * Validate a {@link StepActivity} that came off disk.
+ *
+ * Same tolerance rule as {@link lastTurnFacts}: a field that is not the shape it
+ * claims to be is dropped rather than coerced, and a record with no usable turn
+ * count is no record at all. `writes` is *recomputed* from the tally rather than
+ * trusted, so a hand-edited line cannot claim files it never wrote.
+ *
+ * @param value - A candidate activity record, straight off disk.
+ */
+export function activityFacts(value: unknown): StepActivity | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const raw = value as Record<string, unknown>;
+  if (typeof raw.turns !== "number" || !Number.isFinite(raw.turns) || raw.turns < 0) {
+    return undefined;
+  }
+  const toolCalls: Record<string, number> = {};
+  if (typeof raw.toolCalls === "object" && raw.toolCalls !== null) {
+    for (const [name, count] of Object.entries(raw.toolCalls as Record<string, unknown>)) {
+      if (name === "") continue;
+      if (typeof count !== "number" || !Number.isFinite(count) || count <= 0) continue;
+      toolCalls[name] = Math.floor(count);
+    }
+  }
+  return { turns: Math.floor(raw.turns), toolCalls, writes: countWrites(toolCalls) };
+}
+
+/**
+ * Render a {@link StepActivity} for a human — one line of counts.
+ *
+ * Tools are ordered by call count (ties by name, so the line is stable), the
+ * busiest {@link ACTIVITY_TOOLS_SHOWN} are named and the rest are summarised.
+ * The write count is spelled out rather than omitted when it is zero: "no file
+ * written" is the whole point of the line on a write-lane step.
+ *
+ * @example
+ * activity: 80 turns · bash 77 · read 17 · grep 1 · no file written
+ *
+ * @param activity - The step's recorded counts.
+ */
+export function describeActivity(activity: StepActivity): string {
+  const ranked = Object.entries(activity.toolCalls)
+    .filter(([, count]) => count > 0)
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  const shown = ranked.slice(0, ACTIVITY_TOOLS_SHOWN).map(([name, count]) => `${name} ${count}`);
+  const hidden = ranked.length - shown.length;
+  if (hidden > 0) shown.push(`+${hidden} more`);
+  const calls = shown.length > 0 ? shown : ["no tool call"];
+  const writes =
+    activity.writes === 0
+      ? "no file written"
+      : `${activity.writes} write${activity.writes === 1 ? "" : "s"}`;
+  return [
+    `activity: ${activity.turns} turn${activity.turns === 1 ? "" : "s"}`,
+    ...calls,
+    writes,
+  ].join(" · ");
+}
+
 /**
  * A human's reply to a pending step-failure ask, threaded in by a resume path.
  *
@@ -949,6 +1067,7 @@ export function stepFailAskFacts(line: StepFailAskLine): PendingStepFailAsk | un
       ? line.ceiling
       : undefined;
   const lastTurn = lastTurnFacts(line.lastTurn);
+  const activity = activityFacts(line.activity);
   return {
     stepId: line.stepId,
     ...(typeof line.role === "string" && line.role !== "" ? { role: line.role } : {}),
@@ -962,6 +1081,7 @@ export function stepFailAskFacts(line: StepFailAskLine): PendingStepFailAsk | un
     ...(ceiling === undefined ? {} : { ceiling }),
     attempts,
     ...(lastTurn === undefined ? {} : { lastTurn }),
+    ...(activity === undefined ? {} : { activity }),
   };
 }
 

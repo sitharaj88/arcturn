@@ -95,6 +95,59 @@ CLI, the SDK, or the wire protocol.
   inside the step at the cost of one request; two park the run with the step
   named. Fourteen seconds, in CI, on every change.
 
+- **`progressCheck`: tell an agent it is off track while it still has budget.**
+  A write-lane builder spent all 80 of its turns reading — 77 `bash` calls, 17
+  `read` calls, zero writes, 23.6 minutes, 330K tokens — and hit its ceiling
+  having never started the file it was sent to write. The ceiling caught it,
+  but only once the money was gone, and all it could say afterwards was "hit
+  its 80-turn ceiling" rather than "never wrote anything". A new `AgentOptions`
+  callback runs at the top of every turn after the first, is handed the run's
+  turn index, its ceiling and a histogram of the tool calls it has made so far
+  by name, and may return one sentence to send the model. That sentence rides
+  the next request without spending a turn — exactly as the turn-budget warning
+  does — surfaces as a `warn` notice and a new `progressWarning` event, and is
+  never sent twice in one run, so a check may return it unconditionally for as
+  long as its condition holds. The loop supplies the evidence and the delivery;
+  only the caller knows what the step was *for*. No callback, no change.
+
+- **`arcturn insights`: a local ledger of what keeps going wrong, and the
+  command that reads it.** Every serious defect found here this week was found
+  by a person opening session JSONL by hand — which model went quiet, on which
+  step, how often, whether the nudge recovered it, what a run cost before it
+  parked. The engine knew all of it and kept none of it, so the second
+  occurrence of a fault cost exactly what the first did. It now appends a
+  failure-shaped ledger to `~/.arcturn/insights/events.jsonl` — a silent turn
+  (with the model, whether it was nudged, and the workflow, run, step and role
+  it belonged to), every step terminal, every park with its cause bucketed,
+  every budget checkpoint, every progress warning and every run's end — and
+  `arcturn insights` / `/insights` folds it into five answers: how runs end and
+  what they cost, which step of which pipeline keeps parking and why, which
+  models go quiet and how often the nudge recovers them, which failure kinds
+  and roles dominate, and where the wall-clock time goes. `--since 7d|30d|all`,
+  `--workflow <name>`, `--json`.
+
+  The ledger holds names and numbers and nothing else: workflow names, run
+  ids, step ids, role names, model ids, statuses, durations, token counts,
+  tool-call counts. No prompt text, no reasoning, no file contents, no paths,
+  no session ids — enforced by rebuilding every line field by field from a
+  fixed whitelist rather than by a rule somebody has to remember, which is
+  also how the run journal's `reasoningTail` is dropped on the way in. It
+  rotates at 5 MB keeping one generation, a write that fails is one warning
+  rather than a failed run, and `"insights": false` writes nothing at all.
+  `--share` prints the report as markdown with a one-line statement of its
+  contents and a pre-filled issue URL; nothing is ever sent for you.
+
+- **A step now records what it spent its turns *on*, not just how many.** The
+  eighty-turn builder above was, in every record the run kept, indistinguishable
+  from a step that ran out of rope halfway through real work. Each step's
+  terminal — and the park it may become — now carries the turn count, the
+  per-tool call counts and how many of those calls authored a file, rendered
+  wherever the last turn already was: `activity: 80 turns · bash 77 · read 17 ·
+  no file written`. Counts and tool names only. And the write lane wires the
+  new `progressCheck` to that same evidence: a role that has spent half its
+  ceiling with nothing written is told so once, in the request, while forty
+  turns of budget are still left to act on it.
+
 ### Fixed
 
 - **Scrolling the transcript is smooth, and stays smooth on a slow
@@ -190,6 +243,25 @@ CLI, the SDK, or the wire protocol.
   output becomes a short handoff — path, headings, the five numbers the
   builder needs first — since every later role reads the file from disk
   anyway. The registry disclosure and the editor's bundled catalog follow.
+
+- **Every model now hears that rule, in every lane — no kit author has to
+  rediscover it at $40 a run.** The bullet above fixed one role file; the
+  failure was never that role's. So the rule moves into the engine as one
+  paragraph (`LARGE_CONTENT_RULE`, beside the threshold it quotes,
+  `LARGE_CONTENT_CHARS` = 6,000 characters, about 100 lines) and is spliced,
+  verbatim and identically, into the CLI system prompt, the brief every
+  `subagent` child receives, both worktree lane contracts, and the `write` and
+  `edit` tool descriptions the model reads immediately before making the call
+  that fails. The silent-turn nudge names it too: a turn that went quiet is
+  most often a turn that meant to hand a whole document to one call, and
+  handing it back without saying so gets the same silence again. Nothing
+  refuses a large argument — an 8 KB source file in one `write` is
+  legitimate — the rule is advice, said everywhere it is needed. And because
+  advice is useless to a role that holds `write` and nothing else, the kit
+  conformance suite now fails any shipped role that can create a file but not
+  fill one in stages: `design-author`, `resilience-author`, `baseline-author`
+  and `scaffolder` gain `edit`, with the registry disclosures and the editor's
+  bundled catalog following.
 
 - **A build stage that took three tries to pass is now three steps that
   pass once.** `rag-blueprint`'s `rag-setup` scoped each of its three build
