@@ -3832,7 +3832,18 @@ export async function runWorkflow(
                 ...(result.record === undefined ? {} : { record: result.record }),
                 text: result.text,
                 promptHash: hashPrompt(prompt),
-                attempts: 0,
+                // The count the crashed run had actually reached, not zero: a
+                // reconstructed terminal claiming "0 attempts" tells the next
+                // reader — a resume, `/workflow status`, the ledger — that a
+                // step which really did run and really did spend money never
+                // ran at all. The write-ahead intent names the attempt it was
+                // on (0-based); a resume that was already answering an ask
+                // knows a floor for it.
+                attempts: Math.max(
+                  1,
+                  (interrupted.attempt ?? 0) + 1,
+                  priorAttemptsFor(step.id) + 1,
+                ),
                 startedAt: result.startedAt ?? now(),
                 endedAt: result.endedAt ?? now(),
                 recovered: true,
@@ -3987,6 +3998,14 @@ export async function runWorkflow(
                 durationMs: Math.max(0, now() - stepStartedAt),
                 usage: superseded.usage,
                 attempts: superseded.attempt,
+                // The flag every aggregate that counts STEPS must filter on:
+                // this terminal and the step's own final one describe the same
+                // step, so a rescued step would otherwise add both a `failed`
+                // and a `done` row to its role — inflating that role's failure
+                // rate by exactly the successes the automatic retry produces,
+                // and counting its duration twice. The failure-KIND tally
+                // still wants this record; see `roleStats` in `insights.ts`.
+                superseded: true,
                 ...(superseded.activity === undefined ? {} : { activity: superseded.activity }),
               }),
           );
@@ -5136,15 +5155,43 @@ export const WRITE_LANE_STALL_TURNS = WRITE_LANE_PROGRESS_TURNS * 3;
  * Exported so the thresholds and the wording are one testable thing rather
  * than a condition buried in a spawn call.
  *
+ * CHANGED A FILE, NOT CALLED A WRITE TOOL. Six of the thirteen write-lane
+ * roles this repository ships hold `bash`, and one of them —
+ * `project-setup/scaffolder` — is briefed never to hand-write a file a
+ * generator can produce. A role authoring through `printf >> file`, `npm
+ * create` or `git apply` calls no authoring tool at all, and telling it on
+ * turn 12 that "no file has been changed" while its worktree fills up is a
+ * false statement that teaches it to distrust the whole channel. So the caller
+ * threads in {@link WriteLaneProgress.changedFile}, which answers from the
+ * worktree itself; `countWrites` stays as the cheap half of the same question.
+ *
  * @param progress - The turn about to start, and the calls made so far.
+ * @param changedFile - Has this step changed anything the worktree can see?
+ *   Defaults to "no", so a caller with no worktree (a unit test, a lane that
+ *   cannot probe) gets the tool-call-only reading it always had.
  * @returns The nudge for this turn, or `undefined` when there is none.
  */
-export function writeLaneProgressCheck(progress: TurnProgress): string | undefined {
-  if (countWrites(progress.toolCalls) > 0) return undefined;
-  const first = Math.min(
-    Math.floor(progress.maxTurns * WRITE_LANE_PROGRESS_FRACTION),
-    WRITE_LANE_PROGRESS_TURNS,
-  );
+/**
+ * The turn the first progress notice lands on, given a ceiling.
+ *
+ * The same expression {@link writeLaneProgressCheck} computes, hoisted so the
+ * lane can start watching the worktree one turn before the nudge needs the
+ * answer. A role whose ceiling is unknown to the lane (the session clamps it)
+ * is assumed to get the full schedule.
+ *
+ * @param maxTurns - The child's ceiling, when the lane can see it.
+ */
+export function firstProgressTurn(maxTurns: number | undefined): number {
+  if (maxTurns === undefined) return WRITE_LANE_PROGRESS_TURNS;
+  return Math.min(Math.floor(maxTurns * WRITE_LANE_PROGRESS_FRACTION), WRITE_LANE_PROGRESS_TURNS);
+}
+
+export function writeLaneProgressCheck(
+  progress: TurnProgress,
+  changedFile: () => boolean = () => false,
+): string | undefined {
+  if (countWrites(progress.toolCalls) > 0 || changedFile()) return undefined;
+  const first = firstProgressTurn(progress.maxTurns);
   const spent = `Progress check: ${progress.turnIndex} of ${progress.maxTurns} turns are spent`;
   if (progress.turnIndex === first) {
     return (
@@ -5154,8 +5201,16 @@ export function writeLaneProgressCheck(progress: TurnProgress): string | undefin
     );
   }
   // The second notice is the one with teeth, and it is worded as a deadline
-  // rather than as advice because the first one was answered and ignored.
-  if (progress.turnIndex === WRITE_LANE_PROGRESS_TURNS * 2) {
+  // rather than as advice because the first one was answered and ignored. It
+  // is therefore only sent when the deadline is REAL: a role whose ceiling is
+  // below {@link WRITE_LANE_STALL_TURNS} runs out of turns before the stall
+  // guard could ever stop it (and the lane installs no guard for it at all),
+  // so promising it a stop at turn 36 would be threatening a consequence this
+  // engine cannot deliver.
+  if (
+    progress.turnIndex === WRITE_LANE_PROGRESS_TURNS * 2 &&
+    progress.maxTurns >= WRITE_LANE_STALL_TURNS
+  ) {
     return (
       `${spent} and still no file has been changed. This is the last warning: if no file has ` +
       `been changed by turn ${WRITE_LANE_STALL_TURNS} this step will be stopped and parked for ` +
@@ -5176,19 +5231,35 @@ export function writeLaneProgressCheck(progress: TurnProgress): string | undefin
  * same way and then succeeded on a fresh retry in 82 turns with 30 writes, and
  * the steps that never stalled were the ones with the narrowest briefs.
  *
+ * WHAT IT MAY NOT SAY. The first draft ended every sentence with "and wrote
+ * nothing", meaning "called no `write`/`edit`". Against a role holding `bash`
+ * that was simply false — the reviewer's run appended to a real file on every
+ * one of its 36 turns and was told it had written nothing, in the same
+ * message that said `Patch preserved at …`. The clause now reports the
+ * WORKTREE, which is the signal the guard fires on: it only ever appears
+ * after a fresh `git status --porcelain` came back clean.
+ *
  * @example
  * step 8 (@rag-builder) was stopped after 36 turns without changing a file —
- * it read 114 files and ran 75 shell commands and wrote nothing. Retry it (a
- * fresh attempt usually writes early), or narrow what it was asked to do.
+ * it read 114 files and ran 75 shell commands and its worktree is still
+ * unchanged. Retry it (a fresh attempt usually writes early), or narrow what
+ * it was asked to do.
  *
  * @param stepId - The stalled step.
  * @param role - Its `@role`, when it had one.
  * @param activity - The counts `driveAgent` kept while it ran.
+ * @param changedFiles - Files the capture actually found in the worktree. Zero
+ *   on every path the guard is designed to take — it stops a child only on a
+ *   `git status` that came back clean — and the parameter exists so that the
+ *   one-tool-call-wide race it cannot rule out (a write landing between that
+ *   probe and the abort) produces an honest sentence rather than "it changed
+ *   nothing" printed above a preserved patch.
  */
 export function noProgressCause(
   stepId: string,
   role: string | undefined,
   activity: StepActivity,
+  changedFiles = 0,
 ): string {
   const who = role === undefined || role === "" ? `step ${stepId}` : `step ${stepId} (@${role})`;
   const reads = activity.toolCalls.read ?? 0;
@@ -5200,14 +5271,22 @@ export function noProgressCause(
   if (reads > 0) did.push(`read ${reads} file${reads === 1 ? "" : "s"}`);
   if (shell > 0) did.push(`ran ${shell} shell command${shell === 1 ? "" : "s"}`);
   if (others > 0) did.push(`made ${others} other tool call${others === 1 ? "" : "s"}`);
-  // "wrote nothing" is the clause the whole sentence turns on, so it is always
-  // last and always present — a step that called no tool at all still gets a
-  // truthful "it called no tool and wrote nothing".
-  did.push("wrote nothing");
+  // The clause the whole sentence turns on, so it is always last and always
+  // present — a step that called no tool at all still gets a truthful "it
+  // called no tool and its worktree is still unchanged". It names the WORKTREE
+  // and not the write tools on purpose: see this function's doc comment.
+  did.push(
+    changedFiles > 0
+      ? `left ${changedFiles} changed file${changedFiles === 1 ? "" : "s"} behind, captured below`
+      : "its worktree is still unchanged",
+  );
+  const headline =
+    changedFiles > 0
+      ? `${who} was stopped after ${activity.turns} turns for making no progress`
+      : `${who} was stopped after ${activity.turns} turns without changing a file`;
   return (
-    `${who} was stopped after ${activity.turns} turns without changing a file — it ` +
-    `${did.length === 1 ? "called no tool and " : ""}${did.join(" and ")}. Retry it (a fresh ` +
-    "attempt usually writes early), or narrow what it was asked to do."
+    `${headline} — it ${did.length === 1 ? "called no tool and " : ""}${did.join(" and ")}. ` +
+    "Retry it (a fresh attempt usually writes early), or narrow what it was asked to do."
   );
 }
 
@@ -5484,15 +5563,36 @@ interface AgentRunSignals {
  * exactly zero turns. See {@link WRITE_LANE_STALL_TURNS}.
  */
 interface AgentStallGuard {
-  /** Stop the child once this many turns have ended with nothing written. */
+  /** Stop the child once this many turns have ended with nothing changed. */
   readonly afterTurns: number;
+  /**
+   * The first turn whose end refreshes {@link progress}.
+   *
+   * A `git status` per turn from turn 1 would be a shell round trip per turn
+   * for every write-lane step in every pipeline, to answer a question nobody
+   * asks until the first threshold. So the observer starts one turn before
+   * that threshold and the answer is warm by the time it is read.
+   */
+  readonly observeAfterTurns: number;
   /**
    * How many writes the run has to its name, read off the same tool histogram
    * the drive is already keeping. Injected rather than hard-coded to
    * {@link countWrites} so "what counts as progress" stays the lane's
    * question, not this function's.
+   *
+   * The CHEAP half of that question — see {@link progress} for the honest one.
    */
   readonly writes: (toolCalls: Readonly<Record<string, number>>) => number;
+  /**
+   * The worktree's own answer to "has this step changed a file?".
+   *
+   * A role that authors through `bash` calls no authoring tool, so
+   * {@link writes} alone would stop it at turn 36 and call its real work
+   * nothing — see {@link WriteLaneProgress}. The guard therefore refuses to
+   * abort on anything but a `false` from here: dirty spares the child, and so
+   * does "git could not say".
+   */
+  readonly progress: WriteLaneProgress;
 }
 
 /**
@@ -5579,8 +5679,51 @@ async function driveAgent(
   const toolCalls: Record<string, number> = {};
   /** Set once, by the stall guard below, so the lane can tell it from an Esc. */
   let stalled = false;
+  /** The run is over: nothing may abort it, and no probe may still decide. */
+  let ended = false;
+  /**
+   * The stall guard's probes, serialised — one `git status` in flight at most,
+   * and awaited before this drive returns so `stalled` is settled before the
+   * lane reads it.
+   */
+  let guardWork: Promise<void> = Promise.resolve();
   live?.start();
   try {
+    /**
+     * Ask the worktree, then stop the child if the answer is `false`.
+     *
+     * `decide` separates the observer from the executioner: every turn from
+     * `observeAfterTurns` on refreshes the cache, and only the turn at
+     * `afterTurns` may act on it. Nothing here aborts on `true` (the role
+     * wrote through the shell) or on `undefined` (git could not say) — a
+     * wrongly stopped step throws away real work, twice over once the
+     * automatic fresh retry has doubled it.
+     */
+    const probe = (decide: boolean): void => {
+      if (stall === undefined) return;
+      const guard = stall;
+      const task = (async () => {
+        if (stalled || ended) return;
+        const answer = await guard.progress.refresh(decide);
+        if (!decide || stalled || ended) return;
+        // THIS probe's answer, taken after the decision turn ended — not
+        // `provablyUnchanged()`, which also demands that nothing that could
+        // write has run SINCE. Nothing can have: the guard evaluates on a turn
+        // boundary, no tool is in flight there, and the next one cannot start
+        // until the model has answered. Insisting on it anyway is how a child
+        // whose turns are faster than `git status` — a scripted one, in this
+        // repository's own tests — outran the guard forever.
+        if (answer !== false || guard.writes(toolCalls) > 0) return;
+        stalled = true;
+        agent.abort();
+      })().catch(() => {
+        // A guard that cannot read the worktree stops nothing at all.
+      });
+      // Joined, not queued: an observation dropped because one was already in
+      // flight costs nothing, and a chain of them would put the decision turn
+      // minutes behind the child it is meant to stop.
+      guardWork = Promise.all([guardWork, task]).then(() => undefined);
+    };
     const unsubscribe = agent.subscribe((event) => {
       // Verbatim and namespaced, exactly as the `subagent` tool republishes a
       // child: the host's existing rows then track this step's tokens, todos
@@ -5590,6 +5733,7 @@ async function driveAgent(
       if (event.type === "messageEnd") lastMessage = event.message;
       if (event.type === "toolStart") {
         toolCalls[event.toolName] = (toolCalls[event.toolName] ?? 0) + 1;
+        if (couldWrite(event.toolName)) stall?.progress.mutated();
       }
       // The two events that used to leave no trace outside a person's memory
       // of the run. Both are diagnostics, so both are swallowed if the ledger
@@ -5618,15 +5762,38 @@ async function driveAgent(
         // emitting `turnEnd`, so aborting from inside this handler costs no
         // further request. A child that finally wrote something on the very
         // turn that would have stopped it is therefore spared.
-        if (!stalled && stall !== undefined && turns >= stall.afterTurns) {
-          if (stall.writes(toolCalls) === 0) {
-            stalled = true;
-            agent.abort();
+        //
+        // "Wrote something" is the WORKTREE's answer and not the tool
+        // histogram's — see {@link WriteLaneProgress} for the run that made
+        // that distinction load-bearing. The synchronous path below is taken
+        // when nothing that could have written has run since the last probe,
+        // which is the whole reason the observer keeps the answer warm: a pure
+        // reader is stopped on turn `afterTurns` exactly, and a role that has
+        // touched the shell costs one fresh `git status` before anything is
+        // decided about it.
+        if (!stalled && !ended && stall !== undefined && turns >= stall.observeAfterTurns) {
+          const deciding = turns >= stall.afterTurns && stall.writes(toolCalls) === 0;
+          if (stall.progress.provablyUnchanged()) {
+            // No git needed: either nothing that could write has run at all, or
+            // a clean probe still holds. A purely reading child therefore
+            // costs zero subprocesses and is stopped on the threshold turn
+            // exactly, which is the behaviour the schedule promises.
+            if (deciding) {
+              stalled = true;
+              agent.abort();
+            }
+          } else if (stall.progress.changed() !== true) {
+            // Something that could have written has run and the answer is not
+            // known to be "dirty": ask git. On the decision turn that probe is
+            // a fresh one and the child may finish a turn or two while it
+            // runs — late is fine, wrongly stopping a role that wrote is not.
+            probe(deciding);
           }
         }
       } else if (event.type === "runEnd") {
         reason = event.reason;
         errorMessage = event.errorMessage;
+        ended = true;
       } else if (event.type === "messageStream" && event.event.type === "error") {
         // The core loop re-emits the terminal stream error before it becomes a
         // `runEnd`; the retry layer only surfaces the *final* error event, so
@@ -5648,6 +5815,11 @@ async function driveAgent(
     } finally {
       signal.removeEventListener("abort", onAbort);
       unsubscribe();
+      ended = true;
+      // Settle any probe still in flight before the outcome is built: `stalled`
+      // is what tells a `no-progress` failure from an operator's Esc, and a
+      // flag that arrives after the lane has read it tells nobody anything.
+      await guardWork;
     }
     try {
       text = agent.finalText();
@@ -5847,10 +6019,18 @@ export function emptyStepError(stepId: string, role: string | undefined): string
  * numbers the journal and the ledger carry, and no prompt, path or word of
  * model output.
  *
+ * COUNTED, NOT ASSUMED. The first draft said "retried automatically once and
+ * failed both times" from a constant, and then listed however many attempts it
+ * had been handed. Three is reachable and not rare: a `network` blip is
+ * retried on the transient budget, and the fresh attempt this note exists for
+ * comes *after* that — so a step could be shown three attempts under a
+ * sentence claiming two. The counts come off the list now.
+ *
  * @example
- * This step was retried automatically once and failed both times (attempt 1 —
+ * This step was retried automatically once and failed twice (attempt 1 —
  * activity: 36 turns · read 36 · no file written; attempt 2 — activity: 36
- * turns · bash 30 · read 6 · no file written).
+ * turns · bash 30 · read 6 · no file written). Another identical attempt is
+ * unlikely to differ.
  *
  * @param activities - Each attempt's activity, oldest first, `undefined` where
  *   a lane recorded none. Fewer than two attempts produces nothing: there is
@@ -5865,9 +6045,17 @@ export function retriedAttemptsNote(
       `attempt ${index + 1} — ${activity === undefined ? "no activity recorded" : describeActivity(activity)}`,
   );
   return (
-    `This step was retried automatically once and failed both times ` +
-    `(${parts.join("; ")}). A third identical attempt is unlikely to differ.`
+    `This step was retried automatically ${countedTimes(activities.length - 1)} and failed ` +
+    `${countedTimes(activities.length)} (${parts.join("; ")}). Another identical attempt is ` +
+    "unlikely to differ."
   );
+}
+
+/** "once", "twice", "5 times" — a count a sentence can carry. */
+function countedTimes(count: number): string {
+  if (count === 1) return "once";
+  if (count === 2) return "twice";
+  return `${count} times`;
 }
 
 /**
@@ -5930,8 +6118,315 @@ function writeLaneSlug(stepId: string, role: string, attempt?: number): string {
   return `${stepId}-${role}${suffix}`.replace(/[^A-Za-z0-9._-]+/g, "-");
 }
 
+/**
+ * Worktree paths THIS process minted, per lane.
+ *
+ * The one fact the collision handler below needs and cannot get from git: a
+ * `1-builder` that exists because this run's own earlier attempt kept it for
+ * forensics must never be deleted, and a `1-builder` left by a process that
+ * died mid-step is rubble. Per-lane (so two runs in one process cannot see
+ * each other's), and weak so a finished run's lane takes its set with it.
+ */
+const MINTED_WORKTREES = new WeakMap<WriteLane, Set<string>>();
+
+/** This lane's minted-slug set, created on first use. */
+function mintedFor(lane: WriteLane): Set<string> {
+  const already = MINTED_WORKTREES.get(lane);
+  if (already !== undefined) return already;
+  const fresh = new Set<string>();
+  MINTED_WORKTREES.set(lane, fresh);
+  return fresh;
+}
+
+/** Did this failure say "there is already a worktree there"? */
+function isWorktreeExists(error: unknown): boolean {
+  return (error as { code?: unknown } | undefined)?.code === "worktree-exists";
+}
+
+/**
+ * The path a `worktree-exists` failure was complaining about.
+ *
+ * The lane seam hands back a {@link ScoutWorktreeError} whose message names
+ * the directory, and that message is the only channel through which the path
+ * travels — `createWorktree` throws before it can return one. A message this
+ * does not recognise yields `undefined`, and the caller then salts the slug
+ * instead of deleting a directory it cannot name.
+ */
+function existingWorktreePath(error: unknown): string | undefined {
+  const match = /worktree already exists at (.+?); remove it/.exec(errorText(error));
+  return match?.[1];
+}
+
+/** A step's worktree, and the slug it ended up under. */
+interface OpenedWorktree {
+  readonly worktree: WriteLaneWorktree;
+  readonly slug: string;
+}
+
+/**
+ * Create this step's worktree, clearing a dead run's rubble out of the way.
+ *
+ * THE CRASH THIS EXISTS FOR. `git worktree add` refuses a path that already
+ * exists, and the slug is a pure function of the step, the role and the
+ * attempt — so a run killed mid-step (^C, an OOM, a closed laptop) leaves a
+ * `1-builder` behind that the resume walks straight back into. The refusal
+ * classifies as `config` (deterministic, correctly: retrying the same `git
+ * worktree add` fails identically), so the resumed step fails instantly and
+ * parks with a question about git plumbing that no answer at the park can fix.
+ * Keeping two forensic worktrees per stalled step doubled the window.
+ *
+ * The rule is ownership. A path THIS process minted is real evidence —
+ * a failed attempt's worktree, kept on purpose and possibly named in a
+ * pending ask — so it is left alone and this attempt takes the next salted
+ * slug (`-r<n>`, continuing from the attempt it was already on). A path
+ * nobody in this process created is rubble from a dead one: it is removed
+ * (`git worktree remove --force`, then a prune) and the create is tried once
+ * more. If that removal or that second create fails, salting is the fallback,
+ * because a step that runs in a differently named worktree is a step that
+ * runs.
+ *
+ * @param lane - The worktree lane.
+ * @param stepId - The step being run.
+ * @param role - Its role, for the slug.
+ * @param attempt - The retry index the request carries, if any.
+ * @param seed - The run's applied patches.
+ */
+async function openStepWorktree(
+  lane: WriteLane,
+  stepId: string,
+  role: string,
+  attempt: number | undefined,
+  seed: WriteLaneSeed,
+): Promise<OpenedWorktree> {
+  const minted = mintedFor(lane);
+  const open = async (slug: string): Promise<OpenedWorktree> => {
+    const worktree = await lane.createWorktree(slug, seed);
+    minted.add(slug);
+    return { worktree, slug };
+  };
+  const first = writeLaneSlug(stepId, role, attempt);
+  try {
+    return await open(first);
+  } catch (error) {
+    if (!isWorktreeExists(error)) throw error;
+    const stale = minted.has(first) ? undefined : existingWorktreePath(error);
+    if (stale !== undefined) {
+      try {
+        await lane.exec(lane.cwd, ["worktree", "remove", "--force", stale]);
+      } catch {
+        // Already gone, never registered, or locked: the directory itself may
+        // still be there, so clear it by hand before giving up on the path.
+        await rm(stale, { recursive: true, force: true }).catch(() => undefined);
+      }
+      // Registered-but-missing entries would otherwise keep the path refused.
+      await lane.exec(lane.cwd, ["worktree", "prune"]).catch(() => undefined);
+      try {
+        return await open(first);
+      } catch (again) {
+        if (!isWorktreeExists(again)) throw again;
+      }
+    }
+    // Referenced by this run (or unclearable): take the next slug along,
+    // continuing from the attempt this request was already on.
+    const base = attempt ?? 0;
+    let last: unknown;
+    for (let salt = 1; salt <= WORKTREE_SLUG_SALTS; salt += 1) {
+      try {
+        return await open(writeLaneSlug(stepId, role, base + salt));
+      } catch (salted) {
+        if (!isWorktreeExists(salted)) throw salted;
+        last = salted;
+      }
+    }
+    throw last ?? error;
+  }
+}
+
+/** How many salted slugs a collision may try before the step gives up. */
+const WORKTREE_SLUG_SALTS = 8;
+
 /** Pathspec keeping a role's own agent scratch out of every capture. */
 const CAPTURE_PATHSPEC = ["--", ".", ":(exclude).arcturn"];
+
+/**
+ * Tools that cannot change a file, so an answer taken before one of them ran
+ * is still an answer afterwards.
+ *
+ * Deliberately a SHORT allow-list, and everything else — `bash` above all, but
+ * also any tool this list has not heard of — counts as something that might
+ * have written. The list exists for one reason: it lets the stall guard reuse
+ * a cached `git status` on the turn it decides, which is what keeps the stop
+ * landing on turn {@link WRITE_LANE_STALL_TURNS} exactly rather than one or
+ * two turns after git got round to answering.
+ */
+const NON_WRITING_TOOLS: ReadonlySet<string> = new Set([
+  "read",
+  "grep",
+  "glob",
+  "ls",
+  "search_code",
+  "todo",
+  "web_search",
+  "web_fetch",
+]);
+
+/** Could this tool call have changed a file? Unknown tools count as yes. */
+function couldWrite(toolName: string): boolean {
+  return !NON_WRITING_TOOLS.has(toolName);
+}
+
+/**
+ * "Has this step changed anything?" — asked of the WORKTREE, not of the tool
+ * histogram.
+ *
+ * THE BUG THIS EXISTS FOR. The write lane's progress check and its stall guard
+ * both used to answer that question with {@link countWrites}, which counts
+ * `write`, `edit` and `multiedit` calls and nothing else. Six of the thirteen
+ * write-lane roles this repository ships hold `bash`, and one of them —
+ * `project-setup/scaffolder` — is briefed *never* to hand-write a file a
+ * generator can produce. A role authoring through `printf >> file`, `npm
+ * create`, `cp` or `git apply` therefore registered zero writes forever: it
+ * was told at turns 12 and 24 that "no file has been changed" while its
+ * worktree filled up, and was then stopped at turn 36 with "it wrote nothing"
+ * printed beside "Patch preserved at …" — its 36 turns of real files captured
+ * to a patch and thrown away, twice, because the automatic fresh retry
+ * doubled it.
+ *
+ * `git status --porcelain` in the worktree is the honest signal, and it is the
+ * same one the capture uses: {@link CAPTURE_PATHSPEC} keeps the role's own
+ * `.arcturn` scratch out of the answer, exactly as it is kept out of the diff.
+ *
+ * THREE-VALUED, and the third value matters most: `undefined` means "git could
+ * not say" (no repository, a locked index, a `.git` file removed under the
+ * worktree by a crash). Nothing anywhere may read that as "clean" — an
+ * unknown answer must never stop a child, because a wrongly stopped step
+ * throws away real work.
+ */
+export interface WriteLaneProgress {
+  /**
+   * Record one tool call that could have changed a file — see
+   * {@link couldWrite}. The drive calls this; nothing else does.
+   */
+  mutated(): void;
+  /**
+   * Is this worktree PROVABLY unchanged?
+   *
+   * The only question the guard and the nudge are allowed to act on, and it is
+   * deliberately the harder one to satisfy. Two things can prove it, and
+   * nothing else may:
+   *
+   * 1. **Nothing that could write has run.** A child that has only read,
+   *    grepped and globbed cannot have changed a file, and this needs no git
+   *    at all — which is why a purely reading role costs zero subprocesses and
+   *    is stopped on turn {@link WRITE_LANE_STALL_TURNS} exactly.
+   * 2. **A probe came back clean and still holds** — `git status --porcelain`
+   *    said nothing, and nothing that could write has run since it did.
+   *
+   * Everything else is `false`: a dirty worktree, a git that would not answer,
+   * a probe overtaken by a `bash` call, a probe that has not run yet. "I do
+   * not know" is never "it wrote nothing", because a wrongly stopped step
+   * throws away real work — twice over, once the automatic fresh retry has
+   * doubled it.
+   */
+  provablyUnchanged(): boolean;
+  /**
+   * The softer half of the same question, for the mid-run nudge: is the
+   * worktree *known* to be unchanged — nothing that could write has run, or
+   * the last probe came back clean?
+   *
+   * It differs from {@link provablyUnchanged} in dropping the staleness rule,
+   * and it is the right bar for a message rather than a stop: a role holding
+   * `bash` calls something that could write on nearly every turn, so a nudge
+   * gated on the strict answer would never reach the six shipped write-lane
+   * roles that hold `bash` — the very roles this whole signal exists for.
+   * Worst case it says "no file has been changed" one turn after the first
+   * write; the answer that throws work away is the strict one.
+   */
+  knownUnchanged(): boolean;
+  /**
+   * The last probe's raw answer: `true` dirty, `false` clean, `undefined`
+   * never probed or git refused. Diagnostic; act on
+   * {@link provablyUnchanged} instead.
+   */
+  changed(): boolean | undefined;
+  /**
+   * Probe the worktree and refresh the cache.
+   *
+   * Never rejects: git failing leaves the cache exactly as it was, which for a
+   * first probe means `undefined` — unknown, and unknown never stops anything.
+   *
+   * @param fresh - Insist on an answer taken *after* this call. The default
+   *   joins a probe already in flight, which is what an observer wants and
+   *   what keeps a per-turn watch from queueing a backlog of `git status`
+   *   behind a slow one. Only the decision to stop a child sets it: joining an
+   *   older probe there would judge this turn on last turn's evidence, and
+   *   this turn is exactly when a role writes the file that spares it.
+   */
+  refresh(fresh?: boolean): Promise<boolean | undefined>;
+}
+
+/**
+ * Build a {@link WriteLaneProgress} over one worktree.
+ *
+ * @param probe - Runs `git status --porcelain` (or whatever stands in for it)
+ *   and resolves with its stdout. Rejecting is allowed and means "unknown".
+ */
+export function createWriteLaneProgress(probe: () => Promise<string>): WriteLaneProgress {
+  let cached: boolean | undefined;
+  /** Tool calls that could have changed a file, counted as they start. */
+  let mutations = 0;
+  /** `mutations` as of the last SUCCESSFUL probe; `-1` while there is none. */
+  let watermark = -1;
+  let inFlight: Promise<boolean | undefined> | undefined;
+  let generation = 0;
+  return {
+    mutated() {
+      mutations += 1;
+    },
+    changed: () => cached,
+    provablyUnchanged: () => mutations === 0 || (cached === false && watermark === mutations),
+    knownUnchanged: () => mutations === 0 || cached === false,
+    refresh(fresh = false) {
+      const running = inFlight;
+      if (running !== undefined && !fresh) return running;
+      /** Which probe this is, so only the LATEST one may clear `inFlight`. */
+      generation += 1;
+      const mine = generation;
+      const task = (async (): Promise<boolean | undefined> => {
+        // A fresh probe queues behind the one already running rather than
+        // racing it, so two `git status` calls never read the same worktree at
+        // once and the answer is unambiguously later than this call.
+        if (running !== undefined) await running.catch(() => undefined);
+        // Sampled here rather than at the call: a `bash` that started while
+        // this probe was queued must invalidate it, and would not if the
+        // watermark had been taken before the wait.
+        const at = mutations;
+        try {
+          const status = await probe();
+          cached = status.trim() !== "";
+          watermark = at;
+        } catch {
+          // Unknown, and deliberately NOT recorded as clean: git refusing to
+          // answer is not evidence that a role wrote nothing. A `true` already
+          // observed is kept — a worktree does not un-change itself.
+        } finally {
+          if (generation === mine) inFlight = undefined;
+        }
+        return cached;
+      })();
+      inFlight = task;
+      return task;
+    },
+  };
+}
+
+/** `git status --porcelain` for one worktree, as a {@link WriteLaneProgress} probe. */
+function worktreeProgress(lane: WriteLane, worktree: WriteLaneWorktree): WriteLaneProgress {
+  return createWriteLaneProgress(
+    async () =>
+      (await lane.exec(worktree.dir, ["status", "--porcelain", ...CAPTURE_PATHSPEC])).stdout,
+  );
+}
 
 /**
  * Stage and read one worktree's whole delta.
@@ -6092,12 +6587,10 @@ async function runWorktreeStep(
 
   // A retry gets its own worktree/patch slug: the failed attempt's worktree is
   // kept for forensics, and `git worktree add` at the same path would collide.
-  const slug = writeLaneSlug(step.id, def.name, request.attempt);
-  let worktree: WriteLaneWorktree;
+  const seed = { patches: request.state?.appliedPatches ?? [] };
+  let opened: OpenedWorktree;
   try {
-    worktree = await lane.createWorktree(slug, {
-      patches: request.state?.appliedPatches ?? [],
-    });
+    opened = await openStepWorktree(lane, step.id, def.name, request.attempt, seed);
   } catch (error) {
     const detail = errorText(error);
     return {
@@ -6110,6 +6603,7 @@ async function runWorktreeStep(
       failureKind: isGitLockError(detail) ? "git-lock" : "config",
     };
   }
+  const { worktree, slug } = opened;
 
   const patchFile = join(dirname(worktree.dir), `${slug}.patch`);
   const record = (
@@ -6146,6 +6640,34 @@ async function runWorktreeStep(
     }
     return reaped;
   };
+  /**
+   * The worktree's own answer to "has this step changed a file?", shared by
+   * the mid-run nudge and the stall guard so the two can never disagree.
+   *
+   * WRITE lane only, because it is only there that a role is *expected* to
+   * leave a diff — and only there that anything acts on the answer.
+   */
+  const progress = dispatch === "write" ? worktreeProgress(lane, worktree) : undefined;
+  /**
+   * The ceiling this child will actually run under, as far as the lane can
+   * see: a human's run-scoped raise, else the role file's own number, else
+   * whatever the session clamps a subagent to (which this seam cannot read,
+   * and which can only be LOWER than a declared one).
+   *
+   * Used for one decision — see the stall guard below.
+   */
+  const declaredCeiling = request.turnCeiling ?? def.maxTurns;
+  /**
+   * Does the stall guard get installed at all?
+   *
+   * Not for a role whose ceiling is below {@link WRITE_LANE_STALL_TURNS}: it
+   * runs out of turns before turn 36 could ever arrive, so a guard there is
+   * dead code that only makes the schedule harder to reason about — and the
+   * turn-24 notice, which promises a stop this engine could not deliver, is
+   * withheld from such a role for the same reason.
+   */
+  const guarded =
+    dispatch === "write" && (declaredCeiling ?? WRITE_LANE_STALL_TURNS) >= WRITE_LANE_STALL_TURNS;
   try {
     agent = await lane.spawn({
       def,
@@ -6155,8 +6677,15 @@ async function runWorktreeStep(
       // The human's run-scoped grant, carried onto the expensive lane too.
       ...(request.turnCeiling === undefined ? {} : { turnCeiling: request.turnCeiling }),
       // WRITE lane only: the exec lane's diff is discarded unread, so a role
-      // there is *supposed* to finish with a report and no file.
-      ...(dispatch === "write" ? { progressCheck: writeLaneProgressCheck } : {}),
+      // there is *supposed* to finish with a report and no file. The nudge
+      // reads the same cached worktree answer the guard does, so a role
+      // authoring through `bash` is never told it has changed nothing.
+      ...(progress === undefined
+        ? {}
+        : {
+            progressCheck: (turn: TurnProgress) =>
+              writeLaneProgressCheck(turn, () => !progress.knownUnchanged()),
+          }),
     });
     const run = await driveAgent(
       agent,
@@ -6170,8 +6699,16 @@ async function runWorktreeStep(
       // WRITE lane only, exactly like the progress check above and for the
       // same reason: an exec-lane role's diff is discarded unread, so "you
       // have written no file" is not a fault there — it is the contract.
-      dispatch === "write"
-        ? { afterTurns: WRITE_LANE_STALL_TURNS, writes: countWrites }
+      guarded && progress !== undefined
+        ? {
+            afterTurns: WRITE_LANE_STALL_TURNS,
+            // One turn before the first notice, so the answer is warm by the
+            // time either the nudge or the guard reads it — and never earlier,
+            // because this costs a `git status` per turn.
+            observeAfterTurns: Math.max(1, firstProgressTurn(declaredCeiling) - 1),
+            writes: countWrites,
+            progress,
+          }
         : undefined,
     );
     usage = run.usage;
@@ -6316,7 +6853,9 @@ async function runWorktreeStep(
       // brief. See {@link noProgressCause}.
       const headline =
         run.stalled === true
-          ? noProgressCause(step.id, def.name, run.activity)
+          ? // `files` is what the capture found, so the sentence can never
+            // claim an unchanged worktree over a preserved patch.
+            noProgressCause(step.id, def.name, run.activity, files)
           : `step ${step.id} (@${def.name}) ${run.reason === "completed" || run.reason === "aborted" ? "was cancelled" : "failed"}` +
             `${laneCause()}.`;
       return {
@@ -9303,7 +9842,7 @@ export function createWorkflowCommands(
         // so it is deliberately excluded from "already finished".
         if (state.ended && state.endedStatus !== "paused") {
           ui.notice(
-            "warn",
+            "error",
             `Run ${runId} already finished (${state.endedStatus ?? "done"}); nothing to resume.`,
           );
           return;

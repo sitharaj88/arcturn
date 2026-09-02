@@ -260,6 +260,53 @@ describe("every shipped kit, as the engine would read it", () => {
     expect(cannotWriteInParts(role(undefined))).toBe(false);
   });
 
+  /**
+   * The roles the write lane's "is this step making progress?" signal has to
+   * be right about.
+   *
+   * FAIL FIRST, and it failed for real: that signal counted `write`, `edit`
+   * and `multiedit` tool calls. Every role below holds `bash` as well, and
+   * `project-setup/scaffolder`'s headline rule is *never hand-write a file a
+   * generator produces* — so each of them can do its entire job through
+   * `printf … >> file`, `npm create`, `cp` or `git apply` and register not one
+   * counted write. One did: it was told at turns 12 and 24 that it had changed
+   * no file while its worktree filled up, was stopped at turn 36 for "writing
+   * nothing", had its work captured to a patch and thrown away, and then did
+   * the whole thing again on the automatic fresh retry.
+   *
+   * This list is a tripwire, not decoration: it is written down so that a
+   * future change to the signal has to come back here and decide about these
+   * six roles by name.
+   */
+  it("names every shipped write-lane role that can author through the shell", async () => {
+    const shellAuthors: string[] = [];
+    for (const kit of KITS_WITH_AGENTS) {
+      for (const def of (await kitRoles(kit)).values()) {
+        if (roleDispatch(def) !== "write") continue;
+        if (!(def.tools ?? []).includes("bash")) continue;
+        shellAuthors.push(`${kit}/${def.name}`);
+      }
+    }
+    expect(shellAuthors.sort()).toEqual([
+      "complexity-guard/optimizer",
+      "enterprise-org/developer",
+      "enterprise-org/docs-writer",
+      "enterprise-org/qa-functional",
+      "project-setup/scaffolder",
+      "rag-blueprint/rag-builder",
+    ]);
+    // Nearly half the write lane. A progress signal blind to the shell is
+    // blind to six of these thirteen roles.
+    const writeRoles: string[] = [];
+    for (const kit of KITS_WITH_AGENTS) {
+      for (const def of (await kitRoles(kit)).values()) {
+        if (roleDispatch(def) === "write") writeRoles.push(`${kit}/${def.name}`);
+      }
+    }
+    expect(writeRoles.length).toBeGreaterThanOrEqual(shellAuthors.length);
+    expect(shellAuthors.length / writeRoles.length).toBeGreaterThan(0.25);
+  });
+
   it("declares only finite, positive budgets and deadlines", () => {
     const keys = ["budgetUsd", "budgetTokens", "stepTimeoutMs"] as const;
     for (const shipped of WORKFLOWS) {
@@ -620,7 +667,7 @@ describe("rag-blueprint/rag-setup: the architect goes silent, as it did for real
       expect(ask?.cause).toContain("produced nothing");
       // …and the park says the engine already tried again, so nobody answers
       // `retry` believing it is the untried option.
-      expect(ask?.cause).toContain("retried automatically once and failed both times");
+      expect(ask?.cause).toContain("retried automatically once and failed twice");
       expect(lines.findLast((line) => line.kind === "runEnd")).toMatchObject({ status: "paused" });
 
       // The file the whole pipeline is built on was never written — and the

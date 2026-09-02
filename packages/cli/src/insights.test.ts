@@ -51,9 +51,11 @@ import { buildTestRuntime, makeScratch, type Scratch } from "./test-helpers/scra
 import {
   createRuntimeRunStep,
   createRuntimeWriteLane,
+  createWriteLaneProgress,
   isWorkflowParseError,
   noProgressCause,
   parseWorkflow,
+  retriedAttemptsNote,
   runWorkflow,
   type Workflow,
   type WorkflowStepRequest,
@@ -742,6 +744,230 @@ describe("the write lane's mid-run progress check", () => {
       ).toBeUndefined();
     }
   });
+
+  /**
+   * RED FIRST: the check counted `write`/`edit`/`multiedit` calls and nothing
+   * else, so a role authoring through `printf … >> file` or `npm create` — six
+   * of the thirteen shipped write-lane roles hold `bash`, and
+   * `project-setup/scaffolder`'s headline rule is "never hand-write a file a
+   * generator produces" — was told at turns 12 and 24 that it had changed no
+   * file while its worktree filled up.
+   */
+  it("says nothing when the WORKTREE changed, however the role changed it", () => {
+    const changed = () => true;
+    for (const turnIndex of [WRITE_LANE_PROGRESS_TURNS, WRITE_LANE_PROGRESS_TURNS * 2]) {
+      // The tool histogram is pure shell: not one authoring call in it.
+      expect(
+        writeLaneProgressCheck({ turnIndex, maxTurns: 1000, toolCalls: { bash: 40 } }, changed),
+      ).toBeUndefined();
+    }
+    // And the same role, with the same histogram, IS told when the worktree
+    // really is clean — the nudge is not simply disabled.
+    expect(
+      writeLaneProgressCheck({
+        turnIndex: WRITE_LANE_PROGRESS_TURNS,
+        maxTurns: 1000,
+        toolCalls: { bash: 40 },
+      }),
+    ).toContain("no file has been changed");
+  });
+
+  /**
+   * RED FIRST: the second notice promised a stop at turn 36 to every role,
+   * including one whose ceiling is 30 — a consequence this engine cannot
+   * deliver, since the ceiling ends the step first (and the lane installs no
+   * stall guard for such a role at all).
+   */
+  it("withholds the turn-24 deadline from a role that can never reach turn 36", () => {
+    expect(
+      writeLaneProgressCheck({
+        turnIndex: WRITE_LANE_PROGRESS_TURNS * 2,
+        maxTurns: 30,
+        toolCalls: reading,
+      }),
+    ).toBeUndefined();
+    // The boundary is the stall turn itself, and it is inclusive.
+    expect(
+      writeLaneProgressCheck({
+        turnIndex: WRITE_LANE_PROGRESS_TURNS * 2,
+        maxTurns: WRITE_LANE_STALL_TURNS,
+        toolCalls: reading,
+      }),
+    ).toContain(`by turn ${WRITE_LANE_STALL_TURNS}`);
+    // The FIRST notice is untouched: it promises nothing, so it costs nothing.
+    expect(
+      writeLaneProgressCheck({
+        turnIndex: WRITE_LANE_PROGRESS_TURNS,
+        maxTurns: 30,
+        toolCalls: reading,
+      }),
+    ).toContain("This is a write-lane step");
+  });
+});
+
+describe('the worktree\'s own answer to "has this step changed a file?"', () => {
+  /**
+   * RED FIRST: there was no such answer. `countWrites` was the only signal,
+   * and it is blind to every file a role writes through the shell.
+   */
+  it("proves 'unchanged' without git while nothing that could write has run", async () => {
+    let calls = 0;
+    const progress = createWriteLaneProgress(async () => {
+      calls += 1;
+      return "";
+    });
+    // A child that has only read cannot have changed a file, and this costs
+    // no subprocess at all — which is what keeps the stop landing on turn 36.
+    expect(progress.provablyUnchanged()).toBe(true);
+    expect(calls).toBe(0);
+
+    // One `bash` later, the proof is gone until git says otherwise.
+    progress.mutated();
+    expect(progress.provablyUnchanged()).toBe(false);
+    await progress.refresh();
+    expect(progress.provablyUnchanged()).toBe(true);
+    expect(progress.changed()).toBe(false);
+    expect(calls).toBe(1);
+  });
+
+  it("reports dirty, clean and unknown as three different things", async () => {
+    let status = "";
+    const progress = createWriteLaneProgress(async () => status);
+    progress.mutated();
+    expect(await progress.refresh()).toBe(false);
+    status = " M notes.md\n";
+    expect(await progress.refresh(true)).toBe(true);
+    expect(progress.changed()).toBe(true);
+    // Dirty is never "provably unchanged", whatever else is true.
+    expect(progress.provablyUnchanged()).toBe(false);
+  });
+
+  it("never turns a git failure into 'clean' — and never rejects", async () => {
+    const progress = createWriteLaneProgress(async () => {
+      throw new Error("fatal: not a git repository");
+    });
+    progress.mutated();
+    await expect(progress.refresh()).resolves.toBeUndefined();
+    expect(progress.changed()).toBeUndefined();
+    // THE WHOLE POINT: a guard reading this must not stop the child.
+    expect(progress.provablyUnchanged()).toBe(false);
+
+    // And a worktree already seen dirty stays dirty when git stops answering:
+    // a worktree does not un-change itself.
+    let broken = false;
+    const flaky = createWriteLaneProgress(async () => {
+      if (broken) throw new Error("index.lock");
+      return "?? new.md\n";
+    });
+    flaky.mutated();
+    expect(await flaky.refresh()).toBe(true);
+    broken = true;
+    expect(await flaky.refresh(true)).toBe(true);
+  });
+
+  /**
+   * The staleness rule is what makes a cached answer usable at all: a `git
+   * status` taken when nothing that could write had run since is still the
+   * truth, and one overtaken by a `bash` call is not.
+   */
+  it("stops trusting a clean answer the moment something that could write runs", async () => {
+    const progress = createWriteLaneProgress(async () => "");
+    progress.mutated();
+    await progress.refresh();
+    expect(progress.provablyUnchanged()).toBe(true);
+    progress.mutated();
+    expect(progress.provablyUnchanged()).toBe(false);
+    // The raw cache is still readable; it is simply no longer a proof.
+    expect(progress.changed()).toBe(false);
+  });
+
+  /**
+   * The nudge and the stop ask the same question at two different bars, and
+   * the difference is deliberate: a role holding `bash` calls something that
+   * could write on nearly every turn, so a MESSAGE gated on the strict answer
+   * would never reach the six shipped write-lane roles that hold `bash`.
+   */
+  it("keeps a softer bar for the nudge than for the stop", async () => {
+    const progress = createWriteLaneProgress(async () => "");
+    progress.mutated();
+    await progress.refresh();
+    progress.mutated();
+    // Strict: a `bash` call has overtaken the probe, so nothing is proved.
+    expect(progress.provablyUnchanged()).toBe(false);
+    // Soft: the last thing git said was "clean", which is enough to say so.
+    expect(progress.knownUnchanged()).toBe(true);
+
+    // Neither bar is met once the worktree is actually dirty.
+    const dirty = createWriteLaneProgress(async () => "?? NOTES.md\n");
+    dirty.mutated();
+    await dirty.refresh();
+    expect(dirty.knownUnchanged()).toBe(false);
+    expect(dirty.provablyUnchanged()).toBe(false);
+
+    // …and an unknown answer meets neither, which is what keeps a broken git
+    // from being read as an idle role.
+    const blind = createWriteLaneProgress(async () => {
+      throw new Error("nope");
+    });
+    blind.mutated();
+    await blind.refresh();
+    expect(blind.knownUnchanged()).toBe(false);
+    expect(blind.provablyUnchanged()).toBe(false);
+  });
+
+  it("keeps one probe in flight at a time, and joins rather than queues by default", async () => {
+    let running = 0;
+    let peak = 0;
+    let calls = 0;
+    const progress = createWriteLaneProgress(async () => {
+      calls += 1;
+      running += 1;
+      peak = Math.max(peak, running);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      running -= 1;
+      return "";
+    });
+    progress.mutated();
+    await Promise.all([progress.refresh(), progress.refresh(), progress.refresh()]);
+    expect(peak).toBe(1);
+    expect(calls).toBe(1);
+
+    // A caller that insists on a fresh answer gets its own probe, queued
+    // behind the one already running rather than racing it.
+    calls = 0;
+    await Promise.all([progress.refresh(), progress.refresh(true)]);
+    expect(peak).toBe(1);
+    expect(calls).toBe(2);
+  });
+});
+
+describe("the note a park carries once the engine already retried the step", () => {
+  /**
+   * RED FIRST: the sentence was a constant — "retried automatically once and
+   * failed both times" — printed above however many attempts it was handed.
+   * A transient `network` retry ahead of the fresh one makes three, and the
+   * park then contradicted its own list.
+   */
+  it("counts the attempts it is listing, rather than assuming two", () => {
+    const activity = (turns: number, tool: string) => ({
+      turns,
+      toolCalls: { [tool]: turns },
+      writes: 0,
+    });
+    const two = retriedAttemptsNote([activity(36, "read"), activity(36, "read")]);
+    expect(two).toContain("retried automatically once and failed twice");
+    expect(two).toContain("attempt 1 —");
+    expect(two).toContain("attempt 2 —");
+    expect(two).not.toContain("attempt 3");
+
+    const three = retriedAttemptsNote([undefined, activity(36, "read"), activity(36, "bash")]);
+    expect(three).toContain("retried automatically twice and failed 3 times");
+    expect(three).toContain("attempt 1 — no activity recorded");
+    expect(three).toContain("attempt 3 —");
+
+    // One attempt is no trail at all.
+    expect(retriedAttemptsNote([activity(36, "read")])).toBeUndefined();
+  });
 });
 
 describe("what the park says when the stall guard stopped a step", () => {
@@ -759,8 +985,8 @@ describe("what the park says when the stall guard stopped a step", () => {
       }),
     ).toBe(
       "step 8 (@rag-builder) was stopped after 36 turns without changing a file — it read 114 " +
-        "files and ran 75 shell commands and wrote nothing. Retry it (a fresh attempt usually " +
-        "writes early), or narrow what it was asked to do.",
+        "files and ran 75 shell commands and its worktree is still unchanged. Retry it (a fresh " +
+        "attempt usually writes early), or narrow what it was asked to do.",
     );
   });
 
@@ -768,17 +994,58 @@ describe("what the park says when the stall guard stopped a step", () => {
     // One tool, singular nouns.
     expect(
       noProgressCause("2", "builder", { turns: 36, toolCalls: { read: 1 }, writes: 0 }),
-    ).toContain("it read 1 file and wrote nothing");
+    ).toContain("it read 1 file and its worktree is still unchanged");
     // Anything that is not `read` or `bash` is still counted, never dropped.
     expect(
       noProgressCause("2", "builder", { turns: 36, toolCalls: { grep: 3, glob: 1 }, writes: 0 }),
-    ).toContain("it made 4 other tool calls and wrote nothing");
+    ).toContain("it made 4 other tool calls and its worktree is still unchanged");
     // A child that called nothing at all still gets a true sentence.
     expect(noProgressCause("2", undefined, { turns: 36, toolCalls: {}, writes: 0 })).toBe(
-      "step 2 was stopped after 36 turns without changing a file — it called no tool and wrote " +
-        "nothing. Retry it (a fresh attempt usually writes early), or narrow what it was asked " +
-        "to do.",
+      "step 2 was stopped after 36 turns without changing a file — it called no tool and its " +
+        "worktree is still unchanged. Retry it (a fresh attempt usually writes early), or " +
+        "narrow what it was asked to do.",
     );
+  });
+
+  /**
+   * RED FIRST: the clause used to be "and wrote nothing", meaning "called no
+   * `write`/`edit`". Six of the thirteen write-lane roles this repo ships hold
+   * `bash`, and against one of those the sentence was simply false — the
+   * reviewer's role appended to a real file every turn and was told it had
+   * written nothing, in the same message that said `Patch preserved at …`.
+   * The guard now only fires on a clean worktree, and the sentence says so.
+   */
+  it("never claims a role wrote nothing — it reports the worktree, which is what the guard read", () => {
+    const shellOnly = noProgressCause("8", "scaffolder", {
+      turns: 36,
+      toolCalls: { bash: 36 },
+      writes: 0,
+    });
+    expect(shellOnly).not.toContain("wrote nothing");
+    expect(shellOnly).toContain("ran 36 shell commands and its worktree is still unchanged");
+  });
+
+  /**
+   * The guard stops a child only on a `git status` that came back clean, so
+   * this shape should never occur — but "should never" is what the reviewer's
+   * run said too, and a park that prints "it changed nothing" directly above
+   * `Patch preserved at …` is the specific untruth this whole change is about.
+   */
+  it("says what it found when a diff was captured anyway", () => {
+    const captured = noProgressCause(
+      "8",
+      "scaffolder",
+      { turns: 36, toolCalls: { bash: 36 }, writes: 0 },
+      3,
+    );
+    expect(captured).not.toContain("worktree is still unchanged");
+    expect(captured).not.toContain("without changing a file");
+    expect(captured).toContain("stopped after 36 turns for making no progress");
+    expect(captured).toContain("left 3 changed files behind, captured below");
+    // One file, singular.
+    expect(
+      noProgressCause("8", "scaffolder", { turns: 36, toolCalls: {}, writes: 0 }, 1),
+    ).toContain("left 1 changed file behind");
   });
 });
 
@@ -1163,7 +1430,7 @@ describe("a write-lane role that will not start is stopped, not asked twice and 
         `was stopped after ${WRITE_LANE_STALL_TURNS} turns without changing a file`,
       );
       // Both attempts are accounted for in the words a person reads.
-      expect(parked.steps[0]?.error).toContain("retried automatically once and failed both times");
+      expect(parked.steps[0]?.error).toContain("retried automatically once and failed twice");
       expect(parked.steps[0]?.attempts).toBe(2);
       // Nothing was written: the user's tracked checkout is byte-for-byte what
       // it was (the untracked `.arcturn/` this test wrote its config into is
@@ -1702,6 +1969,85 @@ describe("the aggregate answers the questions a person was reading JSONL to answ
     // The pipeline's silences are outside the filter, so nothing is scored.
     expect(report.silentTurns).toEqual([]);
     expect(report.slowestRoles).toEqual([]);
+  });
+});
+
+describe("a step the automatic retry rescued counts once, not twice", () => {
+  /** A ledger of one rescued step: the attempt that stalled, then the one that worked. */
+  function rescued(): InsightsEvent[] {
+    const e = (ts: number, body: Omit<InsightsEvent, "v" | "ts">): InsightsEvent =>
+      ({ v: 1, ts, ...body }) as InsightsEvent;
+    const terminal = (
+      body: Partial<Omit<StepEndRecord, "v" | "ts" | "kind">> & { durationMs: number },
+    ): Omit<InsightsEvent, "v" | "ts"> =>
+      ({
+        kind: "step-end",
+        workflow: "pipeline",
+        runId: "r1",
+        stepId: "5",
+        role: "rag-builder",
+        status: "done",
+        usage: usage(10, 5),
+        attempts: 1,
+        ...body,
+      }) as Omit<InsightsEvent, "v" | "ts">;
+    return [
+      e(BASE_TS + 1, {
+        kind: "run",
+        workflow: "pipeline",
+        runId: "r1",
+        status: "done",
+        durationMs: 9000,
+        usage: usage(10, 5),
+        steps: 1,
+      } as Omit<InsightsEvent, "v" | "ts">),
+      // Attempt 1: stopped by the stall guard, superseded by the retry below.
+      e(
+        BASE_TS + 2,
+        terminal({
+          status: "failed",
+          failureKind: "no-progress",
+          durationMs: 8000,
+          attempts: 1,
+          superseded: true,
+        }),
+      ),
+      // Attempt 2, the one that worked, and the step's real terminal.
+      e(BASE_TS + 3, terminal({ status: "done", durationMs: 2000, attempts: 2 })),
+      // A second, unrelated step of the same role, so the role clears
+      // MIN_ROLE_STEPS and would be reported if it had a failure at all.
+      e(BASE_TS + 4, terminal({ stepId: "6", status: "done", durationMs: 2000, attempts: 1 })),
+    ];
+  }
+
+  /**
+   * RED FIRST: `roleStats` iterated every `step-end` in the window, and the
+   * engine writes one per ATTEMPT plus one for the step. So every step the
+   * fresh retry rescued added both a `failed` and a `done` row to its role —
+   * the feature's successes raising the role's failure rate by exactly the
+   * number of times it worked — and contributed its duration twice over.
+   */
+  it("does not raise a role's failure rate with the successes the retry produced", () => {
+    const report = aggregateInsights(rescued(), { window: resolveWindow("all") });
+    // Two steps, none of them failed: nothing to report about this role.
+    expect(report.stepFailures.byRole).toEqual([]);
+  });
+
+  it("still counts the stall in the failure-kind tally, which is what that tally is for", () => {
+    const report = aggregateInsights(rescued(), { window: resolveWindow("all") });
+    expect(report.stepFailures.byFailureKind).toEqual([{ failureKind: "no-progress", count: 1 }]);
+  });
+
+  /**
+   * RED FIRST: the superseded attempt's 8000 ms went into the role's duration
+   * list beside the 2000 ms the step actually took, which moved the median of
+   * every role the retry ever touched.
+   */
+  it("takes the step's duration from its final terminal, not from both", () => {
+    const report = aggregateInsights(rescued(), { window: resolveWindow("all") });
+    expect(report.slowestRoles).toEqual([
+      { role: "rag-builder", steps: 2, medianDurationMs: 2000 },
+    ]);
   });
 });
 

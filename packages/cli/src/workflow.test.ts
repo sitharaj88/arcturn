@@ -6312,7 +6312,7 @@ describe("runWorkflow — the stage-boundary budget ask", () => {
 // and then stage 5's `@rag-builder` hit its 64-turn ceiling. The engine wrote
 // `runEnd{failed}`, and BOTH resume entry points refuse a failed run forever:
 //
-//     ⚠ Run 20260830T152033-9f51b895 already finished (failed); nothing to resume.
+//     ✗ Run 20260830T152033-9f51b895 already finished (failed); nothing to resume.
 //
 // The only way forward was a fresh run — paying again for four stages that had
 // already succeeded. Every assertion below on `status === "paused"`, on the
@@ -7089,12 +7089,16 @@ describe("runWorkflow — the step-failure park", () => {
     }
     expect(ended.endedStatus).toBe("failed");
     expect(ended.stepFailAsk).toBeUndefined();
-    // …and now the gate really does refuse it.
+    // …and now the gate really does refuse it. The notice is level "error",
+    // not "warn": under --print this must exit 1, and a resumable park must
+    // never be confused with a dead end that already reported one.
     notices.length = 0;
     await run(`resume ${runId}`);
-    expect(notices.some((n) => /already finished \(failed\); nothing to resume/.test(n.text))).toBe(
-      true,
+    const alreadyFinished = notices.find((n) =>
+      /already finished \(failed\); nothing to resume/.test(n.text),
     );
+    expect(alreadyFinished).toBeDefined();
+    expect(alreadyFinished?.level).toBe("error");
 
     await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   });
@@ -7207,7 +7211,7 @@ describe("runWorkflow — a step that produced nothing is not `done`", () => {
     // already spent — without it the park would read like a first failure and
     // steer a person straight at `retry`, the one thing already tried.
     expect(ask?.cause).toContain(emptyStepError("2", "architect"));
-    expect(ask?.cause).toContain("retried automatically once and failed both times");
+    expect(ask?.cause).toContain("retried automatically once and failed twice");
     expect(ask?.failureKind).toBeUndefined(); // not a turn ceiling; `raise` fixes nothing
     expect(result.pause?.stepId).toBe("2");
     expect(result.pause?.reason).toBe("step-failure");
@@ -7855,6 +7859,38 @@ describe("runWorkflow — resume across the crash window", () => {
     expect(result.status).toBe("failed");
     expect(result.steps[0]?.error).toMatch(/cannot resume: the workflow "demo" changed/);
     expect(calls).toEqual([]);
+  });
+
+  /**
+   * RED FIRST: the reconstructed terminal hard-coded `attempts: 0`. A step
+   * that really ran, really spent money and really left a patch in the user's
+   * checkout was written down as one that had never been attempted — and the
+   * next resume, `/workflow status` and the insights ledger all read that
+   * number.
+   */
+  it("carries the attempt count the crashed run had reached, not zero", async () => {
+    const mem = memoryJournal();
+    await resume(killedInside([guarded, applying, landed]), { journal: mem.sink });
+    const first = mem.lines.find(
+      (line) => line.kind === "stepEnd" && (line as { id: string }).id === "1",
+    ) as { attempts?: number } | undefined;
+    // The write-ahead intent said attempt 0, which is the FIRST attempt.
+    expect(first?.attempts).toBe(1);
+
+    // And a step the crash caught on its second attempt says two.
+    const retried = memoryJournal();
+    await resume(
+      killedInside([
+        { ...guarded, attempt: 1 },
+        { ...applying, attempt: 1 },
+        { ...landed, attempt: 1 },
+      ]),
+      { journal: retried.sink },
+    );
+    const second = retried.lines.find(
+      (line) => line.kind === "stepEnd" && (line as { id: string }).id === "1",
+    ) as { attempts?: number } | undefined;
+    expect(second?.attempts).toBe(2);
   });
 
   it("writes the reconstructed terminal down, so the next resume is unambiguous", async () => {

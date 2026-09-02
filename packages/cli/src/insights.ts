@@ -156,6 +156,20 @@ export interface StepEndRecord extends InsightsEventBase {
   readonly durationMs: number;
   readonly usage: InsightsUsage;
   readonly attempts: number;
+  /**
+   * This terminal was SUPERSEDED by a later attempt of the same step.
+   *
+   * The engine retries a stalled or empty step once, automatically, and writes
+   * a terminal for the attempt it gave up on as well as for the step's real
+   * ending — because "this step took two attempts" is a number, and "the first
+   * one read for 36 turns and changed nothing" is the finding. Both records
+   * describe ONE step, so anything counting steps (a role's failure rate, its
+   * median duration) must count only the one without this flag, or a rescued
+   * step lands in its role's tally twice: once failed, once done. What the
+   * flagged record is for is the failure-KIND tally, which genuinely wants the
+   * no-progress attempt the retry rescued.
+   */
+  readonly superseded?: boolean;
   readonly lastTurn?: InsightsLastTurn;
   readonly activity?: InsightsActivity;
 }
@@ -377,6 +391,7 @@ export function stampEvent(input: InsightsEventInput, ts: number): InsightsEvent
         durationMs: positiveInt(input.durationMs),
         usage: usageFacts(input.usage),
         attempts: positiveInt(input.attempts),
+        ...(input.superseded === true ? { superseded: true } : {}),
         ...(input.lastTurn === undefined ? {} : { lastTurn: insightsLastTurn(input.lastTurn) }),
         ...(input.activity === undefined ? {} : { activity: insightsActivity(input.activity) }),
       };
@@ -987,10 +1002,20 @@ export function aggregateInsights(
   const kindCounts = new Map<string, number>();
   const roleStats = new Map<string, { steps: number; failed: number; durations: number[] }>();
   for (const step of stepEnds) {
+    // EVERY attempt, superseded or not: a stall the automatic retry rescued is
+    // still a stall, and a pipeline whose `no-progress` count is climbing is
+    // the finding this tally exists for — even in a week where every one of
+    // them was rescued and nobody was ever asked about it.
     if (step.status === "failed" && step.failureKind !== undefined) {
       kindCounts.set(step.failureKind, (kindCounts.get(step.failureKind) ?? 0) + 1);
     }
     if (step.role === undefined) continue;
+    // ONE row per step, from here down. A superseded terminal is the same step
+    // as the final one that supersedes it, so counting both put a rescued step
+    // in its role's ledger twice — a `failed` AND a `done`, its duration twice
+    // over — which raised the role's failure rate by exactly the successes the
+    // retry produced. See {@link StepEndRecord.superseded}.
+    if (step.superseded === true) continue;
     const row = roleStats.get(step.role) ?? { steps: 0, failed: 0, durations: [] };
     row.steps += 1;
     if (step.status === "failed") row.failed += 1;

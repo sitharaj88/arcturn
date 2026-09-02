@@ -41,6 +41,7 @@ import {
   runWorkflow,
   type Workflow,
   type WorkflowStepRequest,
+  WRITE_LANE_STALL_TURNS,
   type WriteLane,
   type WriteLaneHost,
 } from "./workflow.js";
@@ -190,6 +191,12 @@ async function journalOnceEnded(
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   throw new Error(`journal at ${dir} never recorded a ${status ?? "terminal"} runEnd`);
+}
+
+/** The last thing the model was sent — where a mid-run notice rides. */
+function lastMessageText(request: LLMRequest): string {
+  const last = request.messages.at(-1);
+  return last === undefined ? "" : contentText(last.content);
 }
 
 /** The production write lane over a real runtime and a real repository. */
@@ -1307,6 +1314,362 @@ describe("a turn raise answers the park it was asked at, and no other step", () 
   );
 });
 
+// ==================== a crash leaves a worktree; the resume must not trip on it
+
+/**
+ * The slug a step's worktree gets is a pure function of the step, the role and
+ * the attempt — `1-builder`.
+ *
+ * FAIL FIRST: a run killed mid-step leaves that directory behind, and the
+ * resume walks straight back into it. `git worktree add` refuses a path that
+ * already exists, the refusal classifies as `config` (deterministic — retrying
+ * the identical `git worktree add` fails identically), and so the resumed step
+ * fails instantly and parks with a question about git plumbing that no answer
+ * at the park can fix. Pre-existing, and made twice as likely by keeping a
+ * forensic worktree per stalled attempt.
+ *
+ * A path this process did not create is rubble from a dead one. It is removed
+ * and the step runs.
+ */
+describe("a leftover worktree from a killed run does not fail the resume", () => {
+  itPosix(
+    "clears the dead run's rubble and re-runs the step",
+    async () => {
+      const scratch = await gitScratch();
+      const runId = "run-leftover";
+      const journalDir = join(scratch.home, "leftover-journal");
+      const builder = role("builder", ["read", "write", "edit"]);
+      const workflow = parseOk("---\nname: pipeline\n---\n1. @builder build the index\n");
+
+      // The rubble, made the way the dead run made it: a real registered
+      // worktree at exactly the slug this step will ask for.
+      const runDir = join(scratch.home, "workflow-runs", runId);
+      const stale = join(runDir, "1-builder");
+      await mkdir(runDir, { recursive: true });
+      await execFileAsync("git", ["worktree", "add", "--detach", stale, "HEAD"], scratch.cwd);
+      expect(await exists(join(stale, "seed.txt"))).toBe(true);
+
+      // A journal that says the step started and never ended — the shape a
+      // crash leaves, with no ask to salt the slug from.
+      const journal = createFileRunJournal(journalDir);
+      for (const line of [
+        {
+          kind: "run",
+          v: 1,
+          runId,
+          workflow: "pipeline",
+          source: "<test>",
+          input: "",
+          stepTimeoutMs: 600_000,
+          maxStepRetries: 0,
+          startedAt: 1,
+        },
+        { kind: "stageStart", stage: 1, parallel: false, steps: 1, ts: 1 },
+        { kind: "stepStart", id: "1", stage: 1, branch: 0, ts: 1 },
+        // The runner's promise that it will announce anything irreversible
+        // before doing it. It announced nothing after this, so nothing landed
+        // and the step genuinely has to run again — into the very worktree
+        // path the dead run left behind.
+        { kind: "stepIntent", id: "1", stage: 1, branch: 0, attempt: 0, act: "guarded", ts: 2 },
+      ] as JournalLine[]) {
+        await journal.append(line);
+      }
+      const state = buildResumeState(await readJournalLines(journalDir));
+      expect(state.stepFailAsk).toBeUndefined();
+
+      const llm = fakeLLM([
+        {
+          toolCalls: [
+            { id: "w", name: "write", arguments: { path: "BUILD.md", content: "built\n" } },
+          ],
+        },
+        { text: "built it" },
+      ]);
+      const runtime = await runtimeWith(scratch, llm);
+      const resumed = await runWorkflow(workflow, {
+        resolveAgent: () => builder,
+        agentNames: () => ["builder"],
+        journal,
+        runId,
+        resumeFrom: state,
+        runStep: createRuntimeRunStep(runtime, {
+          resolveAgent: () => builder,
+          writeLane: laneFor(runtime, runId),
+        }),
+      });
+
+      // THE WHOLE POINT: the step ran, and its bytes are in the checkout.
+      expect(resumed.steps[0]?.error).toBeUndefined();
+      expect(resumed.status).toBe("done");
+      expect(await readFile(join(scratch.cwd, "BUILD.md"), "utf8")).toBe("built\n");
+      // And no park about git plumbing was ever written.
+      const lines = await journalOnceEnded(journalDir, "done");
+      expect(lines.some((line) => line.kind === "stepFailAsk")).toBe(false);
+      // The rubble is gone from git's own bookkeeping, not merely stepped over.
+      const listed = await new Promise<string>((resolve, reject) => {
+        execFile("git", ["worktree", "list", "--porcelain"], { cwd: scratch.cwd }, (error, out) =>
+          error ? reject(error) : resolve(out),
+        );
+      });
+      expect(listed).not.toContain(stale);
+    },
+    60_000,
+  );
+});
+
+// ============================ the stall guard reads the WORKTREE, not the tools
+
+/**
+ * A write-lane role writes with whatever it holds, and six of the thirteen
+ * roles this repository ships hold `bash`.
+ *
+ * FAIL FIRST, end to end: the stall guard and the mid-run progress check both
+ * asked `countWrites`, which counts `write`/`edit`/`multiedit` calls and
+ * nothing else. A role appending to a real file through `printf … >> file`
+ * every turn — the shape `project-setup/scaffolder` is explicitly briefed
+ * towards, since its headline rule is "never hand-write a file a generator
+ * produces" — registered zero writes forever. It was told at turns 12 and 24
+ * that no file had been changed, stopped at turn 36 for "wrote nothing", had
+ * its 36 turns of real files captured to a patch and thrown away, and then did
+ * the whole thing again on the automatic fresh retry.
+ *
+ * The honest question is whether the worktree changed, and `git status
+ * --porcelain` inside it is the answer.
+ */
+describe("a role that writes through the shell is not a role that wrote nothing", () => {
+  /** `subagentMaxTurns` high enough that only the guard under test can stop a child. */
+  async function longCeiling(scratch: Scratch): Promise<void> {
+    await mkdir(join(scratch.cwd, ".arcturn"), { recursive: true });
+    await writeFile(
+      join(scratch.cwd, ".arcturn", "config.json"),
+      JSON.stringify({ subagentMaxTurns: 200 }),
+      "utf8",
+    );
+  }
+
+  /** Every progress notice the model was actually sent. */
+  function notices(llm: FakeLLM): string[] {
+    return llm.requests
+      .map((request) => lastMessageText(request))
+      .filter((text) => text.includes("Progress check:"));
+  }
+
+  const shellWriter = (): AgentDef => role("builder", ["read", "bash", "write", "edit"]);
+
+  itPosix(
+    "is never warned and never stopped while it appends to a file with bash",
+    async () => {
+      const scratch = await gitScratch();
+      await longCeiling(scratch);
+      // Forty turns of `printf >> file`, and not one authoring tool call: the
+      // exact run the reviewer drove, past the turn-36 guillotine.
+      let turn = 0;
+      const llm = respondingLLM(() => {
+        turn += 1;
+        if (turn <= 40) {
+          return {
+            toolCalls: [
+              {
+                id: `b${turn}`,
+                name: "bash",
+                arguments: { command: `printf 'line ${turn}\n' >> NOTES.md` },
+              },
+            ],
+          };
+        }
+        return { text: "wrote the notes" };
+      });
+      const runtime = await runtimeWith(scratch, llm);
+      const builder = shellWriter();
+      const workflow = parseOk("---\nname: pipeline\n---\n1. @builder write the notes\n");
+      const runId = "run-shell-writer";
+      const journalDir = join(scratch.home, "shell-writer-journal");
+
+      const result = await runWorkflow(workflow, {
+        resolveAgent: () => builder,
+        agentNames: () => ["builder"],
+        journal: createFileRunJournal(journalDir),
+        runId,
+        runStep: createRuntimeRunStep(runtime, {
+          resolveAgent: () => builder,
+          writeLane: laneFor(runtime, runId),
+        }),
+      });
+
+      // It ran to its own conclusion: 41 requests, no abort at 36.
+      expect(result.status).toBe("done");
+      expect(result.steps.map((step) => step.status)).toEqual(["done"]);
+      expect(llm.requests).toHaveLength(41);
+      // ONE attempt. The old behaviour stopped it at 36 and then did it again.
+      expect(result.steps[0]?.attempts ?? 1).toBe(1);
+      // Its work is in the user's checkout, all forty lines of it.
+      const notes = await readFile(join(scratch.cwd, "NOTES.md"), "utf8");
+      expect(notes.split("\n").filter((line) => line !== "")).toHaveLength(40);
+      // And it was never told the untruth that started all this.
+      expect(notices(llm)).toEqual([]);
+      const lines = await journalOnceEnded(journalDir, "done");
+      expect(lines.some((line) => line.kind === "stepFailAsk")).toBe(false);
+    },
+    120_000,
+  );
+
+  itPosix(
+    "is still stopped at 36 when the shell only ever reads — the guard still guards",
+    async () => {
+      const scratch = await gitScratch();
+      await longCeiling(scratch);
+      // `bash`, every turn, and never a byte written: `cat` is not progress,
+      // and the worktree says so.
+      const llm = respondingLLM(() => ({
+        toolCalls: [{ id: "c", name: "bash", arguments: { command: "cat seed.txt" } }],
+      }));
+      const runtime = await runtimeWith(scratch, llm);
+      const builder = shellWriter();
+      const workflow = parseOk("---\nname: pipeline\n---\n1. @builder write the notes\n");
+      const runId = "run-shell-reader";
+      const journalDir = join(scratch.home, "shell-reader-journal");
+
+      const result = await runWorkflow(workflow, {
+        resolveAgent: () => builder,
+        agentNames: () => ["builder"],
+        journal: createFileRunJournal(journalDir),
+        runId,
+        runStep: createRuntimeRunStep(runtime, {
+          resolveAgent: () => builder,
+          writeLane: laneFor(runtime, runId),
+        }),
+      });
+
+      expect(result.status).toBe("paused");
+      // Two attempts, each stopped a turn or two after 36: a role that has
+      // touched the shell costs one fresh `git status` before the guard may
+      // decide anything about it, and the child may finish a turn while git
+      // answers. Late is fine; wrongly stopping a role that wrote is not.
+      expect(result.steps[0]?.attempts).toBe(2);
+      expect(llm.requests.length).toBeGreaterThanOrEqual(WRITE_LANE_STALL_TURNS * 2);
+      expect(llm.requests.length).toBeLessThanOrEqual(WRITE_LANE_STALL_TURNS * 2 + 6);
+      const ask = (await journalOnceEnded(journalDir, "paused")).find(
+        (line): line is Extract<JournalLine, { kind: "stepFailAsk" }> =>
+          line.kind === "stepFailAsk",
+      );
+      expect(ask?.failureKind).toBe("no-progress");
+      expect(ask?.cause).toContain("its worktree is still unchanged");
+      // The notices it did get were true ones. The turn-12 notice is a race in
+      // THIS test and only in this test: a scripted model answers in
+      // microseconds, so the `git status` started at the end of turn 11 has
+      // not come back by the top of turn 12 and the check will not assert an
+      // unchanged worktree it cannot vouch for. Against a real model — a turn
+      // is seconds, a probe is milliseconds — both notices land.
+      expect(notices(llm).length).toBeGreaterThanOrEqual(2);
+      for (const notice of notices(llm)) expect(notice).toContain("no file has been changed");
+    },
+    120_000,
+  );
+
+  itPosix(
+    "spares a role that reads for thirty turns and then writes on turn 31",
+    async () => {
+      const scratch = await gitScratch();
+      await longCeiling(scratch);
+      let turn = 0;
+      const llm = respondingLLM(() => {
+        turn += 1;
+        if (turn <= 30) {
+          return { toolCalls: [{ id: `r${turn}`, name: "read", arguments: { path: "seed.txt" } }] };
+        }
+        if (turn === 31) {
+          return {
+            toolCalls: [
+              { id: "b", name: "bash", arguments: { command: "printf 'late\n' > LATE.md" } },
+            ],
+          };
+        }
+        if (turn <= 45) {
+          return { toolCalls: [{ id: `r${turn}`, name: "read", arguments: { path: "seed.txt" } }] };
+        }
+        return { text: "late but real" };
+      });
+      const runtime = await runtimeWith(scratch, llm);
+      const builder = shellWriter();
+      const workflow = parseOk("---\nname: pipeline\n---\n1. @builder write it late\n");
+      const runId = "run-late-writer";
+      const journalDir = join(scratch.home, "late-writer-journal");
+
+      const result = await runWorkflow(workflow, {
+        resolveAgent: () => builder,
+        agentNames: () => ["builder"],
+        journal: createFileRunJournal(journalDir),
+        runId,
+        runStep: createRuntimeRunStep(runtime, {
+          resolveAgent: () => builder,
+          writeLane: laneFor(runtime, runId),
+        }),
+      });
+
+      // Turn 36 came and went, because by then there was a file.
+      expect(result.status).toBe("done");
+      expect(llm.requests).toHaveLength(46);
+      expect(await readFile(join(scratch.cwd, "LATE.md"), "utf8")).toBe("late\n");
+      // It WAS warned at 12 and 24 — those were true when they were sent —
+      // and never again after the write.
+      expect(notices(llm)).toHaveLength(2);
+    },
+    120_000,
+  );
+
+  itPosix(
+    "never stops a child on a git that cannot answer: unknown is not clean",
+    async () => {
+      const scratch = await gitScratch();
+      await longCeiling(scratch);
+      // `bash`, so the guard genuinely has to ask git — a role that only reads
+      // is provably unchanged without a subprocess, and would prove nothing
+      // about a git that cannot answer.
+      const llm = respondingLLM(() => ({
+        toolCalls: [{ id: "c", name: "bash", arguments: { command: "cat seed.txt" } }],
+      }));
+      const runtime = await runtimeWith(scratch, llm);
+      // A role whose ceiling is the only thing that can end it, so "the guard
+      // did not fire" is observable rather than a timeout.
+      const builder = role("builder", ["read", "bash", "write", "edit"], { maxTurns: 40 });
+      const workflow = parseOk("---\nname: pipeline\n---\n1. @builder build it\n");
+      const runId = "run-blind-git";
+      const journalDir = join(scratch.home, "blind-git-journal");
+      const real = laneFor(runtime, runId);
+      /** The same production lane, with `git status` broken under it. */
+      const blind: WriteLane = {
+        ...real,
+        createWorktree: (name, seed) => real.createWorktree(name, seed),
+        spawn: (request) => real.spawn(request),
+        exec: async (cwd, args) => {
+          if (args[0] === "status") throw new Error("fatal: not a git repository");
+          return await real.exec(cwd, args);
+        },
+      };
+
+      const result = await runWorkflow(workflow, {
+        resolveAgent: () => builder,
+        agentNames: () => ["builder"],
+        journal: createFileRunJournal(journalDir),
+        runId,
+        runStep: createRuntimeRunStep(runtime, { resolveAgent: () => builder, writeLane: blind }),
+      });
+
+      // It ran to its CEILING, not to the guard: 40 turns, and the failure a
+      // person is shown is the honest one.
+      expect(llm.requests).toHaveLength(40);
+      const ask = (await journalOnceEnded(journalDir, "paused")).find(
+        (line): line is Extract<JournalLine, { kind: "stepFailAsk" }> =>
+          line.kind === "stepFailAsk",
+      );
+      expect(ask?.failureKind).toBe("turn-ceiling");
+      expect(ask?.cause).not.toContain("without changing a file");
+      expect(result.status).toBe("paused");
+    },
+    120_000,
+  );
+});
+
 // =============================== the automatic fresh retry, before any park
 
 /**
@@ -1395,7 +1758,12 @@ describe("a stalled or empty step retries itself once before it troubles anyone"
       const intents = lines.filter(
         (line): line is Extract<JournalLine, { kind: "stepIntent" }> => line.kind === "stepIntent",
       );
-      expect(intents.map((line) => line.attempt)).toContain(1);
+      // Attempt numbering pinned, not merely "1 is in there": the first
+      // attempt is 0 and the automatic fresh one is 1, and a slug built from
+      // the wrong index is how two attempts collide in one worktree. (The
+      // second attempt files two intents — it guards, then it applies — so the
+      // assertion is over the distinct indices, in order.)
+      expect([...new Set(intents.map((line) => line.attempt))]).toEqual([0, 1]);
     },
     60_000,
   );
@@ -1438,9 +1806,16 @@ describe("a stalled or empty step retries itself once before it troubles anyone"
       // BOTH attempts, each with its own counts: a park that reads like a
       // first failure would send a person straight at `retry`, which is the
       // one thing already known not to have worked.
-      expect(ask?.cause).toContain("retried automatically once and failed both times");
+      expect(ask?.cause).toContain("retried automatically once and failed twice");
       expect(ask?.cause).toContain("attempt 1 — activity: 36 turns · read 36 · no file written");
       expect(ask?.cause).toContain("attempt 2 — activity: 36 turns · read 36 · no file written");
+      // BOTH forensic worktrees survive, under slugs of their own. The retry
+      // takes the next attempt's slug rather than the failed attempt's path,
+      // which is what keeps the collision handler from ever being asked to
+      // rule on a directory this run still cares about.
+      const runDir = join(scratch.home, "workflow-runs", runId);
+      expect(await exists(join(runDir, "1-builder"))).toBe(true);
+      expect(await exists(join(runDir, "1-builder-r1"))).toBe(true);
     },
     60_000,
   );
@@ -1679,7 +2054,7 @@ describe("a step that produced nothing is caught where it happened, not seven st
       expect(ask?.cause).toContain("produced nothing");
       // The receipt for the attempt the engine already spent on the human's
       // behalf: the park must not read like a first failure.
-      expect(ask?.cause).toContain("retried automatically once and failed both times");
+      expect(ask?.cause).toContain("retried automatically once and failed twice");
       // THE DIAGNOSIS RIDES THE PARK: the park line says what the model
       // emitted on the turn it went quiet on, so nobody has to open the
       // session JSONL to learn it. A scripted `{ text: "" }` is a text block
