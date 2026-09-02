@@ -26,9 +26,14 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   allEntries,
+  allEntryNames,
   entryByName,
+  HUB_INDEX_VERSION,
   HUB_KINDS,
+  hubIndex,
   installCommand,
+  installSource,
+  parseEntry,
   registryDir,
   sourceUrl,
 } from "../lib/hub";
@@ -37,6 +42,8 @@ const WEB_DIR = fileURLToPath(new URL("..", import.meta.url));
 const REPO_DIR = join(WEB_DIR, "..");
 const WORKFLOW_SRC = join(REPO_DIR, "packages", "cli", "src", "workflow.ts");
 const REGISTRY_SRC = join(REPO_DIR, "packages", "cli", "src", "registry.ts");
+const HUB_INDEX_SRC = join(REPO_DIR, "packages", "cli", "src", "hub-index.ts");
+const INDEX_ROUTE = join(WEB_DIR, "app", "hub", "index.json", "route.ts");
 
 /** The `owner/repo/subdir` prefix every first-party entry's source starts with. */
 const FIRST_PARTY = "sitharaj88/arcturn/";
@@ -293,5 +300,88 @@ describe("the starter-skills contract", () => {
       "release-notes",
     ]);
     expect(entry!.kinds).toEqual(["skills"]);
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * The index the CLI reads
+ * ------------------------------------------------------------------ */
+
+/**
+ * `/hub/index.json` is the registry as the CLI sees it: `arcturn search`
+ * lists it and `arcturn add <name>` resolves a bare name through it. What is
+ * checked here is the contract between this file and `hub-index.ts` in the
+ * CLI — the version, the name charset, the ref shape — because the two are
+ * maintained in two packages and the day they disagree every CLI in the
+ * field reads the whole index as malformed.
+ */
+describe("the hub index (/hub/index.json)", () => {
+  it("is version 1, stamped with the export time, and carries every entry in name order", () => {
+    const index = hubIndex(new Date("2026-09-02T00:00:00Z"));
+    expect(index.v).toBe(1);
+    expect(index.v).toBe(HUB_INDEX_VERSION);
+    expect(index.generatedAt).toBe("2026-09-02T00:00:00.000Z");
+    expect(index.entries).toEqual(allEntries());
+    expect(index.entries.map((entry) => entry.name)).toEqual(allEntryNames());
+  });
+
+  it("round-trips through JSON, and every entry re-validates as itself", () => {
+    const index = hubIndex();
+    const back = JSON.parse(JSON.stringify(index)) as ReturnType<typeof hubIndex>;
+    expect(back).toEqual(index);
+    for (const entry of back.entries) expect(parseEntry(entry, entry.name)).toEqual(entry);
+  });
+
+  it("names every entry in the charset the CLI treats as a bare hub name", () => {
+    // The literal out of hub-index.ts, so a registry file the CLI would reject
+    // by name cannot reach the index.
+    const src = readFileSync(HUB_INDEX_SRC, "utf8");
+    const match = /export const HUB_NAME = (\/\^.*?\$\/);/.exec(src);
+    expect(match, "HUB_NAME not found in hub-index.ts").toBeTruthy();
+    const hubName = new RegExp((match as RegExpExecArray)[1].slice(1, -1));
+    for (const entry of hubIndex().entries) expect(entry.name).toMatch(hubName);
+  });
+
+  it("carries a well-formed ref wherever an entry pins one", () => {
+    for (const entry of hubIndex().entries) {
+      if (entry.ref === undefined) continue;
+      expect(entry.ref, entry.name).toMatch(/^[^\s/@-][^\s/@]*$/);
+      expect(entry.source, entry.name).not.toMatch(/@[^/]*$/);
+    }
+  });
+
+  it("refuses a malformed ref, a double pin, or a name outside the charset at build time", () => {
+    const base = JSON.parse(readFileSync(join(registryDir(), "starter-skills.json"), "utf8"));
+    for (const ref of ["v 1", "a/b", "-x", "v1@2", "", 1, null]) {
+      expect(() => parseEntry({ ...base, ref }, "starter-skills"), JSON.stringify(ref)).toThrow(
+        /ref/,
+      );
+    }
+    expect(() =>
+      parseEntry({ ...base, source: `${base.source}@v1`, ref: "v2" }, "starter-skills"),
+    ).toThrow(/pins/);
+    expect(() => parseEntry({ ...base, name: "Starter_Skills" }, "Starter_Skills")).toThrow(/name/);
+  });
+
+  it("puts a pinned ref into the install command and the source link alike", () => {
+    // One string for the page and for `arcturn add <name>`: a listing that
+    // vouched for one commit cannot advertise another.
+    const base = JSON.parse(readFileSync(join(registryDir(), "starter-skills.json"), "utf8"));
+    const pinned = parseEntry({ ...base, ref: "v1.2.0" }, "starter-skills");
+    expect(pinned.ref).toBe("v1.2.0");
+    expect(installSource(pinned)).toBe(`${base.source}@v1.2.0`);
+    expect(installCommand(pinned)).toBe(`arcturn add ${base.source}@v1.2.0`);
+    expect(sourceUrl(pinned)).toBe(
+      "https://github.com/sitharaj88/arcturn/tree/v1.2.0/kits/starter-skills",
+    );
+    const unpinned = parseEntry(base, "starter-skills");
+    expect("ref" in unpinned).toBe(false);
+    expect(installSource(unpinned)).toBe(base.source);
+  });
+
+  it("is exported as a static route handler, so a site deploy is an index deploy", () => {
+    const route = readFileSync(INDEX_ROUTE, "utf8");
+    expect(route).toContain('export const dynamic = "force-static"');
+    expect(route).toContain("hubIndex()");
   });
 });

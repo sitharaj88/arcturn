@@ -27,7 +27,7 @@ an inherited stdin open that never closes; waiting for EOF there would hang fore
 
 | Flag | What it does |
 |---|---|
-| `-p`, `--print` | Non-interactive: run to completion, print the final message, exit |
+| `-p`, `--print` | Non-interactive: run to completion, print the final message, exit. A prompt that starts with `/` runs that slash command instead — `arcturn -p "/workflow rag-setup …"` runs a pipeline from CI — and exits `0` when it finished, `1` on an error, `2` for an unknown command, and `3` when a workflow stopped for a person (a budget checkpoint, a role's question, or a parked step); the command to run next is printed on stderr |
 | `--output-format <fmt>` | With `--print`: `text` (default) or `json` (NDJSON of every agent event) |
 | `-m`, `--model <id>` | Model to use — see `--list-models` and [Model providers](/docs/providers) |
 | `-c`, `--continue` | Resume the most recent session in this directory |
@@ -78,6 +78,7 @@ The same table is in `arcturn --help`.
 | `arcturn mcp auth <name>` · `mcp logout <name>` | Authorize an OAuth MCP server in the browser; delete its stored credentials |
 | `arcturn add <source>` | Install a package of skills, agents, workflows or themes — see [Packages](/docs/packages) |
 | `arcturn inspect <source>` | Stage a package and print what installing it *would* add; installs nothing |
+| `arcturn search [query]` | Find packages on the hub ([arcturn.dev/hub](/hub)); install one with `arcturn add <name>` |
 | `arcturn packages` | List installed packages with their pinned commits |
 | `arcturn update [name]` | Re-fetch one package, or all of them; a package pinned to a ref never moves |
 | `arcturn remove <name>` | Uninstall a package, unlinking exactly what it added |
@@ -96,6 +97,11 @@ you grant that consent up front, and `--skills-only` is how you take the package
 markdown and leave its code on disk unlinked. `arcturn inspect` is the same resolver with
 the linking taken out: it prints the agent lanes, workflow budgets and executable files an
 install would add, and adds none of them — run it before you reach for `--yes`.
+
+A bare name — `arcturn add starter-skills`, `arcturn inspect starter-skills` — is looked up
+in the hub's `index.json` first, printed as `resolving "starter-skills" via the hub → …`,
+and then handled exactly as if you had typed the source it resolved to: same resolver, same
+confirmation, same `--yes`. `arcturn search [query]` lists what is there to be named.
 
 ## Slash commands
 

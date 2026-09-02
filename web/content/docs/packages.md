@@ -21,6 +21,14 @@ resolved commit to `.arcturn-install.json`, and links three markdown files into
 the next session. Nothing else happened — and the rest of this page is mostly about how
 you can tell that from the outside.
 
+You do not need to know a source to start. `arcturn search review` lists every package on
+[the hub](/hub) whose name, kinds or description mentions the word, each with the command
+that installs it; and `arcturn add starter-skills` — a bare name, no owner or path — looks
+that name up in the hub's [`index.json`](https://arcturn.dev/hub/index.json), prints the
+source it resolved to, and then runs exactly as if you had typed that source. Everything
+below about gates and disclosure applies unchanged: a bare name is a lookup, not a
+shortcut past anything, and `arcturn inspect <name>` works the same way.
+
 ## The seven kinds
 
 | Kind | Format | Risk class | Installs into |
@@ -335,15 +343,20 @@ saturates rather than before. What it is not is a safety guarantee: a listed pac
 no relaxation of the extensions gate, and `arcturn inspect` is worth running on a hub
 listing for the same reason it is worth running on a stranger's URL.
 
-The generated `index.json` is the API. A future `arcturn search` reads that same file —
-which is why the disclosure block is a required field in the entry and not a courtesy.
+The generated [`index.json`](https://arcturn.dev/hub/index.json) is the API. `arcturn search`
+reads that same file, and `arcturn add <name>` resolves a bare name through it — so a new
+listing is live for every CLI the moment the site deploys, with no release in between.
+That is also why the disclosure block is a required field in the entry and not a courtesy.
+An entry may pin a `ref`; when it does, the page's command and the bare-name install both
+carry it.
 
 ## Command summary
 
 | Command | What it does |
 |---|---|
-| `arcturn add <source> [--name x] [--skills-only] [--yes]` | Install a package |
+| `arcturn add <source> [--name x] [--skills-only] [--yes]` | Install a package; `<source>` may be a bare hub name |
 | `arcturn inspect <source>` | Stage and disclose; install nothing |
+| `arcturn search [query] [--json]` | Find packages on the hub; each result names its `arcturn add` |
 | `arcturn packages` | List what is installed, with pinned commits |
 | `arcturn update [name]` | Re-fetch one package, or every one of them; a pinned package reports and does not move |
 | `arcturn remove <name>` | Unlink exactly what that package added |

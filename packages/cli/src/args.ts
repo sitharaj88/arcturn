@@ -16,7 +16,7 @@
  * Two families own their *entire* argument list instead, and are dispatched
  * before the flag loop below ever runs: `mcp`, whose `add` takes a launch
  * command verbatim after `--`, and the registry verbs (`add`, `remove`,
- * `packages`, `update`, `inspect`, `new`). The registry verbs are here for the
+ * `packages`, `update`, `inspect`, `search`, `new`). The registry verbs are here for the
  * same reason `mcp` is: `--name`, `--skills-only`, `--yes`, `--json` and
  * `--user` are flags of *those* commands, not of a session, and the global loop
  * would reject every one of them as an unknown option. Keeping the argument
@@ -125,12 +125,13 @@ export interface TrustCommand {
  * `packages`, not `list`: a bare `arcturn list` would read as "list what?", and
  * the noun is what the RFC 0002 hub calls these things too.
  */
-export type RegistryVerb = "add" | "remove" | "packages" | "update" | "inspect" | "new";
+export type RegistryVerb = "add" | "remove" | "packages" | "update" | "inspect" | "search" | "new";
 
 /** Every registry verb, in help-text order. */
 export const REGISTRY_VERBS: readonly RegistryVerb[] = [
   "add",
   "inspect",
+  "search",
   "packages",
   "update",
   "remove",
@@ -1027,12 +1028,15 @@ Commands
   mcp logout <name>             Delete the stored OAuth credentials for a server.
   add <source>                  Install a package — skills, agent roles, workflows,
                                 themes, MCP servers, extensions — from a git URL, an
-                                "owner/repo[/subdir][@ref]" shorthand, or a local path.
+                                "owner/repo[/subdir][@ref]" shorthand, a local path,
+                                or a bare hub name (see search).
                                 --name <name>, --skills-only, --yes.
   inspect <source>              Stage a source and print what installing it WOULD add
                                 (roles with their lanes, workflows with their budgets,
                                 skills, MCP servers, executable code). Installs
                                 nothing. --json for the machine-readable form.
+  search [query]                Find packages on the hub (arcturn.dev/hub); install
+                                one with add <name>. --json for the raw entries.
   packages                      List installed packages and what each one provides.
   update [name]                 Re-fetch one package, or every unpinned one.
   remove <name>                 Uninstall a package and unlink everything it added.

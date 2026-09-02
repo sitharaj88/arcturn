@@ -1,5 +1,7 @@
 import { execFile } from "node:child_process";
 import { lstat, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -8,6 +10,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { helpText, parseArgs } from "./args.js";
 import { runCli } from "./cli-main.js";
 import type { CommandUi, SelectOption } from "./commands.js";
+import { version } from "./meta.js";
 import {
   createRegistryCommands,
   type ExecutableCodeWarning,
@@ -28,7 +31,9 @@ import {
   removePackage,
   resolvePackageDir,
   resolveSource,
+  runAddCommand,
   runInspectCommand,
+  runSearchCommand,
   updateAllPackages,
   updatePackage,
 } from "./registry.js";
@@ -1374,6 +1379,7 @@ describe("arcturn add | remove | packages | update | inspect", () => {
       [["packages"], "packages", []],
       [["update"], "update", []],
       [["inspect", ".", "--json"], "inspect", [".", "--json"]],
+      [["search", "review", "--json"], "search", ["review", "--json"]],
       [["new", "agent", "reviewer", "--user"], "new", ["agent", "reviewer", "--user"]],
     ];
     for (const [argv, verb, rest] of cases) {
@@ -1440,7 +1446,14 @@ describe("arcturn add | remove | packages | update | inspect", () => {
 
   it("returns 2 for a usage error on each verb, and says how to send it as a prompt", async () => {
     const home = await scratchDir("arcturn-shell-home-");
-    for (const argv of [["add"], ["remove"], ["inspect"], ["packages", "extra"], ["new"]]) {
+    for (const argv of [
+      ["add"],
+      ["remove"],
+      ["inspect"],
+      ["packages", "extra"],
+      ["search", "the", "codebase"],
+      ["new"],
+    ]) {
       const result = await runShell(argv, home);
       expect(result.code, argv.join(" ")).toBe(2);
       // These verbs are ordinary English words, so a usage error is as likely
@@ -1485,8 +1498,574 @@ describe("arcturn add | remove | packages | update | inspect", () => {
 
   it("lists every verb in the help text", () => {
     const help = helpText();
-    for (const verb of ["add", "inspect", "packages", "update", "remove", "new"]) {
+    for (const verb of ["add", "inspect", "search", "packages", "update", "remove", "new"]) {
       expect(help, verb).toContain(`  ${verb}`);
+    }
+  });
+});
+
+/* The hub: search, and a bare name at add | inspect ------------------------------ */
+
+/**
+ * A hub index is text off the network, so every test here injects the fetch
+ * and asserts the one thing that matters about the seam: the string a bare
+ * name resolves to is handed to the *existing* resolver unchanged, and every
+ * gate downstream of it — the executable-code confirmation above all — fires
+ * exactly as it would had the person typed that string themselves.
+ */
+
+const HUB_INDEX = {
+  v: 1,
+  generatedAt: "2026-09-02T00:00:00.000Z",
+  entries: [
+    {
+      name: "greeter",
+      kinds: ["skills"],
+      source: "acme/kits/tools/greeter",
+      description: "Says hello in one skill.",
+    },
+    {
+      name: "risky",
+      kinds: ["skills", "extensions"],
+      source: "acme/kits/tools/risky",
+      ref: "v1",
+      description: "A skill plus an extension hook.",
+      disclosure: { executable: true },
+    },
+    {
+      name: "cloud-posture-review",
+      kinds: ["org-kit", "agents", "workflows"],
+      source: "acme/kits/tools/cloud",
+      description: "Reviews infrastructure posture.",
+    },
+  ],
+};
+
+/** A fetch answering one canned body, and refusing to be called when `body` is `never`. */
+function hubFetch(body: string | "never" = JSON.stringify(HUB_INDEX), status = 200): typeof fetch {
+  return (async () => {
+    if (body === "never") throw new Error("the hub must not be consulted for this source");
+    return new Response(body, { status, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+}
+
+/**
+ * A git runner that records every call and redirects the GitHub clone URL
+ * the resolver derives at a local repository, so the test proves the hub's
+ * source went through `resolveSource` (only it turns `acme/kits/...` into
+ * `https://github.com/acme/kits.git`) without touching the network.
+ */
+function hubGit(remap: Record<string, string>): { exec: GitExecFn; calls: string[][] } {
+  const calls: string[][] = [];
+  const exec: GitExecFn = async (args, cwd) => {
+    calls.push([...args]);
+    const rewritten = args.map((arg) => remap[arg] ?? arg);
+    const { stdout, stderr } = await execFileAsync("git", rewritten, { cwd });
+    return { stdout, stderr };
+  };
+  return { exec, calls };
+}
+
+const ACME_CLONE_URL = "https://github.com/acme/kits.git";
+
+/** The `acme/kits` repository every hub fixture entry points into, tagged `v1`. */
+async function makeAcmeRepo(): Promise<{ dir: string; url: string }> {
+  const repo = await makeGitRepo({
+    "tools/greeter/skills/greet.md": "# greet\nSay hello.",
+    "tools/risky/skills/wave.md": "# wave\nWave.",
+    "tools/risky/extensions/hook.js": "export default function () {}",
+    "tools/cloud/agents/auditor.md": roleFile("auditor", "read"),
+    "tools/cloud/workflows/posture.md": workflowFile("posture"),
+  });
+  await gitRun(["tag", "v1"], repo.dir);
+  return repo;
+}
+
+describe("a bare name at arcturn add", () => {
+  it("resolves it through the hub, says so first, and installs exactly the source the listing named", async () => {
+    const repo = await makeAcmeRepo();
+    const home = await scratchDir("arcturn-hub-home-");
+    const { exec, calls } = hubGit({ [ACME_CLONE_URL]: repo.url });
+    const out: string[] = [];
+    const err: string[] = [];
+
+    const code = await runAddCommand({
+      argv: ["greeter"],
+      home,
+      stdout: (text) => out.push(text),
+      stderr: (text) => err.push(text),
+      exec,
+      fetchFn: hubFetch(),
+      hubUrl: "https://hub.test/index.json",
+      version: "0.0.0-test",
+    });
+
+    expect(code, err.join("\n")).toBe(0);
+    // Printed before anything is fetched or linked: nothing installs unannounced.
+    expect(out[0]).toBe('resolving "greeter" via the hub → acme/kits/tools/greeter');
+    expect(out.join("\n")).toContain('Installed "greeter"');
+    // The resolver, not the hub, produced the clone URL — so the string went through it.
+    expect(calls[0]).toEqual([
+      "clone",
+      "--depth",
+      "1",
+      "--no-tags",
+      "--",
+      ACME_CLONE_URL,
+      calls[0]![6],
+    ]);
+    const record = await readInstallRecordForTest(registryPathsFromHome(home), "greeter");
+    expect(record.source).toBe("acme/kits/tools/greeter");
+    expect(record.sourceKind).toBe("github-shorthand");
+    expect(record.subdir).toBe("tools/greeter");
+    expect(record.pinned).toBe(false);
+    expect(await isSymlink(join(home, "skills", "greet.md"))).toBe(true);
+  });
+
+  it("pins the listing's ref, and the executable-code gate fires exactly as for a typed source", async () => {
+    const repo = await makeAcmeRepo();
+    const home = await scratchDir("arcturn-hub-home-");
+    const { exec, calls } = hubGit({ [ACME_CLONE_URL]: repo.url });
+    const warnings: ExecutableCodeWarning[] = [];
+    const out: string[] = [];
+
+    const declined = await runAddCommand({
+      argv: ["risky"],
+      home,
+      stdout: (text) => out.push(text),
+      stderr: () => {},
+      confirm: (warning) => {
+        warnings.push(warning);
+        return false;
+      },
+      exec,
+      fetchFn: hubFetch(),
+      hubUrl: "https://hub.test/index.json",
+      version: "0.0.0-test",
+    });
+
+    expect(declined).toBe(1);
+    expect(out[0]).toBe('resolving "risky" via the hub → acme/kits/tools/risky@v1');
+    expect(calls[0]).toContain("--branch=v1");
+    // The gate: named the file, was declined, and nothing landed — not even the skill.
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]!.extensionFiles).toEqual(["extensions/hook.js"]);
+    expect(out.join("\n")).toContain("cancelled");
+    expect(await exists(join(home, "packages", "risky"))).toBe(false);
+    expect(await exists(join(home, "skills", "wave.md"))).toBe(false);
+    expect(await exists(join(home, "extensions", "hook.js"))).toBe(false);
+
+    // `--yes` means what it always meant: consent given up front, gate not asked.
+    const confirmed = await runAddCommand({
+      argv: ["risky", "--yes"],
+      home,
+      stdout: () => {},
+      stderr: () => {},
+      confirm: () => {
+        throw new Error("--yes must not consult the confirmer");
+      },
+      exec,
+      fetchFn: hubFetch(),
+      hubUrl: "https://hub.test/index.json",
+      version: "0.0.0-test",
+    });
+    expect(confirmed).toBe(0);
+    const record = await readInstallRecordForTest(registryPathsFromHome(home), "risky");
+    expect(record.source).toBe("acme/kits/tools/risky@v1");
+    expect(record.ref).toBe("v1");
+    expect(record.pinned).toBe(true);
+    expect(await isSymlink(join(home, "extensions", "hook.js"))).toBe(true);
+  });
+
+  it("never consults the hub for a source shape the resolver already owns", async () => {
+    // Local path, shorthand, URL, and a name carrying an @ref: each is what it
+    // was before the hub existed. A fetch here is a bug.
+    const home = await scratchDir("arcturn-hub-home-");
+    for (const source of ["./nope", "acme/kits", "https://example.test/r.git", "greeter@v1"]) {
+      const err: string[] = [];
+      const code = await runAddCommand({
+        argv: [source],
+        cwd: home,
+        home,
+        stdout: () => {},
+        stderr: (text) => err.push(text),
+        exec: async () => {
+          throw new Error("offline");
+        },
+        fetchFn: hubFetch("never"),
+        version: "0.0.0-test",
+      });
+      expect(code, source).toBe(1);
+      expect(err.join("\n"), source).not.toContain("via the hub");
+      expect(err.join("\n"), source).not.toContain("hub unreachable");
+    }
+  });
+
+  it("reports the hub unreachable — network, status, timeout, malformed — and installs nothing", async () => {
+    const home = await scratchDir("arcturn-hub-home-");
+    const cases: [string, typeof fetch][] = [
+      [
+        "network",
+        (async () => {
+          throw new TypeError("fetch failed");
+        }) as unknown as typeof fetch,
+      ],
+      ["status", hubFetch("gone", 404)],
+      ["malformed", hubFetch("{}")],
+      // A poisoned index: a source the resolver would happily take as a local
+      // path. Refused as malformed, so a bare name can never reach the disk.
+      [
+        "poisoned",
+        hubFetch(JSON.stringify({ v: 1, entries: [{ ...HUB_INDEX.entries[0], source: "/etc" }] })),
+      ],
+    ];
+    for (const [label, fetchFn] of cases) {
+      const err: string[] = [];
+      let cloned = false;
+      const code = await runAddCommand({
+        argv: ["greeter"],
+        home,
+        stdout: () => {},
+        stderr: (text) => err.push(text),
+        exec: async () => {
+          cloned = true;
+          return { stdout: "", stderr: "" };
+        },
+        fetchFn,
+        hubUrl: "https://hub.test/index.json",
+        version: "0.0.0-test",
+      });
+      expect(code, label).toBe(1);
+      expect(err.join("\n"), label).toMatch(
+        /^arcturn: hub unreachable \(.+\); pass the explicit source instead, e\.g\. owner\/repo\/subdir$/m,
+      );
+      expect(cloned, label).toBe(false);
+    }
+    const status = await (async () => {
+      const err: string[] = [];
+      await runAddCommand({
+        argv: ["greeter"],
+        home,
+        stdout: () => {},
+        stderr: (text) => err.push(text),
+        fetchFn: hubFetch("gone", 404),
+        hubUrl: "https://hub.test/index.json",
+        version: "0.0.0-test",
+      });
+      return err.join("\n");
+    })();
+    expect(status).toContain("404");
+    expect(await exists(join(home, "packages"))).toBe(false);
+  });
+
+  it("names the closest listed packages for a name the hub does not have", async () => {
+    const home = await scratchDir("arcturn-hub-home-");
+    const err: string[] = [];
+    const code = await runAddCommand({
+      argv: ["cloud-posture"],
+      home,
+      stdout: () => {},
+      stderr: (text) => err.push(text),
+      exec: async () => {
+        throw new Error("must not clone");
+      },
+      fetchFn: hubFetch(),
+      hubUrl: "https://hub.test/index.json",
+      version: "0.0.0-test",
+    });
+    expect(code).toBe(1);
+    expect(err.join("\n")).toContain('"cloud-posture" is not on the hub');
+    expect(err.join("\n")).toContain("cloud-posture-review");
+    expect(err.join("\n")).not.toContain("greeter");
+  });
+});
+
+describe("a bare name at arcturn inspect", () => {
+  it("resolves it through the hub, says so first, and installs nothing", async () => {
+    const repo = await makeAcmeRepo();
+    const home = await scratchDir("arcturn-hub-home-");
+    const { exec, calls } = hubGit({ [ACME_CLONE_URL]: repo.url });
+    const out: string[] = [];
+
+    const code = await runInspectCommand({
+      argv: ["risky"],
+      home,
+      stdout: (text) => out.push(text),
+      stderr: () => {},
+      exec,
+      fetchFn: hubFetch(),
+      hubUrl: "https://hub.test/index.json",
+      version: "0.0.0-test",
+    });
+
+    expect(code).toBe(0);
+    expect(out[0]).toBe('resolving "risky" via the hub → acme/kits/tools/risky@v1');
+    expect(calls[0]).toContain("--branch=v1");
+    expect(out.join("\n")).toContain("extensions/hook.js");
+    expect(await exists(join(home, "packages", "risky"))).toBe(false);
+    expect(await exists(join(home, "extensions", "hook.js"))).toBe(false);
+  });
+
+  it("keeps --json parseable: the resolving line goes to stderr there", async () => {
+    const repo = await makeAcmeRepo();
+    const home = await scratchDir("arcturn-hub-home-");
+    const { exec } = hubGit({ [ACME_CLONE_URL]: repo.url });
+    const out: string[] = [];
+    const err: string[] = [];
+
+    const code = await runInspectCommand({
+      argv: ["greeter", "--json"],
+      home,
+      stdout: (text) => out.push(text),
+      stderr: (text) => err.push(text),
+      exec,
+      fetchFn: hubFetch(),
+      hubUrl: "https://hub.test/index.json",
+      version: "0.0.0-test",
+    });
+
+    expect(code).toBe(0);
+    expect(err).toEqual(['resolving "greeter" via the hub → acme/kits/tools/greeter']);
+    const parsed = JSON.parse(out.join("\n"));
+    expect(parsed.name).toBe("greeter");
+    expect(parsed.skills.map((skill: { name: string }) => skill.name)).toEqual(["greet"]);
+  });
+
+  it("fails the same way add does when the hub is unreachable or the name is unknown", async () => {
+    const home = await scratchDir("arcturn-hub-home-");
+    const unreachable: string[] = [];
+    expect(
+      await runInspectCommand({
+        argv: ["greeter"],
+        home,
+        stdout: () => {},
+        stderr: (text) => unreachable.push(text),
+        fetchFn: hubFetch("gone", 503),
+        hubUrl: "https://hub.test/index.json",
+        version: "0.0.0-test",
+      }),
+    ).toBe(1);
+    expect(unreachable.join("\n")).toContain("hub unreachable (");
+    expect(unreachable.join("\n")).toContain("503");
+
+    const unknown: string[] = [];
+    expect(
+      await runInspectCommand({
+        argv: ["greet"],
+        home,
+        stdout: () => {},
+        stderr: (text) => unknown.push(text),
+        fetchFn: hubFetch(),
+        hubUrl: "https://hub.test/index.json",
+        version: "0.0.0-test",
+      }),
+    ).toBe(1);
+    expect(unknown.join("\n")).toContain('"greet" is not on the hub');
+    expect(unknown.join("\n")).toContain("greeter");
+  });
+});
+
+describe("runSearchCommand", () => {
+  const common = { hubUrl: "https://hub.test/index.json", version: "0.0.0-test" };
+
+  it("lists every package in name order, three lines each, with the command to install it", async () => {
+    const out: string[] = [];
+    const code = await runSearchCommand({
+      argv: [],
+      stdout: (text) => out.push(text),
+      stderr: () => {},
+      fetchFn: hubFetch(),
+      ...common,
+    });
+    expect(code).toBe(0);
+    expect(out.slice(0, 3)).toEqual([
+      "cloud-posture-review  [org-kit, agents, workflows]",
+      "  Reviews infrastructure posture.",
+      "  arcturn add cloud-posture-review",
+    ]);
+    const names = out.filter((line) => /^[a-z]/.test(line)).map((line) => line.split("  ")[0]);
+    expect(names).toEqual(["cloud-posture-review", "greeter", "risky"]);
+  });
+
+  it("filters by a query over name, kinds and description", async () => {
+    const out: string[] = [];
+    const code = await runSearchCommand({
+      argv: ["extensions"],
+      stdout: (text) => out.push(text),
+      stderr: () => {},
+      fetchFn: hubFetch(),
+      ...common,
+    });
+    expect(code).toBe(0);
+    expect(out[0]).toBe("risky  [skills, extensions]");
+    expect(out.join("\n")).not.toContain("greeter");
+  });
+
+  it("--json prints the matching entries as the hub published them", async () => {
+    const out: string[] = [];
+    const code = await runSearchCommand({
+      argv: ["risky", "--json"],
+      stdout: (text) => out.push(text),
+      stderr: () => {},
+      fetchFn: hubFetch(),
+      ...common,
+    });
+    expect(code).toBe(0);
+    const parsed = JSON.parse(out.join("\n"));
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0].name).toBe("risky");
+    expect(parsed[0].ref).toBe("v1");
+    expect(parsed[0].disclosure).toEqual({ executable: true });
+  });
+
+  it("says when nothing matches, and exits 1", async () => {
+    const err: string[] = [];
+    const code = await runSearchCommand({
+      argv: ["quantum"],
+      stdout: () => {},
+      stderr: (text) => err.push(text),
+      fetchFn: hubFetch(),
+      ...common,
+    });
+    expect(code).toBe(1);
+    expect(err.join("\n")).toContain('no packages match "quantum"');
+  });
+
+  it("reports the hub unreachable the same way add does", async () => {
+    const err: string[] = [];
+    const code = await runSearchCommand({
+      argv: [],
+      stdout: () => {},
+      stderr: (text) => err.push(text),
+      fetchFn: hubFetch("<html>", 500),
+      ...common,
+    });
+    expect(code).toBe(1);
+    expect(err.join("\n")).toMatch(/^arcturn: hub unreachable \(.*500.*\)/m);
+  });
+
+  it("treats an unknown flag or a second word as a usage error", async () => {
+    for (const argv of [["--wat"], ["cloud", "posture"]]) {
+      const err: string[] = [];
+      const code = await runSearchCommand({
+        argv,
+        stdout: () => {},
+        stderr: (text) => err.push(text),
+        fetchFn: hubFetch("never"),
+        ...common,
+      });
+      expect(code, argv.join(" ")).toBe(2);
+    }
+  });
+});
+
+describe("the hub at the shell", () => {
+  /** A loopback hub: the one place plain http is allowed, so the shell path is exercised offline. */
+  async function serveHub(): Promise<{
+    server: Server;
+    url: string;
+    requests: { url: string; ua: string; accept: string }[];
+  }> {
+    const requests: { url: string; ua: string; accept: string }[] = [];
+    const server = createServer((req, res) => {
+      requests.push({
+        url: req.url ?? "",
+        ua: String(req.headers["user-agent"] ?? ""),
+        accept: String(req.headers.accept ?? ""),
+      });
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(HUB_INDEX));
+    });
+    await new Promise<void>((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
+    const { port } = server.address() as AddressInfo;
+    return { server, url: `http://127.0.0.1:${port}/hub/index.json`, requests };
+  }
+
+  async function withHub<T>(
+    run: (hub: Awaited<ReturnType<typeof serveHub>>) => Promise<T>,
+  ): Promise<T> {
+    const hub = await serveHub();
+    const previous = process.env.ARCTURN_HUB_URL;
+    process.env.ARCTURN_HUB_URL = hub.url;
+    try {
+      return await run(hub);
+    } finally {
+      if (previous === undefined) delete process.env.ARCTURN_HUB_URL;
+      else process.env.ARCTURN_HUB_URL = previous;
+      await new Promise<void>((resolveClose) => hub.server.close(() => resolveClose()));
+    }
+  }
+
+  /** Same shell harness as the registry verbs above, for the search verb. */
+  async function runShell(argv: readonly string[], home: string) {
+    const parsed = parseArgs(argv, { stdinIsTty: false });
+    if (!parsed.ok) throw new Error(`parse failed: ${parsed.error}`);
+    const out: string[] = [];
+    const err: string[] = [];
+    const stdout = process.stdout.write.bind(process.stdout);
+    const stderr = process.stderr.write.bind(process.stderr);
+    const previousHome = process.env.ARCTURN_HOME;
+    process.env.ARCTURN_HOME = home;
+    process.stdout.write = ((chunk: string) => {
+      out.push(String(chunk));
+      return true;
+    }) as typeof process.stdout.write;
+    process.stderr.write = ((chunk: string) => {
+      err.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      const code = await runCli(parsed.args);
+      return { code, out: out.join(""), err: err.join("") };
+    } finally {
+      process.stdout.write = stdout;
+      process.stderr.write = stderr;
+      if (previousHome === undefined) delete process.env.ARCTURN_HOME;
+      else process.env.ARCTURN_HOME = previousHome;
+    }
+  }
+
+  it("routes search to the hub named by ARCTURN_HUB_URL, identifying the CLI by version", async () => {
+    const home = await scratchDir("arcturn-shell-home-");
+    await withHub(async (hub) => {
+      const result = await runShell(["search", "hello"], home);
+      expect(result.code, result.err).toBe(0);
+      expect(result.out).toContain("greeter  [skills]");
+      expect(result.out).toContain("  arcturn add greeter");
+      expect(hub.requests).toHaveLength(1);
+      expect(hub.requests[0]!.url).toBe("/hub/index.json");
+      expect(hub.requests[0]!.ua).toBe(`arcturn/${version()}`);
+      expect(hub.requests[0]!.accept).toBe("application/json");
+    });
+  });
+
+  it("routes a bare name at add and inspect through the same hub", async () => {
+    const home = await scratchDir("arcturn-shell-home-");
+    await withHub(async (hub) => {
+      // The clone itself would go to github.com, which this test must not
+      // reach; the resolving line and the fetch prove the wiring, and the
+      // failed clone proves the hub's string was handed to the real resolver.
+      const result = await runShell(["inspect", "greeter"], home);
+      expect(result.code).toBe(1);
+      expect(result.out).toContain('resolving "greeter" via the hub → acme/kits/tools/greeter');
+      expect(result.err).toContain('could not clone "https://github.com/acme/kits.git"');
+      expect(hub.requests).toHaveLength(1);
+    });
+  });
+
+  it("reports the hub unreachable at the shell when nothing answers", async () => {
+    const home = await scratchDir("arcturn-shell-home-");
+    const previous = process.env.ARCTURN_HUB_URL;
+    // Port 1 on loopback: refused immediately, never listened on.
+    process.env.ARCTURN_HUB_URL = "http://127.0.0.1:1/hub/index.json";
+    try {
+      const result = await runShell(["add", "greeter"], home);
+      expect(result.code).toBe(1);
+      expect(result.err).toContain("arcturn: hub unreachable (");
+      expect(result.err).toContain("pass the explicit source instead");
+    } finally {
+      if (previous === undefined) delete process.env.ARCTURN_HUB_URL;
+      else process.env.ARCTURN_HUB_URL = previous;
     }
   });
 });

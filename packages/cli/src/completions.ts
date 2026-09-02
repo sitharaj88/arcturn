@@ -308,6 +308,7 @@ export const DEFAULT_COMPLETION_SPEC: CompletionSpec = {
     },
     { name: "add", description: "Install a package from a git URL, shorthand or local path." },
     { name: "inspect", description: "Print what installing a source WOULD add. Installs nothing." },
+    { name: "search", description: "Find packages on the hub; install one with add <name>." },
     { name: "packages", description: "List installed packages and what each one provides." },
     { name: "update", description: "Re-fetch one package, or every unpinned one." },
     { name: "remove", description: "Uninstall a package and unlink everything it added." },

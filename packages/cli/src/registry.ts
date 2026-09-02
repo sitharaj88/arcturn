@@ -28,8 +28,10 @@
  *   manifest, everything is detected by convention.
  *
  * `arcturn add <source>` / `/add <source>` resolves a source (a git URL, a
- * `owner/repo[/subdir][@ref]` GitHub shorthand, or a local path), clones or
- * copies it into `~/.arcturn/packages/<name>/`, records the exact resolved commit
+ * `owner/repo[/subdir][@ref]` GitHub shorthand, or a local path — or, at the
+ * shell only, a bare hub name that `hub-index.ts` turns into one of those
+ * first; see {@link runAddCommand}), clones or copies it into
+ * `~/.arcturn/packages/<name>/`, records the exact resolved commit
  * for reproducibility, and links (or, when a symlink can't be made, copies)
  * each piece it finds into the root Arcturn already scans — `~/.arcturn/skills`,
  * `~/.arcturn/agents`, `~/.arcturn/workflows`, `~/.arcturn/extensions`,
@@ -120,6 +122,16 @@ import { promisify } from "node:util";
 import { loadAgentDefs } from "./agents.js";
 import type { CommandContext, CommandUi, SlashCommand } from "./commands.js";
 import { oneLine } from "./format.js";
+import {
+  type FetchFn,
+  fetchHubIndex,
+  type HubIndex,
+  isBareHubName,
+  resolveHubName,
+  searchHub,
+  suggestHubNames,
+} from "./hub-index.js";
+import { version as cliVersion } from "./meta.js";
 import { loadSkills } from "./skills.js";
 import type { Workflow, WorkflowDispatch } from "./workflow.js";
 import { isWorkflowParseError, parseWorkflow, roleDispatch } from "./workflow.js";
@@ -3004,8 +3016,180 @@ async function terminalConfirm(warning: ExecutableCodeWarning): Promise<boolean>
   }
 }
 
+/* The hub: a bare name at add | inspect, and search ------------------------------ */
+
+/**
+ * How a command reaches the hub index when a bare name (or `search`) sends it
+ * there. Every field is optional and injectable so the tests never touch the
+ * network; the shell passes only `version`.
+ */
+export interface HubCommandOptions {
+  /** `fetch` override, for tests. */
+  fetchFn?: FetchFn;
+  /** Index URL override. Defaults to `$ARCTURN_HUB_URL`, then arcturn.dev. */
+  hubUrl?: string;
+  /** The CLI version sent as `User-Agent: arcturn/<version>`; defaults to the package's own. */
+  version?: string;
+}
+
+async function readHubIndex(options: HubCommandOptions): Promise<HubIndex> {
+  return fetchHubIndex({
+    ...(options.fetchFn === undefined ? {} : { fetchFn: options.fetchFn }),
+    ...(options.hubUrl === undefined ? {} : { url: options.hubUrl }),
+    version: options.version ?? cliVersion(),
+  });
+}
+
+/** The one line every hub failure prints: the reason, and the way around it. */
+function hubUnreachableLine(error: unknown): string {
+  return (
+    `arcturn: hub unreachable (${errorMessage(error)}); pass the explicit source instead, ` +
+    "e.g. owner/repo/subdir"
+  );
+}
+
+/**
+ * Whether a positional source is a bare hub name rather than a source.
+ *
+ * The name charset has no `/`, `:` or `@` and no leading `.`, `~`, `-` or
+ * `\`, so it is disjoint from every shape {@link resolveSource} accepts — a
+ * git URL, an `owner/repo` shorthand, a local path — and nothing a person
+ * could already install changes meaning. `isLocalPathSpec` is re-asked
+ * anyway: the two checks are maintained in two files, and this is the one
+ * that must never drift.
+ */
+function isBareName(source: string): boolean {
+  return isBareHubName(source) && !isLocalPathSpec(source);
+}
+
+/**
+ * Turn a bare hub name into the source string the existing resolver will see.
+ *
+ * The hub index is data, not instructions. The only thing that leaves this
+ * function is one string, `source` or `source@ref`, and the caller hands it
+ * to {@link installPackage} / {@link inspectPackage} exactly as if the person
+ * had typed it — so `resolveSource` re-validates it, the executable-code
+ * confirmation fires on it, `--yes` and `--skills-only` mean what they always
+ * meant. The index itself has already refused any `source` that is not a
+ * GitHub shorthand, so a bare name can never land on a local path or on a
+ * host the resolver would not already accept from a typed shorthand.
+ *
+ * The resolution is announced *before* anything is fetched or linked, so
+ * nothing installs that was not printed first.
+ *
+ * @returns The source string, or `undefined` after explaining on `stderr`.
+ */
+async function resolveBareName(
+  name: string,
+  options: HubCommandOptions,
+  announce: RegistryWriter,
+  stderr: RegistryWriter,
+): Promise<string | undefined> {
+  let index: HubIndex;
+  try {
+    index = await readHubIndex(options);
+  } catch (error) {
+    stderr(hubUnreachableLine(error));
+    return undefined;
+  }
+  const resolved = resolveHubName(index, name);
+  if (resolved === undefined) {
+    const close = suggestHubNames(index, name);
+    stderr(
+      close.length > 0
+        ? `arcturn: "${name}" is not on the hub; did you mean: ${close.join(", ")}`
+        : `arcturn: "${name}" is not on the hub; run "arcturn search" to see what is listed`,
+    );
+    return undefined;
+  }
+  const source =
+    resolved.ref === undefined ? resolved.source : `${resolved.source}@${resolved.ref}`;
+  announce(`resolving "${name}" via the hub → ${source}`);
+  return source;
+}
+
+interface ParsedSearchArgs {
+  query?: string;
+  json: boolean;
+  error?: string;
+}
+
+/** `[query] [--json]` — one word, or a quoted phrase; a second word is a usage error. */
+function parseSearchArgv(argv: readonly string[]): ParsedSearchArgs {
+  let query: string | undefined;
+  let json = false;
+  for (const token of argv) {
+    if (token === "--json") {
+      json = true;
+    } else if (token.startsWith("-") && token !== "-") {
+      return { json, error: `unknown flag "${token}"` };
+    } else if (query === undefined) {
+      query = token;
+    } else {
+      return { json, error: `unexpected argument "${token}" (quote a multi-word query)` };
+    }
+  }
+  return { query, json };
+}
+
+/** Options for {@link runSearchCommand}. */
+export interface RunSearchCommandOptions extends HubCommandOptions {
+  /** Arguments after `arcturn search`, e.g. `["review", "--json"]`. */
+  argv: readonly string[];
+  stdout?: RegistryWriter;
+  stderr?: RegistryWriter;
+}
+
+/**
+ * `arcturn search [query] [--json]` — list what the hub carries, filtered by a
+ * case-insensitive substring over name, kinds and description. Exit code `0`
+ * with matches, `1` with none or with the hub unreachable, `2` on a usage
+ * error.
+ *
+ * Reads the same `index.json` the site exports from `registry/`, so listing
+ * a package is a pull request and a deploy, never a CLI release. Each match
+ * prints as its name and kinds, its description, and the `arcturn add <name>`
+ * that installs it; `--json` prints the matching entries as published.
+ *
+ * @param options - See {@link RunSearchCommandOptions}.
+ */
+export async function runSearchCommand(options: RunSearchCommandOptions): Promise<number> {
+  const stdout = options.stdout ?? defaultStdout;
+  const stderr = options.stderr ?? defaultStderr;
+  const parsed = parseSearchArgv(options.argv);
+  if (parsed.error) {
+    stderr(`arcturn: ${parsed.error}; usage: arcturn search [query] [--json]`);
+    return 2;
+  }
+  let index: HubIndex;
+  try {
+    index = await readHubIndex(options);
+  } catch (error) {
+    stderr(hubUnreachableLine(error));
+    return 1;
+  }
+  const matches = searchHub(index, parsed.query);
+  if (parsed.json) stdout(JSON.stringify(matches, null, 2));
+  if (matches.length === 0) {
+    stderr(
+      parsed.query === undefined
+        ? "arcturn: the hub lists no packages"
+        : `arcturn: no packages match "${parsed.query}"`,
+    );
+    return 1;
+  }
+  if (parsed.json) return 0;
+  matches.forEach((entry, i) => {
+    if (i > 0) stdout("");
+    stdout(`${entry.name}  [${entry.kinds.join(", ")}]`);
+    stdout(`  ${entry.description}`);
+    stdout(`  arcturn add ${entry.name}`);
+  });
+  return 0;
+}
+
 /** Options for {@link runAddCommand}. */
-export interface RunAddCommandOptions {
+export interface RunAddCommandOptions extends HubCommandOptions {
   /** Arguments after `arcturn add`, e.g. `["owner/repo", "--skills-only"]`. */
   argv: readonly string[];
   /** Working directory for resolving a relative local-path source. Defaults to `process.cwd()`. */
@@ -3029,6 +3213,10 @@ export interface RunAddCommandOptions {
  * package. Exit code `0` on success, `1` on a declined confirmation or
  * install failure, `2` on a usage error.
  *
+ * A bare hub name (`arcturn add starter-skills`) is looked up in the hub index
+ * first and replaced by the source the listing names; from there on the
+ * command is exactly `arcturn add <that source>` — see {@link resolveBareName}.
+ *
  * @param options - See {@link RunAddCommandOptions}.
  */
 export async function runAddCommand(options: RunAddCommandOptions): Promise<number> {
@@ -3041,12 +3229,18 @@ export async function runAddCommand(options: RunAddCommandOptions): Promise<numb
     );
     return 2;
   }
+  let source = parsed.source;
+  if (isBareName(source)) {
+    const resolved = await resolveBareName(source, options, stdout, stderr);
+    if (resolved === undefined) return 1;
+    source = resolved;
+  }
   const paths = registryPathsFromHome(options.home ?? defaultHome());
   const confirm = parsed.yes ? () => true : (options.confirm ?? terminalConfirm);
   let result: InstallResult;
   try {
     result = await installPackage({
-      source: parsed.source,
+      source,
       ...(parsed.name === undefined ? {} : { name: parsed.name }),
       skillsOnly: parsed.skillsOnly,
       paths,
@@ -3210,7 +3404,7 @@ function parseInspectArgv(argv: readonly string[]): ParsedInspectArgs {
 }
 
 /** Options for {@link runInspectCommand}. */
-export interface RunInspectCommandOptions {
+export interface RunInspectCommandOptions extends HubCommandOptions {
   /** Arguments after `arcturn inspect`, e.g. `["owner/repo", "--json"]`. */
   argv: readonly string[];
   /** Working directory for resolving a relative local-path source. Defaults to `process.cwd()`. */
@@ -3230,9 +3424,12 @@ export interface RunInspectCommandOptions {
  *
  * `--json` emits the {@link PackageDisclosure} itself, unwrapped and
  * pretty-printed. It is the machine contract this command exists to provide:
- * the hub at arcturn.dev renders its listing pages from this shape, and a
- * future `arcturn search` reads the same one back, so the page a person reads
- * and the command they run cannot drift apart.
+ * the hub at arcturn.dev renders its listing pages from this shape, so the
+ * page a person reads and the command they run cannot drift apart.
+ *
+ * A bare hub name resolves the way it does for `add` (see
+ * {@link resolveBareName}); with `--json` the "resolving …" line goes to
+ * stderr so stdout stays one parseable document.
  *
  * @param options - See {@link RunInspectCommandOptions}.
  */
@@ -3246,11 +3443,17 @@ export async function runInspectCommand(options: RunInspectCommandOptions): Prom
     );
     return 2;
   }
+  let source = parsed.source;
+  if (isBareName(source)) {
+    const resolved = await resolveBareName(source, options, parsed.json ? stderr : stdout, stderr);
+    if (resolved === undefined) return 1;
+    source = resolved;
+  }
   const paths = registryPathsFromHome(options.home ?? defaultHome());
   let disclosure: PackageDisclosure;
   try {
     disclosure = await inspectPackage({
-      source: parsed.source,
+      source,
       ...(parsed.name === undefined ? {} : { name: parsed.name }),
       paths,
       ...(options.cwd === undefined ? {} : { cwd: options.cwd }),

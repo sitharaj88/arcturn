@@ -3,8 +3,12 @@
 This directory **is** the registry. One JSON file per listed asset, no
 database, no backend, no upload endpoint. The hub at
 [arcturn.dev/hub](https://arcturn.dev/hub) is a build-time render of exactly
-these files, and a future `arcturn search` reads the same data — the file is
-the API (RFC 0002, *Discovery: the hub at arcturn.dev*).
+these files, and the same build exports them as one JSON document,
+[`https://arcturn.dev/hub/index.json`](https://arcturn.dev/hub/index.json),
+which is what `arcturn search` reads and what `arcturn add <name>` resolves a
+bare name through — the file is the API (RFC 0002, *Discovery: the hub at
+arcturn.dev*). Listing a package is therefore a pull request here and a site
+deploy; no CLI release is involved.
 
 Listing is a pull request. That is the moderation model, and this README is
 where it is stated plainly rather than implied.
@@ -31,6 +35,7 @@ page and the install are not allowed to describe two different packages.
   "name": "enterprise-org",              // required — must equal the filename stem
   "kinds": ["org-kit", "agents"],        // required — one or more, see below
   "source": "owner/repo/subdir",         // required — a source the CLI accepts
+  "ref": "v1.2.0",                       // optional — a tag, branch or commit to pin
   "description": "One sentence.",        // required — one sentence, no marketing
   "maintainer": { "name": "…", "url": "https://…" },   // required
   "disclosure": {                        // required
@@ -66,6 +71,28 @@ Exactly what a person will type after `arcturn add`, so the command on the hub
 page is copy-pasteable rather than a reconstruction. The resolver accepts a git
 URL, a GitHub `owner/repo[/subdir][@ref]` shorthand, or a local path; hub
 entries use the shorthand, because a listing has to be fetchable by anyone.
+The CLI holds the hub to that: an index entry whose `source` is anything but
+the shorthand — a local path, a git URL — is refused as malformed, whole, so a
+bare name can never resolve to somewhere a listing is not allowed to point.
+
+### `ref`
+
+Optional. A tag, branch or commit — no whitespace, no `/`, no `@`, no leading
+`-` — that the listing pins. When present, the CLI installs `source@ref`: the
+command on the hub page carries it, and so does `arcturn add <name>`, so a
+listing that vouched for one commit cannot quietly install another. Omit it to
+install the source's default branch, exactly as typing the source would. A
+`source` may spell the pin itself (`owner/repo/subdir@v1`); it may not do both.
+
+### The index
+
+`https://arcturn.dev/hub/index.json` is `{ "v": 1, "generatedAt": "<ISO>",
+"entries": [ …every entry above, validated… ] }`, written by the site build
+from this directory. The CLI reads it over https, treats every field as data —
+`source` goes through the same resolver, the same executable-code confirmation
+and the same `--yes` semantics as a typed source — and rejects the whole file
+on any deviation from that shape. `ARCTURN_HUB_URL` points a CLI at another
+copy (plain http only on localhost, for a local `next build`).
 
 ### `disclosure`
 
@@ -98,6 +125,8 @@ page a person reads before granting code execution.
    real files and fails on drift.
 4. Open a pull request. Expect questions about anything in `disclosure` that
    the tree does not support, and about `executable: true` in particular.
+5. Once the site deploys, `arcturn search <word>` finds the entry and
+   `arcturn add <name>` installs it. Nothing about the CLI changes.
 
 ## The curation stance, and its honest gap
 

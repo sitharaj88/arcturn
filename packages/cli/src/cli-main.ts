@@ -751,9 +751,11 @@ async function dispatchRegistryVerb(
   const registry = await import("./registry.js");
   switch (command.verb) {
     case "add":
-      return registry.runAddCommand({ argv: command.argv, cwd, home });
+      return registry.runAddCommand({ argv: command.argv, cwd, home, version: version() });
     case "inspect":
-      return registry.runInspectCommand({ argv: command.argv, cwd, home });
+      return registry.runInspectCommand({ argv: command.argv, cwd, home, version: version() });
+    case "search":
+      return registry.runSearchCommand({ argv: command.argv, version: version() });
     case "packages":
       return registry.runPackagesCommand({ argv: command.argv, home });
     case "update":

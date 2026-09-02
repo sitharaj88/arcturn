@@ -3,8 +3,9 @@
  *
  * The registry of record is a directory of JSON files at the repository root,
  * not a database and not a fetch: `/hub` is a static render of what is in git
- * at export time, and a future `arcturn search` reads the same files. This
- * module is the one place that knows their shape.
+ * at export time, and `arcturn search` reads the same files through the JSON
+ * index {@link hubIndex} builds, served at `/hub/index.json`. This module is
+ * the one place that knows their shape.
  *
  * **Everything here validates.** A malformed entry throws during
  * `next build` rather than rendering a half-empty card, because the thing an
@@ -170,9 +171,42 @@ export interface HubEntry {
   kinds: HubKind[];
   /** What a reader types after `arcturn add` — a source the CLI resolves. */
   source: string;
+  /**
+   * A tag, branch or commit the listing pins, when it pins one. Optional: an
+   * unpinned entry installs the source's default branch, exactly as typing
+   * the source would. When present, the CLI installs `source@ref` — a bare
+   * `arcturn add <name>` and the command on the hub page both carry it, so a
+   * listing that vouched for one commit cannot quietly install another.
+   */
+  ref?: string;
   description: string;
   maintainer: HubMaintainer;
   disclosure: HubDisclosure;
+}
+
+/**
+ * The version of {@link HubIndex} that `hubIndex()` emits. Bumped only for a
+ * change an older CLI could misread; adding an optional field is not one.
+ */
+export const HUB_INDEX_VERSION = 1;
+
+/**
+ * The registry as one JSON document — `/hub/index.json`, the file the CLI's
+ * `arcturn search` reads and `arcturn add <name>` resolves a bare name
+ * through (RFC 0002: "the file is the API").
+ *
+ * The CLI treats this as data, never as instructions: `source` is re-run
+ * through its own resolver exactly as if a person had typed it, and nothing
+ * else in an entry is executed or followed. Listing a package is therefore a
+ * pull request to `registry/` and a site deploy, with no CLI release.
+ */
+export interface HubIndex {
+  /** Schema version; see {@link HUB_INDEX_VERSION}. */
+  v: typeof HUB_INDEX_VERSION;
+  /** ISO-8601 timestamp of the export that produced this file. */
+  generatedAt: string;
+  /** Every entry, validated, in name order. */
+  entries: HubEntry[];
 }
 
 /* ------------------------------------------------------------------ *
@@ -224,6 +258,22 @@ const GITHUB_SHORTHAND = /^[a-zA-Z0-9][a-zA-Z0-9-]{0,38}\/[a-zA-Z0-9._-]+(?:\/[a
 
 /** `@ref` suffix, split off before the shorthand is matched. */
 const REF_SUFFIX = /@([^@/]+)$/;
+
+/**
+ * What an entry may be called: the same charset `arcturn add <name>` accepts
+ * as a bare hub name (`HUB_NAME` in `packages/cli/src/hub-index.ts`). A name
+ * outside it would ship in the index and make the whole file unreadable to
+ * every CLI, so it fails the build here instead.
+ */
+const ENTRY_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
+/**
+ * What a `ref` may look like: no whitespace, no `/`, no `@`, no leading `-`.
+ * The CLI appends it as `source@ref` and hands the pair to git as a
+ * `--branch=<ref>` argument, so a `/` would read as a path, an `@` as a
+ * second pin, and a leading `-` as an option.
+ */
+const ENTRY_REF = /^[^\s/@-][^\s/@]*$/;
 
 function fail(file: string, message: string): never {
   throw new Error(`registry/${file}: ${message}`);
@@ -312,6 +362,9 @@ export function parseEntry(json: unknown, slug: string): HubEntry {
 
   const name = requireString(raw.name, file, "name");
   if (name !== slug) fail(file, `name "${name}" must match the filename stem "${slug}"`);
+  if (!ENTRY_NAME.test(name)) {
+    fail(file, `name "${name}" must be lowercase letters, digits and hyphens (at most 64)`);
+  }
 
   const kinds = requireArray(raw.kinds, file, "kinds").map((kind, i) => {
     const value = requireString(kind, file, `kinds[${i}]`);
@@ -325,6 +378,20 @@ export function parseEntry(json: unknown, slug: string): HubEntry {
   const source = requireString(raw.source, file, "source");
   if (!GITHUB_SHORTHAND.test(source.replace(REF_SUFFIX, ""))) {
     fail(file, `source "${source}" is not an owner/repo[/subdir][@ref] shorthand the CLI accepts`);
+  }
+
+  const ref = raw.ref;
+  if (ref !== undefined) {
+    if (typeof ref !== "string" || !ENTRY_REF.test(ref)) {
+      fail(
+        file,
+        `ref ${JSON.stringify(ref)} must be a tag, branch or commit: no spaces, "/" or "@"`,
+      );
+    }
+    if (REF_SUFFIX.test(source)) {
+      // Two pins would be two claims about which commit a reader gets.
+      fail(file, `source "${source}" already carries an @ref; drop one of the two pins`);
+    }
   }
 
   const maintainerRaw = raw.maintainer;
@@ -346,6 +413,7 @@ export function parseEntry(json: unknown, slug: string): HubEntry {
     name,
     kinds,
     source,
+    ...(ref === undefined ? {} : { ref }),
     description: requireString(raw.description, file, "description"),
     maintainer: {
       name: requireString(maintainer.name, file, "maintainer.name"),
@@ -399,16 +467,38 @@ export function entryByName(name: string): HubEntry | undefined {
   return allEntries().find((entry) => entry.name === name);
 }
 
+/**
+ * The whole registry as the document `/hub/index.json` serves.
+ *
+ * Built from {@link allEntries}, so it validates the same way the pages do
+ * and cannot list an entry the site would refuse to render. The clock is a
+ * parameter so a test can pin it; the route handler takes the default.
+ */
+export function hubIndex(now: Date = new Date()): HubIndex {
+  return { v: HUB_INDEX_VERSION, generatedAt: now.toISOString(), entries: allEntries() };
+}
+
 /* ------------------------------------------------------------------ *
  * Derived display values
  * ------------------------------------------------------------------ */
 
 /**
- * The command a reader copies. Written from `source` alone so the page cannot
- * advertise an install that differs from the entry it is describing.
+ * The source string an install of this entry actually resolves: `source`,
+ * with the listing's `ref` pinned onto it when there is one. This is what
+ * `arcturn add <name>` hands its resolver, so the page's command and the
+ * bare-name install are one string, not two.
+ */
+export function installSource(entry: HubEntry): string {
+  return entry.ref === undefined ? entry.source : `${entry.source}@${entry.ref}`;
+}
+
+/**
+ * The command a reader copies. Written from the entry's own source and ref
+ * alone so the page cannot advertise an install that differs from the entry
+ * it is describing.
  */
 export function installCommand(entry: HubEntry): string {
-  return `arcturn add ${entry.source}`;
+  return `arcturn add ${installSource(entry)}`;
 }
 
 /**
@@ -419,8 +509,9 @@ export function installCommand(entry: HubEntry): string {
  * else's repository. GitHub resolves `/tree/HEAD/…` to whatever it really is.
  */
 export function sourceUrl(entry: HubEntry): string {
-  const ref = REF_SUFFIX.exec(entry.source)?.[1];
-  const [owner, repo, ...rest] = entry.source.replace(REF_SUFFIX, "").split("/");
+  const source = installSource(entry);
+  const ref = REF_SUFFIX.exec(source)?.[1];
+  const [owner, repo, ...rest] = source.replace(REF_SUFFIX, "").split("/");
   const base = `https://github.com/${owner}/${repo}`;
   if (rest.length === 0) return ref ? `${base}/tree/${ref}` : base;
   return `${base}/tree/${ref ?? "HEAD"}/${rest.join("/")}`;
