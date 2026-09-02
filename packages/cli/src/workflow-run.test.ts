@@ -1,7 +1,7 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Usage } from "@arcturn/types";
+import type { AssistantMessage, Usage } from "@arcturn/types";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   budgetAskFacts,
@@ -10,16 +10,23 @@ import {
   classifyFailureKind,
   createFileRunJournal,
   decideInterruptedStep,
+  describeLastTurn,
   failureKindFromAIError,
   hashPatch,
   hashPrompt,
   type InterruptedStep,
   isGitLockError,
   type JournalLine,
+  type LastTurnShape,
+  lastTurnDeliveredNothing,
+  lastTurnFacts,
+  REASONING_TAIL_CHARS,
   RUN_JOURNAL_FILE,
   RUN_JOURNAL_SCHEMA_VERSION,
   readJournalLines,
   readManifest,
+  stepFailAskFacts,
+  turnShapeOf,
   writeManifest,
 } from "./workflow-run.js";
 
@@ -880,5 +887,183 @@ describe("budgetAskQuestion", () => {
     expect(q).toContain("48,000,000 of its 60,000,000-token run budget");
     expect(q).toContain("(80%)");
     expect(q).toContain("3 of 4 stage(s) still to go");
+  });
+});
+
+describe("the last turn's shape", () => {
+  const turn = (
+    content: AssistantMessage["content"],
+    stopReason: AssistantMessage["stopReason"] = "endTurn",
+  ): AssistantMessage => ({
+    role: "assistant",
+    content,
+    model: "zai/glm-5.3-flash",
+    usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    stopReason,
+    timestamp: 0,
+  });
+
+  it("reduces a silent, reasoning-only turn to its sizes and keeps the reasoning tail", () => {
+    const reasoning = `${"x".repeat(69_000)} Numbers coherent. Compose.`;
+    const shape = turnShapeOf(turn([{ type: "thinking", thinking: reasoning }]));
+    expect(shape).toMatchObject({
+      model: "zai/glm-5.3-flash",
+      stopReason: "endTurn",
+      blocks: [{ type: "thinking", chars: reasoning.length }],
+    });
+    expect(shape.reasoningTail).toMatch(/^…/);
+    expect(shape.reasoningTail?.endsWith("Numbers coherent. Compose.")).toBe(true);
+    expect(shape.reasoningTail?.length).toBe(REASONING_TAIL_CHARS + 1);
+  });
+
+  it("keeps no reasoning when the turn delivered something", () => {
+    // Reasoning is journalled only for the turn that needs explaining. A turn
+    // that wrote text or called a tool explains itself.
+    const shape = turnShapeOf(
+      turn(
+        [
+          { type: "thinking", thinking: "plan" },
+          { type: "toolCall", id: "c1", name: "write", arguments: { path: "a.md" } },
+        ],
+        "toolCalls",
+      ),
+    );
+    expect(shape.reasoningTail).toBeUndefined();
+    expect(shape.blocks).toEqual([
+      { type: "thinking", chars: 4 },
+      { type: "toolCall", chars: JSON.stringify({ path: "a.md" }).length, name: "write" },
+    ]);
+  });
+
+  it("treats whitespace-only text as nothing delivered", () => {
+    const shape = turnShapeOf(
+      turn([
+        { type: "thinking", thinking: "Now write." },
+        { type: "text", text: "  \n" },
+      ]),
+    );
+    expect(shape.reasoningTail).toBe("Now write.");
+  });
+
+  it("renders one line of facts, and the tail on a second line only when there is one", () => {
+    expect(
+      describeLastTurn({
+        model: "zai/glm-5.3-flash",
+        stopReason: "endTurn",
+        blocks: [{ type: "thinking", chars: 69_786 }],
+        reasoningTail: "…Numbers coherent. Compose.",
+      }),
+    ).toBe(
+      "last turn: zai/glm-5.3-flash · stopped endTurn · thinking 69,786 chars · no text · " +
+        'no tool call\nreasoning ended: "…Numbers coherent. Compose."',
+    );
+    expect(
+      describeLastTurn({
+        model: "openai/gpt-5-nano",
+        stopReason: "maxTokens",
+        blocks: [
+          { type: "text", chars: 12 },
+          { type: "toolCall", chars: 30, name: "write" },
+          { type: "toolCall", chars: 8, name: "read" },
+        ],
+      }),
+    ).toBe(
+      "last turn: openai/gpt-5-nano · stopped maxTokens · no thinking · text 12 chars · " +
+        "tool calls: write, read",
+    );
+  });
+
+  it("validates a shape off disk and drops one that is not a shape", () => {
+    const good = {
+      model: "m",
+      stopReason: "endTurn",
+      blocks: [{ type: "thinking", chars: 3.7, name: "" }],
+      reasoningTail: "  tail  ",
+    };
+    expect(lastTurnFacts(good)).toEqual({
+      model: "m",
+      stopReason: "endTurn",
+      blocks: [{ type: "thinking", chars: 3 }],
+      reasoningTail: "tail",
+    });
+    for (const bad of [
+      undefined,
+      null,
+      "shape",
+      { model: "", stopReason: "endTurn", blocks: [] },
+      { model: "m", stopReason: "", blocks: [] },
+      { model: "m", stopReason: "endTurn", blocks: "none" },
+      { model: "m", stopReason: "endTurn", blocks: [{ type: "image", chars: 1 }] },
+      { model: "m", stopReason: "endTurn", blocks: [{ type: "text", chars: -1 }] },
+      { model: "m", stopReason: "endTurn", blocks: [{ type: "text", chars: Number.NaN }] },
+    ]) {
+      expect(lastTurnFacts(bad), JSON.stringify(bad)).toBeUndefined();
+    }
+  });
+
+  it("scrubs credential shapes out of the reasoning tail, on write and on read", () => {
+    const shape = turnShapeOf(
+      turn([
+        {
+          type: "thinking",
+          thinking:
+            "read .env: OPENAI_API_KEY=sk-abcdefghijklmnop1234 and AKIAABCDEFGHIJKLMNOP; " +
+            "header Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig; git https://user:hunter2@host/repo. " +
+            "Now write.",
+        },
+      ]),
+    );
+    expect(shape.reasoningTail).not.toContain("sk-abcdef");
+    expect(shape.reasoningTail).not.toContain("AKIAABCD");
+    expect(shape.reasoningTail).not.toContain("eyJhbGci");
+    expect(shape.reasoningTail).not.toContain("hunter2");
+    expect(shape.reasoningTail).toContain("[redacted]");
+    expect(shape.reasoningTail?.endsWith("Now write.")).toBe(true);
+    // A line off disk is held to the same cap and the same scrub.
+    const long = `${"y".repeat(5000)} ghp_abcdefghijklmnopqrstuvwxyz done`;
+    const facts = lastTurnFacts({
+      model: "m",
+      stopReason: "endTurn",
+      blocks: [],
+      reasoningTail: long,
+    });
+    expect(facts?.reasoningTail?.length).toBe(REASONING_TAIL_CHARS + 1);
+    expect(facts?.reasoningTail).not.toContain("ghp_abc");
+  });
+
+  it("knows a turn that delivered nothing from its shape alone", () => {
+    const shape = (blocks: LastTurnShape["blocks"]): LastTurnShape => ({
+      model: "m",
+      stopReason: "endTurn",
+      blocks,
+    });
+    expect(lastTurnDeliveredNothing(shape([{ type: "thinking", chars: 9 }]))).toBe(true);
+    expect(lastTurnDeliveredNothing(shape([{ type: "text", chars: 0 }]))).toBe(true);
+    expect(lastTurnDeliveredNothing(shape([{ type: "text", chars: 1 }]))).toBe(false);
+    expect(lastTurnDeliveredNothing(shape([{ type: "toolCall", chars: 2, name: "write" }]))).toBe(
+      false,
+    );
+  });
+
+  it("rides a step-failure ask through the journal, and never a malformed one", () => {
+    const base = {
+      kind: "stepFailAsk" as const,
+      stepId: "3",
+      role: "rag-architect",
+      cause: "step 3 produced nothing",
+      attempts: 1,
+      ts: 1,
+    };
+    const shape = {
+      model: "zai/glm-5.3-flash",
+      stopReason: "endTurn",
+      blocks: [{ type: "thinking" as const, chars: 10 }],
+      reasoningTail: "Now write.",
+    };
+    expect(stepFailAskFacts({ ...base, lastTurn: shape })?.lastTurn).toEqual(shape);
+    expect(stepFailAskFacts(base)?.lastTurn).toBeUndefined();
+    expect(
+      stepFailAskFacts({ ...base, lastTurn: { model: 1 } as unknown as typeof shape })?.lastTurn,
+    ).toBeUndefined();
   });
 });

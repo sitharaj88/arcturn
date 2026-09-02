@@ -1,6 +1,7 @@
 import type { AgentEvent } from "@arcturn/types";
 import { describe, expect, it } from "vitest";
-import { runPrint } from "./print.js";
+import { CommandRegistry, type SlashCommand } from "./commands.js";
+import { PRINT_EXIT, runPrint } from "./print.js";
 import { buildTestRuntime, makeScratch } from "./test-helpers/scratch.js";
 
 function capture() {
@@ -144,5 +145,195 @@ describe("runPrint", () => {
     expect(result.exitCode).toBe(1);
     expect(result.reason).toBe("error");
     await runtime.dispose();
+  });
+});
+
+describe("runPrint with a slash command", () => {
+  /** A registry holding exactly the scripted commands, nothing built in. */
+  function registryOf(...commands: SlashCommand[]): CommandRegistry {
+    const registry = new CommandRegistry();
+    registry.registerAll(commands);
+    return registry;
+  }
+
+  it("dispatches a leading-slash prompt as a command, not as a question for the model", async () => {
+    const scratch = await makeScratch();
+    // The model must never be asked: a scripted turn that would answer.
+    const runtime = await buildTestRuntime(scratch, [{ text: "MODEL SPOKE" }]);
+    const seen: string[] = [];
+    const io = capture();
+    const result = await runPrint({
+      runtime,
+      prompt: "/echo hello there",
+      stdout: io.stdout,
+      stderr: io.stderr,
+      commands: registryOf({
+        name: "echo",
+        description: "test",
+        run({ ui, args }) {
+          seen.push(args);
+          ui.print(["line one", `args: ${args}`]);
+          ui.notice("info", "all good");
+        },
+      }),
+    });
+    expect(seen).toEqual(["hello there"]);
+    expect(io.stdoutText()).toBe("line one\nargs: hello there\nall good\n");
+    expect(io.stderrText()).toBe("");
+    expect(io.stdoutText()).not.toContain("MODEL SPOKE");
+    expect(result).toMatchObject({ exitCode: PRINT_EXIT.ok, reason: "completed" });
+  });
+
+  it("exits 2 for a command that does not exist", async () => {
+    const scratch = await makeScratch();
+    const runtime = await buildTestRuntime(scratch);
+    const io = capture();
+    const result = await runPrint({
+      runtime,
+      prompt: "/nope",
+      stdout: io.stdout,
+      stderr: io.stderr,
+      commands: registryOf(),
+    });
+    expect(result.exitCode).toBe(PRINT_EXIT.unknownCommand);
+    expect(io.stderrText()).toContain('Unknown command "/nope"');
+  });
+
+  it("exits 1 when the command reports an error, with the error on stderr", async () => {
+    const scratch = await makeScratch();
+    const runtime = await buildTestRuntime(scratch);
+    const io = capture();
+    const result = await runPrint({
+      runtime,
+      prompt: "/boom",
+      stdout: io.stdout,
+      stderr: io.stderr,
+      commands: registryOf({
+        name: "boom",
+        description: "test",
+        run({ ui }) {
+          ui.notice("error", "it broke");
+        },
+      }),
+    });
+    expect(result.exitCode).toBe(PRINT_EXIT.error);
+    expect(io.stderrText()).toBe("arcturn: it broke\n");
+  });
+
+  it("exits 3 when a workflow stops for a human, and prints the command to run next", async () => {
+    // What `/workflow` says when a step parks or a role asks: a warn notice
+    // opening with the words `pauseSummary` mints, plus a pre-filled resume
+    // command. Neither is an error, and neither is "done" — CI needs its own
+    // code for "a person has to decide".
+    const scratch = await makeScratch();
+    const runtime = await buildTestRuntime(scratch);
+    const io = capture();
+    const result = await runPrint({
+      runtime,
+      prompt: "/workflowish",
+      stdout: io.stdout,
+      stderr: io.stderr,
+      commands: registryOf({
+        name: "workflowish",
+        description: "test",
+        run({ ui }) {
+          ui.notice("warn", "Workflow parked at a failed step (3): step 3 (@architect) failed");
+          ui.notice("info", "last turn: zai/glm-5.3 · stopped endTurn · no text · no tool call");
+          ui.setInput("/workflow resume run-1 ");
+        },
+      }),
+    });
+    expect(result.exitCode).toBe(PRINT_EXIT.needsHuman);
+    expect(result.reason).toBe("completed");
+    expect(io.stderrText()).toContain("arcturn: Workflow parked at a failed step (3)");
+    expect(io.stderrText()).toContain('arcturn: next: arcturn -p "/workflow resume run-1"');
+    expect(io.stdoutText()).toContain("last turn: zai/glm-5.3");
+  });
+
+  it("refuses a picker with a notice instead of hanging, so the command takes its cancel branch", async () => {
+    const scratch = await makeScratch();
+    const runtime = await buildTestRuntime(scratch);
+    const io = capture();
+    let picked: unknown = "unset";
+    const result = await runPrint({
+      runtime,
+      prompt: "/pick",
+      stdout: io.stdout,
+      stderr: io.stderr,
+      commands: registryOf({
+        name: "pick",
+        description: "test",
+        async run({ ui }) {
+          picked = await ui.select("Choose a session", [{ label: "a", value: 1 }]);
+        },
+      }),
+    });
+    expect(picked).toBeUndefined();
+    expect(io.stderrText()).toContain("Choose a session: a picker cannot be shown under --print.");
+    expect(result.exitCode).toBe(PRINT_EXIT.ok);
+  });
+
+  it("emits every surface as NDJSON under --output-format json", async () => {
+    const scratch = await makeScratch();
+    const runtime = await buildTestRuntime(scratch);
+    const io = capture();
+    await runPrint({
+      runtime,
+      prompt: "/j",
+      outputFormat: "json",
+      stdout: io.stdout,
+      stderr: io.stderr,
+      commands: registryOf({
+        name: "j",
+        description: "test",
+        run({ ui }) {
+          ui.print("hello");
+          ui.notice("warn", "careful");
+          ui.workflowLive?.({ type: "stageStart", stage: 1, parallel: false, steps: 1 } as never);
+        },
+      }),
+    });
+    const records = io
+      .stdoutText()
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(records.map((record) => record.type)).toEqual(["print", "notice", "workflow"]);
+    expect(io.stderrText()).toBe("");
+  });
+
+  it("sends a prompt that merely starts with a path to the model, as before", async () => {
+    // `parseCommandLine` accepts "/etc/hosts …" as a malformed command name;
+    // the interactive app tolerates that because a person there has a
+    // completion menu open. Under --print nobody does, and exiting 2 on a
+    // question about a file would be a regression from asking the model.
+    const scratch = await makeScratch();
+    const runtime = await buildTestRuntime(scratch, [{ text: "the model answered" }]);
+    const io = capture();
+    const result = await runPrint({
+      runtime,
+      prompt: "/etc/hosts is wrong, fix it",
+      stdout: io.stdout,
+      stderr: io.stderr,
+      commands: registryOf(),
+    });
+    expect(result.exitCode).toBe(0);
+    expect(io.stdoutText()).toBe("the model answered\n");
+    expect(io.stderrText()).toBe("");
+  });
+
+  it("still sends an ordinary prompt to the model", async () => {
+    const scratch = await makeScratch();
+    const runtime = await buildTestRuntime(scratch, [{ text: "from the model" }]);
+    const io = capture();
+    const result = await runPrint({
+      runtime,
+      prompt: "not a command, just / a slash inside",
+      stdout: io.stdout,
+      stderr: io.stderr,
+      commands: registryOf(),
+    });
+    expect(result.exitCode).toBe(0);
+    expect(io.stdoutText()).toBe("from the model\n");
   });
 });

@@ -20,8 +20,15 @@ import type {
   UserContent,
 } from "@arcturn/types";
 import type { OutputFormat } from "./args.js";
+import {
+  type CommandRegistry,
+  type CommandUi,
+  createCommandRegistry,
+  parseCommandLine,
+} from "./commands.js";
 import { expandMentions } from "./mentions.js";
 import type { ArcturnRuntime } from "./runtime.js";
+import { isWorkflowHumanStop } from "./workflow.js";
 
 /** Options for {@link runPrint}. */
 export interface RunPrintOptions {
@@ -35,11 +42,23 @@ export interface RunPrintOptions {
   stdout?: (chunk: string) => void;
   /** stderr sink. Defaults to `process.stderr.write`. */
   stderr?: (chunk: string) => void;
+  /**
+   * The slash-command registry a leading-`/` prompt dispatches through.
+   * Defaults to the same registry the interactive app builds, extensions
+   * included; injectable so a test can script a command.
+   */
+  commands?: CommandRegistry;
 }
 
 /** Result of a `--print` run. */
 export interface PrintResult {
-  /** Process exit code: `0` on success, `1` on error or abort. */
+  /**
+   * Process exit code. For a prompt: `0` on success, `1` on error or abort.
+   * For a slash command: `0` when it ran clean, `1` when it reported an
+   * error, `2` when no such command exists, and `3` when a workflow stopped
+   * for a human — a budget checkpoint, an `ORG-ASK`, or a parked step — so a
+   * CI job can tell "finished" from "waiting for you" by the code alone.
+   */
   exitCode: number;
   /** The final assistant text, also written to stdout in text mode. */
   text: string;
@@ -48,6 +67,14 @@ export interface PrintResult {
   /** Populated when `reason` is `"error"`. */
   errorMessage?: string;
 }
+
+/** The exit code a slash command run under `--print` ends with. */
+export const PRINT_EXIT = {
+  ok: 0,
+  error: 1,
+  unknownCommand: 2,
+  needsHuman: 3,
+} as const;
 
 /**
  * Run one prompt to completion without a UI.
@@ -82,6 +109,18 @@ export async function runPrint(options: RunPrintOptions): Promise<PrintResult> {
       };
     },
   );
+
+  // A leading slash is a command, exactly as it is in the interactive app —
+  // `arcturn -p "/workflow rag-setup …"` runs the pipeline, it does not ask
+  // the model to. Dispatched after the permission requester above is in
+  // place, so a workflow's sub-agents meet the same non-interactive denial a
+  // plain prompt's tools do. Content-block prompts (attached images) are
+  // never commands.
+  // Well-formed only: "/etc/hosts is wrong, fix it" is a prompt about a path,
+  // not a command, and must still reach the model exactly as it did before.
+  if (typeof prompt === "string" && parseCommandLine(prompt.trim())?.wellFormed === true) {
+    return runPrintCommand(prompt.trim(), options, format, out, err);
+  }
 
   // Held in an object rather than `let` bindings: assignments happen inside a
   // callback, which control-flow analysis cannot see.
@@ -130,5 +169,74 @@ export async function runPrint(options: RunPrintOptions): Promise<PrintResult> {
     text,
     reason: outcome.reason,
     ...(outcome.errorMessage === undefined ? {} : { errorMessage: outcome.errorMessage }),
+  };
+}
+
+/**
+ * Run one slash command with no terminal behind it.
+ *
+ * The interactive app hands a command a transcript, a modal picker and an
+ * editor to pre-fill. None of those exist here, so each degrades to the
+ * honest equivalent: the transcript is stdout, a picker is refused with a
+ * notice naming what to pass instead, and a pre-filled follow-up is printed
+ * as the command to run next. Nothing is invented on the command's behalf.
+ */
+async function runPrintCommand(
+  input: string,
+  options: RunPrintOptions,
+  format: OutputFormat,
+  out: (chunk: string) => void,
+  err: (chunk: string) => void,
+): Promise<PrintResult> {
+  const { runtime } = options;
+  const registry =
+    options.commands ??
+    createCommandRegistry(runtime.extensions.commands, (message) => err(`arcturn: ${message}\n`));
+  const seen = { error: false, needsHuman: false };
+  const emit = (record: Record<string, unknown>): void => out(`${JSON.stringify(record)}\n`);
+  const ui: CommandUi = {
+    print(content) {
+      const lines = typeof content === "string" ? [content] : [...content];
+      if (format === "json") emit({ type: "print", lines });
+      else out(`${lines.join("\n")}\n`);
+    },
+    notice(level, text) {
+      if (level === "error") seen.error = true;
+      if (isWorkflowHumanStop(text)) seen.needsHuman = true;
+      if (format === "json") emit({ type: "notice", level, text });
+      else if (level === "info") out(`${text}\n`);
+      else err(`arcturn: ${text}\n`);
+    },
+    async select(title) {
+      // A picker needs a person. Say so, name the surface, and let the
+      // command take the "cancelled" branch it already has for Esc.
+      ui.notice("warn", `${title}: a picker cannot be shown under --print.`);
+      return undefined;
+    },
+    setInput(text) {
+      const next = text.trim();
+      if (next !== "") err(`arcturn: next: arcturn -p ${JSON.stringify(next)}\n`);
+    },
+    clear() {},
+    exit() {},
+    ...(format === "json" ? { workflowLive: (event) => emit({ type: "workflow", event }) } : {}),
+  };
+  const result = await registry.dispatch(input, { runtime, ui });
+  const exitCode =
+    "unknown" in result && result.unknown === true
+      ? PRINT_EXIT.unknownCommand
+      : seen.error
+        ? PRINT_EXIT.error
+        : seen.needsHuman
+          ? PRINT_EXIT.needsHuman
+          : PRINT_EXIT.ok;
+  return {
+    exitCode,
+    text: "",
+    reason:
+      exitCode === PRINT_EXIT.ok || exitCode === PRINT_EXIT.needsHuman ? "completed" : "error",
+    ...(exitCode === PRINT_EXIT.unknownCommand
+      ? { errorMessage: `unknown command ${input.split(/\s+/)[0]}` }
+      : {}),
   };
 }

@@ -234,6 +234,30 @@ describe("a turn that delivered nothing", () => {
     expect(agent.finalText()).toBe("the real answer");
   });
 
+  it("does not spend the last permitted turn on a nudge", async () => {
+    // A silence on the final turn used to become a turn-ceiling error after
+    // the nudge — "raise maxTurns" for a model that emits nothing. The run
+    // ends as what it is: a completed run that delivered nothing, which the
+    // workflow's void gate then names correctly.
+    const agent = new Agent({
+      llm: createScriptedLLM([silentTurn("thinking"), textTurn("never reached")]),
+      model: TEST_MODEL,
+      systemPrompt: "You are Arcturn.",
+      tools: [],
+      cwd: "/work",
+      permissions: { mode: "yolo" },
+      maxTurns: 1,
+    });
+    const notices: string[] = [];
+    agent.subscribe((event) => {
+      if (event.type === "notice") notices.push(event.text);
+    });
+    await agent.prompt("write the ADR");
+    expect(nudges(agent)).toBe(0);
+    expect(agent.finalText()).toBe("");
+    expect(notices.join(" ")).not.toContain("maximum of");
+  });
+
   it("leaves a turn that said something alone", async () => {
     const agent = agentWith([textTurn("done")]);
     await agent.prompt("write the ADR");

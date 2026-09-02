@@ -29,6 +29,7 @@ import {
   budgetAskFacts,
   budgetAskQuestion,
   budgetAskResumeHint,
+  describeLastTurn,
   type JournalLine,
   type PendingStepFailAsk,
   readJournalLines,
@@ -588,6 +589,14 @@ export function formatRunDetail(
           ? `Awaiting a human answer: ${run.pendingQuestion}`
           : `Parked at a failed step: ${run.pendingQuestion}`,
       );
+      // The diagnosis under the park: what the model emitted on the turn the
+      // step failed on. Rendered by the journal's own renderer, so status, the
+      // terminal notice and the resume restatement show one set of words.
+      if (run.parkedStep?.lastTurn !== undefined) {
+        for (const line of describeLastTurn(run.parkedStep.lastTurn).split("\n")) {
+          lines.push(`  ${line}`);
+        }
+      }
     } else if (run.pendingQuestions.length > 1) {
       lines.push(`Awaiting ${run.pendingQuestions.length} human answers:`);
       for (const q of run.pendingQuestions) lines.push(`  ${q.stepId}: ${q.question}`);

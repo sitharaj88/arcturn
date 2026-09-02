@@ -44,7 +44,7 @@
 import { createHash } from "node:crypto";
 import { appendFile, mkdir, open, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { Usage } from "@arcturn/types";
+import type { AssistantMessage, Usage } from "@arcturn/types";
 import { formatCost, oneLine } from "./format.js";
 import type { WorkflowPatchRecord, WorkflowRunStatus, WorkflowStepStatus } from "./workflow.js";
 
@@ -200,6 +200,19 @@ export interface StepEndLine {
    * nothing.
    */
   readonly finalText?: string;
+  /**
+   * The shape of the agent's last turn, on a FAILED step: what the model
+   * emitted (block kinds and sizes, the stop reason), not what it said.
+   *
+   * `finalText` answers "how far did it get"; this answers "what came back at
+   * the end" — the question a step that produced nothing leaves open. A turn
+   * that was 69,786 characters of reasoning, no text and no tool call, ending
+   * on the words "Now write.", is a different fault from a turn the output
+   * limit cut off, and until this field existed telling them apart meant an
+   * engineer reading session JSONL by hand. Absent on every non-failed
+   * terminal. See {@link LastTurnShape}.
+   */
+  readonly lastTurn?: LastTurnShape;
 }
 
 /**
@@ -370,6 +383,8 @@ export interface StepFailAskLine {
   readonly ceiling?: number;
   /** How many times this step has now been run and failed, across resumes. */
   readonly attempts: number;
+  /** The failed step's last turn, when the lane saw one. See {@link StepEndLine.lastTurn}. */
+  readonly lastTurn?: LastTurnShape;
   readonly ts: number;
 }
 
@@ -678,6 +693,205 @@ export interface PendingStepFailAsk {
   readonly patchPath?: string;
   readonly ceiling?: number;
   readonly attempts: number;
+  /** What the failed step's model emitted on its last turn, when recorded. */
+  readonly lastTurn?: LastTurnShape;
+}
+
+/* ------------------------------------------------------------------ *
+ * The last turn's shape
+ * ------------------------------------------------------------------ */
+
+/** One block of an assistant turn, reduced to its kind and its size. */
+export interface TurnBlockShape {
+  readonly type: "text" | "thinking" | "toolCall";
+  /** Characters of text or reasoning; for a tool call, of its serialized arguments. */
+  readonly chars: number;
+  /** The tool a `toolCall` block named. */
+  readonly name?: string;
+}
+
+/**
+ * What a model emitted on one turn — the diagnosis a parked step owes the
+ * person who has to decide what to do about it.
+ *
+ * Deliberately a *shape*, not a transcript: block kinds, sizes, the stop
+ * reason, and — only when the turn delivered nothing visible — the tail of
+ * its reasoning. That last field is the one that turns "step 3 produced
+ * nothing" into "the model reasoned for 70,000 characters, wrote 'Now write.'
+ * and stopped", and it is captured only in that case so the journal does not
+ * routinely carry reasoning.
+ */
+export interface LastTurnShape {
+  /** The catalog id the turn ran on — the first thing to check when a step goes quiet. */
+  readonly model: string;
+  /** The provider's stop reason, verbatim (`endTurn`, `maxTokens`, …). */
+  readonly stopReason: string;
+  readonly blocks: readonly TurnBlockShape[];
+  /**
+   * The last ~{@link REASONING_TAIL_CHARS} characters of the turn's reasoning,
+   * present only when the turn had reasoning and nothing else.
+   */
+  readonly reasoningTail?: string;
+}
+
+/** How much reasoning a silent turn's shape keeps — enough for its last sentence or two. */
+export const REASONING_TAIL_CHARS = 160;
+
+/**
+ * Token shapes a reasoning tail must never carry into a journal or a CI log.
+ * A step that read a `.env` and then went quiet could, in principle, end its
+ * reasoning on the key it just read; the tail is short, but short is not the
+ * same as safe. Matched shapes are replaced, not the whole tail dropped, so
+ * the sentence around them still explains the silence.
+ */
+const SECRET_SHAPES: readonly RegExp[] = [
+  /\bsk-[A-Za-z0-9_-]{8,}/g,
+  /\bAKIA[0-9A-Z]{12,}/g,
+  /\bgh[pousr]_[A-Za-z0-9]{16,}/g,
+  /\bxox[abposr]-[A-Za-z0-9-]{8,}/g,
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g,
+  /\bBearer\s+[A-Za-z0-9._~+/-]{12,}=*/g,
+  /:\/\/[^\s/:@]+:[^\s@]+@/g,
+];
+
+/** Replace credential-shaped substrings in a reasoning tail. */
+export function scrubReasoningTail(tail: string): string {
+  let out = tail;
+  for (const shape of SECRET_SHAPES) out = out.replace(shape, "[redacted]");
+  return out;
+}
+
+/** Cap a tail to its last {@link REASONING_TAIL_CHARS} characters, marking the cut. */
+function capTail(reasoning: string): string {
+  return reasoning.length <= REASONING_TAIL_CHARS
+    ? reasoning
+    : `…${reasoning.slice(-REASONING_TAIL_CHARS)}`;
+}
+
+/**
+ * Whether a shape shows a turn that delivered nothing: no tool call and no
+ * text characters. The journal-side twin of the loop's own check, for a step
+ * whose *earlier* turns spoke but whose last did not.
+ */
+export function lastTurnDeliveredNothing(shape: LastTurnShape): boolean {
+  return !shape.blocks.some(
+    (block) => block.type === "toolCall" || (block.type === "text" && block.chars > 0),
+  );
+}
+
+/** Whether a turn carried anything a caller could act on: non-blank text or a tool call. */
+function deliveredSomething(message: AssistantMessage): boolean {
+  return message.content.some(
+    (block) => block.type === "toolCall" || (block.type === "text" && block.text.trim().length > 0),
+  );
+}
+
+/**
+ * Reduce an assistant message to its {@link LastTurnShape}.
+ *
+ * @param message - The turn, as the agent loop delivered it.
+ */
+export function turnShapeOf(message: AssistantMessage): LastTurnShape {
+  const blocks: TurnBlockShape[] = message.content.map((block) => {
+    // Trimmed: a whitespace-only text block is size, not substance, and every
+    // reader of this shape asks "did it say anything", not "how many bytes".
+    if (block.type === "text") return { type: "text", chars: block.text.trim().length };
+    if (block.type === "thinking") return { type: "thinking", chars: block.thinking.length };
+    return {
+      type: "toolCall",
+      chars: JSON.stringify(block.arguments ?? {}).length,
+      name: block.name,
+    };
+  });
+  let reasoningTail: string | undefined;
+  if (!deliveredSomething(message)) {
+    const reasoning = message.content
+      .map((block) => (block.type === "thinking" ? block.thinking : ""))
+      .join("")
+      .trim();
+    if (reasoning !== "") reasoningTail = capTail(scrubReasoningTail(reasoning));
+  }
+  return {
+    model: message.model,
+    stopReason: message.stopReason,
+    blocks,
+    ...(reasoningTail === undefined ? {} : { reasoningTail }),
+  };
+}
+
+/**
+ * Validate a {@link LastTurnShape} that came off disk.
+ *
+ * Same tolerance rule as every other fact folded out of the journal: a field
+ * that is not the shape it claims to be is dropped, never coerced, and a
+ * shape with no usable model, stop reason or block list is no shape at all.
+ */
+export function lastTurnFacts(value: unknown): LastTurnShape | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const raw = value as Record<string, unknown>;
+  if (typeof raw.model !== "string" || raw.model === "") return undefined;
+  if (typeof raw.stopReason !== "string" || raw.stopReason === "") return undefined;
+  if (!Array.isArray(raw.blocks)) return undefined;
+  const blocks: TurnBlockShape[] = [];
+  for (const entry of raw.blocks) {
+    if (typeof entry !== "object" || entry === null) return undefined;
+    const block = entry as Record<string, unknown>;
+    if (block.type !== "text" && block.type !== "thinking" && block.type !== "toolCall") {
+      return undefined;
+    }
+    if (typeof block.chars !== "number" || !Number.isFinite(block.chars) || block.chars < 0) {
+      return undefined;
+    }
+    blocks.push({
+      type: block.type,
+      chars: Math.floor(block.chars),
+      ...(typeof block.name === "string" && block.name !== "" ? { name: block.name } : {}),
+    });
+  }
+  // Re-capped and re-scrubbed on the way in: a line written by an older
+  // build, or edited by hand, does not get to be longer or rawer than one
+  // this build would write.
+  const tail =
+    typeof raw.reasoningTail === "string"
+      ? capTail(scrubReasoningTail(raw.reasoningTail.trim()))
+      : "";
+  return {
+    model: raw.model,
+    stopReason: raw.stopReason,
+    blocks,
+    ...(tail === "" ? {} : { reasoningTail: tail }),
+  };
+}
+
+/**
+ * Render a {@link LastTurnShape} for a human — one line of facts, plus the
+ * reasoning tail on a second line when the turn was silent.
+ *
+ * One renderer, like {@link stepFailAskQuestion}: `/workflow status`, the
+ * terminal park notice and the resume restatement all show the same words.
+ *
+ * @example
+ * last turn: zai/glm-5.3-flash · stopped endTurn · thinking 69,786 chars · no text · no tool call
+ * reasoning ended: "…Numbers coherent. Compose."
+ */
+export function describeLastTurn(shape: LastTurnShape): string {
+  const sum = (type: TurnBlockShape["type"]): number =>
+    shape.blocks.filter((block) => block.type === type).reduce((n, block) => n + block.chars, 0);
+  const thinking = sum("thinking");
+  const text = sum("text");
+  const calls = shape.blocks
+    .filter((block) => block.type === "toolCall")
+    .map((block) => block.name ?? "?");
+  const facts = [
+    `last turn: ${shape.model}`,
+    `stopped ${shape.stopReason}`,
+    thinking > 0 ? `thinking ${thinking.toLocaleString("en-US")} chars` : "no thinking",
+    text > 0 ? `text ${text.toLocaleString("en-US")} chars` : "no text",
+    calls.length > 0 ? `tool calls: ${calls.join(", ")}` : "no tool call",
+  ];
+  const head = facts.join(" · ");
+  if (shape.reasoningTail === undefined) return head;
+  return `${head}\nreasoning ended: ${JSON.stringify(shape.reasoningTail)}`;
 }
 
 /**
@@ -734,6 +948,7 @@ export function stepFailAskFacts(line: StepFailAskLine): PendingStepFailAsk | un
     typeof line.ceiling === "number" && Number.isFinite(line.ceiling) && line.ceiling > 0
       ? line.ceiling
       : undefined;
+  const lastTurn = lastTurnFacts(line.lastTurn);
   return {
     stepId: line.stepId,
     ...(typeof line.role === "string" && line.role !== "" ? { role: line.role } : {}),
@@ -746,6 +961,7 @@ export function stepFailAskFacts(line: StepFailAskLine): PendingStepFailAsk | un
       : {}),
     ...(ceiling === undefined ? {} : { ceiling }),
     attempts,
+    ...(lastTurn === undefined ? {} : { lastTurn }),
   };
 }
 

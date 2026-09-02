@@ -654,7 +654,10 @@ export async function runLoop(rt: LoopRuntime): Promise<LoopResult> {
     // reaches here is `endTurn` (the model thinks it is done) or `maxTokens`
     // (reasoning consumed the whole budget). Both leave the caller empty
     // handed, and both are worth exactly one more turn.
-    if (!justNudged && producedNothingVisible(assistant)) {
+    // `turnIndex + 1 < rt.maxTurns`: a nudge spends a turn, and spending the
+    // last one on it would end the run as "turn ceiling" — steering the
+    // operator to raise `maxTurns` against a model that emits nothing.
+    if (!justNudged && turnIndex + 1 < rt.maxTurns && producedNothingVisible(assistant)) {
       justNudged = true;
       await rt.appendMessage(userMessage(SILENT_TURN_NUDGE));
       rt.emit({

@@ -713,3 +713,59 @@ describe("formatRunDetail", () => {
     expect(deriveRunState(run, lastTs(lines) + 100)).toBe("paused");
   });
 });
+
+describe("a parked run's diagnosis", () => {
+  it("prints what the model emitted on the turn the step failed on", () => {
+    const lastTurn = {
+      model: "zai/glm-5.3-flash",
+      stopReason: "endTurn",
+      blocks: [{ type: "thinking" as const, chars: 69_786 }],
+      reasoningTail: "…Numbers coherent. Compose.",
+    };
+    const usage = { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 };
+    const lines: JournalLine[] = [
+      { kind: "stageStart", stage: 3, parallel: false, steps: 1, ts: 1 },
+      {
+        kind: "stepStart",
+        id: "3",
+        stage: 3,
+        branch: 0,
+        agent: "rag-architect",
+        promptHash: "h",
+        ts: 1,
+      },
+      {
+        kind: "stepEnd",
+        id: "3",
+        stage: 3,
+        branch: 0,
+        status: "failed",
+        agent: "rag-architect",
+        usage,
+        text: "",
+        promptHash: "h",
+        attempts: 1,
+        startedAt: 1,
+        endedAt: 2,
+        lastTurn,
+      },
+      {
+        kind: "stepFailAsk",
+        stepId: "3",
+        role: "rag-architect",
+        cause: "step 3 (@rag-architect) produced nothing",
+        attempts: 1,
+        lastTurn,
+        ts: 2,
+      },
+      { kind: "stageEnd", stage: 3, status: "failed", ts: 2 },
+      { kind: "runEnd", status: "paused", ts: 2 },
+    ];
+    const detail = formatRunDetail(foldJournal("run-1", lines), 3).join("\n");
+    expect(detail).toContain("Parked at a failed step:");
+    expect(detail).toContain(
+      "last turn: zai/glm-5.3-flash · stopped endTurn · thinking 69,786 chars · no text · no tool call",
+    );
+    expect(detail).toContain('reasoning ended: "…Numbers coherent. Compose."');
+  });
+});

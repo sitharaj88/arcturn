@@ -157,6 +157,24 @@ stopped in one line, the patch its work was captured to when there is one, and t
 that are valid. `continueOnError: true` is untouched: those runs already continue past a
 failed step and never park.
 
+The park also says **what the model emitted on the turn the step failed on** — the block
+kinds and their sizes, the stop reason, and, when the turn was reasoning alone, the last
+sentence of that reasoning. It is printed under the park in the terminal, in
+`/workflow status <run-id>`, and again when you resume without an answer:
+
+```text
+Parked at a failed step: Step 3 (@rag-architect) failed — step 3 produced nothing …
+  last turn: zai/glm-5.3 · stopped endTurn · thinking 65,215 chars · no text · no tool call
+  reasoning ended: "…Boring-over-clever choices named inline. Write the file now."
+```
+
+That is the difference between "step 3 produced nothing" and knowing that the model
+planned the whole document in its reasoning, said *write the file now*, and then ended its
+turn without calling the tool — a fault with a specific fix (ask the role to write a long
+document in sections, so no single tool call has to carry all of it) rather than a
+mystery to re-run and hope. A run that ends `failed` carries the same shape on its step's
+`stepEnd` journal line.
+
 Three replies, all through the ordinary resume command, and all of them **words**:
 
 ```text
@@ -340,6 +358,15 @@ naming the role and telling you to approve the plan or leave plan mode and re-ru
 /workflow status <run-id>          # one run, step by step, with the reason it stopped
 /workflow resume <run-id>          # re-enter an interrupted run where it left off
 ```
+
+Every one of those runs without a terminal too. `arcturn -p "/workflow ship-fix …"` runs
+the pipeline non-interactively — in CI, from a script, from cron — with the run's notices on
+stderr and, under `--output-format json`, every workflow event as NDJSON on stdout. The exit
+code says how it ended: `0` finished, `1` failed, `3` stopped for a person (a budget
+checkpoint, a role's `ORG-ASK`, or a parked step), and in that last case the exact
+`/workflow resume …` command to run next is printed on stderr. A picker the interactive
+app would show — choosing a run to resume, say — is refused with a notice naming the
+argument to pass instead.
 
 ## From a panel, or any remote client
 

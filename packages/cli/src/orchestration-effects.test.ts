@@ -1274,6 +1274,21 @@ describe("a step that produced nothing is caught where it happened, not seven st
       );
       expect(ask).toMatchObject({ stepId: "2", role: "architect" });
       expect(ask?.cause).toContain("produced nothing");
+      // THE DIAGNOSIS RIDES THE PARK: the park line says what the model
+      // emitted on the turn it went quiet on, so nobody has to open the
+      // session JSONL to learn it. A scripted `{ text: "" }` is a text block
+      // of zero characters that ended the turn — no tool call, `endTurn`.
+      expect(ask?.lastTurn).toMatchObject({ stopReason: "endTurn" });
+      expect(ask?.lastTurn?.blocks.some((block) => block.type === "toolCall")).toBe(false);
+      expect(
+        ask?.lastTurn?.blocks.reduce(
+          (chars, block) => (block.type === "text" ? chars + block.chars : chars),
+          0,
+        ),
+      ).toBe(0);
+      // …and the failed terminal carries the same shape, for the autopsy.
+      const voidEnd = terminals.find((line) => line.id === "2");
+      expect(voidEnd?.lastTurn).toEqual(ask?.lastTurn);
       const state = buildResumeState(lines);
       expect(state.endedStatus).toBe("paused");
       expect([...state.completed.keys()]).toEqual(["1"]);
@@ -1295,6 +1310,69 @@ describe("a step that produced nothing is caught where it happened, not seven st
       // architect's report, not an empty `{{prev}}`.
       const built = llm.requests.at(-1);
       expect(JSON.stringify(built?.messages ?? [])).toContain("ADR written to docs/adr");
+    },
+  );
+
+  itPosix(
+    "parks a step that spoke once and then went silent twice — a preamble is not a result",
+    async () => {
+      const scratch = await gitScratch();
+      // The shape a real architect produced: one turn of "I'll read the
+      // survey, then write the ADR", then reasoning alone, then — after the
+      // nudge — reasoning alone again. Its `text` is that preamble, so the
+      // text-only void gate would have called it done and handed stage 2 a
+      // sentence about intending to write. The last turn is what is judged.
+      const llm = fakeLLM([
+        // Speaks AND acts, so the loop continues past this turn — a text-only
+        // first turn would simply be the answer.
+        {
+          text: "I'll read the survey, then write the ADR.",
+          toolCalls: [{ id: "r1", name: "read", arguments: { path: "seed.txt" } }],
+        },
+        { text: "" },
+        { text: "" },
+        { text: "STAGE TWO MUST NEVER RUN" },
+      ]);
+      const runtime = await runtimeWith(scratch, llm);
+      const architect = role("architect", ["read", "write", "edit"]);
+      const builder = role("builder", ["read", "write", "edit"]);
+      const resolve = (name: string): AgentDef => (name === "architect" ? architect : builder);
+      const workflow = parseOk(
+        [
+          "---",
+          "name: pipeline",
+          "---",
+          "1. @architect write the ADR to docs/adr/rag-architecture.md",
+          "2. @builder build, following the ADR {{prev}}",
+          "",
+        ].join("\n"),
+      );
+      const runId = "run-preamble-void";
+      const journalDir = join(scratch.home, "preamble-journal");
+      const result = await runWorkflow(workflow, {
+        resolveAgent: resolve,
+        agentNames: () => ["architect", "builder"],
+        journal: createFileRunJournal(journalDir),
+        runId,
+        runStep: createRuntimeRunStep(runtime, {
+          resolveAgent: resolve,
+          writeLane: laneFor(runtime, runId),
+        }),
+      });
+
+      expect(result.status).toBe("paused");
+      expect(result.steps.map((step) => step.status)).toEqual(["failed", "skipped"]);
+      // The preamble turn, the silence, the nudged silence — and nothing for stage 2.
+      expect(llm.requests).toHaveLength(3);
+      const lines = await journalOnceEnded(journalDir);
+      const ask = lines.find(
+        (line): line is Extract<JournalLine, { kind: "stepFailAsk" }> =>
+          line.kind === "stepFailAsk",
+      );
+      expect(ask?.cause).toContain("produced nothing");
+      // And the diagnosis names the turn that decided it: the last one.
+      expect(ask?.lastTurn?.blocks.some((block) => block.type === "toolCall")).toBe(false);
+      expect(await exists(join(scratch.cwd, "docs", "adr", "rag-architecture.md"))).toBe(false);
     },
   );
 

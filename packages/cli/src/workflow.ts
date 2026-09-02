@@ -234,6 +234,7 @@ import {
 import type {
   AgentEvent,
   AIError,
+  AssistantMessage,
   ModelSpec,
   PermissionRule,
   PermissionScope,
@@ -256,6 +257,7 @@ import {
   createFileRunJournal,
   DURABLE_JOURNAL_KINDS,
   decideInterruptedStep,
+  describeLastTurn,
   failureKindFromAIError,
   hashPatch,
   hashPrompt,
@@ -263,6 +265,8 @@ import {
   type InterruptedVerdict,
   isGitLockError,
   type JournalLine,
+  type LastTurnShape,
+  lastTurnDeliveredNothing,
   type PatchPresence,
   type PendingBudgetAsk,
   type PendingStepFailAsk,
@@ -275,6 +279,7 @@ import {
   stepFailAskQuestion,
   stepFailAskResumeHint,
   turnRaiseKey,
+  turnShapeOf,
   type WorkflowFailureKind,
   type WorkflowStopReason,
   writeManifest,
@@ -608,6 +613,14 @@ export interface WorkflowStepOutcome {
    * and appends it to the failure message a human reads.
    */
   readonly finalText?: string;
+  /**
+   * The shape of the agent's last turn, whenever the lane drove one. Carried
+   * on every outcome — not only errors — because the void gate in
+   * {@link runWorkflow} reclassifies a `done` outcome that produced nothing
+   * *after* the lane returned, and that is exactly the step whose last turn a
+   * human most needs to see. See {@link LastTurnShape}.
+   */
+  readonly lastTurn?: LastTurnShape;
 }
 
 /** Executes one step. Injected so the engine is testable without an LLM. */
@@ -706,6 +719,12 @@ export interface WorkflowStepResult {
   readonly startedAt?: number;
   /** Unset for a step that never finished. */
   readonly endedAt?: number;
+  /**
+   * What the step's model emitted on its last turn, when a lane drove one.
+   * Journalled only for a failed step (see the `stepEnd` line), but carried
+   * here on every result so the void gate's reclassification keeps it.
+   */
+  readonly lastTurn?: LastTurnShape;
 }
 
 /** The record of one workflow run. */
@@ -777,6 +796,8 @@ export interface WorkflowPause {
    * is keyed under a real step. Absent means an ordinary `ORG-ASK`.
    */
   readonly reason?: "step-failure";
+  /** For a step-failure park: the failed step's last turn, when recorded. */
+  readonly lastTurn?: LastTurnShape;
 }
 
 /**
@@ -2493,6 +2514,24 @@ export function classifyStepHalt(text: string): WorkflowHaltKind | undefined {
  *
  * @param pauses - The stage's pauses, in branch order.
  */
+/**
+ * How a run that stopped for a person announces itself — the two openings
+ * every {@link pauseSummary} sentence starts with. Shared with
+ * {@link isWorkflowHumanStop} so a headless host can recognise the condition
+ * from the notice text without the wording living in two places.
+ */
+const HUMAN_STOP_OPENINGS = { paused: "Workflow paused", parked: "Workflow parked" } as const;
+
+/**
+ * Whether a notice is a workflow stopping for a human — a budget checkpoint,
+ * a role's `ORG-ASK`, or a step-failure park — as opposed to finishing or
+ * failing. `--print` maps it to its own exit code: a CI job must be able to
+ * tell "done" from "waiting for you" without grepping.
+ */
+export function isWorkflowHumanStop(text: string): boolean {
+  return text.startsWith(HUMAN_STOP_OPENINGS.paused) || text.startsWith(HUMAN_STOP_OPENINGS.parked);
+}
+
 function pauseSummary(pauses: readonly WorkflowPause[]): string {
   const first = pauses[0];
   if (first === undefined) return "";
@@ -2502,20 +2541,20 @@ function pauseSummary(pauses: readonly WorkflowPause[]): string {
     // exist. It never coexists with a role's pause (the ask only fires on a
     // stage that paused nothing), so only the single-pause wording needs it.
     if (first.stepId === BUDGET_ASK_STEP_ID) {
-      return `Workflow paused at a budget checkpoint: ${first.question}`;
+      return `${HUMAN_STOP_OPENINGS.paused} at a budget checkpoint: ${first.question}`;
     }
     // The step-failure park is not a question a role asked — it is the run
     // reporting that a step broke and stopping to be told what to do about
     // it. "Paused for a human answer at step 5" would read as an `ORG-ASK`,
     // which is exactly the wrong thing to go looking for in the transcript.
     if (first.reason === "step-failure") {
-      return `Workflow parked at a failed step (${first.stepId}): ${first.question}`;
+      return `${HUMAN_STOP_OPENINGS.parked} at a failed step (${first.stepId}): ${first.question}`;
     }
-    return `Workflow paused for a human answer at step ${first.stepId}: ${first.question}`;
+    return `${HUMAN_STOP_OPENINGS.paused} for a human answer at step ${first.stepId}: ${first.question}`;
   }
   const asked = pauses.map((pause) => `${pause.stepId}: ${pause.question}`).join(" · ");
   return (
-    `Workflow paused for human answers at ${pauses.length} steps of stage ` +
+    `${HUMAN_STOP_OPENINGS.paused} for human answers at ${pauses.length} steps of stage ` +
     `${first.stageIndex} — ${asked}`
   );
 }
@@ -3690,6 +3729,7 @@ export async function runWorkflow(
                   }
                 : {}),
               ...(finalWords === undefined ? {} : { finalText: finalWords }),
+              ...(outcome.lastTurn === undefined ? {} : { lastTurn: outcome.lastTurn }),
               startedAt: stepStartedAt,
               endedAt: now(),
             };
@@ -3790,7 +3830,18 @@ export async function runWorkflow(
               unparkableSteps.add(step.id);
             } else if (halt?.kind === "ask") {
               result = { ...result, status: "paused", question: halt.question.question };
-            } else if (stepProducedNothing(result.text, result.record)) {
+            } else if (
+              stepProducedNothing(result.text, result.record) ||
+              (result.lastTurn !== undefined &&
+                lastTurnDeliveredNothing(result.lastTurn) &&
+                (result.record === undefined || result.record.files === 0))
+            ) {
+              // The second arm is the same void seen from the last turn: a
+              // step whose first turn said "I'll read the survey, then write"
+              // and whose last two turns were reasoning alone has a non-empty
+              // `text` — that preamble — and still produced nothing. Judged
+              // on the turn the run ended on, with the diff as the tiebreak:
+              // a role that wrote a file and then went quiet delivered.
               // THE VOID GATE (see {@link stepProducedNothing}): a step that
               // changed no file and said nothing has produced nothing, and
               // `done` is a lie the next seven stages build on. It fails —
@@ -3834,6 +3885,11 @@ export async function runWorkflow(
               ? { question: result.question }
               : {}),
             ...(result.finalText === undefined ? {} : { finalText: result.finalText }),
+            // The last turn's shape rides the failed terminal beside the final
+            // words: together they say how far it got and what came back.
+            ...(result.status === "failed" && result.lastTurn !== undefined
+              ? { lastTurn: result.lastTurn }
+              : {}),
             promptHash,
             attempts,
             startedAt: stepStartedAt,
@@ -3979,6 +4035,7 @@ export async function runWorkflow(
           ...(captured === undefined ? {} : { patchPath: captured }),
           ...(tripped === undefined ? {} : { ceiling: tripped }),
           attempts: priorAttempts + (broken.attempts ?? 1),
+          ...(broken.lastTurn === undefined ? {} : { lastTurn: broken.lastTurn }),
         };
         let parked = true;
         try {
@@ -4005,6 +4062,7 @@ export async function runWorkflow(
             question: stepFailAskQuestion(ask, askAudience),
             promptHash: "",
             reason: "step-failure",
+            ...(ask.lastTurn === undefined ? {} : { lastTurn: ask.lastTurn }),
           });
         }
       }
@@ -4792,6 +4850,12 @@ interface AgentRunOutcome {
    * which lands here as exactly that.
    */
   errorKind?: AIError["kind"];
+  /**
+   * The shape of the child's last turn — what it emitted, not what it said.
+   * Captured from the `messageEnd` the core loop emits for every turn, so it
+   * is the turn the run actually ended on. See {@link LastTurnShape}.
+   */
+  lastTurn?: LastTurnShape;
 }
 
 /**
@@ -4828,6 +4892,7 @@ async function driveAgent(
   let errorMessage: string | undefined;
   let errorKind: AIError["kind"] | undefined;
   let text = "";
+  let lastMessage: AssistantMessage | undefined;
   live?.start();
   try {
     const unsubscribe = agent.subscribe((event) => {
@@ -4835,6 +4900,8 @@ async function driveAgent(
       // child: the host's existing rows then track this step's tokens, todos
       // and current tool without knowing that workflows exist.
       live?.relay(event);
+      // The turn the run ends on is the one a parked step is diagnosed from.
+      if (event.type === "messageEnd") lastMessage = event.message;
       if (event.type === "turnEnd") {
         usage = addUsage(usage, event.usage);
         onUsage?.(usage);
@@ -4881,7 +4948,13 @@ async function driveAgent(
     ...(errorMessage === undefined ? {} : { errorMessage }),
     ...(errorKind === undefined ? {} : { errorKind }),
     text,
+    ...(lastMessage === undefined ? {} : { lastTurn: turnShapeOf(lastMessage) }),
   };
+}
+
+/** The `lastTurn` spread every lane outcome carries, when the run saw a turn. */
+function lastTurnOf(run: AgentRunOutcome): { lastTurn?: LastTurnShape } {
+  return run.lastTurn === undefined ? {} : { lastTurn: run.lastTurn };
 }
 
 /**
@@ -5392,6 +5465,7 @@ async function runWorktreeStep(
       return {
         text: [run.text.trim(), tasks, trailer].filter((part) => part !== "").join("\n\n"),
         usage,
+        ...lastTurnOf(run),
         isError: false,
         record: discarded,
       };
@@ -5421,6 +5495,7 @@ async function runWorktreeStep(
       return {
         text: "",
         usage,
+        ...lastTurnOf(run),
         isError: true,
         record: captured,
         error: withTasks(
@@ -5443,6 +5518,7 @@ async function runWorktreeStep(
           .filter((part) => part !== "")
           .join("\n\n"),
         usage,
+        ...lastTurnOf(run),
         isError: false,
         record: empty,
       };
@@ -5454,6 +5530,7 @@ async function runWorktreeStep(
       return {
         text: "",
         usage,
+        ...lastTurnOf(run),
         isError: true,
         record: refused,
         error: withTasks(
@@ -5491,6 +5568,7 @@ async function runWorktreeStep(
       return {
         text: "",
         usage,
+        ...lastTurnOf(run),
         isError: true,
         record: captured,
         error: withTasks(
@@ -5529,6 +5607,7 @@ async function runWorktreeStep(
       return {
         text: "",
         usage,
+        ...lastTurnOf(run),
         isError: true,
         record: settled,
         error: withTasks(
@@ -5547,6 +5626,7 @@ async function runWorktreeStep(
       return {
         text: "",
         usage,
+        ...lastTurnOf(run),
         isError: true,
         record: refused,
         error: withTasks(
@@ -5917,6 +5997,7 @@ export function createRuntimeRunStep(
     return {
       text: isError ? "" : run.text,
       usage: run.usage,
+      ...lastTurnOf(run),
       isError,
       ...(isError
         ? {
@@ -8218,14 +8299,27 @@ export function createWorkflowCommands(
               result.status === "cancelled" ? "warn" : "error",
               result.error ?? result.status,
             );
-          } else if (result.pauses[0]?.reason === "step-failure") {
-            // A step-failure park is a pause, so it is not an error — but it
-            // is emphatically not a completed run either, and off a TTY
-            // (`--print`, serve, acp, CI) the modal below never appears. This
-            // is the one line that says "this pipeline did not finish, and a
-            // person has to decide what happens next", loud enough to be
-            // grepped out of a CI log.
-            ui.notice("warn", result.error ?? "Workflow parked at a failed step.");
+          } else if (result.status === "paused" && result.pauses.length > 0) {
+            // A pause is not an error — but it is emphatically not a completed
+            // run either, and off a TTY (`--print`, serve, acp, CI) the modal
+            // below never appears. This is the one line that says "this
+            // pipeline did not finish, and a person has to decide what happens
+            // next", loud enough to be grepped out of a CI log — for every
+            // kind of pause: a budget checkpoint, a role's question, a parked
+            // step. `result.error` already carries `pauseSummary`, whose
+            // opening words `--print` keys its exit code on.
+            //
+            // For a parked step the diagnosis rides the same notice: what the
+            // model emitted on the turn it failed on, on the same stream as
+            // the park so a job capturing only stderr keeps both. This is the
+            // line that used to live in an engineer's head after an hour with
+            // the session JSONL.
+            const shape = result.pauses[0]?.lastTurn;
+            const summary = result.error ?? pauseSummary(result.pauses);
+            ui.notice(
+              "warn",
+              shape === undefined ? summary : `${summary}\n${describeLastTurn(shape)}`,
+            );
           }
           return result;
         } catch (error) {
@@ -8260,8 +8354,8 @@ export function createWorkflowCommands(
         if (first === undefined) return;
         const title =
           pauses.length === 1
-            ? `Workflow paused — ${oneLine(first.question, 80)}`
-            : `Workflow paused — ${pauses.length} questions, one reply answers them: ` +
+            ? `${HUMAN_STOP_OPENINGS.paused} — ${oneLine(first.question, 80)}`
+            : `${HUMAN_STOP_OPENINGS.paused} — ${pauses.length} questions, one reply answers them: ` +
               pauses.map((pause) => oneLine(pause.question, 40)).join(" · ");
         const choice = await ui.select(title, [
           {
@@ -8406,6 +8500,9 @@ export function createWorkflowCommands(
               "warn",
               `Run ${runId} is parked at a failed step — ${stepFailAskQuestion(state.stepFailAsk)}`,
             );
+            if (state.stepFailAsk.lastTurn !== undefined) {
+              ui.notice("warn", describeLastTurn(state.stepFailAsk.lastTurn));
+            }
             ui.notice("info", stepFailAskResumeHint(runId, state.stepFailAsk));
             ui.setInput(`/workflow resume ${runId} `);
             return;
