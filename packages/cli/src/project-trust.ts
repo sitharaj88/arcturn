@@ -1113,10 +1113,12 @@ export function describeProjectCodeCounts(counts: ProjectCodeCounts): string {
 /** `hooks, verify command, extensions and MCP servers`, for the refusal line. */
 function describeProjectCodeKinds(counts: ProjectCodeCounts): string {
   const parts: string[] = [];
-  if (counts.hook > 0) parts.push(counts.hook === 1 ? "hook" : "hooks");
+  // Always plural: these nouns feed a sentence ending in "are NOT running",
+  // so the noun-verb agreement must hold even when the count is one.
+  if (counts.hook > 0) parts.push("hooks");
   if (counts.verify > 0) parts.push("verify command");
   if (counts.extension > 0) parts.push("extensions");
-  if (counts.mcp > 0) parts.push(counts.mcp === 1 ? "MCP server" : "MCP servers");
+  if (counts.mcp > 0) parts.push("MCP servers");
   if (parts.length === 0) return "project code";
   if (parts.length === 1) return parts[0] as string;
   return `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;

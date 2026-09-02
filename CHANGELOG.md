@@ -151,11 +151,28 @@ CLI, the SDK, or the wire protocol.
   the consequence, and **stopped at 36**: the child is aborted, the step fails
   as the new `no-progress` kind, and the run parks with what it did instead —
   `step 8 (@rag-builder) was stopped after 36 turns without changing a file —
-  it read 114 files and ran 75 shell commands and wrote nothing`. Every
-  threshold is a turn count, never a fraction of the ceiling, so a `raise 1000`
-  answered at a park defers none of them. Read and exec lanes are never warned
-  and never stopped — their diff is discarded unread, so writing nothing is
-  their contract, not their fault.
+  it read 114 files and ran 75 shell commands and its worktree is still
+  unchanged`. Every threshold is a turn count, never a fraction of the ceiling,
+  so a `raise 1000` answered at a park defers none of them.
+
+  **"Changed a file" is asked of the worktree**, not of the tool histogram.
+  Six of the thirteen write-lane roles Arcturn ships hold `bash` — one of them
+  under a rule that says never to hand-write a file a generator can produce —
+  and a role authoring through `printf … >> file`, `npm create` or `git apply`
+  makes no `write` call at all. Counting write tools told such a role at turns
+  12 and 24 that it had changed nothing while its worktree filled up, then
+  stopped it at 36, captured its 36 turns of real files to a patch, threw them
+  away and did it again on the automatic retry — printing "it wrote nothing"
+  and "Patch preserved at …" in the same message. The schedule now runs `git
+  status --porcelain` inside the worktree (cached, from one turn before the
+  first notice, and skipped entirely for a child that has called nothing that
+  could write), and no child is stopped on anything but a status that came
+  back clean: a `git` that will not answer is *unknown*, and unknown never
+  ends a step. The turn-24 notice is withheld from a role whose ceiling is
+  under 36 turns — and no guard is installed for it — because a warning must
+  not promise a stop that role can never reach. Read and exec lanes are never
+  warned and never stopped — their diff is discarded unread, so writing
+  nothing is their contract, not their fault.
 
   The step is not handed to a person first. A `no-progress` stall and the void
   (a step that changed no file and said no word) each buy **one automatic fresh
@@ -169,7 +186,15 @@ CLI, the SDK, or the wire protocol.
   config error are still settled on the first attempt, and `maxStepRetries:`
   neither grants nor withholds this one. If the second attempt fails the same
   way the run parks as before, with `attempts: 2` and a cause naming what each
-  attempt did, so nobody is steered at a `retry` that has already been tried.
+  attempt did — counted from the attempts it lists, so a step whose fresh
+  attempt followed a transient retry says "retried automatically twice and
+  failed 3 times" rather than claiming two — so nobody is steered at a `retry`
+  that has already been tried. The per-attempt terminals this writes to the
+  insights ledger are marked superseded, so a step the retry rescued counts
+  once in its role's failure rate and its median duration (it used to count
+  as both a failure and a success, raising every rescued role's failure rate
+  by exactly the successes the feature produced) while still counting in the
+  `no-progress` tally, which is the number that should climb.
 
 - **`arcturn serve --allow-ceiling-raise`, and a parked run's diagnosis on the
   wire.** A `raise <n>` reply used to be refused outright over the wire, no
@@ -191,6 +216,47 @@ CLI, the SDK, or the wire protocol.
   the park support it.
 
 ### Fixed
+
+- **A run killed mid-step no longer fails its own resume over a leftover
+  worktree.** A write-lane step's worktree is named after the step, the role
+  and the attempt — `1-builder` — so a run killed while a step was running
+  left a directory that the resume's `git worktree add` refused. The refusal
+  is deterministic by design (the same command fails the same way), so the
+  resumed step failed instantly and parked with a question about git plumbing
+  that no answer at the park could fix; keeping a forensic worktree per
+  stalled attempt doubled the window. A colliding path that no worktree of the
+  *running* process created is now recognised as rubble from a dead one:
+  it is removed (`git worktree remove --force`, then a prune) and the step
+  runs. A path this run does still care about — a failed attempt's forensics,
+  a pending ask's patch — is never touched; the new attempt takes the next
+  salted slug instead. The terminal a resume reconstructs for a step whose
+  crash it ruled on now carries the attempt count that step had actually
+  reached, rather than the `0` it always claimed — a step that ran, spent
+  money and landed a patch was being written down as one that never ran.
+
+- **A `--print` run parked for a human now exits `3`, even when the step that
+  parked it reported an error on the way.** A step-failure park is `failed` by
+  design — the step is what failed, not the run — so its error-level
+  `stepEnd` notice used to beat the warn-level "Workflow parked…" notice in
+  `--print`'s exit-code check, and every parked run answered `1` instead of
+  the documented `3`. The park is resumable; that outranks the error that led
+  to it. Fixed alongside it: a headless park no longer also prints "a picker
+  cannot be shown under --print" — the run has already said it needs a human
+  and named the resume command, and a second, unexplained refusal under that
+  was noise. `/workflow resume <finished-run> retry` on a run that already
+  finished now reports at `error` level instead of `warn`, so `--print` and
+  the TUI both treat it as the failure it is rather than a shrug. And
+  `arcturn -r <bad-session-id> -p "..."` no longer starts a fresh session and
+  exits `0` after warning on stderr that resume failed — a session that could
+  not be read now exits `2` and runs nothing, matching the exit-code table.
+
+- **`arcturn doctor <provider>` accepts a base provider name, not only a
+  preset.** `openai`, `anthropic` and `google` are registered providers with
+  their own curated models, and `--help` describes `doctor [preset]` as
+  probing a *provider* endpoint — but `doctor openai` answered
+  `unknown preset "openai"`. It now probes the provider's curated head model
+  with its key env var, the same report row a preset gets; a name that is
+  neither a preset nor a provider still exits `2`, now naming both.
 
 - **A `raise <n>` at a parked step no longer re-budgets every later step of
   that role.** The run-scoped grant was keyed by the step's `@role` when it had

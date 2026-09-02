@@ -157,6 +157,21 @@ export class ModelResolutionError extends Error {
   }
 }
 
+/**
+ * Raised when an explicitly named session (`--resume <id>` / `-r <id>`)
+ * cannot be read. Nothing should run on top of a session that failed to
+ * load — see the exit-code table in cli-reference.md, where this is `2`.
+ *
+ * `-c`/`--continue` with no previous session found is a different case
+ * (documented as legitimately starting fresh) and does not throw this.
+ */
+export class SessionResumeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SessionResumeError";
+  }
+}
+
 /** Running totals for the current session. */
 export interface SessionMetrics {
   /** Completed model turns. */
@@ -2895,7 +2910,8 @@ export async function buildRuntime(options: BuildRuntimeOptions = {}): Promise<A
   });
   runtime.setTitleGenerator(titles);
 
-  let sessionId = options.resume;
+  const explicitResume = options.resume;
+  let sessionId = explicitResume;
   if (!sessionId && options.continueSession) {
     const headers = await runtime.listSessions();
     sessionId = headers[0]?.sessionId;
@@ -2907,10 +2923,18 @@ export async function buildRuntime(options: BuildRuntimeOptions = {}): Promise<A
     try {
       await runtime.resumeSession(sessionId);
     } catch (error) {
-      warnings.push(
+      const message =
         `Could not resume session ${sessionId}: ` +
-          `${error instanceof Error ? error.message : String(error)}`,
-      );
+        `${error instanceof Error ? error.message : String(error)}`;
+      // An explicitly-named session (`--resume`/`-r`) that fails to load
+      // must run nothing — the CLI exits 2 for it. `-c` falling back to a
+      // fresh session when none exists is the one case that legitimately
+      // proceeds, and it never reaches this branch (no sessionId to resume).
+      if (sessionId === explicitResume) {
+        await runtime.dispose();
+        throw new SessionResumeError(message);
+      }
+      warnings.push(message);
     }
   }
 

@@ -45,6 +45,7 @@ an inherited stdin open that never closes; waiting for EOF there would hang fore
 | `--no-providers` | Register nothing from a config `providers` block; entries still parse and still list. Both flags apply to `serve`, `acp`, `mcp-serve` and `replay` as well as to an ordinary run |
 | `--list-models` | Print the model catalog and exit |
 | `--list-providers` | Print every provider and preset endpoint — including the ones your config declares, with their state — and exit |
+| `--allow-ceiling-raise` | With `serve`: honour a wire `resumeWorkflow` answer of `raise <n>` instead of refusing it. A raise spends *your own* money or turns — off unless you opt in — see [Server mode](/docs/server-mode#--allow-ceiling-raise-letting-the-wire-raise-a-ceiling-too) |
 | `-h`, `--help` · `-v`, `--version` | Usage, version |
 
 `--host`, `--port` and `--token` apply to `arcturn serve`; `--cassette` applies to
@@ -136,6 +137,7 @@ session is a tree, so the branch you rewound away from is still there.
 | `/permissions` | Show rules and mode; also `suggest` |
 | `/trust` | Show or decide whether this project's declared code runs; also `allow`, `deny`, `revoke` |
 | `/mcp` | Show MCP server status |
+| `/stats` | Session insights: cost, tokens, cache and tool usage; also `--all`, `--since <window>`, `--json` |
 
 ### Changes
 
@@ -144,6 +146,9 @@ session is a tree, so the branch you rewound away from is still there.
 | `/diff` | Show pending dry-run changes |
 | `/apply` | Apply pending dry-run changes to the workspace |
 | `/discard` | Throw away pending dry-run changes |
+| `/commit` | Commit staged changes: `/commit [message]` (generated from the diff if omitted) |
+| `/pr` | Push this branch and open a pull request: `/pr [title]` |
+| `/review` | Review a diff: `/review [staged\|<branch>\|<range>\|<PR#>]` |
 
 These three are the [dry-run](/docs/dry-run) loop: with `--dry-run`, edits land in a shadow
 copy until you have read them.

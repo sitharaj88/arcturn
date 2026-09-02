@@ -143,7 +143,7 @@ that fired, a patch that would not apply, a role that spent its own `budget:` �
 wrote `runEnd{failed}`, and a failed run is permanently unresumable:
 
 ```text
-⚠ Run 20260830T152033-9f51b895 already finished (failed); nothing to resume.
+✗ Run 20260830T152033-9f51b895 already finished (failed); nothing to resume.
 ```
 
 For a nine-stage pipeline that got through four paid stages before stage 5 ran out of
@@ -302,15 +302,27 @@ them:
   on disk for forensics and says where.
 
   A write-lane step that has only been reading is put on a schedule, and the schedule ends
-  in a stop. At **12 turns** without a write — or halfway to the ceiling, whichever comes
-  first — it is told so once. At **24** it is told again, and that message names the
+  in a stop. At **12 turns** with nothing changed — or halfway to the ceiling, whichever
+  comes first — it is told so once. At **24** it is told again, and that message names the
   consequence. At **36 turns with no file changed the step is stopped**: the child is
   aborted, the step fails as `no-progress`, and the run parks. Every one of those numbers is
   a count of turns and nothing else, so **a raised ceiling does not defer any of them** — a
   `raise 1000` buys a step rope to finish work it has started, not an hour of reading. Each
   message is sent once and never repeats, and nothing on the schedule fires at all once the
-  step has actually changed a file. Read and exec lanes are never warned and never stopped:
-  their product is a report, and their diff is discarded unread.
+  step has actually changed a file.
+
+  **"Changed a file" means the worktree**, not a `write` tool call. Plenty of roles author
+  through the shell — `printf … >> file`, `npm create`, `cp`, `git apply` — and six of the
+  write-lane roles Arcturn ships hold `bash` for exactly that reason, one of them under a
+  rule that says never to hand-write a file a generator can produce. So the schedule asks
+  `git status --porcelain` inside the worktree, and a role whose diff is growing is never
+  warned and never stopped however it got there. A `git` that will not answer counts as
+  *unknown*, never as "changed nothing": the guard stops a child only on a status that came
+  back clean, so a broken repository loses you the guard, not your work. The turn-24 notice
+  is withheld from a role whose ceiling is under 36 turns, and no guard is installed for it
+  either — its ceiling gets there first, and a warning must not promise a stop that cannot
+  happen. Read and exec lanes are never warned and never stopped: their product is a report,
+  and their diff is discarded unread.
 
   A stopped step does not go straight to a human. It — like a step that produced nothing at
   all — gets **one automatic fresh attempt first**: a new worktree seeded from the same

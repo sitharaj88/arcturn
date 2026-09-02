@@ -276,12 +276,61 @@ describe("runDoctorCommand: one preset", () => {
     expect(requests).toHaveLength(0);
   });
 
-  it("exits 2 on an unknown preset, listing the valid ones", async () => {
+  it("exits 2 on an unknown preset or provider, listing both", async () => {
     const { code, err, requests } = await runDoctor(["doctor", "nope"], {});
     expect(code).toBe(2);
-    expect(err).toContain('unknown preset "nope"');
+    expect(err).toContain('unknown preset or provider "nope"');
     expect(err).toContain("groq");
+    expect(err).toContain("openai");
     expect(err).toContain("quote it");
+    expect(requests).toHaveLength(0);
+  });
+
+  it("accepts a registered base provider name, not only a preset, and probes its curated head", async () => {
+    // `doctor openai` used to answer 'unknown preset "openai"' even though
+    // --help and the docs describe `doctor [preset]` as probing a *provider*
+    // endpoint, and openai/anthropic/google are registered base providers
+    // (see --list-providers), not entries in PROVIDER_PRESETS.
+    const first = await runDoctor(["doctor", "openai"], {});
+    // No key set: the honest verdict is "no key", never a silent "unknown
+    // preset" — same shape a keyless preset row gets.
+    expect(first.code).toBe(1);
+    expect(first.out).toContain("no key");
+    expect(first.out).toContain("OPENAI_API_KEY");
+    expect(first.requests).toHaveLength(0);
+
+    const { code, out, err, requests } = await runDoctor(["doctor", "openai"], {
+      OPENAI_API_KEY: "super-secret-key-material",
+    });
+    expect(code).toBe(0);
+    expect(out).toContain("ok");
+    expect(out).toContain("openai/");
+    expect(out).toContain("OPENAI_API_KEY ✓");
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.model.provider).toBe("openai");
+    expect(out + err).not.toContain("super-secret");
+  });
+
+  it("classifies a rejected key the same way for a base provider as for a preset", async () => {
+    const probe = await runDoctor(["doctor", "anthropic"], { ANTHROPIC_API_KEY: "bad" }, {});
+    const modelId = probe.requests[0]?.model.id;
+    if (modelId === undefined) throw new Error("expected a probe request");
+    const { code, out } = await runDoctor(
+      ["doctor", "anthropic"],
+      { ANTHROPIC_API_KEY: "bad" },
+      { [modelId]: { kind: "auth", message: "invalid x-api-key", status: 401 } },
+    );
+    expect(code).toBe(1);
+    expect(out).toContain("auth failed");
+    expect(out).toContain("ANTHROPIC_API_KEY");
+  });
+
+  it("still exits 2, listing registered providers too, for a name that is neither", async () => {
+    const { code, err, requests } = await runDoctor(["doctor", "totally-not-a-thing"], {});
+    expect(code).toBe(2);
+    expect(err).toContain('unknown preset or provider "totally-not-a-thing"');
+    expect(err).toContain("openai");
+    expect(err).toContain("anthropic");
     expect(requests).toHaveLength(0);
   });
 

@@ -17,6 +17,7 @@ import {
   collectProjectCodeSurface,
   lookupTrustRecord,
   PROJECT_TRUST_VERSION,
+  projectCodeRefusalWarning,
   projectSurfaceBlob,
   projectSurfaceDigest,
   readProjectTrustStore,
@@ -380,6 +381,31 @@ describe("sanitizeForTerminal", () => {
 
   it("leaves ordinary text, including non-ASCII, untouched", () => {
     expect(sanitizeForTerminal("pnpm test — ünïcode ✓")).toBe("pnpm test — ünïcode ✓");
+  });
+});
+
+describe("projectCodeRefusalWarning", () => {
+  it("keeps subject-verb agreement when the project declares exactly one hook", async () => {
+    // Regression: with a single hook, describeProjectCodeKinds used the
+    // singular noun "hook" but the sentence always ends in the plural verb
+    // "are NOT running" — "this project's hook are NOT running" reads as a
+    // typo. The noun must agree with the fixed plural verb.
+    const scratch = await makeScratch();
+    const paths = resolveArcturnPaths({ cwd: scratch.cwd, home: scratch.home, env: {} });
+    const surface = await surfaceOf(
+      scratch,
+      config({
+        hooks: {
+          preToolUse: [],
+          postToolUse: [],
+          sessionStart: [{ command: "./setup.sh", scope: "project" }],
+          runEnd: [],
+        },
+      }),
+    );
+    const message = projectCodeRefusalWarning(surface, paths, "declined");
+    expect(message).toContain("this project's hooks are NOT running.");
+    expect(message).not.toContain("hook are NOT running");
   });
 });
 

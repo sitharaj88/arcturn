@@ -209,8 +209,12 @@ async function runPrintCommand(
     },
     async select(title) {
       // A picker needs a person. Say so, name the surface, and let the
-      // command take the "cancelled" branch it already has for Esc.
-      ui.notice("warn", `${title}: a picker cannot be shown under --print.`);
+      // command take the "cancelled" branch it already has for Esc — unless
+      // a human-stop notice has already printed the resume hint, in which
+      // case this refusal is redundant noise on top of it.
+      if (!seen.needsHuman) {
+        ui.notice("warn", `${title}: a picker cannot be shown under --print.`);
+      }
       return undefined;
     },
     setInput(text) {
@@ -222,13 +226,15 @@ async function runPrintCommand(
     ...(format === "json" ? { workflowLive: (event) => emit({ type: "workflow", event }) } : {}),
   };
   const result = await registry.dispatch(input, { runtime, ui });
+  // A park is resumable — that is the whole point — so it takes priority
+  // over an error notice a failed step reported on its way to parking.
   const exitCode =
     "unknown" in result && result.unknown === true
       ? PRINT_EXIT.unknownCommand
-      : seen.error
-        ? PRINT_EXIT.error
-        : seen.needsHuman
-          ? PRINT_EXIT.needsHuman
+      : seen.needsHuman
+        ? PRINT_EXIT.needsHuman
+        : seen.error
+          ? PRINT_EXIT.error
           : PRINT_EXIT.ok;
   return {
     exitCode,

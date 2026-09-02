@@ -250,6 +250,76 @@ describe("runPrint with a slash command", () => {
     expect(io.stdoutText()).toContain("last turn: zai/glm-5.3");
   });
 
+  it("exits 3, not 1, when a failed step's error notice precedes the park warn", async () => {
+    // A step that parks the run is `failed` by design (see workflow.ts's
+    // `stepEnd` notice), so the error-level per-step notice always arrives
+    // before the warn-level park notice. The park is resumable — that is the
+    // whole point — so it must win over the error on the way to it.
+    const scratch = await makeScratch();
+    const runtime = await buildTestRuntime(scratch);
+    const io = capture();
+    const result = await runPrint({
+      runtime,
+      prompt: "/parkish",
+      stdout: io.stdout,
+      stderr: io.stderr,
+      commands: registryOf({
+        name: "parkish",
+        description: "test",
+        run({ ui }) {
+          ui.notice("error", "step 3 (@architect) failed");
+          ui.notice("warn", "Workflow parked at a failed step (3): step 3 (@architect) failed");
+        },
+      }),
+    });
+    expect(result.exitCode).toBe(PRINT_EXIT.needsHuman);
+  });
+
+  it("exits 1, not 3, when a command reports an error with no human-stop notice", async () => {
+    const scratch = await makeScratch();
+    const runtime = await buildTestRuntime(scratch);
+    const io = capture();
+    const result = await runPrint({
+      runtime,
+      prompt: "/boom2",
+      stdout: io.stdout,
+      stderr: io.stderr,
+      commands: registryOf({
+        name: "boom2",
+        description: "test",
+        run({ ui }) {
+          ui.notice("error", "plain failure, nobody is waiting on anything");
+        },
+      }),
+    });
+    expect(result.exitCode).toBe(PRINT_EXIT.error);
+  });
+
+  it("stays silent on the picker refusal once a human-stop notice already printed the resume hint", async () => {
+    const scratch = await makeScratch();
+    const runtime = await buildTestRuntime(scratch);
+    const io = capture();
+    const result = await runPrint({
+      runtime,
+      prompt: "/parkpick",
+      stdout: io.stdout,
+      stderr: io.stderr,
+      commands: registryOf({
+        name: "parkpick",
+        description: "test",
+        async run({ ui }) {
+          ui.notice("warn", "Workflow parked at a failed step (3): step 3 (@architect) failed");
+          // The command's own picker call, exactly as `/workflow`'s
+          // offerAnswer() makes one — must not add a second, redundant
+          // "cannot be shown" notice on top of the park's resume hint.
+          await ui.select("Choose an answer", [{ label: "a", value: 1 }]);
+        },
+      }),
+    });
+    expect(io.stderrText()).not.toContain("a picker cannot be shown under --print");
+    expect(result.exitCode).toBe(PRINT_EXIT.needsHuman);
+  });
+
   it("refuses a picker with a notice instead of hanging, so the command takes its cancel branch", async () => {
     const scratch = await makeScratch();
     const runtime = await buildTestRuntime(scratch);

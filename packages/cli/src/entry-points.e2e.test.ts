@@ -1024,6 +1024,25 @@ describe("arcturn exit codes", () => {
     expect(result.stderr).toContain("--permission-mode");
   });
 
+  it("returns 2 for -r/--resume naming a session that cannot be read, and runs nothing", async () => {
+    // Documented in cli-reference.md's exit-code table: "a session that
+    // could not be read" is exit 2, nothing ran. The old behaviour printed
+    // "Could not resume session …: does not exist" as a warning and then
+    // started a fresh session anyway — exit 0, and a real model call.
+    const provider = await stubProvider([{ text: "unused" }]);
+    const ws = await workspace(provider.baseUrl);
+
+    const result = await run(["-r", "bogus-session-id", "-p", "hi", "--no-mcp"], {
+      workspace: ws,
+      timeoutMs: DEFAULT_SPAWN_DEADLINE_MS,
+    });
+
+    expect(result.code).toBe(2);
+    expect(result.stderr).toContain("Could not resume session bogus-session-id");
+    expect(result.stdout).toBe("");
+    expect(provider.requests).toEqual([]);
+  });
+
   it("documents its exit codes in --help", async () => {
     // An exit code nobody can look up is not an interface. Scripts branch on
     // these; they belong in the help text next to the flags that produce them.

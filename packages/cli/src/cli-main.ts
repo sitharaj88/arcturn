@@ -31,6 +31,7 @@ import {
   formatProviderCatalog,
   ModelResolutionError,
   registerBundledCatalog,
+  SessionResumeError,
 } from "./runtime.js";
 
 /**
@@ -465,7 +466,7 @@ export async function runCli(args: CliArgs, options: RunCliOptions = {}): Promis
     await recorder?.close();
     return code;
   } catch (error) {
-    if (error instanceof ModelResolutionError) {
+    if (error instanceof ModelResolutionError || error instanceof SessionResumeError) {
       process.stderr.write(`arcturn: ${error.message}\n`);
       return 2;
     }

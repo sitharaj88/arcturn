@@ -24,6 +24,7 @@ import {
   FALLBACK_API_KEY_ENV,
   getModel,
   listModels,
+  listProviderIds,
   PROVIDER_PRESETS,
   presetSpec,
   resolveApiKey,
@@ -76,6 +77,17 @@ const PROBE_STALL_TIMEOUT_MS = 10_000;
 
 /** Probes in flight at once. Small: this is a health check, not a load test. */
 const PROBE_POOL_SIZE = 6;
+
+/**
+ * Registered base providers `doctor <name>` also accepts alongside the
+ * `PROVIDER_PRESETS` table — the direct, single-key-variable adapters with a
+ * curated model catalog. `--help` and the docs describe `doctor [preset]` as
+ * probing a *provider* endpoint, and these three are the base providers a
+ * plain `provider/model` id (no preset) resolves through; `--list-providers`
+ * lists more (openai-compatible, azure, vertex, bedrock, …) but those need a
+ * baseUrl or ambient credentials a bare name cannot supply.
+ */
+const BASE_PROVIDERS = ["openai", "anthropic", "google"] as const;
 
 /**
  * Z.AI's "insufficient balance" answer: numeric code 1113, and the English or
@@ -182,14 +194,23 @@ export async function runDoctorCommand(
   if (command.preset !== undefined) {
     const entry = PROVIDER_PRESETS[command.preset];
     if (entry === undefined) {
-      const valid = Object.keys(PROVIDER_PRESETS).sort().join(", ");
-      err(`arcturn: unknown preset "${command.preset}". Valid presets: ${valid}\n`);
-      // "doctor" is an ordinary English verb, so an unquoted prompt lands
-      // here; same escape hatch the registry verbs print on their exit 2.
-      err(`arcturn: to send this as a prompt instead, quote it: arcturn "doctor ..."\n`);
-      return 2;
+      if ((BASE_PROVIDERS as readonly string[]).includes(command.preset)) {
+        targets = [await providerTarget(command.preset, env, options)];
+      } else {
+        const validPresets = Object.keys(PROVIDER_PRESETS).sort().join(", ");
+        const validProviders = listProviderIds().join(", ");
+        err(
+          `arcturn: unknown preset or provider "${command.preset}". Valid presets: ` +
+            `${validPresets}. Registered providers: ${validProviders}\n`,
+        );
+        // "doctor" is an ordinary English verb, so an unquoted prompt lands
+        // here; same escape hatch the registry verbs print on their exit 2.
+        err(`arcturn: to send this as a prompt instead, quote it: arcturn "doctor ..."\n`);
+        return 2;
+      }
+    } else {
+      targets = [await presetTarget(command.preset, env, options)];
     }
-    targets = [await presetTarget(command.preset, env, options)];
   } else {
     const loaded = await loadConfig({
       ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
@@ -534,6 +555,56 @@ async function presetTarget(
     // Genuinely keyless local runtimes probe fine; stripping the variable
     // is what tells the adapter precheck this is that case.
     return { ...base, spec: withoutApiKeyEnv(spec) };
+  }
+  return { ...base, spec };
+}
+
+/**
+ * Build the target for one named base provider (`doctor openai`, `doctor
+ * anthropic`, `doctor google`) — the same report row shape {@link
+ * presetTarget} builds for a preset, but sourced from the curated catalog
+ * rather than `PROVIDER_PRESETS`, since these providers are not presets.
+ */
+async function providerTarget(
+  name: string,
+  env: EnvMap,
+  options: RunDoctorCommandOptions,
+): Promise<ProbeTarget> {
+  const base: ProbeTarget = { name, labels: [] };
+  const model = options.model ?? (await pickModel(name, env, options));
+  if (model === undefined) {
+    return {
+      ...base,
+      pre: {
+        word: "no known model",
+        detail: `no model id known for this provider — pass one: arcturn doctor ${name} --model <id>`,
+        failed: false,
+      },
+    };
+  }
+  // `model` came from the same catalog lookup as the id below (or from
+  // `--model`, an explicit override this provider's adapter accepts
+  // regardless of curation), so this is never undefined in practice; the
+  // fallback keeps the type honest without inventing a spec that could send
+  // a request nobody asked for.
+  const spec = getModel(`${name}/${model}`) ?? {
+    id: `${name}/${model}`,
+    provider: name as ModelSpec["provider"],
+    model,
+    displayName: model,
+    contextWindow: 0,
+    maxOutputTokens: 0,
+    capabilities: { tools: false, vision: false, thinking: false, caching: false },
+    apiKeyEnv: DEFAULT_API_KEY_ENV[name],
+  };
+  const keyed = resolveApiKey(spec, { env }) !== undefined;
+  if (!keyed) {
+    const apiKeyEnv =
+      spec.apiKeyEnv ?? DEFAULT_API_KEY_ENV[name] ?? `${name.toUpperCase()}_API_KEY`;
+    return {
+      ...base,
+      pre: { word: "no key", detail: `set ${apiKeyEnv} to probe ${name}`, failed: true },
+    };
   }
   return { ...base, spec };
 }
