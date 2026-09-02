@@ -550,11 +550,14 @@ function resumeServedAgent(
  *   `attachCostGuard`); `maxAttachmentBytes` overrides the total per-prompt
  *   attachment budget, injectable so a test can prove the cap cuts without
  *   writing a megabyte of scratch files first (see
- *   `ContextResolverOptions.maxAttachmentBytes`).
+ *   `ContextResolverOptions.maxAttachmentBytes`); `allowCeilingRaise` is
+ *   `arcturn serve --allow-ceiling-raise`, threaded to
+ *   {@link createServeWorkflows}'s `allowBudgetRaise` — off unless the caller
+ *   opts in, since a raise spends the operator's own money or turns.
  */
 export function createServeHost(
   runtime: ServableRuntime,
-  options: { maxCostUsd?: number; maxAttachmentBytes?: number } = {},
+  options: { maxCostUsd?: number; maxAttachmentBytes?: number; allowCeilingRaise?: boolean } = {},
 ): SessionHost {
   const resolveModel = serveModelResolver(runtime.env);
   // The `/bg` registry, over the runtime's own memoized manager. `undefined`
@@ -622,6 +625,7 @@ export function createServeHost(
         return undefined;
       }
     },
+    allowBudgetRaise: options.allowCeilingRaise === true,
   });
   return new SessionHost({
     agentFactory: (opts) =>
@@ -962,6 +966,18 @@ export interface RunServeOptions {
    * stays off and `runServe` reports why.
    */
   trustProject?: boolean;
+  /**
+   * `--allow-ceiling-raise`. Off by default: a `resumeWorkflow` answer of
+   * `raise <n>` is refused over the wire, exactly as it always was. On, a
+   * raise-shaped answer is honoured on the same terms the interactive
+   * terminal grants one — the same parser, the same validation, the same
+   * ceilings — because a raise spends **this host's** money or turns, and
+   * that is a decision only the operator running `serve` may make on a
+   * client's behalf. Advertised to a connecting client as
+   * `capabilities.ceilingRaise` on the `authenticate` handshake, so a client
+   * knows whether offering a "raise" affordance is meaningful before it tries.
+   */
+  allowCeilingRaise?: boolean;
 }
 
 /** What {@link runServe} hands back to its caller (`main.ts`). */
@@ -1015,10 +1031,10 @@ export async function runServe(options: RunServeOptions = {}): Promise<RunServeR
     ...(options.trustProject === undefined ? {} : { trustProject: options.trustProject }),
   });
 
-  const sessionHost = createServeHost(
-    runtime,
-    options.maxCostUsd === undefined ? {} : { maxCostUsd: options.maxCostUsd },
-  );
+  const sessionHost = createServeHost(runtime, {
+    ...(options.maxCostUsd === undefined ? {} : { maxCostUsd: options.maxCostUsd }),
+    allowCeilingRaise: options.allowCeilingRaise === true,
+  });
 
   // The page server binds *first*: a browser always stamps an `Origin` on the
   // WebSocket upgrade, and `ArcturnServer` refuses every origin it was not given
@@ -1046,6 +1062,10 @@ export async function runServe(options: RunServeOptions = {}): Promise<RunServeR
     ...(web === undefined
       ? {}
       : { allowedOrigins: webClientOrigins(host, web.port, options.webOrigins ?? []) }),
+    // Always sent, flag on or off — a client that reads `false` knows for a
+    // fact that a raise will be refused, rather than guessing at what an
+    // absent field means. See `ArcturnServerOptions.capabilities`.
+    capabilities: { ceilingRaise: options.allowCeilingRaise === true },
   });
 
   let port: number;

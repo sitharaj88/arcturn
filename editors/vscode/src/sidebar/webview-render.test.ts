@@ -3082,4 +3082,103 @@ describe("the workflow surface", () => {
     expect(panel.byId("wf-note").classList.contains("hidden")).toBe(false);
     expect(panel.byId("wf-note").textContent).toContain("may only lower that ceiling");
   });
+
+  describe("a parked step's diagnosis, and the ceiling-raise capability", () => {
+    /**
+     * `run()`'s `extra` spreads into the run row, not the view — `capabilities`
+     * is a fact about the ENGINE and lives on the view alongside `run`, so
+     * these tests build the `workflows` message directly rather than through
+     * that helper.
+     */
+    function withCapabilities(
+      questions: unknown[],
+      capabilities?: Record<string, unknown>,
+    ): unknown {
+      return {
+        type: "workflows",
+        view: {
+          status: "ready",
+          workflows: [],
+          run: {
+            runId: "run-1",
+            workflow: "ship-fix",
+            state: "paused",
+            stageCount: 3,
+            stepsDone: 1,
+            stepsTotal: 4,
+            questions,
+          },
+          ...(capabilities === undefined ? {} : { capabilities }),
+        },
+      };
+    }
+
+    it("shows the diagnosis line under a step-failure park's question", () => {
+      panel.send(
+        withCapabilities([
+          {
+            stepId: "2",
+            question: "Step 2 ran out of turns.",
+            diagnosis: "last turn: zai/glm-5.3-flash · stopped endTurn · no text · no tool call",
+          },
+        ]),
+      );
+      expect(panel.byId("wf-diagnosis").classList.contains("hidden")).toBe(false);
+      expect(panel.byId("wf-diagnosis").textContent).toBe(
+        "last turn: zai/glm-5.3-flash · stopped endTurn · no text · no tool call",
+      );
+    });
+
+    it("hides the diagnosis line for a park that carries none — a budget ask, say", () => {
+      panel.send(withCapabilities([{ stepId: "budget", question: "at 90%." }]));
+      expect(panel.byId("wf-diagnosis").classList.contains("hidden")).toBe(true);
+      expect(panel.byId("wf-diagnosis").textContent).toBe("");
+    });
+
+    it("never offers Raise ceiling when the engine has not advertised the capability", () => {
+      // The question carries `raise` — this park IS the right shape — but the
+      // capability is the other half of the offer, and it is missing.
+      panel.send(
+        withCapabilities([{ stepId: "2", question: "q", raise: { kind: "turns", current: 2 } }]),
+      );
+      expect(panel.byId("wf-raise").classList.contains("hidden")).toBe(true);
+    });
+
+    it("never offers Raise ceiling for a park with no raise shape, even with the capability on", () => {
+      panel.send(
+        withCapabilities([{ stepId: "3", question: "per-tenant or per-user?" }], {
+          ceilingRaise: true,
+        }),
+      );
+      expect(panel.byId("wf-raise").classList.contains("hidden")).toBe(true);
+    });
+
+    it("offers Raise ceiling only once BOTH the capability and the park's own raise shape agree", () => {
+      panel.send(
+        withCapabilities([{ stepId: "2", question: "q", raise: { kind: "turns", current: 2 } }], {
+          ceilingRaise: true,
+        }),
+      );
+      expect(panel.byId("wf-raise").classList.contains("hidden")).toBe(false);
+    });
+
+    it("sends raiseCeiling with just the run id — the page never collects the number itself", () => {
+      panel.send(
+        withCapabilities([{ stepId: "2", question: "q", raise: { kind: "turns", current: 2 } }], {
+          ceilingRaise: true,
+        }),
+      );
+      panel.byId("wf-raise").dispatch("click");
+      expect(panel.posted.at(-1)).toEqual({ type: "raiseCeiling", runId: "run-1" });
+    });
+
+    it("drops a raise.kind outside the closed pair rather than rendering it", () => {
+      panel.send(
+        withCapabilities([{ stepId: "2", question: "q", raise: { kind: "dollars", current: 2 } }], {
+          ceilingRaise: true,
+        }),
+      );
+      expect(panel.byId("wf-raise").classList.contains("hidden")).toBe(true);
+    });
+  });
 });

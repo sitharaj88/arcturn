@@ -446,6 +446,49 @@ describe("createProtocolClient: authentication", () => {
   });
 });
 
+describe("createProtocolClient: capabilities", () => {
+  it("reads capabilities off the authenticate response", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket, { token: "t" });
+
+    expect(client.capabilities()).toEqual({});
+    const authenticated = client.authenticate();
+    socket.respondOk(0, { authenticated: true, capabilities: { ceilingRaise: true } });
+    await authenticated;
+
+    expect(client.capabilities()).toEqual({ ceilingRaise: true });
+  });
+
+  it("is {} before the handshake settles, and stays {} for a server that predates the field", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket, { token: "t" });
+    expect(client.capabilities()).toEqual({});
+
+    const authenticated = client.authenticate();
+    // An older server's response — no `capabilities` field at all.
+    socket.respondOk(0, { authenticated: true });
+    await authenticated;
+
+    expect(client.capabilities()).toEqual({});
+  });
+
+  it("is {} with no token configured — no authenticate frame is ever sent", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket);
+    await client.authenticate();
+    expect(client.capabilities()).toEqual({});
+  });
+
+  it("drops a malformed capabilities field rather than throwing or trusting it", async () => {
+    const socket = new FakeSocket();
+    const client = createProtocolClient(socket, { token: "t" });
+    const authenticated = client.authenticate();
+    socket.respondOk(0, { authenticated: true, capabilities: { ceilingRaise: "yes" } });
+    await authenticated;
+    expect(client.capabilities()).toEqual({});
+  });
+});
+
 describe("createProtocolClient: events", () => {
   it("fans out events to every listener and honours unsubscribe", () => {
     const socket = new FakeSocket();

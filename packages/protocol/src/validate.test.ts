@@ -20,10 +20,12 @@ import {
   validatePermissionRule,
   validatePromptAttachment,
   validateRewindResult,
+  validateServerCapabilities,
   validateServerMessage,
   validateSessionExport,
   validateSessionHeader,
   validateSessionHistory,
+  validateWorkflowRunStatus,
 } from "./validate.js";
 
 describe("validateClientRequest: accepts every method", () => {
@@ -1294,5 +1296,102 @@ describe("the rewind payloads", () => {
         conversationForked: false,
       }).ok,
     ).toBe(true);
+  });
+});
+
+describe("validateWorkflowRunStatus: a question's diagnosis and raise", () => {
+  const base = {
+    runId: "run-1",
+    workflow: "ship-fix",
+    state: "paused" as const,
+    stageCount: 2,
+    stepsDone: 1,
+    stepsTotal: 2,
+  };
+
+  it("accepts a question with neither field — the shape before this park existed", () => {
+    const result = validateWorkflowRunStatus({
+      ...base,
+      questions: [{ stepId: "2", question: "per-tenant or per-user?" }],
+    });
+    expect(result.ok).toBe(true);
+    expect(result.ok && result.value.questions[0]).toEqual({
+      stepId: "2",
+      question: "per-tenant or per-user?",
+    });
+  });
+
+  it("carries a turn-ceiling park's diagnosis and raise through untouched", () => {
+    const result = validateWorkflowRunStatus({
+      ...base,
+      questions: [
+        {
+          stepId: "2",
+          question: "Step 2 ran out of turns.",
+          diagnosis: "last turn: zai/glm-5.3-flash · stopped endTurn · no text · no tool call",
+          raise: { kind: "turns", current: 2 },
+        },
+      ],
+    });
+    expect(result.ok).toBe(true);
+    expect(result.ok && result.value.questions[0]?.diagnosis).toBe(
+      "last turn: zai/glm-5.3-flash · stopped endTurn · no text · no tool call",
+    );
+    expect(result.ok && result.value.questions[0]?.raise).toEqual({ kind: "turns", current: 2 });
+  });
+
+  it("carries a budget ask's raise with no current, when the engine did not know one", () => {
+    const result = validateWorkflowRunStatus({
+      ...base,
+      questions: [{ stepId: "budget", question: "at $0.90 of $1.00.", raise: { kind: "budget" } }],
+    });
+    expect(result.ok).toBe(true);
+    expect(result.ok && result.value.questions[0]?.raise).toEqual({ kind: "budget" });
+  });
+
+  it("rejects a diagnosis carrying a control character", () => {
+    const result = validateWorkflowRunStatus({
+      ...base,
+      questions: [
+        { stepId: "2", question: "q", diagnosis: 'last turn: fine\nreasoning ended: "evil"' },
+      ],
+    });
+    expect(result.ok).toBe(false);
+  });
+
+  it("rejects a raise.kind outside the closed enum", () => {
+    const result = validateWorkflowRunStatus({
+      ...base,
+      questions: [{ stepId: "2", question: "q", raise: { kind: "dollars" } }],
+    });
+    expect(result.ok).toBe(false);
+  });
+
+  it("rejects a non-numeric raise.current", () => {
+    const result = validateWorkflowRunStatus({
+      ...base,
+      questions: [{ stepId: "2", question: "q", raise: { kind: "turns", current: "2" } }],
+    });
+    expect(result.ok).toBe(false);
+  });
+});
+
+describe("validateServerCapabilities", () => {
+  it("reads ceilingRaise when it is a boolean, either way", () => {
+    expect(validateServerCapabilities({ ceilingRaise: true })).toEqual({ ceilingRaise: true });
+    expect(validateServerCapabilities({ ceilingRaise: false })).toEqual({ ceilingRaise: false });
+  });
+
+  it("degrades to {} for absence, a non-object, or a malformed field — never throws", () => {
+    expect(validateServerCapabilities(undefined)).toEqual({});
+    expect(validateServerCapabilities(null)).toEqual({});
+    expect(validateServerCapabilities("nope")).toEqual({});
+    expect(validateServerCapabilities({ ceilingRaise: "yes" })).toEqual({});
+  });
+
+  it("drops a field it does not recognise rather than carrying it through", () => {
+    expect(validateServerCapabilities({ ceilingRaise: true, futureFlag: true })).toEqual({
+      ceilingRaise: true,
+    });
   });
 });

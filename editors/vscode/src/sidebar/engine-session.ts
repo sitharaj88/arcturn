@@ -30,6 +30,7 @@ import type {
   ModelCatalogEntry,
   ProtocolClient,
   ScoutRun,
+  ServerCapabilities,
   SessionHeader,
   SessionHistory,
   WebSocketLike,
@@ -115,6 +116,16 @@ export interface EngineSession {
   readonly failure: ConnectionReport | undefined;
   /** The open session, or `undefined` while not connected. */
   readonly controller: SessionController | undefined;
+  /**
+   * What this engine advertised on its `authenticate` handshake — e.g.
+   * `{ ceilingRaise: true }` for `arcturn serve --allow-ceiling-raise`.
+   *
+   * `{}` while not connected and for an engine older than the field —
+   * `ProtocolClient.capabilities()`'s own contract, carried through
+   * unchanged. Every property is optional-on-read: a caller that wants one
+   * tests it explicitly (`=== true`) rather than assuming absence means "no".
+   */
+  readonly capabilities: ServerCapabilities;
   /** Start the engine and open a new session. Idempotent; never throws. */
   start(): Promise<void>;
   /** Tear down and start again — what the reconnect card calls. */
@@ -522,6 +533,9 @@ export function createEngineSession(options: EngineSessionOptions): EngineSessio
     },
     get controller(): SessionController | undefined {
       return controller;
+    },
+    get capabilities(): ServerCapabilities {
+      return client?.capabilities() ?? {};
     },
     start,
     async restart(): Promise<void> {

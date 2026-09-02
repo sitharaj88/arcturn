@@ -290,11 +290,13 @@ export function renderSidebarHtml(options: SidebarHtmlOptions): string {
         <p id="wf-run-meta" class="wf-meta"></p>
         <div id="wf-questions" class="wf-questions hidden">
           <p id="wf-question-text" class="wf-question"></p>
+          <p id="wf-diagnosis" class="wf-diagnosis hidden"></p>
           <label class="wf-answer-label" for="wf-answer">Your answer</label>
           <textarea id="wf-answer" class="wf-answer" rows="2"
             aria-label="Answer the workflow's question"></textarea>
           <div class="wf-actions">
             <button id="wf-send-answer" class="wf-button wf-primary" type="button">Answer &amp; resume</button>
+            <button id="wf-raise" class="wf-button hidden" type="button">Raise ceiling&hellip;</button>
           </div>
         </div>
         <p id="wf-note" class="wf-note hidden" role="status" aria-live="polite"></p>

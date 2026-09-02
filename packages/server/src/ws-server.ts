@@ -56,7 +56,7 @@ import {
   okResponse,
   validateClientRequest,
 } from "@arcturn/protocol";
-import type { ClientRequest, ServerMessage } from "@arcturn/types";
+import type { ClientRequest, ServerCapabilities, ServerMessage } from "@arcturn/types";
 import { type RawData, WebSocket, WebSocketServer } from "ws";
 import { type AuthenticateFrame, isAuthenticateFrame, tokensMatch } from "./auth.js";
 import { type SessionHost, SessionHostError } from "./session-host.js";
@@ -78,6 +78,15 @@ export interface ArcturnServerOptions {
    * connections unauthenticated.
    */
   token?: string;
+  /**
+   * Optional behaviour to advertise on the `authenticate` handshake's
+   * response, so a client can learn it without a probe round trip. Omit
+   * (the default) to send no `capabilities` field at all — the byte-identical
+   * response every caller of this constructor got before the field existed;
+   * `arcturn serve` always passes one (computed from its own flags), which is
+   * what actually turns this on.
+   */
+  capabilities?: ServerCapabilities;
   /**
    * Maximum concurrent connections. Past this cap, a new connection is
    * closed with code 1013 ("try again later") before authentication.
@@ -161,6 +170,7 @@ interface ConnectionState {
 export class ArcturnServer {
   readonly #sessionHost: SessionHost;
   readonly #token: string | undefined;
+  readonly #capabilities: ServerCapabilities | undefined;
   readonly #allowedOrigins: readonly string[];
   readonly #maxConnections: number;
   readonly #maxPayloadBytes: number;
@@ -185,6 +195,7 @@ export class ArcturnServer {
   constructor(options: ArcturnServerOptions) {
     this.#sessionHost = options.sessionHost;
     this.#token = options.token;
+    this.#capabilities = options.capabilities;
     this.#allowedOrigins = options.allowedOrigins ?? [];
     this.#maxConnections = options.maxConnections ?? DEFAULT_MAX_CONNECTIONS;
     this.#maxPayloadBytes = options.maxPayloadBytes ?? DEFAULT_MAX_PAYLOAD_BYTES;
@@ -437,7 +448,13 @@ export class ArcturnServer {
       return;
     }
     state.authenticated = true;
-    this.#send(ws, okResponse(frame.id, { authenticated: true }));
+    this.#send(
+      ws,
+      okResponse(frame.id, {
+        authenticated: true,
+        ...(this.#capabilities === undefined ? {} : { capabilities: this.#capabilities }),
+      }),
+    );
   }
 
   async #dispatch(ws: WebSocket, state: ConnectionState, request: ClientRequest): Promise<unknown> {

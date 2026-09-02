@@ -8454,9 +8454,11 @@ export function createWorkflowCommands(
         // and the reply is interpreted by the ENGINE (acknowledge, raise, or
         // re-park with the reason) — never parsed here, which is exactly what
         // keeps "raise 40" typed at a role's ORG-ASK an ordinary answer. This
-        // interactive path is the one origin with raise authority; the serve
-        // path passes `allowBudgetRaise: false` and the wire refuses raises
-        // outright.
+        // interactive path always has raise authority; the serve path passes
+        // `allowBudgetRaise: false` by default and the wire refuses raises
+        // outright, unless the host started `arcturn serve
+        // --allow-ceiling-raise`, in which case it passes `true` and the wire
+        // is the SAME origin, reusing this exact grammar.
         if (state.budgetAsk !== undefined) {
           if (answerText === "") {
             // A bare resume is not consent, exactly as it is not an answer to
@@ -8488,9 +8490,10 @@ export function createWorkflowCommands(
         // reply is interpreted by the ENGINE (retry, abandon, raise, or
         // re-park with the reason) — never parsed here, which is what keeps
         // "retry" typed at a role's ORG-ASK an ordinary answer. This
-        // interactive path is the one origin with raise authority; the serve
-        // path passes `allowBudgetRaise: false` and the wire refuses raises
-        // outright.
+        // interactive path always has raise authority; the serve path passes
+        // `allowBudgetRaise: false` by default and the wire refuses raises
+        // outright, unless the host started `arcturn serve
+        // --allow-ceiling-raise`, in which case it passes `true`.
         if (state.stepFailAsk !== undefined) {
           if (answerText === "") {
             // A bare resume is not a decision to spend again: re-state the

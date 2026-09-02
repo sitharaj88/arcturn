@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { BACKGROUND_COMMANDS, BACKGROUND_VIEW_ID } from "./background/view.js";
@@ -279,5 +279,46 @@ describe("the getting-started walkthrough", () => {
       );
       expect(covered, `${media} is not allowlisted in .vscodeignore`).toBe(true);
     }
+  });
+
+  it("names the actual count of hub kits, counted from registry/*.json rather than typed by hand", () => {
+    // The count that broke last time: "Thirteen" was typed once and the
+    // registry grew past it with nothing to notice. Counting the real
+    // directory is the fix — this assertion fails the moment they drift
+    // again, instead of shipping a walkthrough that undercounts the hub.
+    const registryDir = fileURLToPath(new URL("../../../registry", import.meta.url));
+    const count = readdirSync(registryDir).filter((name) => name.endsWith(".json")).length;
+    const NUMBER_WORDS = [
+      "zero",
+      "one",
+      "two",
+      "three",
+      "four",
+      "five",
+      "six",
+      "seven",
+      "eight",
+      "nine",
+      "ten",
+      "eleven",
+      "twelve",
+      "thirteen",
+      "fourteen",
+      "fifteen",
+      "sixteen",
+      "seventeen",
+      "eighteen",
+      "nineteen",
+      "twenty",
+    ];
+    const word = NUMBER_WORDS[count];
+    expect(
+      word,
+      `no spelled-out word on hand for ${String(count)} — extend NUMBER_WORDS`,
+    ).toBeDefined();
+    const capitalized = `${(word as string)[0]?.toUpperCase()}${(word as string).slice(1)}`;
+    const skillsStep = walkthrough().steps.find((step) => step.id === "skills");
+    expect(skillsStep, 'no walkthrough step named "skills"').toBeDefined();
+    expect(skillsStep?.description).toContain(`${capitalized} of them are on the hub`);
   });
 });

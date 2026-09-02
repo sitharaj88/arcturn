@@ -27,7 +27,12 @@
  *    answer it, and never to summarise it.
  */
 
-import type { WorkflowRoleLane, WorkflowRunStatus, WorkflowSummary } from "../serve/engine.js";
+import type {
+  ServerCapabilities,
+  WorkflowRoleLane,
+  WorkflowRunStatus,
+  WorkflowSummary,
+} from "../serve/engine.js";
 import { escapeCodicons } from "./picker.js";
 
 /** Button: start the pipeline, spending real money. */
@@ -75,12 +80,33 @@ export interface WorkflowOption {
   roles: WorkflowRoleRow[];
 }
 
+/** What a `raise <n>` reply would need to beat, for the ceiling this park is shaped like. */
+export interface WorkflowRaiseInfo {
+  /** `"turns"` for a step that hit a role's `maxTurns`; `"budget"` for a stage-boundary ask. */
+  kind: "turns" | "budget";
+  /** The ceiling in force, in its own unit, when the engine reported one. */
+  current?: number;
+}
+
 /** One `ORG-ASK:` a run is waiting on. */
 export interface WorkflowQuestionRow {
   /** The step that asked. */
   stepId: string;
   /** The question, escaped — it is model-written text heading for a rendered row. */
   question: string;
+  /**
+   * What the failed step's model emitted on its last turn, for a step-failure
+   * park — escaped on `question`'s own terms. Absent for an ordinary
+   * `ORG-ASK` and for a budget ask, which has no "last turn" of its own.
+   */
+  diagnosis?: string;
+  /**
+   * Whether a "Raise ceiling…" action is meaningful for THIS park, and what a
+   * typed number needs to exceed. Presence alone does not mean the engine
+   * will honour one — that is {@link WorkflowView.capabilities}`.ceilingRaise`
+   * — only that this park is the shape a raise applies to.
+   */
+  raise?: WorkflowRaiseInfo;
 }
 
 /** The run the panel is currently following. */
@@ -108,6 +134,13 @@ export interface WorkflowView {
   run?: WorkflowRunRow;
   /** Why the last run or resume did not take, when it did not. Escaped. */
   note?: string;
+  /**
+   * What this engine advertised on its `authenticate` handshake — carried
+   * straight from `EngineSession.capabilities`. `undefined` reads exactly
+   * like `{}`: no capability may be assumed on, so the "Raise ceiling…"
+   * action only ever appears when `ceilingRaise` is explicitly `true`.
+   */
+  capabilities?: ServerCapabilities;
 }
 
 /** The view before anything has been asked. */
@@ -159,6 +192,10 @@ export function projectWorkflowRun(run: WorkflowRunStatus, budgetUsd?: number): 
     questions: run.questions.map((question) => ({
       stepId: question.stepId,
       question: escapeCodicons(question.question),
+      ...(question.diagnosis === undefined
+        ? {}
+        : { diagnosis: escapeCodicons(question.diagnosis) }),
+      ...(question.raise === undefined ? {} : { raise: question.raise }),
     })),
     ...(run.stage === undefined ? {} : { stage: run.stage }),
     ...(run.spentUsd === undefined ? {} : { spentUsd: run.spentUsd }),

@@ -35,6 +35,7 @@ Flags, from `packages/cli/src/args.ts`:
 | `--web-port <n>` | Port for the browser client. Omitted picks one. |
 | `--web-origin <origin>` | Extra browser origin allowed to open the WebSocket. Repeatable. |
 | `--max-cost <usd>` | USD ceiling applied independently to *each* served session. |
+| `--allow-ceiling-raise` | Honour a `resumeWorkflow` answer of `raise <n>` instead of refusing it (see [Workflows](#workflows)). Off by default — a raise spends *your own* money or turns, so this is a host opting in deliberately, not something a client can ask for. |
 
 `arcturn attach ws://host:port [--token ...]` drives a session hosted by another `arcturn
 serve` from a second terminal.
@@ -96,6 +97,27 @@ Anything else as the first frame — a `listSessions` call, a malformed frame, a
 — closes the connection with an error rather than proceeding. A server with no token
 configured (only reachable via an explicit loopback `--token ""`) accepts any first frame
 normally.
+
+### Capabilities
+
+The response also carries a `capabilities` object, so a client can learn optional server
+behaviour without a probe round trip:
+
+```json
+{ "kind": "response", "id": "0", "result": { "authenticated": true, "capabilities": { "ceilingRaise": true } } }
+```
+
+Today's one field is `ceilingRaise` — `true` when this server was started with
+`--allow-ceiling-raise`, `false` otherwise; `@arcturn/protocol`'s `ProtocolClient.capabilities()`
+reads it off the handshake. **Every property is optional-on-read**: absent means "this server
+predates the field" exactly as absent means "not applicable", never "false" — a caller that
+cares tests one explicitly (`=== true`) rather than assuming absence means "no". Extending this
+object is never a `PROTOCOL_VERSION` bump, on the same terms as an optional verb (see
+[Versioning](#versioning)).
+
+Reached only when this client is built with a `token` — the handshake is skipped entirely
+otherwise (see [Starting a server](#starting-a-server) on why a token is generated even on
+loopback), so `capabilities()` reads `{}` until `authenticate()` has settled.
 
 ## Wire protocol
 
@@ -1664,16 +1686,62 @@ raise" would have meant "may lower until somebody resumes".
 
 **The parked run needs a real answer.** When the engine parks a run at its stage-boundary
 budget ask (80% of a ceiling consumed with stages remaining), `resumeWorkflow` accepts
-exactly one reply over the wire: `answer: "continue"`, which acknowledges the checkpoint and
-lets the run continue to the hard stop the file (or the client's own lower cap) set. A bare
-`resumeWorkflow` with no answer is **refused** — the same "an answer, not a nudge" line the
-`ORG-ASK` gate holds, and for the same reason: the acknowledgement is a durable record that
-a person consented, and a client that resumes every stalled run must not be able to mint it.
-An `answer` of `raise <n>` is **refused with an error naming the contract**, not threaded
-through as free text: a run's ceiling cannot be raised over the wire; resume from the
-terminal, or edit the workflow file. The question the wire hands back says so itself — it
-offers `continue` and never advertises `raise`, because a question that tells a client to
-send the one reply it will always be refused for is an instruction to loop.
+exactly one reply over the wire by default: `answer: "continue"`, which acknowledges the
+checkpoint and lets the run continue to the hard stop the file (or the client's own lower
+cap) set. A bare `resumeWorkflow` with no answer is **refused** — the same "an answer, not a
+nudge" line the `ORG-ASK` gate holds, and for the same reason: the acknowledgement is a
+durable record that a person consented, and a client that resumes every stalled run must not
+be able to mint it. An `answer` of `raise <n>` is **refused with an error naming the
+contract**, not threaded through as free text: a run's ceiling cannot be raised over the
+wire; resume from the terminal, or edit the workflow file. The question the wire hands back
+says so itself — it offers `continue` and never advertises `raise`, because a question that
+tells a client to send the one reply it will always be refused for is an instruction to loop.
+
+### `--allow-ceiling-raise`: letting the wire raise a ceiling too
+
+That refusal is the *default*, not an absolute. A server started with `arcturn serve
+--allow-ceiling-raise` threads `answer: "raise <n>"` to the **engine** instead of refusing it
+— the exact parser and the exact validation an interactive terminal's `raise <n>` gets
+(`parseBudgetRaiseAnswer`, positive, exceeds both the ceiling and what is already spent, and,
+for a wire-started run, under the client's own commissioning cap): one grammar, reached from
+two origins, never two. A raise spends **the host's own** money or turns, which is why this
+is off unless the person running `serve` opted in — never something a client can turn on for
+itself.
+
+The question changes to match: with the flag on, a parked run's `question` names `raise <n>`
+as a legal reply (the same sentence the terminal sees), and each pending question carries a
+`raise` field so a client knows *which* parks a raise even applies to, without parsing the
+question's own prose:
+
+```json
+{ "stepId": "2", "question": "Step 2 (@indexer) ran out of turns … reply \"retry\", \"raise <n>\" …", "raise": { "kind": "turns", "current": 2 } }
+{ "stepId": "budget", "question": "Paused at a budget checkpoint … reply \"continue\" or \"raise <n>\" …", "raise": { "kind": "budget", "current": 1 } }
+```
+
+`raise.kind` is `"turns"` for a step that hit a role's `maxTurns`, `"budget"` for a
+stage-boundary ask (dollars or tokens — the unit a client renders is the same one already in
+the question's own prose); `current` is the ceiling in force, when the engine knows it, so a
+client can validate a typed number locally before spending a round trip on a refusal.
+**Presence of `raise` does not by itself mean a raise will be honoured** — that is
+`capabilities.ceilingRaise`, a property of the *server*; `raise` only says this specific park
+is the shape a raise applies to. Absent on both counts for an ordinary `ORG-ASK`, and absent
+entirely from a server that predates the field.
+
+A parked *step* additionally carries `diagnosis` — what the failed step's model actually
+emitted on its last turn, one line, capped at 240 characters:
+
+```json
+{ "stepId": "2", "question": "…", "diagnosis": "last turn: zai/glm-5.3-flash · stopped endTurn · thinking 69,786 chars · no text · no tool call", "raise": { "kind": "turns", "current": 2 } }
+```
+
+This is the same fact a terminal park prints under the question — `describeLastTurn()`'s
+first line, sanitized on the terms `question` itself is — and it is what turns "step 2
+produced nothing" into "the model reasoned for 70,000 characters, wrote nothing, and hit its
+turn ceiling before finishing", without a person opening the session's JSONL to find out. It
+rides on every `workflowStatus` answer, independent of `--allow-ceiling-raise`: a client with
+no raise capability still gets to explain the park, it just has nothing to offer for fixing
+it. Absent for a budget ask, which has no "last turn" of its own — it fires at a stage
+boundary, never on a step's failure.
 
 ### Following a run: no second channel
 

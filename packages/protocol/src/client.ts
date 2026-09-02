@@ -60,6 +60,7 @@ import type {
   RewindResult,
   ScoutRun,
   ScoutStarted,
+  ServerCapabilities,
   SessionExport,
   SessionHeader,
   SessionHistory,
@@ -90,6 +91,7 @@ import {
   validatePendingChanges,
   validatePermissionState,
   validateRewindResult,
+  validateServerCapabilities,
   validateServerMessage,
   validateSessionExport,
   validateSessionHeader,
@@ -308,6 +310,21 @@ export interface ProtocolClient {
    * construction so the `authenticate` frame is always the first frame sent.
    */
   authenticate(): Promise<void>;
+  /**
+   * Optional behaviour this server advertised on the `authenticate`
+   * handshake — e.g. `{ ceilingRaise: true }` for `arcturn serve
+   * --allow-ceiling-raise`.
+   *
+   * `{}` in three cases a caller does not need to tell apart: the handshake
+   * has not settled yet, this client was built with no `token` (so no
+   * `authenticate` frame is ever sent — see {@link ProtocolClient.authenticate}),
+   * or the server predates this field. Every property is therefore
+   * optional-on-read; test one explicitly (`=== true`) rather than assuming
+   * absence means "no". Call {@link ProtocolClient.authenticate} first (or any
+   * other verb, which awaits the same handshake) if the caller cares about a
+   * fresh answer rather than whatever raced the socket open.
+   */
+  capabilities(): ServerCapabilities;
   /** List every session the server knows about. */
   listSessions(): Promise<SessionHeader[]>;
   /** Create a new session and return its header. */
@@ -1129,6 +1146,8 @@ class ProtocolClientImpl implements ProtocolClient {
   #closed = false;
   #closeCalled = false;
   #handshake: Promise<void> | undefined;
+  /** See {@link ProtocolClient.capabilities}. Set once, by `#performHandshake`. */
+  #capabilities: ServerCapabilities = {};
   /** Memoized answer to "does this engine know RFC 0005's context verbs?". */
   #contextSupport: Promise<ContextSupport> | undefined;
 
@@ -1166,6 +1185,10 @@ class ProtocolClientImpl implements ProtocolClient {
     if (this.#token === undefined) return Promise.resolve();
     this.#handshake ??= this.#performHandshake(this.#token);
     return this.#handshake;
+  }
+
+  capabilities(): ServerCapabilities {
+    return this.#capabilities;
   }
 
   async listSessions(): Promise<SessionHeader[]> {
@@ -1907,6 +1930,13 @@ class ProtocolClientImpl implements ProtocolClient {
     assertCompatibleVersion(
       isRecord(result) ? result.protocolVersion : undefined,
       "authenticate response",
+    );
+    // Validated rather than trusted verbatim, on `validateServerCapabilities`'s
+    // own terms: a malformed `capabilities` degrades to `{}` — "predates the
+    // field" — rather than failing a handshake over one advertisement neither
+    // side is required to agree on.
+    this.#capabilities = validateServerCapabilities(
+      isRecord(result) ? result.capabilities : undefined,
     );
   }
 

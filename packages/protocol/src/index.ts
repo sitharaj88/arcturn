@@ -1,6 +1,6 @@
 /** @arcturn/protocol — NDJSON wire-protocol framing and validation for Arcturn server mode. */
 
-export { PROTOCOL_VERSION } from "@arcturn/types";
+export { PROTOCOL_VERSION, type ServerCapabilities } from "@arcturn/types";
 export {
   ClientErrorCode,
   createProtocolClient,
@@ -72,6 +72,7 @@ export {
   validatePermissionState,
   validatePromptAttachment,
   validateRewindResult,
+  validateServerCapabilities,
   validateServerMessage,
   validateSessionExport,
   validateSessionHeader,

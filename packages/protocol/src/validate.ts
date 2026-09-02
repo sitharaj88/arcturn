@@ -50,6 +50,7 @@ import type {
   PromptAttachmentKind,
   RewindFailure,
   RewindResult,
+  ServerCapabilities,
   ServerMessage,
   SessionExport,
   SessionHeader,
@@ -2793,7 +2794,48 @@ export function validateWorkflowRunStatus(value: unknown): ValidationResult<Work
         `WorkflowRunStatus.questions[${String(i)}].question must not contain control characters`,
       );
     }
-    questions.push({ stepId: entry.stepId, question: entry.question });
+    let diagnosis: string | undefined;
+    if (entry.diagnosis !== undefined) {
+      if (!isString(entry.diagnosis)) {
+        return fail(
+          `WorkflowRunStatus.questions[${String(i)}].diagnosis must be a string when present`,
+        );
+      }
+      if (hasControlCharacter(entry.diagnosis)) {
+        return fail(
+          `WorkflowRunStatus.questions[${String(i)}].diagnosis must not contain control characters`,
+        );
+      }
+      diagnosis = entry.diagnosis;
+    }
+    let raise: { kind: "turns" | "budget"; current?: number } | undefined;
+    if (entry.raise !== undefined) {
+      if (!isRecord(entry.raise)) {
+        return fail(
+          `WorkflowRunStatus.questions[${String(i)}].raise must be an object when present`,
+        );
+      }
+      if (entry.raise.kind !== "turns" && entry.raise.kind !== "budget") {
+        return fail(
+          `WorkflowRunStatus.questions[${String(i)}].raise.kind must be "turns" or "budget"`,
+        );
+      }
+      if (entry.raise.current !== undefined && !isNumber(entry.raise.current)) {
+        return fail(
+          `WorkflowRunStatus.questions[${String(i)}].raise.current must be a number when present`,
+        );
+      }
+      raise = {
+        kind: entry.raise.kind,
+        ...(entry.raise.current === undefined ? {} : { current: entry.raise.current as number }),
+      };
+    }
+    questions.push({
+      stepId: entry.stepId,
+      question: entry.question,
+      ...(diagnosis === undefined ? {} : { diagnosis }),
+      ...(raise === undefined ? {} : { raise }),
+    });
   }
   let steps: WorkflowRunStepStatus[] | undefined;
   if (value.steps !== undefined) {
@@ -2839,6 +2881,26 @@ export function validateWorkflowRuns(value: unknown): ValidationResult<WorkflowR
     runs.push(entry.value);
   }
   return { ok: true, value: { runs } };
+}
+
+/**
+ * Validate the `capabilities` object an `authenticate` response may carry.
+ *
+ * Deliberately lenient rather than exhaustive, the way a capability object
+ * has to be: every field is optional, an unrecognised field is dropped rather
+ * than refused (a server ahead of this client may have added one), and a
+ * `capabilities` that is present but malformed degrades to `{}` — the same
+ * "predates the field" reading an absent object gets — rather than failing
+ * the whole handshake over one advertisement neither side needs to agree on.
+ *
+ * @param value - The `capabilities` field of an `authenticate` response, or
+ *   `undefined` when the server sent none.
+ */
+export function validateServerCapabilities(value: unknown): ServerCapabilities {
+  if (!isRecord(value)) return {};
+  const capabilities: ServerCapabilities = {};
+  if (typeof value.ceilingRaise === "boolean") capabilities.ceilingRaise = value.ceilingRaise;
+  return capabilities;
 }
 
 /** An array of non-empty strings, rebuilt element by element. */

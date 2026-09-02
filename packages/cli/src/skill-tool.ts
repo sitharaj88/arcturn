@@ -120,16 +120,21 @@ const INDEX_MAX_TOTAL_CHARS = 24_000;
  * same untrusted markdown from the same attacker-controlled file, and there is
  * no good reason for two sanitizers to exist and drift. See
  * `serve-commands.ts` for the one difference in treatment, and why.
+ *
+ * `maxChars` defaults to {@link INDEX_LINE_MAX_CHARS} — the skill index's own
+ * budget — but is a parameter rather than a second copy of this function: a
+ * parked run's `diagnosis` (`serve-workflows.ts`) is read once, at a park, not
+ * embedded on every request the way the skill index is, so it earns a wider
+ * cap while going through the exact same first-line/control-char/truncate
+ * discipline.
  */
 // biome-ignore lint/suspicious/noControlCharactersInRegex: collapsing control chars to spaces is the point.
 const CONTROL_CHARS = /[\u0000-\u001F\u007F]/g;
 
-export function sanitizeDescription(raw: string): string {
+export function sanitizeDescription(raw: string, maxChars: number = INDEX_LINE_MAX_CHARS): string {
   const firstLine = raw.split(/\r?\n/, 1)[0] ?? "";
   const cleaned = firstLine.replace(CONTROL_CHARS, " ").replace(/\s+/g, " ").trim();
-  return cleaned.length > INDEX_LINE_MAX_CHARS
-    ? `${cleaned.slice(0, INDEX_LINE_MAX_CHARS - 1)}…`
-    : cleaned;
+  return cleaned.length > maxChars ? `${cleaned.slice(0, maxChars - 1)}…` : cleaned;
 }
 
 /**

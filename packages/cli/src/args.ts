@@ -215,6 +215,13 @@ export interface CliArgs {
   port?: number;
   /** `--token`: shared secret for `arcturn serve`. */
   token?: string;
+  /**
+   * `--allow-ceiling-raise`: with `arcturn serve`, honour a wire
+   * `resumeWorkflow` answer of `raise <n>` instead of refusing it. Off by
+   * default — a raise spends the operator's own money or turns, so this is a
+   * host opting in deliberately, not a client asking for it.
+   */
+  allowCeilingRaise?: boolean;
   /** `--web`: also serve the browser client alongside `arcturn serve`. */
   web?: boolean;
   /** `--web-port`: port for the browser client (0 or omitted picks one). */
@@ -814,6 +821,9 @@ export function parseArgs(
         args.port = port;
         break;
       }
+      case "--allow-ceiling-raise":
+        args.allowCeilingRaise = true;
+        break;
       case "--web":
         args.web = true;
         break;
@@ -1061,6 +1071,9 @@ Options
       --host <iface>            With serve: interface to bind (default 127.0.0.1).
       --port <n>                With serve: port to bind (default 7717).
       --token <secret>          With serve: shared auth token (generated if omitted).
+      --allow-ceiling-raise     With serve: honour a wire "raise <n>" reply instead of
+                                refusing it. A raise spends YOUR money or turns — off
+                                unless you opt in.
       --cassette <file>         With bisect: the VCR recording to compare against.
       --record <file>           Record this run's model and tool calls to a cassette,
                                 so "arcturn bisect --cassette <file>" has one to read.
