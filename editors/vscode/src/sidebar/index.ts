@@ -322,6 +322,9 @@ export function activateSidebar(
         case "resumeWorkflow":
           void resumeWorkflow(message.runId, message.answer);
           return;
+        case "raiseCeiling":
+          void raiseCeiling(message.runId);
+          return;
         case "rewindTo":
           void rewindTo(message.checkpointId, message.confirmation);
           return;
@@ -1317,6 +1320,10 @@ export function activateSidebar(
       workflows: workflowCatalog ?? [],
       ...(workflowRunRow === undefined ? {} : { run: workflowRunRow }),
       ...(note === undefined ? {} : { note }),
+      // Carried straight from the engine session — `{}` while not connected,
+      // which the page reads exactly like an engine that predates the field:
+      // no capability may be assumed on.
+      ...(engine === undefined ? {} : { capabilities: engine.capabilities }),
     };
     provider.postWorkflows(view);
     if (view.status !== "loading") return;
@@ -1458,6 +1465,53 @@ export function activateSidebar(
     } catch (error) {
       await publishWorkflows(workflowRefusal(error, "resume"));
     }
+  }
+
+  /**
+   * Collect a new ceiling and resume the parked run with it.
+   *
+   * The number is collected HERE, natively — never in the webview, which has
+   * no `showInputBox` and, more to the point, must not be the surface that
+   * decides to spend the operator's own money or turns. `startWorkflow`'s
+   * native-modal rule applies again: a page control is not a decision, a
+   * native dialog is.
+   *
+   * Both preconditions are re-checked against the engine's and the run's OWN
+   * current state rather than trusted from the click that sent this message —
+   * the page already gated the button on them, but a stale row (the panel
+   * reopened, the run answered itself, the engine reconnected without the
+   * capability) must not send a raise nobody asked for and nothing can act on.
+   */
+  async function raiseCeiling(runId: string): Promise<void> {
+    if (engine?.capabilities.ceilingRaise !== true) return;
+    const run = workflowRunRow;
+    if (run === undefined || run.runId !== runId) return;
+    const raise = run.questions.find((question) => question.raise !== undefined)?.raise;
+    if (raise === undefined) return;
+    const current = raise.current;
+    const noun = raise.kind === "turns" ? "turn" : "budget";
+    const value = await vscode.window.showInputBox({
+      title: "Raise ceiling",
+      prompt:
+        current === undefined
+          ? `New ${noun} ceiling for this run`
+          : `New ${noun} ceiling for this run — currently ${String(current)}`,
+      placeHolder:
+        current === undefined ? "e.g. 200" : `a whole number greater than ${String(current)}`,
+      ignoreFocusOut: true,
+      validateInput: (text) => {
+        const trimmed = text.trim();
+        if (!/^\d+$/.test(trimmed)) return "Enter a positive whole number.";
+        const parsed = Number(trimmed);
+        if (!Number.isSafeInteger(parsed) || parsed <= 0) return "Enter a positive whole number.";
+        if (current !== undefined && parsed <= current) {
+          return `Must be greater than the current ceiling (${String(current)}).`;
+        }
+        return undefined;
+      },
+    });
+    if (value === undefined) return;
+    await resumeWorkflow(runId, `raise ${value.trim()}`);
   }
 
   /**

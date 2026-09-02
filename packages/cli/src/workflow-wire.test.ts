@@ -76,13 +76,22 @@ async function writeRole(scratch: Scratch, name: string, body: string): Promise<
 async function serve(
   scratch: Scratch,
   turns: readonly ScriptedTurn[] = [{ text: "step output" }],
+  options: { allowCeilingRaise?: boolean; token?: string } = {},
 ): Promise<Harness> {
   const runtime = await buildTestRuntime(scratch, turns, { permissionMode: "yolo" });
   runtimes.push(runtime);
-  const server = new ArcturnServer({ sessionHost: createServeHost(runtime) });
+  const server = new ArcturnServer({
+    sessionHost: createServeHost(runtime, {
+      allowCeilingRaise: options.allowCeilingRaise === true,
+    }),
+    ...(options.token === undefined ? {} : { token: options.token }),
+    capabilities: { ceilingRaise: options.allowCeilingRaise === true },
+  });
   servers.push(server);
   const port = await server.start({ host: "127.0.0.1", port: 0 });
-  const client = createProtocolClient(new WebSocket(`ws://127.0.0.1:${port}`));
+  const client = createProtocolClient(new WebSocket(`ws://127.0.0.1:${port}`), {
+    ...(options.token === undefined ? {} : { token: options.token }),
+  });
   closers.push(() => client.close());
   const events: AgentEvent[] = [];
   client.onEvent((_id, event) => events.push(event));
@@ -515,6 +524,14 @@ describe("the step-failure park over the wire", () => {
     expect(parked.questions).toHaveLength(1);
     expect(parked.questions[0]?.stepId).toBe("2");
     expect(parked.questions[0]?.question).toContain("ran out of turns");
+    // The diagnosis and raise metadata land on the wire regardless of whether
+    // this server allows a raise — only the ANSWER is gated by the flag. A
+    // client with no ceiling-raise capability still gets to render "what did
+    // the model do" and "there is a ceiling here", it just has nothing to
+    // offer for the second one.
+    expect(parked.questions[0]?.diagnosis).toContain("tool calls: grep");
+    expect(parked.questions[0]?.diagnosis).toContain("no text");
+    expect(parked.questions[0]?.raise).toEqual({ kind: "turns", current: 2 });
     // The wire is never told to send the one reply it will only be refused for.
     expect(parked.questions[0]?.question).not.toContain("raise <n>");
     expect(parked.questions[0]?.question).toContain('Reply "retry"');
@@ -599,6 +616,11 @@ describe("the stage-boundary budget ask over the wire", () => {
     expect(parked.questions).toHaveLength(1);
     expect(parked.questions[0]?.stepId).toBe("budget");
     expect(parked.questions[0]?.question).toContain("$0.90 of its $1.00 run budget");
+    // A budget ask has no "last turn" of its own — it fires at a stage
+    // boundary, not on a step's failure — so it carries no `diagnosis`, only
+    // the `raise` shape a client needs to know a raise would apply here.
+    expect(parked.questions[0]?.diagnosis).toBeUndefined();
+    expect(parked.questions[0]?.raise).toEqual({ kind: "budget", current: 1 });
     // FAIL-FIRST: the question told every reader to `raise <new-limit>` — the
     // one reply this origin is forbidden to send. An automation that followed
     // its own question's instructions looped on refusals forever.
@@ -694,6 +716,130 @@ describe("the stage-boundary budget ask over the wire", () => {
       true,
     );
     expect(harness.notices().some((line) => line.includes("$1.00 run budget"))).toBe(false);
+  });
+});
+
+describe("--allow-ceiling-raise: the host may let the wire raise a ceiling", () => {
+  /** A read-lane role with a two-turn ceiling, and a workflow that uses it. */
+  async function ragFixture(scratch: Scratch): Promise<void> {
+    await writeRole(
+      scratch,
+      "indexer",
+      "---\nname: indexer\ndescription: Builds indexes\ntools: read, grep\nmaxTurns: 2\n---\nIndex.\n",
+    );
+    await writeWorkflow(
+      scratch,
+      "rag",
+      ["---", "name: rag", "---", "1. First: {{input}}", "2. @indexer Index: {{prev}}", ""].join(
+        "\n",
+      ),
+    );
+  }
+
+  const looping = { toolCalls: [{ id: "c", name: "grep", arguments: { pattern: "x" } }] };
+
+  it("honours raise <n> on a turn-ceiling park, and retries the step under the new ceiling", async () => {
+    const scratch = await makeScratch();
+    await ragFixture(scratch);
+    // Same script as the terminal-only "accepts retry" test — the fourth turn
+    // is what proves the raise itself continued the step rather than merely
+    // being accepted and then doing nothing.
+    const harness = await serve(
+      scratch,
+      [{ text: "the survey" }, looping, looping, { text: "indexed" }],
+      { allowCeilingRaise: true },
+    );
+
+    const handle = await harness.client.runWorkflow(harness.sessionId, "rag", { input: "go" });
+    const parked = await settled(harness.client, handle.runId);
+    expect(parked.state).toBe("paused");
+    expect(parked.questions[0]?.raise).toEqual({ kind: "turns", current: 2 });
+
+    // Where the default-off wire refuses this outright, a server started with
+    // the flag threads it to the ENGINE — the exact parser and the exact
+    // validation a terminal `raise <n>` gets (`parseBudgetRaiseAnswer`, the
+    // "must exceed the ceiling that just tripped" check, and so on).
+    const raised = await harness.client.resumeWorkflow(harness.sessionId, handle.runId, "raise 5");
+    expect(raised).toMatchObject({ runId: handle.runId, resumed: true });
+
+    const finished = await settled(harness.client, handle.runId, (state) => state === "done");
+    expect(finished.state).toBe("done");
+    const steps = (await harness.client.workflowStatus(handle.runId, { steps: true }))?.runs[0]
+      ?.steps;
+    expect(steps?.find((step) => step.id === "1")?.status).toBe("done");
+    expect(steps?.find((step) => step.id === "2")?.status).toBe("done");
+  });
+
+  it("still refuses a raise that does not exceed the ceiling that tripped, naming the number", async () => {
+    const scratch = await makeScratch();
+    await ragFixture(scratch);
+    const harness = await serve(scratch, [{ text: "the survey" }, looping, looping], {
+      allowCeilingRaise: true,
+    });
+    const handle = await harness.client.runWorkflow(harness.sessionId, "rag", { input: "go" });
+    await settled(harness.client, handle.runId);
+
+    // The engine's own validation still applies — allowing the wire to raise
+    // does not mean allowing it to raise to anything. The reply is ACCEPTED
+    // (the resume is not rejected — nothing on this wire is refused just for
+    // being raise-shaped once the flag is on), but nothing is spent and
+    // nothing advances: the engine re-parks on the same durable ask, exactly
+    // as an insufficient `raise <n>` re-parks a terminal run.
+    const reparked = await harness.client.resumeWorkflow(
+      harness.sessionId,
+      handle.runId,
+      "raise 2",
+    );
+    expect(reparked).toMatchObject({ runId: handle.runId, resumed: true });
+    const still = await settled(harness.client, handle.runId);
+    expect(still.state).toBe("paused");
+    expect(still.questions[0]?.stepId).toBe("2");
+    expect(still.questions[0]?.raise).toEqual({ kind: "turns", current: 2 });
+  });
+
+  it("honours raise <n> on a stage-boundary budget ask, and the raised ceiling is what actually binds", async () => {
+    const scratch = await makeScratch();
+    await writeWorkflow(
+      scratch,
+      "asky2",
+      [
+        "---",
+        "name: asky2",
+        "budgetUsd: 1",
+        "---",
+        "1. First: {{input}}",
+        "2. Second: {{prev}}",
+        "",
+      ].join("\n"),
+    );
+    const harness = await serve(scratch, [{ text: "pricey output", usage: { costUsd: 0.9 } }], {
+      allowCeilingRaise: true,
+    });
+
+    const handle = await harness.client.runWorkflow(harness.sessionId, "asky2", { input: "go" });
+    const parked = await settled(harness.client, handle.runId);
+    expect(parked.state).toBe("paused");
+    expect(parked.questions[0]?.raise).toEqual({ kind: "budget", current: 1 });
+
+    const raised = await harness.client.resumeWorkflow(harness.sessionId, handle.runId, "raise 5");
+    expect(raised).toMatchObject({ runId: handle.runId, resumed: true });
+
+    // Stage 2 spends another $0.90 — $1.80 total, over the FILE's original
+    // $1.00 but comfortably under the $5.00 the wire just raised it to.
+    const done = await settled(harness.client, handle.runId, (state) => state === "done");
+    expect(done.state).toBe("done");
+    expect(harness.notices().some((line) => line.includes("exceeded its"))).toBe(false);
+  });
+
+  it("advertises the capability on the authenticate handshake, on and off", async () => {
+    const scratch = await makeScratch();
+    const allowed = await serve(scratch, undefined, { allowCeilingRaise: true, token: "t" });
+    await allowed.client.authenticate();
+    expect(allowed.client.capabilities()).toEqual({ ceilingRaise: true });
+
+    const refused = await serve(scratch, undefined, { allowCeilingRaise: false, token: "t2" });
+    await refused.client.authenticate();
+    expect(refused.client.capabilities()).toEqual({ ceilingRaise: false });
   });
 });
 

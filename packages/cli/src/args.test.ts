@@ -103,6 +103,11 @@ describe("parseArgs", () => {
     expect(ok(["--list-providers"]).listProviders).toBe(true);
     expect(ok([]).listProviders).toBe(false);
   });
+
+  it("parses --allow-ceiling-raise, off unless named", () => {
+    expect(ok(["serve", "--allow-ceiling-raise"]).allowCeilingRaise).toBe(true);
+    expect(ok(["serve"]).allowCeilingRaise).toBeUndefined();
+  });
 });
 
 describe("parseArgs: positional commands", () => {
@@ -188,6 +193,7 @@ describe("helpText", () => {
       "--list-providers",
       "--help",
       "--version",
+      "--allow-ceiling-raise",
     ]) {
       expect(help).toContain(flag);
     }

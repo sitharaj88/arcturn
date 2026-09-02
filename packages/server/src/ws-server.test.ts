@@ -341,6 +341,33 @@ describe("ArcturnServer end-to-end", () => {
     });
   });
 
+  it("advertises capabilities on the authenticate response when the constructor was given some", async () => {
+    const host = buildSessionHost(createScriptedLLM([textTurn("hi")]));
+    const { url } = await startServer(host, "s3cr3t", {
+      capabilities: { ceilingRaise: true },
+    });
+    const ws = await connect(url);
+    const messages = collectMessages(ws);
+    send(ws, { id: "auth", method: "authenticate", params: { token: "s3cr3t" } });
+    await waitFor(messages, (m) => responseFor(m, "auth") !== undefined);
+    expect(responseFor(messages, "auth")).toMatchObject({
+      kind: "response",
+      id: "auth",
+      result: { authenticated: true, capabilities: { ceilingRaise: true } },
+    });
+  });
+
+  it("sends no capabilities field at all when the constructor was given none — byte-identical to before the field existed", async () => {
+    const host = buildSessionHost(createScriptedLLM([textTurn("hi")]));
+    const { url } = await startServer(host, "s3cr3t");
+    const ws = await connect(url);
+    const messages = collectMessages(ws);
+    send(ws, { id: "auth", method: "authenticate", params: { token: "s3cr3t" } });
+    await waitFor(messages, (m) => responseFor(m, "auth") !== undefined);
+    const response = responseFor(messages, "auth") as { result: Record<string, unknown> };
+    expect(response.result).toEqual({ authenticated: true });
+  });
+
   it("closes a connection that sends a non-auth frame before authenticating", async () => {
     const host = buildSessionHost(createScriptedLLM([textTurn("hi")]));
     const { url } = await startServer(host, "s3cr3t");

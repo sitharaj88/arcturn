@@ -2,7 +2,7 @@
   "name": "arcturn-vscode",
   "displayName": "Arcturn",
   "description": "The Arcturn coding agent in VS Code \u2014 terminal integration, native sidebar, and honest cost accounting, all driven by the same engine as the CLI.",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "publisher": "arcturn",
   "license": "Apache-2.0",
@@ -571,7 +571,7 @@
           {
             "id": "skills",
             "title": "Teach it your work",
-            "description": "Kits are roles and workflows kept as files you can read and version. Thirteen of them are on the hub.\n[Browse the hub](https://arcturn.dev/hub)",
+            "description": "Kits are roles and workflows kept as files you can read and version. Fourteen of them are on the hub.\n[Browse the hub](https://arcturn.dev/hub)",
             "media": {
               "markdown": "media/walkthrough/skills.md"
             },

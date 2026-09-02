@@ -680,6 +680,22 @@ export type WebviewMessage =
    */
   | { type: "resumeWorkflow"; runId: string; answer?: string }
   /**
+   * Ask the host to prompt for a new ceiling and resume the run with it.
+   *
+   * The page never collects the number itself — a webview has no
+   * `showInputBox`, and this is the one control on the workflow surface that
+   * spends the *operator's own* money or turns, so the same native-modal
+   * discipline `runWorkflow`'s confirmation follows applies here: the host
+   * asks, validates (a positive integer greater than the pending park's own
+   * `current`, when known), and only then sends `resumeWorkflow` with
+   * `answer: "raise <n>"` — reusing that verb rather than adding a second one,
+   * because a raise is exactly an answer to the park in question. Offered by
+   * the page only when the engine's `capabilities.ceilingRaise` is `true`
+   * *and* the run's pending question carries a `raise` shape — this message
+   * makes neither claim itself, so the host does not have to trust it.
+   */
+  | { type: "raiseCeiling"; runId: string }
+  /**
    * Restore files to a checkpoint and fork the conversation. **Irreversible.**
    *
    * The host confirms with a native modal naming the file count and the files
@@ -851,6 +867,14 @@ export function parseWebviewMessage(value: unknown): WebviewMessage | undefined 
       if (typeof answer !== "string") return undefined;
       if (answer.length > MAX_WORKFLOW_INPUT_LENGTH) return undefined;
       return { type: "resumeWorkflow", runId, answer };
+    }
+    case "raiseCeiling": {
+      const rawId = value.runId;
+      if (typeof rawId !== "string") return undefined;
+      const runId = rawId.trim();
+      if (runId === "" || runId.length > MAX_WORKFLOW_RUN_ID_LENGTH) return undefined;
+      if (hasControlCharacter(runId)) return undefined;
+      return { type: "raiseCeiling", runId };
     }
     case "discardChanges":
       // No payload: the *whole* pending set, which is what the card's Discard

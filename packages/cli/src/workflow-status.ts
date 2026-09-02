@@ -32,6 +32,7 @@ import {
   describeActivity,
   describeLastTurn,
   type JournalLine,
+  type PendingBudgetAsk,
   type PendingStepFailAsk,
   readJournalLines,
   stepFailAskFacts,
@@ -121,6 +122,17 @@ export interface JournalRun {
    * engine will refuse is an instruction to loop.
    */
   parkedStep?: PendingStepFailAsk;
+  /**
+   * The stage-boundary budget ask this run is holding, when one is pending.
+   *
+   * {@link parkedStep}'s twin for the other park a wire client may want to
+   * offer a raise for: kept on the fold rather than re-derived from the
+   * question text, on the same grounds — a client that knows a raise is
+   * meaningful for this park (`serve-workflows.ts`'s `WorkflowRunQuestion.raise`)
+   * needs the ceiling in force, and the question string alone does not carry
+   * that back out as a number.
+   */
+  budgetAsk?: PendingBudgetAsk;
   /** Wall clock of the newest journal line — the staleness signal. */
   lastWriteTs?: number;
 }
@@ -320,6 +332,7 @@ export function foldJournal(
         const facts = budgetAskFacts(line);
         if (facts !== undefined) {
           askedCeiling = facts.ceiling;
+          run.budgetAsk = facts;
           pending.set(BUDGET_ASK_STEP_ID, budgetAskQuestion(facts, audience));
         }
         bumpWrite(run, line.ts);
@@ -334,6 +347,7 @@ export function foldJournal(
         if (askedCeiling !== undefined && askedCeiling === line.ceiling) {
           pending.delete(BUDGET_ASK_STEP_ID);
           askedCeiling = undefined;
+          run.budgetAsk = undefined;
         }
         bumpWrite(run, line.ts);
         break;

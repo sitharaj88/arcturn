@@ -95,10 +95,12 @@ import {
 } from "./workflow.js";
 import {
   BUDGET_ACK_ANSWER,
+  BUDGET_ASK_STEP_ID,
   type BudgetAskAudience,
   budgetAskQuestion,
   buildResumeState,
   createFileRunJournal,
+  describeLastTurn,
   type JournalLine,
   RUN_JOURNAL_SCHEMA_VERSION,
   readJournalLines,
@@ -154,6 +156,20 @@ export interface ServeWorkflowOptions {
   discover?: typeof discoverWorkflows;
   /** Clock injection, for tests. */
   now?: () => number;
+  /**
+   * `arcturn serve --allow-ceiling-raise`. Off by default, on the seam's own
+   * contract: nothing on the wire may raise a ceiling unless the host running
+   * `serve` opted in deliberately, because a raise spends the operator's own
+   * money or turns.
+   *
+   * ONE flag, threaded to every place the contract has a say — `runWorkflow`'s
+   * engine call gets it as `allowBudgetRaise`, which decides both whether a
+   * `raise <n>` reply is honoured and how the budget/step-failure questions are
+   * *worded* (never advertise a reply this origin will only be refused for);
+   * `resume`'s own pre-flight refusal is gated by the same flag, so the two can
+   * never disagree about what this server allows.
+   */
+  allowBudgetRaise?: boolean;
 }
 
 /**
@@ -332,6 +348,61 @@ export function resolveRunBudget(
   return { ok: true, value: requested };
 }
 
+/**
+ * How much of a parked step's `describeLastTurn()` reaches a wire client.
+ *
+ * Wider than {@link INDEX_LINE_MAX_CHARS} on purpose: a diagnosis is read once,
+ * at a park, by a person deciding whether to retry or raise a ceiling — not
+ * embedded in a prompt on every request the way a skill index line is. Still
+ * one line, on `sanitizeDescription`'s own terms: `describeLastTurn` writes a
+ * second line only when the turn was silent, and that reasoning-tail line is
+ * exactly what a first-line cap is for dropping — the facts line survives, the
+ * scrubbed reasoning excerpt does not travel over the wire at all.
+ */
+const DIAGNOSIS_MAX_CHARS = 240;
+
+/**
+ * What a client needs to know beyond the question's own text: whether the
+ * failed step left a diagnosis, and whether a `raise <n>` reply would be
+ * meaningful for this specific park.
+ *
+ * `stepId` distinguishes the two shapes a pending question can be, on the
+ * fold's own terms (`workflow-status.ts`): the step-failure park is keyed by
+ * the step that failed, and the stage-boundary budget ask is always keyed by
+ * {@link BUDGET_ASK_STEP_ID}. A step id matching neither — an ordinary
+ * `ORG-ASK` — gets neither field, because neither applies.
+ *
+ * @param run - The folded journal, for its `parkedStep`/`budgetAsk` facts.
+ * @param stepId - The question's own step id.
+ */
+function questionExtras(
+  run: JournalRun,
+  stepId: string,
+): Pick<WorkflowRunStatus["questions"][number], "diagnosis" | "raise"> {
+  if (run.parkedStep !== undefined && run.parkedStep.stepId === stepId) {
+    const ask = run.parkedStep;
+    const diagnosis =
+      ask.lastTurn === undefined
+        ? undefined
+        : sanitizeDescription(describeLastTurn(ask.lastTurn), DIAGNOSIS_MAX_CHARS);
+    return {
+      ...(diagnosis === undefined ? {} : { diagnosis }),
+      ...(ask.failureKind === "turn-ceiling"
+        ? {
+            raise: {
+              kind: "turns" as const,
+              ...(ask.ceiling === undefined ? {} : { current: ask.ceiling }),
+            },
+          }
+        : {}),
+    };
+  }
+  if (stepId === BUDGET_ASK_STEP_ID && run.budgetAsk !== undefined) {
+    return { raise: { kind: "budget" as const, current: run.budgetAsk.limit } };
+  }
+  return {};
+}
+
 /** Project a folded journal run into its wire row. */
 export function runStatus(run: JournalRun, now: number, withSteps: boolean): WorkflowRunStatus {
   const summary = summariseRun(run, now);
@@ -365,6 +436,7 @@ export function runStatus(run: JournalRun, now: number, withSteps: boolean): Wor
     questions: run.pendingQuestions.map((question) => ({
       stepId: question.stepId,
       question: sanitizeDescription(question.question),
+      ...questionExtras(run, question.stepId),
     })),
     ...(summary.stage === undefined ? {} : { stage: summary.stage }),
     ...(summary.spentUsd === undefined ? {} : { spentUsd: summary.spentUsd }),
@@ -525,11 +597,12 @@ export function createServeWorkflows(
       journal,
       ...(lane === undefined ? {} : { verifyPatch: createPatchVerifier(lane) }),
       ...(params.resumeFrom === undefined ? {} : { resumeFrom: params.resumeFrom }),
-      // The seam's contract, threaded into the engine: nothing on the wire may
-      // raise a ceiling. It also decides how the budget ask is *worded* for
-      // this origin — a question that offered `raise` to a client forbidden to
-      // send it would be an instruction to loop on refusals.
-      allowBudgetRaise: false,
+      // The seam's contract, threaded into the engine: the wire may raise a
+      // ceiling only when this server was started with `--allow-ceiling-raise`.
+      // It also decides how the budget ask is *worded* for this origin — a
+      // question that offered `raise` to a client forbidden to send it would be
+      // an instruction to loop on refusals.
+      allowBudgetRaise: options.allowBudgetRaise === true,
       ...(params.budgetCapUsd === undefined ? {} : { budgetCapUsd: params.budgetCapUsd }),
       onEvent: (event) => {
         // The same function the TUI narrates with, so the sentences a panel
@@ -589,9 +662,9 @@ export function createServeWorkflows(
     async status(runId?: string): Promise<WorkflowResult<WorkflowRunStatus[]>> {
       const at = now();
       // A parked run's question is rendered into this response verbatim, so it
-      // is rendered for THIS audience: a client the seam forbids from raising
-      // a ceiling must not be handed a question that tells it to.
-      const audience: BudgetAskAudience = { allowRaise: false };
+      // is rendered for THIS audience: a client this server forbids from
+      // raising a ceiling must not be handed a question that tells it to.
+      const audience: BudgetAskAudience = { allowRaise: options.allowBudgetRaise === true };
       if (runId === undefined) {
         const runs = await readWorkflowRuns(runsRoot, audience);
         return {
@@ -752,22 +825,30 @@ export function createServeWorkflows(
       }
 
       // The stage-boundary budget ask, over the wire. Two answers are valid
-      // here and neither of them is silence.
+      // here and neither of them is silence — three, on a server started with
+      // `--allow-ceiling-raise`.
       //
-      // A raise-shaped answer is REFUSED, not threaded through: the seam's
-      // contract is that nothing on the wire may raise a ceiling
-      // (`packages/server/src/workflows.ts`), and the run-start `budgetUsd`
-      // refusal above would be theatre if a resume could smuggle the same
-      // raise in as free text. The raise grammar is the engine's own
-      // (`parseBudgetRaiseAnswer`), so the two can never drift.
+      // A raise-shaped answer is REFUSED here, not threaded through, UNLESS
+      // this server opted in: the seam's default contract is that nothing on
+      // the wire may raise a ceiling (`packages/server/src/workflows.ts`), and
+      // the run-start `budgetUsd` refusal above would be theatre if a resume
+      // could smuggle the same raise in as free text. When the flag is set,
+      // the reply falls through to `resumeFrom` below and the ENGINE validates
+      // it — positive, exceeds both the ceiling and what is already spent, and
+      // (for a wire run) under the starter's own cap — with the exact grammar
+      // and the exact checks a terminal `raise <n>` gets, because `start()`
+      // hands the engine `allowBudgetRaise: options.allowBudgetRaise === true`
+      // and this gate uses the same flag. One parser, one set of rules,
+      // reached from two origins.
       //
-      // A *bare* resume is refused too, for the same reason the role-pause gate
-      // above refuses one: the acknowledgement is a durable record of an
-      // operator's consent, and a client that nudges every stalled run would
-      // otherwise mint that record for a question nobody ever read.
+      // A *bare* resume is refused either way, for the same reason the
+      // role-pause gate above refuses one: the acknowledgement is a durable
+      // record of an operator's consent, and a client that nudges every
+      // stalled run would otherwise mint that record for a question nobody
+      // ever read.
       if (state.budgetAsk !== undefined) {
         const answer = request.answer ?? "";
-        if (parseBudgetRaiseAnswer(answer) !== undefined) {
+        if (options.allowBudgetRaise !== true && parseBudgetRaiseAnswer(answer) !== undefined) {
           return {
             ok: false,
             error:
@@ -781,7 +862,7 @@ export function createServeWorkflows(
             level: "warn",
             text:
               `Run ${request.runId} is parked at a budget checkpoint — ` +
-              budgetAskQuestion(state.budgetAsk, { allowRaise: false }),
+              budgetAskQuestion(state.budgetAsk, { allowRaise: options.allowBudgetRaise === true }),
           });
           return {
             ok: false,
@@ -793,18 +874,20 @@ export function createServeWorkflows(
       }
 
       // The step-failure park, over the wire. Two answers are valid here —
-      // `retry` and `abandon` — and neither of them is silence.
+      // `retry` and `abandon` — and a `raise <n>` third when this server
+      // allows it, on exactly the terms above.
       //
-      // A raise-shaped answer is REFUSED for the reason a budget raise is:
-      // nothing on the wire may lift a ceiling, turn ceilings included. The
-      // grammar is the engine's own (`parseBudgetRaiseAnswer`, shared by both
-      // gates), so the two can never drift.
+      // A raise-shaped answer is REFUSED for the reason a budget raise is,
+      // gated by the same flag: nothing on the wire may lift a ceiling, turn
+      // ceilings included, unless the host opted in. The grammar is the
+      // engine's own (`parseBudgetRaiseAnswer`, shared by both gates), so the
+      // two can never drift.
       //
-      // A *bare* resume is refused too: a retry is money, and a client that
-      // nudges every stalled run must not be able to spend it.
+      // A *bare* resume is refused either way: a retry is money, and a client
+      // that nudges every stalled run must not be able to spend it.
       if (state.stepFailAsk !== undefined) {
         const answer = request.answer ?? "";
-        if (parseBudgetRaiseAnswer(answer) !== undefined) {
+        if (options.allowBudgetRaise !== true && parseBudgetRaiseAnswer(answer) !== undefined) {
           return {
             ok: false,
             error:
@@ -818,7 +901,9 @@ export function createServeWorkflows(
             level: "warn",
             text:
               `Run ${request.runId} is parked at a failed step — ` +
-              stepFailAskQuestion(state.stepFailAsk, { allowRaise: false }),
+              stepFailAskQuestion(state.stepFailAsk, {
+                allowRaise: options.allowBudgetRaise === true,
+              }),
           });
           return {
             ok: false,

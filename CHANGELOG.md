@@ -148,6 +148,25 @@ CLI, the SDK, or the wire protocol.
   ceiling with nothing written is told so once, in the request, while forty
   turns of budget are still left to act on it.
 
+- **`arcturn serve --allow-ceiling-raise`, and a parked run's diagnosis on the
+  wire.** A `raise <n>` reply used to be refused outright over the wire, no
+  matter how the run was started — the seam's contract, but also a dead end
+  for anyone driving a parked run from an editor rather than a terminal.
+  With the flag, a served host opts a `resumeWorkflow` answer of `raise <n>`
+  into the exact parser and validation an interactive `raise <n>` gets
+  (`parseBudgetRaiseAnswer`, one grammar, two origins) — off by default,
+  because a raise spends the operator's own money or turns. The `authenticate`
+  handshake now advertises `capabilities.ceilingRaise` so a client knows
+  whether offering the affordance is meaningful before it tries, and every
+  pending question on `workflowStatus` carries an optional `raise: { kind,
+  current }` naming which parks a raise even applies to, plus — for a step
+  parked on a failure — the same `diagnosis` line a terminal park prints:
+  `describeLastTurn()`'s first sentence, capped at 240 characters, so a
+  client shows *why* a step is parked without a person reading session
+  JSONL. The VS Code extension (0.4.0) renders the diagnosis under the
+  question and offers a "Raise ceiling…" action when both the capability and
+  the park support it.
+
 ### Fixed
 
 - **Scrolling the transcript is smooth, and stays smooth on a slow

@@ -384,6 +384,32 @@ describe("createEngineSession", () => {
     await expect(h.session.listModels()).resolves.toBeUndefined();
   });
 
+  it("reads capabilities off the authenticate handshake, once connected", async () => {
+    // Set before `start()`, unlike the `listModels` overrides above: the
+    // handshake this reads runs once, inside `boot()`, so a socket swapped in
+    // afterwards would be answering a question nobody is asking any more.
+    const h = harness({
+      socketFactory: () => {
+        const socket = scriptedSocket();
+        const scripted = socket.autoRespond as (frame: SentFrame) => unknown;
+        socket.autoRespond = (frame) =>
+          frame.method === "authenticate"
+            ? { authenticated: true, capabilities: { ceilingRaise: true } }
+            : scripted(frame);
+        return socket;
+      },
+    });
+    expect(h.session.capabilities).toEqual({});
+    await started(h);
+    expect(h.session.capabilities).toEqual({ ceilingRaise: true });
+  });
+
+  it("reads {} from an engine that predates capabilities, rather than throwing", async () => {
+    const h = harness();
+    await started(h);
+    expect(h.session.capabilities).toEqual({});
+  });
+
   it("dispose kills the child, closes the client and disposes the controller", async () => {
     const h = harness();
     await started(h);

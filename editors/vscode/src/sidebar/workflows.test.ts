@@ -203,6 +203,50 @@ describe("projectWorkflowRun", () => {
     );
     expect(row.questions).toHaveLength(2);
   });
+
+  it("escapes a diagnosis before it reaches a rendered row, on question's own terms", () => {
+    const row = projectWorkflowRun(
+      status({
+        state: "paused",
+        questions: [
+          {
+            stepId: "2",
+            question: "Step 2 ran out of turns.",
+            diagnosis: "last turn: $(alert) zai/glm-5.3-flash",
+          },
+        ],
+      }),
+    );
+    expect(row.questions[0]?.diagnosis).toContain(String.raw`\$(alert)`);
+  });
+
+  it("omits diagnosis rather than reporting an empty string when the engine sent none", () => {
+    const row = projectWorkflowRun(
+      status({ state: "paused", questions: [{ stepId: "3", question: "q?" }] }),
+    );
+    expect(row.questions[0]?.diagnosis).toBeUndefined();
+  });
+
+  it("carries raise through untouched — kind and current are the engine's own closed values", () => {
+    const row = projectWorkflowRun(
+      status({
+        state: "paused",
+        questions: [
+          { stepId: "2", question: "q", raise: { kind: "turns", current: 2 } },
+          { stepId: "budget", question: "q2", raise: { kind: "budget" } },
+        ],
+      }),
+    );
+    expect(row.questions[0]?.raise).toEqual({ kind: "turns", current: 2 });
+    expect(row.questions[1]?.raise).toEqual({ kind: "budget" });
+  });
+
+  it("omits raise for an ordinary ORG-ASK, which has no ceiling shape", () => {
+    const row = projectWorkflowRun(
+      status({ state: "paused", questions: [{ stepId: "3", question: "per-tenant?" }] }),
+    );
+    expect(row.questions[0]?.raise).toBeUndefined();
+  });
 });
 
 describe("runSummaryLine", () => {

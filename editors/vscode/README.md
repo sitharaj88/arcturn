@@ -271,6 +271,10 @@ credential the engine can already see.
   workspace host, so on a remote or dev container that means *there*, not on
   your laptop).
 - The `arcturn` CLI, which the extension will offer to install for you.
+- `arcturn` 0.5.9 or newer for the workflow run card's "Raise ceiling…" action
+  and its parked-step diagnosis line — both read `capabilities.ceilingRaise`
+  off the engine's handshake, so an older CLI still runs everything else, it
+  just does not offer either.
 
 Arcturn is disabled in untrusted workspaces and in virtual ones. It runs an
 agent that reads, edits and executes in your working tree; that is not
@@ -283,7 +287,7 @@ From the repository root:
 ```bash
 pnpm install
 pnpm -C editors/vscode run build      # esbuild -> dist/extension.js
-pnpm -C editors/vscode run package    # @vscode/vsce -> arcturn-vscode-0.3.0.vsix
+pnpm -C editors/vscode run package    # @vscode/vsce -> arcturn-vscode-0.4.0.vsix
 npx vitest run editors/vscode         # the extension's own tests
 ```
 

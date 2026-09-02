@@ -68,6 +68,7 @@ export type {
   RewindFailure,
   RewindResult,
   ScoutRun,
+  ServerCapabilities,
   SessionHeader,
   SessionHistory,
   StreamEvent,

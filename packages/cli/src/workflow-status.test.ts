@@ -769,3 +769,67 @@ describe("a parked run's diagnosis", () => {
     expect(detail).toContain('reasoning ended: "…Numbers coherent. Compose."');
   });
 });
+
+describe("JournalRun.budgetAsk", () => {
+  // `serve-workflows.ts`'s `WorkflowRunQuestion.raise` reads this field to
+  // tell a wire client a raise would be meaningful for a budget-checkpoint
+  // park — parkedStep's sibling, on the same fold.
+  it("carries the pending budget ask's own facts while it is unanswered", () => {
+    const lines: JournalLine[] = [
+      {
+        kind: "budgetAsk",
+        ceiling: "usd",
+        spent: 0.9,
+        limit: 1,
+        stagesDone: 1,
+        stagesTotal: 2,
+        ts: 1,
+      },
+      { kind: "runEnd", status: "paused", ts: 1 },
+    ];
+    const run = foldJournal("run-1", lines);
+    expect(run.budgetAsk).toEqual({
+      ceiling: "usd",
+      spent: 0.9,
+      limit: 1,
+      stagesDone: 1,
+      stagesTotal: 2,
+    });
+  });
+
+  it("clears once acknowledged, and again once raised", () => {
+    const ask: JournalLine = {
+      kind: "budgetAsk",
+      ceiling: "usd",
+      spent: 0.9,
+      limit: 1,
+      stagesDone: 1,
+      stagesTotal: 2,
+      ts: 1,
+    };
+    const acked = foldJournal("run-1", [ask, { kind: "budgetAck", ceiling: "usd", ts: 2 }]);
+    expect(acked.budgetAsk).toBeUndefined();
+
+    const raised = foldJournal("run-1", [
+      ask,
+      { kind: "budgetRaise", ceiling: "usd", value: 5, ts: 2 },
+    ]);
+    expect(raised.budgetAsk).toBeUndefined();
+  });
+
+  it("does not clear on a reply naming the OTHER ceiling", () => {
+    // `budgetAck`/`budgetRaise` only settle the ceiling they answer — a token
+    // reply must not silently retire a pending dollar ask.
+    const ask: JournalLine = {
+      kind: "budgetAsk",
+      ceiling: "usd",
+      spent: 0.9,
+      limit: 1,
+      stagesDone: 1,
+      stagesTotal: 2,
+      ts: 1,
+    };
+    const run = foldJournal("run-1", [ask, { kind: "budgetAck", ceiling: "tokens", ts: 2 }]);
+    expect(run.budgetAsk).toBeDefined();
+  });
+});

@@ -720,3 +720,42 @@ describe("parseWebviewMessage — the workflow verbs", () => {
     ).toBeUndefined();
   });
 });
+
+describe("parseWebviewMessage: raiseCeiling", () => {
+  // The number itself is never on this message — the host collects and
+  // validates it natively (showInputBox), so the wire between page and host
+  // carries only identity: which run to resume with the answer once one is
+  // collected. See webview-messages.ts's own doc for why.
+  it("takes just the run id", () => {
+    expect(parseWebviewMessage({ type: "raiseCeiling", runId: "run-1" })).toEqual({
+      type: "raiseCeiling",
+      runId: "run-1",
+    });
+  });
+
+  it("trims the run id, on resumeWorkflow's own terms", () => {
+    expect(parseWebviewMessage({ type: "raiseCeiling", runId: "  run-1  " })).toEqual({
+      type: "raiseCeiling",
+      runId: "run-1",
+    });
+  });
+
+  it("refuses a run id that is empty, unbounded, or carries a control character", () => {
+    expect(parseWebviewMessage({ type: "raiseCeiling", runId: "" })).toBeUndefined();
+    expect(parseWebviewMessage({ type: "raiseCeiling", runId: "  " })).toBeUndefined();
+    expect(
+      parseWebviewMessage({
+        type: "raiseCeiling",
+        runId: "a".repeat(MAX_WORKFLOW_RUN_ID_LENGTH + 1),
+      }),
+    ).toBeUndefined();
+    expect(
+      parseWebviewMessage({ type: "raiseCeiling", runId: `run-1${String.fromCharCode(7)}` }),
+    ).toBeUndefined();
+  });
+
+  it("refuses a non-string run id rather than coercing it", () => {
+    expect(parseWebviewMessage({ type: "raiseCeiling", runId: 1 })).toBeUndefined();
+    expect(parseWebviewMessage({ type: "raiseCeiling" })).toBeUndefined();
+  });
+});

@@ -2521,6 +2521,53 @@ export interface WorkflowRunQuestion {
    * the engine exactly as a skill description is.
    */
   question: string;
+  /**
+   * What the failed step's model emitted on its last turn, for a park caused
+   * by a step failure — the engine's `describeLastTurn()`, first line only,
+   * sanitized and length-capped exactly as `question` is. Optional on read: a
+   * server that predates this field sends none, and a budget-ask park (which
+   * has no "last turn" of its own) never carries one.
+   */
+  diagnosis?: string;
+  /**
+   * Whether a `raise <n>` reply would be meaningful for this park, and the
+   * ceiling it would need to exceed.
+   *
+   * Absence means one of two things a client cannot tell apart and does not
+   * need to: this park is not turns- or budget-shaped (an ordinary `ORG-ASK`),
+   * or this server predates the field. Either way, a client offers no raise
+   * affordance. Presence does **not** mean a raise will be honoured — that is
+   * a property of the *server*, carried separately on
+   * {@link ServerCapabilities.ceilingRaise} — only that this specific park is
+   * the shape a raise applies to.
+   */
+  raise?: {
+    /** `"turns"` for a step that hit a role's `maxTurns`; `"budget"` for a stage-boundary budget ask (dollars or tokens). */
+    kind: "turns" | "budget";
+    /** The ceiling in force, in its own unit, when the engine knows it. A valid raise must exceed this. */
+    current?: number;
+  };
+}
+
+/**
+ * Optional server behaviour, learned from the `authenticate` handshake's
+ * response (`ProtocolClient.capabilities()`).
+ *
+ * Every property is optional-on-read by design: absence means "this server
+ * predates the field" or "not applicable" — never "false" — so a caller that
+ * wants one tests it explicitly (`=== true`) rather than assuming absence
+ * means "no". Extending this object is never a `PROTOCOL_VERSION` bump, on
+ * the same terms as an optional verb: an older client that has never heard of
+ * a capability simply never reads it.
+ */
+export interface ServerCapabilities {
+  /**
+   * Whether a `resumeWorkflow` answer of `raise <n>` is honoured rather than
+   * refused — `arcturn serve --allow-ceiling-raise`. A raise spends the
+   * operator's own money (or turns), so this is off unless the host running
+   * `serve` opted in deliberately.
+   */
+  ceilingRaise?: boolean;
 }
 
 /** One step of a run, as the journal recorded it. */

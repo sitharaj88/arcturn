@@ -32,6 +32,8 @@ const ledger = vi.hoisted(() => ({
   posted: [] as { type: string; [key: string]: unknown }[],
   clipboard: [] as string[],
   quickPicks: [] as { items: { label: string; description?: string }[]; options: unknown }[],
+  /** Every `showInputBox` call, so a test can prove the native dialog was — or was not — raised. */
+  inputBoxes: [] as unknown[],
   contentProviders: [] as { scheme: string; provider: unknown }[],
   messages: [] as { level: string; message: string; items: string[] }[],
   executed: [] as { command: string; args: unknown[] }[],
@@ -61,6 +63,7 @@ const ledger = vi.hoisted(() => ({
     ledger.posted = [];
     ledger.clipboard = [];
     ledger.quickPicks = [];
+    ledger.inputBoxes = [];
     ledger.contentProviders = [];
     ledger.messages = [];
     ledger.executed = [];
@@ -211,7 +214,10 @@ vi.mock("vscode", () => {
         });
         return Promise.resolve(undefined);
       },
-      showInputBox: () => Promise.resolve(undefined),
+      showInputBox: (options: unknown) => {
+        ledger.inputBoxes.push(options);
+        return Promise.resolve(undefined);
+      },
       get activeTextEditor() {
         ledger.activeEditorReads += 1;
         return ledger.activeEditor;
@@ -908,6 +914,28 @@ describe("the workflow surface at the host seam", () => {
       line.includes("dropped an unrecognised webview message"),
     );
     expect(dropped).toHaveLength(2);
+  });
+
+  it("never shows the native raise-ceiling dialog for a run this panel is not following", async () => {
+    // The engine is down in this suite (no spawned `arcturn serve`), so
+    // `engine.capabilities.ceilingRaise` reads false and `workflowRunRow` is
+    // undefined either way — `raiseCeiling` must return before it ever
+    // reaches `vscode.window.showInputBox`, exactly as it would for a stale
+    // click racing a run that already answered itself.
+    const panel = open();
+    panel.send({ type: "raiseCeiling", runId: "run-1" });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(ledger.inputBoxes).toEqual([]);
+  });
+
+  it("drops a raiseCeiling message whose run id the boundary refuses", () => {
+    const panel = open();
+    panel.send({ type: "raiseCeiling", runId: "" });
+    const dropped = (ledger.outputs[0]?.lines ?? []).filter((line) =>
+      line.includes("dropped an unrecognised webview message"),
+    );
+    expect(dropped).toHaveLength(1);
   });
 });
 

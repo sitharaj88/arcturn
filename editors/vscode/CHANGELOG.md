@@ -6,6 +6,36 @@ format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 The extension and the `arcturn` CLI version separately: the CLI is the engine,
 this is one of two front-ends onto it. Each release names the engine it needs.
 
+## [0.4.0] — 2026-09-02
+
+**Requires `arcturn` 0.4.0 or newer; 0.5.9 unlocks ceiling raise and the
+parked-step diagnosis below.**
+
+### A parked run says why, and can be told to spend more
+
+- **The diagnosis rides the question.** When a workflow step parks — it hit a
+  role's turn ceiling, or failed outright — the run card now shows what the
+  model actually emitted on its last turn under the question itself: model,
+  stop reason, block shapes, and the tail of its reasoning when the turn was
+  silent. The same fact a terminal park prints; previously the panel showed
+  only the 160-character question and left the rest to the session JSONL.
+- **"Raise ceiling…"**, offered only when both halves agree: the engine
+  advertised `capabilities.ceilingRaise` (`arcturn serve
+  --allow-ceiling-raise`) *and* this specific park is the shape a raise
+  applies to. The number is collected in a native input box, never in the
+  webview — validated as a positive integer greater than the ceiling that
+  tripped — because a raise spends the *operator's* money or turns, and this
+  extension does not get to make that decision quietly. Pressing it sends the
+  same `resumeWorkflow` verb the Answer button already uses, with `raise <n>`
+  as the answer. Without the capability, the panel behaves exactly as before:
+  Answer, and nothing else.
+
+### Fixed
+
+- The hub walkthrough said "Thirteen" kits; the registry has grown to
+  fourteen. The copy is checked against `registry/*.json` in CI now, so it
+  cannot drift silently again.
+
 ## [0.3.0] — 2026-08-29
 
 **Requires `arcturn` 0.4.0 or newer; 0.5.3 unlocks the mid-run permission chip.**

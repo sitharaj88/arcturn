@@ -807,6 +807,7 @@ async function runServeCommand(args: CliArgs): Promise<number> {
       ...(args.web === true ? { web: true } : {}),
       ...(args.webPort === undefined ? {} : { webPort: args.webPort }),
       ...(args.webOrigins === undefined ? {} : { webOrigins: args.webOrigins }),
+      ...(args.allowCeilingRaise === true ? { allowCeilingRaise: true } : {}),
       ...providerFlags(args),
       ...projectCodeFlags(args),
     });

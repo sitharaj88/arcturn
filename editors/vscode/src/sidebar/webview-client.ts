@@ -1205,6 +1205,19 @@ button.text-button.secondary:hover { background: var(--vscode-button-secondaryHo
 .wf-lane.lane-unknown, .wf-lane.lane-undeclared { color: var(--arc-err); border-color: var(--arc-err); }
 .wf-meta { margin: 4px 0 0; color: var(--arc-muted); }
 .wf-question { margin: 6px 0 4px; color: var(--vscode-foreground); }
+/*
+ * What the model actually emitted on a parked step's last turn — quieter than
+ * the question itself, on the capability-line's own terms: it is context for
+ * deciding, not the decision to make.
+ */
+.wf-diagnosis {
+  margin: 0 0 6px;
+  font-size: 0.85em;
+  color: var(--arc-muted);
+  font-family: var(--vscode-editor-font-family, monospace);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 .wf-answer-label { display: block; font-size: 0.85em; color: var(--arc-muted); }
 .wf-answer {
   width: 100%;
@@ -2112,8 +2125,10 @@ const CLIENT_SOURCE = String.raw`
   var wfRunMeta = $("wf-run-meta");
   var wfQuestions = $("wf-questions");
   var wfQuestionText = $("wf-question-text");
+  var wfDiagnosis = $("wf-diagnosis");
   var wfAnswer = $("wf-answer");
   var wfSendAnswer = $("wf-send-answer");
+  var wfRaise = $("wf-raise");
   var wfNote = $("wf-note");
   var dryRunCard = $("dryrun");
   var dryRunIcon = $("dryrun-icon");
@@ -2247,7 +2262,7 @@ const CLIENT_SOURCE = String.raw`
    * refresh. 'busy' disables the answer button between a click and that
    * refresh, so a double press cannot resume one run twice.
    */
-  var workflows = { status: "loading", workflows: [], run: undefined, note: "" };
+  var workflows = { status: "loading", workflows: [], run: undefined, note: "", capabilities: {} };
   var wfCatalogOpen = false;
   var wfBusy = false;
   /*
@@ -4252,6 +4267,28 @@ const CLIENT_SOURCE = String.raw`
           ? run.questions[0].question
           : run.questions.map(function (q) { return q.stepId + ": " + q.question; }).join("\n");
         wfSendAnswer.disabled = wfBusy;
+
+        // What the failed step's model actually emitted — a render of the
+        // HOST's answer and nothing else, exactly like every other field on
+        // this card: this page never derives a diagnosis, it shows the one
+        // the engine already computed.
+        var diagnosed = run.questions.filter(function (q) { return q.diagnosis; });
+        var diagnosisText = diagnosed.length === 0 ? "" : diagnosed.length === 1
+          ? diagnosed[0].diagnosis
+          : diagnosed.map(function (q) { return q.stepId + ": " + q.diagnosis; }).join("\n");
+        wfDiagnosis.textContent = diagnosisText;
+        wfDiagnosis.classList.toggle("hidden", diagnosisText === "");
+
+        // "Raise ceiling…" needs BOTH halves: the engine must actually honour
+        // one ('capabilities.ceilingRaise', a fact about the SERVER), and this
+        // specific park must be the shape a raise applies to ('raise', a fact
+        // about the QUESTION). Neither alone is an offer this page may make —
+        // see webview-messages.ts's 'raiseCeiling' doc for why the number
+        // itself is never collected here.
+        var raiseHere = workflows.capabilities && workflows.capabilities.ceilingRaise === true
+          && run.questions.some(function (q) { return q.raise; });
+        wfRaise.classList.toggle("hidden", !raiseHere);
+        if (raiseHere) wfRaise.disabled = wfBusy;
       }
     }
 
@@ -4286,6 +4323,22 @@ const CLIENT_SOURCE = String.raw`
     renderWorkflows();
     post({ type: "resumeWorkflow", runId: run.runId, answer: wfAnswer.value });
     wfAnswer.value = "";
+  }
+
+  /*
+   * Ask the host to collect a new ceiling and resume with it.
+   *
+   * No 'wfBusy' here, unlike 'sendWorkflowAnswer': what happens next is a
+   * NATIVE dialog the host owns, and the person may cancel it — nothing comes
+   * back to clear a busy flag this page set optimistically, so setting one
+   * would leave the card disabled forever the moment somebody pressed Escape.
+   * The host resumes (which repaints this card through the normal 'workflows'
+   * message) only once a number is actually collected.
+   */
+  function sendRaiseCeiling() {
+    var run = workflows.run;
+    if (!run) return;
+    post({ type: "raiseCeiling", runId: run.runId });
   }
 
   /* ---- wiring --------------------------------------------------------- */
@@ -4405,6 +4458,7 @@ const CLIENT_SOURCE = String.raw`
   // page writes nothing and confirms nothing.
   wfClose.addEventListener("click", closeWorkflows);
   wfSendAnswer.addEventListener("click", sendWorkflowAnswer);
+  wfRaise.addEventListener("click", sendRaiseCeiling);
   // Ctrl/Cmd+Enter sends the answer, matching the composer. Plain Enter inserts
   // a newline, because an ORG-ASK answer is prose and often more than one line.
   wfAnswer.addEventListener("keydown", function (event) {
@@ -4922,9 +4976,23 @@ const CLIENT_SOURCE = String.raw`
         for (var q = 0; q < reportedQuestions.length; q += 1) {
           var question = reportedQuestions[q];
           if (!question || typeof question.question !== "string") continue;
+          // 'raise' is trusted only in the shape the wire actually promises —
+          // a 'kind' outside the closed pair is treated as absent rather than
+          // rendered, on the same "never invent what the engine did not say"
+          // rule the lane chips hold.
+          var reportedRaise = question.raise && typeof question.raise === "object"
+            ? question.raise : undefined;
+          var raise = reportedRaise && (reportedRaise.kind === "turns" || reportedRaise.kind === "budget")
+            ? {
+                kind: reportedRaise.kind,
+                current: typeof reportedRaise.current === "number" ? reportedRaise.current : undefined
+              }
+            : undefined;
           asked.push({
             stepId: typeof question.stepId === "string" ? question.stepId : "",
-            question: question.question
+            question: question.question,
+            diagnosis: typeof question.diagnosis === "string" ? question.diagnosis : undefined,
+            raise: raise
           });
         }
         runRow = {
@@ -4940,11 +5008,14 @@ const CLIENT_SOURCE = String.raw`
           questions: asked
         };
       }
+      var reportedCapabilities = wv.capabilities && typeof wv.capabilities === "object"
+        ? wv.capabilities : {};
       workflows = {
         status: wfStatus,
         workflows: listed,
         run: runRow,
-        note: typeof wv.note === "string" ? wv.note : ""
+        note: typeof wv.note === "string" ? wv.note : "",
+        capabilities: { ceilingRaise: reportedCapabilities.ceilingRaise === true }
       };
       // The host has answered, so whatever was in flight is over.
       wfBusy = false;
