@@ -4812,22 +4812,46 @@ export type WorkflowProgressCheck = (progress: TurnProgress) => string | undefin
 
 /**
  * How far into its ceiling a write-lane role may get with nothing written
- * before the loop says so out loud. Half: late enough that a role which reads
- * first is not hectored on turn three, early enough that the other half of the
- * budget can still produce a diff.
+ * before the loop says so out loud, as a fraction of that ceiling. Half: late
+ * enough that a role which reads first is not hectored on turn three, early
+ * enough that the other half of the budget can still produce a diff.
+ *
+ * Capped by {@link WRITE_LANE_PROGRESS_TURNS} — half of a role's *declared*
+ * ceiling is fine, but half of a ceiling a human raised at a park is not.
  */
 const WRITE_LANE_PROGRESS_FRACTION = 0.5;
 
 /**
- * The write lane's mid-run progress check: **you have spent half your turns and
- * changed no file.**
+ * The absolute cap on the halfway trigger above.
  *
- * The run this exists for: a stage-5 builder spent all eighty of its turns on
- * `bash` (77 calls) and `read` (17), twenty-four minutes and 330K tokens, and
- * hit its ceiling having written nothing. Every guard rail the engine had
- * fired *after* the money was gone — the turn ceiling, the void gate, the park.
- * None of them could say the one thing that would have changed the outcome
- * while there were still forty turns left to change it.
+ * The run this exists for: a step whose ceiling was raised to 1000 at a park
+ * (`raise 1000`) retried its write-lane builder, which spent ~370 turns on
+ * `bash` — `sed`, `grep`, `awk`, `cat`, nothing else — wrote not one file, and
+ * was killed by the step's 90-minute deadline having burned 1.16M input,
+ * 274K output and 7.1M cache-read tokens. Waiting for the halfway turn on a
+ * 1000-turn ceiling means waiting for turn 500; the deadline never let it get
+ * there, so the one check built to catch exactly this never fired.
+ *
+ * Calibrated off the two write-lane roles that finished *that same run*: the
+ * architect and the builder that followed it each made their first
+ * `write`/`edit` call on turn 6. Doubled for headroom — a role reading a
+ * little longer than either of those two is not yet a role that is stuck —
+ * and clamped to `[8, 40]`: never so low that a role reading first before an
+ * eight- or twelve-turn step gets hectored on turn three, never so high that
+ * a raised ceiling can hide a stall past forty turns again.
+ */
+export const WRITE_LANE_PROGRESS_TURNS = 12;
+
+/**
+ * The write lane's mid-run progress check: **you have spent N turns, or half
+ * your ceiling — whichever comes first — and changed no file.**
+ *
+ * Every guard rail the engine had otherwise fired *after* the money was
+ * gone — the turn ceiling, the void gate, the park. None of them could say
+ * the one thing that would have changed the outcome while there was still
+ * budget left to change it. See {@link WRITE_LANE_PROGRESS_TURNS} for the two
+ * real runs (an 80-turn ceiling, and a 1000-turn one raised at a park) this
+ * threshold is calibrated against.
  *
  * WRITE LANE ONLY. A read-lane or exec-lane role produces a *report*, and its
  * diff is discarded unread; telling one of those to "write a file now" would be
@@ -4840,7 +4864,10 @@ const WRITE_LANE_PROGRESS_FRACTION = 0.5;
  * @returns The nudge, or `undefined` when the step is on track.
  */
 export function writeLaneProgressCheck(progress: TurnProgress): string | undefined {
-  const threshold = Math.floor(progress.maxTurns * WRITE_LANE_PROGRESS_FRACTION);
+  const threshold = Math.min(
+    Math.floor(progress.maxTurns * WRITE_LANE_PROGRESS_FRACTION),
+    WRITE_LANE_PROGRESS_TURNS,
+  );
   // ONE turn, not "this turn and every one after". The loop dedupes a warning
   // by its exact text and this message names the turn it fired on, so a
   // `>=` test would re-fire with fresh wording every remaining turn — which is

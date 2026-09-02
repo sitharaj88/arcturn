@@ -56,6 +56,7 @@ import {
   runWorkflow,
   type Workflow,
   type WorkflowStepRequest,
+  WRITE_LANE_PROGRESS_TURNS,
   type WriteLane,
   type WriteLaneHost,
   writeLaneProgressCheck,
@@ -590,20 +591,65 @@ describe("the write lane's mid-run progress check", () => {
   const reading = { bash: 40, read: 12 };
 
   /**
-   * RED FIRST: nothing looked at a running step's shape. Every guard rail
-   * fired only after the money was gone.
+   * RED FIRST: a `raise 1000` at a park used to mean the check waited for
+   * turn 500 — a step's deadline killed the real run this models long before
+   * that. The cap catches it at `WRITE_LANE_PROGRESS_TURNS` instead, and on
+   * that turn only.
    */
-  it("fires on the halfway turn, and on that turn only", () => {
-    expect(writeLaneProgressCheck({ turnIndex: 39, maxTurns: 80, toolCalls: reading })).toBe(
-      undefined,
+  it("fires at the progress-turns cap on a raised, 1000-turn ceiling — not halfway", () => {
+    expect(
+      writeLaneProgressCheck({
+        turnIndex: WRITE_LANE_PROGRESS_TURNS - 1,
+        maxTurns: 1000,
+        toolCalls: reading,
+      }),
+    ).toBe(undefined);
+    const notice = writeLaneProgressCheck({
+      turnIndex: WRITE_LANE_PROGRESS_TURNS,
+      maxTurns: 1000,
+      toolCalls: reading,
+    });
+    expect(notice).toContain(
+      `Progress check: ${WRITE_LANE_PROGRESS_TURNS} of 1000 turns are spent`,
     );
-    const notice = writeLaneProgressCheck({ turnIndex: 40, maxTurns: 80, toolCalls: reading });
-    expect(notice).toContain("Progress check: 40 of 80 turns are spent");
     expect(notice).toContain("no file has been changed");
     expect(notice).toContain("write-lane step");
     // Once per run: the loop dedupes by exact text, and this message names the
     // turn, so firing again would say something new every remaining turn.
-    expect(writeLaneProgressCheck({ turnIndex: 41, maxTurns: 80, toolCalls: reading })).toBe(
+    expect(
+      writeLaneProgressCheck({
+        turnIndex: WRITE_LANE_PROGRESS_TURNS + 1,
+        maxTurns: 1000,
+        toolCalls: reading,
+      }),
+    ).toBe(undefined);
+  });
+
+  it("fires at the progress-turns cap on an 80-turn ceiling too, since half (40) is not below it", () => {
+    // The cap is meant to bind here as well — an 80-turn role stalled at
+    // turn 12 is no less stuck than a 1000-turn one is.
+    expect(WRITE_LANE_PROGRESS_TURNS).toBeLessThan(40);
+    expect(
+      writeLaneProgressCheck({
+        turnIndex: WRITE_LANE_PROGRESS_TURNS,
+        maxTurns: 80,
+        toolCalls: reading,
+      }),
+    ).toContain(`Progress check: ${WRITE_LANE_PROGRESS_TURNS} of 80 turns are spent`);
+    // Old halfway turn: no longer where it fires.
+    expect(writeLaneProgressCheck({ turnIndex: 40, maxTurns: 80, toolCalls: reading })).toBe(
+      undefined,
+    );
+  });
+
+  it("still fires at plain halfway when the ceiling keeps it under the cap", () => {
+    expect(writeLaneProgressCheck({ turnIndex: 5, maxTurns: 12, toolCalls: reading })).toBe(
+      undefined,
+    );
+    expect(writeLaneProgressCheck({ turnIndex: 6, maxTurns: 12, toolCalls: reading })).toContain(
+      "Progress check: 6 of 12 turns are spent",
+    );
+    expect(writeLaneProgressCheck({ turnIndex: 7, maxTurns: 12, toolCalls: reading })).toBe(
       undefined,
     );
   });
@@ -612,8 +658,15 @@ describe("the write lane's mid-run progress check", () => {
     for (const tool of ["write", "edit", "multiedit"]) {
       expect(
         writeLaneProgressCheck({
-          turnIndex: 40,
+          turnIndex: WRITE_LANE_PROGRESS_TURNS,
           maxTurns: 80,
+          toolCalls: { ...reading, [tool]: 1 },
+        }),
+      ).toBeUndefined();
+      expect(
+        writeLaneProgressCheck({
+          turnIndex: WRITE_LANE_PROGRESS_TURNS,
+          maxTurns: 1000,
           toolCalls: { ...reading, [tool]: 1 },
         }),
       ).toBeUndefined();

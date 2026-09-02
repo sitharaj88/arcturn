@@ -299,6 +299,13 @@ them:
   step. The worktree itself is removed only on success; a failed or cancelled step keeps it
   on disk for forensics and says where.
 
+  A write-lane step that has only been reading gets one mid-run nudge telling it so: after
+  12 turns without a write, or halfway to the ceiling, whichever comes first — the smaller
+  of the two once a human raises a step's ceiling at a park, so the check still fires while
+  there is budget left to act on it rather than waiting for a turn the step's own deadline
+  will never let it reach. It fires once and never repeats, and it never fires once the step
+  has actually changed a file.
+
 One entry in those lists is a name and nothing more. `multiedit` appears in the write-tool
 set the lane classifier matches against, but [no package registers a tool by that
 name](/docs/tools#multiedit-reserved-and-currently-inert). Declaring it is therefore the one

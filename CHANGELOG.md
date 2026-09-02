@@ -144,9 +144,9 @@ CLI, the SDK, or the wire protocol.
   per-tool call counts and how many of those calls authored a file, rendered
   wherever the last turn already was: `activity: 80 turns · bash 77 · read 17 ·
   no file written`. Counts and tool names only. And the write lane wires the
-  new `progressCheck` to that same evidence: a role that has spent half its
-  ceiling with nothing written is told so once, in the request, while forty
-  turns of budget are still left to act on it.
+  new `progressCheck` to that same evidence: a role that has spent 12 turns,
+  or half its ceiling, whichever comes first, with nothing written is told so
+  once, in the request, while budget is still left to act on it.
 
 - **`arcturn serve --allow-ceiling-raise`, and a parked run's diagnosis on the
   wire.** A `raise <n>` reply used to be refused outright over the wire, no
