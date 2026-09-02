@@ -5596,6 +5596,45 @@ interface AgentStallGuard {
 }
 
 /**
+ * How long a finished child waits for its stall guard's last `git status`.
+ *
+ * Long enough that a loaded machine's probe still counts (the production
+ * lane's own `git` timeout is well inside it), short enough that a step is
+ * never held hostage by a diagnostic.
+ */
+const STALL_GUARD_DRAIN_MS = 20_000;
+
+/**
+ * Await `work`, but never longer than `ms`.
+ *
+ * Neither the value nor the failure is of interest — the caller only needs the
+ * side effects `work` has had by the time it stops waiting — so a rejection is
+ * swallowed exactly as a timeout is.
+ *
+ * Exported for its own test: the behaviour under test is "it returns even
+ * when the work never does", which cannot be asserted through a step without
+ * making that step wait {@link STALL_GUARD_DRAIN_MS}.
+ *
+ * @param work - The promise to settle.
+ * @param ms - The longest it may take.
+ */
+export async function settleWithin(work: Promise<unknown>, ms: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      work.catch(() => undefined),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, ms);
+        // A pending diagnostic must never be the reason a process stays alive.
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+/**
  * Build the insights signals for one step's child, when a ledger is wired.
  *
  * The step's attribution is captured once here, so every event this child
@@ -5677,6 +5716,14 @@ async function driveAgent(
    */
   let turns = 0;
   const toolCalls: Record<string, number> = {};
+  /**
+   * In-flight tool calls that could change a file, by id.
+   *
+   * `toolEnd` names only the call id, so the ids of the calls whose *start*
+   * ticked the write epoch have to be remembered to tick it again on the way
+   * out. Empty for every lane that installs no stall guard.
+   */
+  const writingCalls = new Set<string>();
   /** Set once, by the stall guard below, so the lane can tell it from an Esc. */
   let stalled = false;
   /** The run is over: nothing may abort it, and no probe may still decide. */
@@ -5733,7 +5780,15 @@ async function driveAgent(
       if (event.type === "messageEnd") lastMessage = event.message;
       if (event.type === "toolStart") {
         toolCalls[event.toolName] = (toolCalls[event.toolName] ?? 0) + 1;
-        if (couldWrite(event.toolName)) stall?.progress.mutated();
+        if (couldWrite(event.toolName) && stall !== undefined) {
+          // Both ends of the call are ticked, so the write epoch's parity says
+          // whether one is in flight — see {@link WriteLaneProgress.mutated}.
+          // `toolEnd` carries only the id, so the ids that mattered are kept.
+          writingCalls.add(event.toolCallId);
+          stall.progress.mutated();
+        }
+      } else if (event.type === "toolEnd" && writingCalls.delete(event.toolCallId)) {
+        stall?.progress.mutated();
       }
       // The two events that used to leave no trace outside a person's memory
       // of the run. Both are diagnostics, so both are swallowed if the ledger
@@ -5771,6 +5826,25 @@ async function driveAgent(
         // reader is stopped on turn `afterTurns` exactly, and a role that has
         // touched the shell costs one fresh `git status` before anything is
         // decided about it.
+        //
+        // BE HONEST ABOUT THE RACE. A handler cannot await, so the fresh probe
+        // is started here and resolves later, while the loop is already asking
+        // the model for the next turn: the abort therefore lands on turn 36,
+        // or on 37, or on 38. Two properties make that safe rather than
+        // merely tolerable. In production the numbers are not close — a probe
+        // is 10-50 ms of `git status` against a model round trip measured in
+        // seconds, and no tool can start until that round trip returns — and
+        // in the pathological case the epoch parity above refuses the
+        // synchronous path outright, so a child whose writes overlap the probe
+        // is never stopped on stale evidence, only later than ideal.
+        //
+        // The tests lean on exactly two things, and on nothing about timing: a
+        // child that has called nothing which could write needs no probe at
+        // all and so IS stopped on turn 36 to the turn (the reading-role
+        // tests), and a child that has touched the shell is stopped a few
+        // turns late, which is why those tests assert a RANGE rather than an
+        // exact count. A scripted model answers in microseconds, so in a test
+        // the probe always loses the race that in production it always wins.
         if (!stalled && !ended && stall !== undefined && turns >= stall.observeAfterTurns) {
           const deciding = turns >= stall.afterTurns && stall.writes(toolCalls) === 0;
           if (stall.progress.provablyUnchanged()) {
@@ -5819,7 +5893,14 @@ async function driveAgent(
       // Settle any probe still in flight before the outcome is built: `stalled`
       // is what tells a `no-progress` failure from an operator's Esc, and a
       // flag that arrives after the lane has read it tells nobody anything.
-      await guardWork;
+      //
+      // BOUNDED, because this is a lane's `git` and a lane is injected: the
+      // production one carries `GIT_TIMEOUT_MS`, and a host that wires its own
+      // without one would otherwise hang a finished step forever on a
+      // diagnostic. The guard's answer is worth waiting seconds for and
+      // nothing at all worth waiting minutes for — a probe that has not
+      // returned by now was never going to stop this child.
+      await settleWithin(guardWork, STALL_GUARD_DRAIN_MS);
     }
     try {
       text = agent.finalText();
@@ -6304,8 +6385,15 @@ function couldWrite(toolName: string): boolean {
  */
 export interface WriteLaneProgress {
   /**
-   * Record one tool call that could have changed a file — see
-   * {@link couldWrite}. The drive calls this; nothing else does.
+   * Tick the WRITE EPOCH: called once when a tool that could change a file
+   * starts, and once again when it ends — see {@link couldWrite}. The drive
+   * calls this; nothing else does.
+   *
+   * Two ticks per call, not one, so the epoch's parity says whether such a
+   * tool is *in flight*: odd means one is running right now. A probe that
+   * overlapped a `bash` cannot be trusted however clean it came back, and the
+   * start tick alone could not see that — the call would already have been
+   * counted before the probe began, and the probe would then look fresh.
    */
   mutated(): void;
   /**
@@ -6319,14 +6407,16 @@ export interface WriteLaneProgress {
    *    grepped and globbed cannot have changed a file, and this needs no git
    *    at all — which is why a purely reading role costs zero subprocesses and
    *    is stopped on turn {@link WRITE_LANE_STALL_TURNS} exactly.
-   * 2. **A probe came back clean and still holds** — `git status --porcelain`
-   *    said nothing, and nothing that could write has run since it did.
+   * 2. **A probe came back clean and still holds** — the worktree answered
+   *    "nothing", the write epoch has not moved since that answer was taken,
+   *    and it is EVEN, so no such tool was running while the answer was taken
+   *    either.
    *
    * Everything else is `false`: a dirty worktree, a git that would not answer,
-   * a probe overtaken by a `bash` call, a probe that has not run yet. "I do
-   * not know" is never "it wrote nothing", because a wrongly stopped step
-   * throws away real work — twice over, once the automatic fresh retry has
-   * doubled it.
+   * a probe overtaken by a `bash` call, a probe taken while one was in flight,
+   * a probe that has not run yet. "I do not know" is never "it wrote nothing",
+   * because a wrongly stopped step throws away real work — twice over, once
+   * the automatic fresh retry has doubled it.
    */
   provablyUnchanged(): boolean;
   /**
@@ -6355,6 +6445,12 @@ export interface WriteLaneProgress {
    * Never rejects: git failing leaves the cache exactly as it was, which for a
    * first probe means `undefined` — unknown, and unknown never stops anything.
    *
+   * Resolves `undefined` when THIS probe could not answer, whatever an earlier
+   * one said. Returning the last good answer from a failed probe was a real
+   * defect: one clean probe, then a broken git, and every later "fresh" answer
+   * was a stale `false` that the guard would stop a child on — the exact
+   * opposite of "unknown never aborts".
+   *
    * @param fresh - Insist on an answer taken *after* this call. The default
    *   joins a probe already in flight, which is what an observer wants and
    *   what keeps a per-turn watch from queueing a backlog of `git status`
@@ -6373,19 +6469,24 @@ export interface WriteLaneProgress {
  */
 export function createWriteLaneProgress(probe: () => Promise<string>): WriteLaneProgress {
   let cached: boolean | undefined;
-  /** Tool calls that could have changed a file, counted as they start. */
-  let mutations = 0;
-  /** `mutations` as of the last SUCCESSFUL probe; `-1` while there is none. */
+  /**
+   * The write epoch: two ticks per tool call that could change a file — one at
+   * its start, one at its end. Zero means no such tool has ever run; an odd
+   * value means one is running right now.
+   */
+  let epoch = 0;
+  /** `epoch` as of the last SUCCESSFUL probe; `-1` while there is none. */
   let watermark = -1;
   let inFlight: Promise<boolean | undefined> | undefined;
   let generation = 0;
   return {
     mutated() {
-      mutations += 1;
+      epoch += 1;
     },
     changed: () => cached,
-    provablyUnchanged: () => mutations === 0 || (cached === false && watermark === mutations),
-    knownUnchanged: () => mutations === 0 || cached === false,
+    provablyUnchanged: () =>
+      epoch === 0 || (cached === false && watermark === epoch && epoch % 2 === 0),
+    knownUnchanged: () => epoch === 0 || cached === false,
     refresh(fresh = false) {
       const running = inFlight;
       if (running !== undefined && !fresh) return running;
@@ -6397,22 +6498,29 @@ export function createWriteLaneProgress(probe: () => Promise<string>): WriteLane
         // racing it, so two `git status` calls never read the same worktree at
         // once and the answer is unambiguously later than this call.
         if (running !== undefined) await running.catch(() => undefined);
-        // Sampled here rather than at the call: a `bash` that started while
-        // this probe was queued must invalidate it, and would not if the
-        // watermark had been taken before the wait.
-        const at = mutations;
+        /** Did THIS probe answer? Only then may it speak for the worktree. */
+        let answered = false;
+        // The epoch as this probe BEGINS. Read back at `provablyUnchanged`,
+        // where it must still be the current value and must be even: a write
+        // that started before the probe leaves it odd, one that started during
+        // the probe moves it, and one that started after moves it too. All
+        // three are the same fault — an answer that cannot speak for the
+        // moment it is being read at — and all three fail the same test.
+        const before = epoch;
         try {
           const status = await probe();
           cached = status.trim() !== "";
-          watermark = at;
+          watermark = before;
+          answered = true;
         } catch {
           // Unknown, and deliberately NOT recorded as clean: git refusing to
           // answer is not evidence that a role wrote nothing. A `true` already
-          // observed is kept — a worktree does not un-change itself.
+          // observed is kept in `cached` — a worktree does not un-change
+          // itself — but this call still answers `undefined` below.
         } finally {
           if (generation === mine) inFlight = undefined;
         }
-        return cached;
+        return answered ? cached : undefined;
       })();
       inFlight = task;
       return task;
@@ -6420,12 +6528,46 @@ export function createWriteLaneProgress(probe: () => Promise<string>): WriteLane
   };
 }
 
-/** `git status --porcelain` for one worktree, as a {@link WriteLaneProgress} probe. */
+/**
+ * The capture's own question, asked of a live worktree: **is there anything
+ * here that `captureWorktreeDiff` would find?**
+ *
+ * Two halves, because a role may deliver its work in either form and the lane
+ * contract says so out loud — *anything you change (or commit) here is your
+ * own delta*:
+ *
+ * 1. `git status --porcelain` — the working tree and the index, under
+ *    {@link CAPTURE_PATHSPEC} so a role's own `.arcturn` scratch is excluded
+ *    exactly as it is excluded from the diff.
+ * 2. `git rev-list --count <baseRef>..HEAD` — commits the role made itself.
+ *    A role that ran `git add -A && git commit` has an EMPTY porcelain and a
+ *    full diff, and the guard used to read that as an idle child: the
+ *    reviewer's role committed on turn 1, read for the rest, and was stopped
+ *    at turn 36 — twice — with "left 1 changed file behind, captured below"
+ *    and nothing applied. Skipped when the lane seeded no base commit, which
+ *    is the case where {@link captureWorktreeDiff} itself falls back to
+ *    `--cached` and the porcelain is the whole story.
+ *
+ * A rejection from either half propagates, which is the point: the caller
+ * reads a failed probe as "unknown", and unknown never stops a child.
+ *
+ * @param lane - The worktree lane, for its `git` runner.
+ * @param worktree - The checkout to watch.
+ */
 function worktreeProgress(lane: WriteLane, worktree: WriteLaneWorktree): WriteLaneProgress {
-  return createWriteLaneProgress(
-    async () =>
-      (await lane.exec(worktree.dir, ["status", "--porcelain", ...CAPTURE_PATHSPEC])).stdout,
-  );
+  return createWriteLaneProgress(async () => {
+    const status = (await lane.exec(worktree.dir, ["status", "--porcelain", ...CAPTURE_PATHSPEC]))
+      .stdout;
+    if (status.trim() !== "") return status;
+    const base = worktree.baseRef;
+    if (base === undefined) return "";
+    const commits = (
+      await lane.exec(worktree.dir, ["rev-list", "--count", `${base}..HEAD`])
+    ).stdout.trim();
+    // Any non-zero count is a delta; the string is returned rather than a
+    // boolean because a probe's contract is "non-empty means changed".
+    return commits === "" || commits === "0" ? "" : `${commits} commit(s) since ${base}`;
+  });
 }
 
 /**

@@ -57,12 +57,14 @@ import {
   parseWorkflow,
   retriedAttemptsNote,
   runWorkflow,
+  settleWithin,
   type Workflow,
   type WorkflowStepRequest,
   WRITE_LANE_PROGRESS_TURNS,
   WRITE_LANE_STALL_TURNS,
   type WriteLane,
   type WriteLaneHost,
+  type WriteLaneProgress,
   writeLaneProgressCheck,
 } from "./workflow.js";
 import {
@@ -807,6 +809,17 @@ describe("the write lane's mid-run progress check", () => {
 
 describe('the worktree\'s own answer to "has this step changed a file?"', () => {
   /**
+   * One completed tool call that could write: the epoch is ticked on the way
+   * in and again on the way out, exactly as the drive does it. A single
+   * `mutated()` is therefore a call still IN FLIGHT, and the tests below use
+   * both spellings deliberately.
+   */
+  function wrote(progress: WriteLaneProgress): void {
+    progress.mutated();
+    progress.mutated();
+  }
+
+  /**
    * RED FIRST: there was no such answer. `countWrites` was the only signal,
    * and it is blind to every file a role writes through the shell.
    */
@@ -822,7 +835,7 @@ describe('the worktree\'s own answer to "has this step changed a file?"', () => 
     expect(calls).toBe(0);
 
     // One `bash` later, the proof is gone until git says otherwise.
-    progress.mutated();
+    wrote(progress);
     expect(progress.provablyUnchanged()).toBe(false);
     await progress.refresh();
     expect(progress.provablyUnchanged()).toBe(true);
@@ -833,7 +846,7 @@ describe('the worktree\'s own answer to "has this step changed a file?"', () => 
   it("reports dirty, clean and unknown as three different things", async () => {
     let status = "";
     const progress = createWriteLaneProgress(async () => status);
-    progress.mutated();
+    wrote(progress);
     expect(await progress.refresh()).toBe(false);
     status = " M notes.md\n";
     expect(await progress.refresh(true)).toBe(true);
@@ -846,7 +859,7 @@ describe('the worktree\'s own answer to "has this step changed a file?"', () => 
     const progress = createWriteLaneProgress(async () => {
       throw new Error("fatal: not a git repository");
     });
-    progress.mutated();
+    wrote(progress);
     await expect(progress.refresh()).resolves.toBeUndefined();
     expect(progress.changed()).toBeUndefined();
     // THE WHOLE POINT: a guard reading this must not stop the child.
@@ -859,26 +872,97 @@ describe('the worktree\'s own answer to "has this step changed a file?"', () => 
       if (broken) throw new Error("index.lock");
       return "?? new.md\n";
     });
-    flaky.mutated();
+    wrote(flaky);
     expect(await flaky.refresh()).toBe(true);
     broken = true;
-    expect(await flaky.refresh(true)).toBe(true);
+    expect(await flaky.refresh(true)).toBeUndefined();
+    expect(flaky.changed()).toBe(true);
   });
 
   /**
-   * The staleness rule is what makes a cached answer usable at all: a `git
-   * status` taken when nothing that could write had run since is still the
-   * truth, and one overtaken by a `bash` call is not.
+   * RED FIRST, and the sharper half of the same rule: `refresh` used to return
+   * the CACHE after its catch, so a probe that failed handed back whatever the
+   * last successful one had said. One clean answer early on, a git that breaks
+   * afterwards, and every "fresh" probe from then on resolved `false` — which
+   * is the one value the guard stops a child on. The shipped test only ever
+   * broke git before the first probe, where the cache was empty anyway.
+   */
+  it("answers 'unknown' from a FAILED probe even after a clean one succeeded", async () => {
+    let broken = false;
+    const progress = createWriteLaneProgress(async () => {
+      if (broken) throw new Error("fatal: not a git repository");
+      return "";
+    });
+    wrote(progress);
+    expect(await progress.refresh()).toBe(false);
+
+    broken = true;
+    wrote(progress);
+    // The guard's own call: fresh, and it must not resolve `false`.
+    expect(await progress.refresh(true)).toBeUndefined();
+    // …nor may the strict bar be met off the stale cache.
+    expect(progress.provablyUnchanged()).toBe(false);
+  });
+
+  /**
+   * RED FIRST: the watermark was sampled BEFORE the probe ran, so a `git
+   * status` that overlapped the next turn's `bash` could record "clean, and
+   * nothing has happened since" — and the guard's synchronous branch would
+   * then stop a child that had just written, with no fresh probe at all. The
+   * epoch is ticked on both the start and the end of such a call, so an answer
+   * taken across one can never look fresh.
+   */
+  it("refuses a clean answer taken while something that could write was in flight", async () => {
+    let release = (): void => {};
+    const progress = createWriteLaneProgress(async () => {
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return "";
+    });
+    const probing = progress.refresh(true);
+    // The next turn's `bash` starts and finishes while git is still reading.
+    progress.mutated();
+    progress.mutated();
+    release();
+    expect(await probing).toBe(false);
+    // Clean, yes — but taken across a write, so it proves nothing and the
+    // guard must go and ask again rather than abort on it.
+    expect(progress.provablyUnchanged()).toBe(false);
+  });
+
+  it("refuses a clean answer while such a call is still running", async () => {
+    const progress = createWriteLaneProgress(async () => "");
+    // A `bash` that has started and not yet returned: the epoch is odd.
+    progress.mutated();
+    await progress.refresh();
+    expect(progress.changed()).toBe(false);
+    expect(progress.provablyUnchanged()).toBe(false);
+    // It returns, and only now can a fresh answer prove anything.
+    progress.mutated();
+    await progress.refresh(true);
+    expect(progress.provablyUnchanged()).toBe(true);
+  });
+
+  /**
+   * The staleness clause, pinned on its own: delete `watermark === epoch` from
+   * `provablyUnchanged` and this test is the one that goes red. A clean answer
+   * from before a write is not evidence about after it.
    */
   it("stops trusting a clean answer the moment something that could write runs", async () => {
     const progress = createWriteLaneProgress(async () => "");
-    progress.mutated();
+    wrote(progress);
     await progress.refresh();
     expect(progress.provablyUnchanged()).toBe(true);
-    progress.mutated();
+    // A COMPLETED call after the probe: parity is even again, so only the
+    // watermark clause can catch this one.
+    wrote(progress);
     expect(progress.provablyUnchanged()).toBe(false);
     // The raw cache is still readable; it is simply no longer a proof.
     expect(progress.changed()).toBe(false);
+    // And the proof comes back the moment git is asked again.
+    await progress.refresh(true);
+    expect(progress.provablyUnchanged()).toBe(true);
   });
 
   /**
@@ -889,9 +973,9 @@ describe('the worktree\'s own answer to "has this step changed a file?"', () => 
    */
   it("keeps a softer bar for the nudge than for the stop", async () => {
     const progress = createWriteLaneProgress(async () => "");
-    progress.mutated();
+    wrote(progress);
     await progress.refresh();
-    progress.mutated();
+    wrote(progress);
     // Strict: a `bash` call has overtaken the probe, so nothing is proved.
     expect(progress.provablyUnchanged()).toBe(false);
     // Soft: the last thing git said was "clean", which is enough to say so.
@@ -899,7 +983,7 @@ describe('the worktree\'s own answer to "has this step changed a file?"', () => 
 
     // Neither bar is met once the worktree is actually dirty.
     const dirty = createWriteLaneProgress(async () => "?? NOTES.md\n");
-    dirty.mutated();
+    wrote(dirty);
     await dirty.refresh();
     expect(dirty.knownUnchanged()).toBe(false);
     expect(dirty.provablyUnchanged()).toBe(false);
@@ -909,7 +993,7 @@ describe('the worktree\'s own answer to "has this step changed a file?"', () => 
     const blind = createWriteLaneProgress(async () => {
       throw new Error("nope");
     });
-    blind.mutated();
+    wrote(blind);
     await blind.refresh();
     expect(blind.knownUnchanged()).toBe(false);
     expect(blind.provablyUnchanged()).toBe(false);
@@ -927,7 +1011,7 @@ describe('the worktree\'s own answer to "has this step changed a file?"', () => 
       running -= 1;
       return "";
     });
-    progress.mutated();
+    wrote(progress);
     await Promise.all([progress.refresh(), progress.refresh(), progress.refresh()]);
     expect(peak).toBe(1);
     expect(calls).toBe(1);
@@ -938,6 +1022,38 @@ describe('the worktree\'s own answer to "has this step changed a file?"', () => 
     await Promise.all([progress.refresh(), progress.refresh(true)]);
     expect(peak).toBe(1);
     expect(calls).toBe(2);
+  });
+});
+
+describe("a finished child never waits forever on its guard's last git call", () => {
+  /**
+   * RED FIRST: the drive awaited the guard's in-flight probe unbounded. The
+   * production lane's `git` carries a timeout, but the lane is an injected
+   * seam — a host wiring its own `exec` without one could hang a step that had
+   * already finished, on a diagnostic that could no longer change anything.
+   */
+  it("gives up on a probe that never returns, and keeps the answer of one that does", async () => {
+    const started = Date.now();
+    await settleWithin(new Promise(() => {}), 20);
+    expect(Date.now() - started).toBeLessThan(1000);
+
+    // A rejection is swallowed exactly as a timeout is: the caller wants the
+    // side effects, never the value.
+    await expect(settleWithin(Promise.reject(new Error("boom")), 20)).resolves.toBeUndefined();
+
+    // And work that finishes inside the bound is genuinely awaited — the drive
+    // reads `stalled` immediately after this returns.
+    let done = false;
+    await settleWithin(
+      new Promise<void>((resolve) =>
+        setTimeout(() => {
+          done = true;
+          resolve();
+        }, 5),
+      ),
+      5_000,
+    );
+    expect(done).toBe(true);
   });
 });
 

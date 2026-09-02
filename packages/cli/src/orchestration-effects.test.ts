@@ -1514,6 +1514,70 @@ describe("a role that writes through the shell is not a role that wrote nothing"
   );
 
   itPosix(
+    "is never stopped for committing its work inside the worktree",
+    async () => {
+      const scratch = await gitScratch();
+      await longCeiling(scratch);
+      // The lane contract says it out loud — "anything you change (or commit)
+      // here is your own delta" — and `captureWorktreeDiff` diffs against the
+      // seed commit for exactly that reason. A guard that asked only `git
+      // status --porcelain` disagreed with the capture it is guarding: this
+      // role commits on turn 1, reads for the rest, and used to be stopped at
+      // 36 twice with "left 1 changed file behind, captured below" and nothing
+      // applied to the checkout.
+      let turn = 0;
+      const llm = respondingLLM(() => {
+        turn += 1;
+        if (turn === 1) {
+          return {
+            toolCalls: [
+              {
+                id: "commit",
+                name: "bash",
+                arguments: {
+                  command:
+                    "printf 'generated\\n' > GENERATED.md && git add -A && " +
+                    "git -c user.email=t@example.com -c user.name=t commit -qm 'scaffold'",
+                },
+              },
+            ],
+          };
+        }
+        if (turn <= 41) {
+          return { toolCalls: [{ id: `r${turn}`, name: "read", arguments: { path: "seed.txt" } }] };
+        }
+        return { text: "scaffolded and reviewed" };
+      });
+      const runtime = await runtimeWith(scratch, llm);
+      const builder = shellWriter();
+      const workflow = parseOk("---\nname: pipeline\n---\n1. @builder scaffold it\n");
+      const runId = "run-committer";
+      const journalDir = join(scratch.home, "committer-journal");
+
+      const result = await runWorkflow(workflow, {
+        resolveAgent: () => builder,
+        agentNames: () => ["builder"],
+        journal: createFileRunJournal(journalDir),
+        runId,
+        runStep: createRuntimeRunStep(runtime, {
+          resolveAgent: () => builder,
+          writeLane: laneFor(runtime, runId),
+        }),
+      });
+
+      // Forty-two turns, well past 36, and nobody stopped it.
+      expect(result.status).toBe("done");
+      expect(llm.requests).toHaveLength(42);
+      expect(result.steps[0]?.attempts ?? 1).toBe(1);
+      // Its commit is a delta the capture found and the lane applied.
+      expect(await readFile(join(scratch.cwd, "GENERATED.md"), "utf8")).toBe("generated\n");
+      // And it was never told it had changed nothing, either.
+      expect(notices(llm)).toEqual([]);
+    },
+    120_000,
+  );
+
+  itPosix(
     "is still stopped at 36 when the shell only ever reads — the guard still guards",
     async () => {
       const scratch = await gitScratch();
@@ -1546,8 +1610,14 @@ describe("a role that writes through the shell is not a role that wrote nothing"
       // decide anything about it, and the child may finish a turn while git
       // answers. Late is fine; wrongly stopping a role that wrote is not.
       expect(result.steps[0]?.attempts).toBe(2);
+      // A RANGE, and deliberately so: a child that has touched the shell is
+      // decided by a fresh `git status`, which the handler cannot await, so the
+      // abort lands on turn 36 or a few turns after it. Against a scripted
+      // model a turn is microseconds and a probe is milliseconds, so the probe
+      // always loses a race it always wins in production. What is pinned is
+      // that it stops far below the 200-turn ceiling, on both attempts.
       expect(llm.requests.length).toBeGreaterThanOrEqual(WRITE_LANE_STALL_TURNS * 2);
-      expect(llm.requests.length).toBeLessThanOrEqual(WRITE_LANE_STALL_TURNS * 2 + 6);
+      expect(llm.requests.length).toBeLessThanOrEqual(WRITE_LANE_STALL_TURNS * 2 + 20);
       const ask = (await journalOnceEnded(journalDir, "paused")).find(
         (line): line is Extract<JournalLine, { kind: "stepFailAsk" }> =>
           line.kind === "stepFailAsk",
