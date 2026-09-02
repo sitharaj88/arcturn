@@ -12,7 +12,7 @@
       {
         "name": "rag-architect",
         "lane": "write",
-        "tools": ["read", "grep", "glob", "ls", "write"]
+        "tools": ["read", "grep", "glob", "ls", "write", "edit"]
       },
       {
         "name": "rag-builder",
@@ -73,7 +73,7 @@
       },
       {
         "name": "rag-threat-drills",
-        "line": "Runs injection, minimal-count poisoning, entitlement bypass cold and against a warm cache, cross-tenant probes, exfiltration and denial of wallet — against a scratch target only, each CONFIRMED, MITIGATED or NO-ORACLE with its reproduction and both denominators."
+        "line": "Runs injection, minimal-count poisoning, entitlement bypass cold and against a warm cache, cross-tenant probes, exfiltration and denial of wallet \u2014 against a scratch target only, each CONFIRMED, MITIGATED or NO-ORACLE with its reproduction and both denominators."
       }
     ],
     "executable": false

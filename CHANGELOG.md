@@ -35,7 +35,76 @@ CLI, the SDK, or the wire protocol.
   under-reporting spend the day it lapsed, and a budget ceiling that reads
   low is one that fails to trip.
 
+- **`arcturn search`, and `arcturn add <name>` for anything the hub lists.**
+  The site now exports the registry as one JSON file,
+  `https://arcturn.dev/hub/index.json`, built from the same `registry/*.json`
+  the hub pages render — and the CLI reads it. `arcturn search review` lists
+  every listed package whose name, kinds or description carries the word,
+  each with the `arcturn add <name>` that installs it; `arcturn add
+  starter-skills` and `arcturn inspect starter-skills` look a bare name up in
+  that file, print `resolving "starter-skills" via the hub → …`, and then run
+  exactly as if you had typed the source they found. Listing a package is a
+  pull request to `registry/` and a site deploy; no CLI release is involved,
+  which is what RFC 0002 meant by "the file is the API".
+
+  The index is data, never instructions. A bare name can only ever resolve
+  to the `owner/repo[/subdir][@ref]` GitHub shorthand a listing is allowed to
+  carry — an index naming a local path or an arbitrary git URL is refused
+  whole — and the string it resolves to goes through the same resolver, the
+  same executable-code confirmation and the same `--yes` semantics as a
+  typed source. Nothing installs that was not printed first. A listing may
+  now pin a `ref`; when it does, the hub page's command and the bare-name
+  install both carry it. The index is read over https only (plain http on
+  localhost, for a local site build), `ARCTURN_HUB_URL` points a CLI at
+  another copy, and an unreachable hub is one line on stderr naming the
+  reason, the explicit source as the way around it, and exit 1.
+
+- **A parked step says what the model emitted on the turn it failed on.**
+  The park used to name the step, the role and a one-line cause. For a step
+  that produced nothing, that cause was the whole story: "no file was changed
+  and no text was returned", and the hour of work that followed — opening
+  the session JSONL, finding the last assistant message, measuring it — lived
+  in an engineer's head. The failed step's last turn is now recorded as a
+  *shape* on its `stepEnd` line and on the `stepFailAsk` park: the model id,
+  the stop reason, each block's kind and size, and — only when the turn was
+  reasoning alone — the last sentence of that reasoning. `/workflow status`,
+  the live park notice and the resume restatement print it as one line:
+  `last turn: zai/glm-5.3 · stopped endTurn · thinking 65,215 chars · no text
+  · no tool call`, then `reasoning ended: "…Write the file now."`. That line
+  is what turns a void into a diagnosis with a specific fix. Reasoning is
+  never journalled for a turn that delivered something.
+
+- **`arcturn -p "/workflow …"` runs the workflow.** A leading slash under
+  `--print` used to be handed to the model as a question — so there was no
+  way to run a pipeline from CI, a script or cron at all. Print mode now
+  dispatches a `/command` through the same registry the interactive app
+  uses, with a headless surface behind it: the transcript is stdout, notices
+  are stderr, a pre-filled follow-up is printed as the command to run next,
+  and a picker is refused with a notice naming the argument to pass instead.
+  The exit code tells a CI job how it ended without grepping: `0` finished,
+  `1` an error, `2` no such command, `3` the workflow stopped for a person.
+  Under `--output-format json` every notice and workflow event is NDJSON.
+
+- **Every shipped workflow is now proven to run.** A conformance suite parses
+  all eighteen kit workflows with the real parser, resolves every `@role` in
+  its own kit, refuses any model tag that is not a `tier:`, loads every role
+  file clean, and then runs each workflow end to end through the real engine
+  — lanes, worktrees, journal — under a fake model that answers each step
+  minimally, asserting it completes. Two failure shapes from real runs are
+  replayed against the shipped `rag-setup` files: one silent turn recovers
+  inside the step at the cost of one request; two park the run with the step
+  named. Fourteen seconds, in CI, on every change.
+
 ### Fixed
+
+- **A team member that produced nothing is `failed`, not `done`.** The same
+  hole the workflow engine closed for steps, in the team supervisor: a member
+  whose agent returned no text and changed no file was recorded `done`, then
+  folded into `empty` at merge, and the team read as merged-and-complete
+  while the member's work never existed. It is now `failed` with a cause in
+  the same words as the step's, `merge()` reports it as a failure, and the
+  team cannot read complete over it. A member that said something and
+  changed nothing is still the honest `empty`.
 
 - **A turn that returns nothing is handed back once, instead of ending the
   run.** A model can reason at length, close its thinking with "Now write.",
@@ -75,6 +144,21 @@ CLI, the SDK, or the wire protocol.
 
 
 ### Changed
+
+- **`rag-blueprint`'s architect writes the ADR in sections, never in one
+  call.** Two real runs on two different models ended the same way: the
+  architect planned all eleven sections in its reasoning — 65,000 characters
+  of it — closed with "Write the file now.", and ended its turn without
+  making the `write` call; nudged, it did the same again, and the run parked
+  with nothing on disk. A read-lane role on the same model wrote 23,000
+  characters of *text* after 38,000 of reasoning without trouble; what does
+  not survive is a single tool call asked to carry a thirty-kilobyte
+  argument after that much thinking. The role now holds `edit` beside
+  `write` and is told exactly how to use them: land the file with its
+  headings first, fill one section per `edit`, read it back once. Its step
+  output becomes a short handoff — path, headings, the five numbers the
+  builder needs first — since every later role reads the file from disk
+  anyway. The registry disclosure and the editor's bundled catalog follow.
 
 - **A build stage that took three tries to pass is now three steps that
   pass once.** `rag-blueprint`'s `rag-setup` scoped each of its three build

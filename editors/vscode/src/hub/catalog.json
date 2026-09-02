@@ -490,7 +490,7 @@
         {
           "name": "rag-architect",
           "lane": "write",
-          "tools": ["read", "grep", "glob", "ls", "write"]
+          "tools": ["read", "grep", "glob", "ls", "write", "edit"]
         },
         {
           "name": "rag-builder",
