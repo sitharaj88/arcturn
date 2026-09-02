@@ -40,6 +40,10 @@ import {
   ERASE_DOWN,
   ERASE_LINE,
   ERASE_SCREEN,
+  RESET_SCROLL_REGION,
+  scrollDown,
+  scrollRegion,
+  scrollUp,
 } from "./ansi.js";
 import type { Terminal } from "./terminal.js";
 import type { CursorPosition } from "./tui.js";
@@ -66,6 +70,25 @@ export interface ComposedFrame {
 
 /** Maximum transcript lines written per slice when the terminal signals drain. */
 const CONTENT_SLICE_LINES = 400;
+
+/**
+ * Rows a shift must save, net of the ones it exposes, to be worth a scroll
+ * region. Below this the escape sequences cost more than the repaint they
+ * replace, and — since a shift also blanks rows the terminal then has to be
+ * told about — the plain row diff is both smaller and simpler.
+ */
+const MIN_SHIFT_GAIN = 3;
+
+/**
+ * A vertical move of a contiguous band of rows: `rows` positive means the
+ * content moved *up* the screen (SU), negative means down (SD). Bounds are
+ * 0-based and inclusive, and name the DECSTBM region the move happens in.
+ */
+interface RowShift {
+  readonly top: number;
+  readonly bottom: number;
+  readonly rows: number;
+}
 
 /**
  * SGR "default background". Rendered lines that carry their own background —
@@ -99,6 +122,18 @@ export interface FrameComposerOptions {
    * and must never tint it, so inline callers simply omit this.
    */
   readonly canvas?: () => string;
+  /**
+   * Whether a pure vertical scroll may be painted by moving the terminal's own
+   * rows (DECSTBM plus SU/SD) instead of rewriting them (default `true`).
+   *
+   * A scroll changes nearly every row of the frame, so the row diff — which is
+   * exactly right for a keystroke — degenerates into a full repaint for the
+   * *smallest* possible change. Handing the move to the terminal turns a
+   * screenful of styled cells into a handful of bytes and a memmove. Only
+   * meaningful in screen mode, and only ever a shortcut: any row the shift
+   * cannot account for is still written out by the ordinary diff.
+   */
+  readonly scrollRegion?: boolean;
 }
 
 /**
@@ -119,6 +154,8 @@ export class FrameComposer {
   private readonly screen: boolean;
   /** Resolves the current canvas SGR, or `""` when the theme paints no ground. */
   private readonly canvas: (() => string) | undefined;
+  /** Whether screen-mode frames may move rows with a DECSTBM scroll region. */
+  private readonly scrollRegion: boolean;
   /** The canvas resolved for the flush in progress (`""` outside a flush). */
   private canvasSgr = "";
 
@@ -142,6 +179,7 @@ export class FrameComposer {
     this.terminal = terminal;
     this.screen = options.screen ?? false;
     this.canvas = options.canvas;
+    this.scrollRegion = options.scrollRegion ?? true;
   }
 
   /* ---------------------------------------------------------------- state */
@@ -439,10 +477,32 @@ export class FrameComposer {
       }
     } else {
       const previous = this.flushedLines;
-      const max = Math.max(frame.lines.length, previous.length);
+      // A scroll is the one change the row diff handles worst: it moves every
+      // row, so the cheapest frame to compute is the most expensive to write.
+      // When the new frame is the old one shifted, the terminal moves the rows
+      // itself and only the band it exposed is painted.
+      const shift = this.scrollRegion
+        ? detectShift(previous, frame.lines, frame.height)
+        : undefined;
+      let baseline: (string | null)[] = previous;
+      if (shift) {
+        buffer +=
+          scrollRegion(shift.top, shift.bottom) +
+          (shift.rows > 0 ? scrollUp(shift.rows) : scrollDown(-shift.rows)) +
+          RESET_SCROLL_REGION;
+        baseline = shiftedBaseline(previous, frame.height, shift);
+        // DECSTBM homed the cursor; every write below is absolute, and the
+        // frame's own cursor park (if any) is the last word.
+        this.cursorRow = 0;
+        this.cursorCol = 0;
+      }
+      const max = Math.max(frame.lines.length, baseline.length);
       for (let i = 0; i < max; i++) {
         const line = frame.lines[i] ?? "";
-        if ((previous[i] ?? "") === line) continue;
+        const painted = baseline[i];
+        // `null` marks a row the shift blanked: its content is the terminal's
+        // fill, never a line we know, so it always gets rewritten.
+        if (painted !== null && (painted ?? "") === line) continue;
         buffer += cursorTo(i, 0) + this.erase(ERASE_LINE) + this.paintRow(line, frame.width);
       }
     }
@@ -567,4 +627,106 @@ export class FrameComposer {
     this.cursorCol = col;
     return bytes;
   }
+}
+
+/**
+ * The vertical shift, if any, that explains `next` as `previous` scrolled.
+ *
+ * Rows are compared by identity first and content second — consecutive frames
+ * of a scrolling viewport slice the same underlying row array, so the common
+ * case is a pointer compare — and the winner is the shift that saves the most
+ * repaints net of the band it exposes. Returns `undefined` when no shift pays
+ * for itself, which is every frame that is not a scroll.
+ */
+function detectShift(
+  previous: readonly string[],
+  next: readonly string[],
+  height: number,
+): RowShift | undefined {
+  if (height <= 1 || previous.length === 0) return undefined;
+  const at = (lines: readonly string[], index: number): string | undefined =>
+    index >= 0 && index < height ? (lines[index] ?? "") : undefined;
+
+  // A shift needs `gain - step >= MIN_SHIFT_GAIN` with `step >= 1`, and `gain`
+  // never exceeds the number of rows where `next[i] !== previous[i]` at the
+  // same index (a shifted row's gain requires exactly that, once its matching
+  // run has lined it up with the shift — see the loop below). So a frame with
+  // MIN_SHIFT_GAIN or fewer such rows — every keystroke frame among them, on
+  // a screen this can never win a scroll region, and it is O(height) to rule
+  // out versus O(height²) to discover the same way the search below would.
+  let changed = 0;
+  for (let i = 0; i < height; i++) {
+    if ((previous[i] ?? "") !== (next[i] ?? "")) {
+      changed++;
+      if (changed > MIN_SHIFT_GAIN) break;
+    }
+  }
+  if (changed <= MIN_SHIFT_GAIN) return undefined;
+
+  let best: RowShift | undefined;
+  let bestGain = 0;
+  for (let delta = -(height - 1); delta <= height - 1; delta++) {
+    if (delta === 0) continue;
+    const step = Math.abs(delta);
+    // Walk the maximal runs of rows the shift explains, scoring each by the
+    // rows inside it that actually changed — a run of matching blanks explains
+    // nothing and must not win.
+    let gain = 0;
+    let first = -1;
+    let last = -1;
+    for (let i = 0; i <= height; i++) {
+      const source = at(previous, i + delta);
+      const inRun = i < height && source !== undefined && source === at(next, i);
+      if (inRun) {
+        if (source !== at(previous, i)) {
+          if (first === -1) first = i;
+          last = i;
+          gain++;
+        }
+        continue;
+      }
+      // Run ended: score it, then reset.
+      if (gain > bestGain && first !== -1) {
+        // SU pushes the band up and blanks `step` rows below it; SD pulls it
+        // down and blanks `step` rows above. Either way the region must fit.
+        const top = delta > 0 ? first : first - step;
+        const bottom = delta > 0 ? last + step : last;
+        if (top >= 0 && bottom < height && gain - step >= MIN_SHIFT_GAIN) {
+          bestGain = gain;
+          best = { top, bottom, rows: delta };
+        }
+      }
+      gain = 0;
+      first = -1;
+      last = -1;
+    }
+  }
+  return best;
+}
+
+/**
+ * The screen as the terminal will hold it once `shift` has been applied:
+ * `previous` with the band moved, and the rows the move exposed marked `null`
+ * so the diff always rewrites them.
+ */
+function shiftedBaseline(
+  previous: readonly string[],
+  height: number,
+  shift: RowShift,
+): (string | null)[] {
+  const baseline: (string | null)[] = [...previous];
+  while (baseline.length < height) baseline.push("");
+  const step = Math.abs(shift.rows);
+  if (shift.rows > 0) {
+    for (let i = shift.top; i <= shift.bottom - step; i++) baseline[i] = previous[i + step] ?? "";
+    for (let i = Math.max(shift.top, shift.bottom - step + 1); i <= shift.bottom; i++) {
+      baseline[i] = null;
+    }
+  } else {
+    for (let i = shift.bottom; i >= shift.top + step; i--) baseline[i] = previous[i - step] ?? "";
+    for (let i = shift.top; i <= Math.min(shift.bottom, shift.top + step - 1); i++) {
+      baseline[i] = null;
+    }
+  }
+  return baseline;
 }

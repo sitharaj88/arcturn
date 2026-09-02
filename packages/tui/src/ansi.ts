@@ -455,6 +455,34 @@ export function cursorToColumn(col: number): string {
   return `${CSI}${Math.max(0, col) + 1}G`;
 }
 
+/**
+ * Sets the vertical scrolling region (DECSTBM) to the **0-based**, inclusive
+ * row range — the rows {@link scrollUp} and {@link scrollDown} move. Homes the
+ * cursor, as the standard requires, so absolute addressing must follow.
+ */
+export function scrollRegion(top: number, bottom: number): string {
+  return `${CSI}${Math.max(0, top) + 1};${Math.max(0, bottom) + 1}r`;
+}
+
+/** Restores the scrolling region to the whole screen. Homes the cursor. */
+export const RESET_SCROLL_REGION = `${CSI}r`;
+
+/**
+ * Scrolls the scrolling region up by `n` rows (SU): the content moves toward
+ * the top, and `n` blank rows appear at the bottom of the region.
+ */
+export function scrollUp(n = 1): string {
+  return n > 0 ? `${CSI}${n}S` : "";
+}
+
+/**
+ * Scrolls the scrolling region down by `n` rows (SD): the content moves toward
+ * the bottom, and `n` blank rows appear at the top of the region.
+ */
+export function scrollDown(n = 1): string {
+  return n > 0 ? `${CSI}${n}T` : "";
+}
+
 /** Erases the entire current line, leaving the cursor where it is. */
 export const ERASE_LINE = `${CSI}2K`;
 /** Erases from the cursor to the end of the current line. */

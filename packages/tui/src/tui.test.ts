@@ -640,3 +640,72 @@ describe("screen-mode teardown", () => {
     expect(reset).toBeLessThan(exit);
   });
 });
+
+describe("priority key handlers", () => {
+  class Sink implements Component {
+    seen: string[] = [];
+    render(): string[] {
+      return ["sink"];
+    }
+    handleInput(key: Key): boolean {
+      this.seen.push(key.name);
+      return true;
+    }
+  }
+
+  it("sees a key before the focused component, and can consume it", () => {
+    const terminal = new TestTerminal({ columns: 20, rows: 6 });
+    const tui = new TUI(terminal, { manageCursor: false });
+    const sink = new Sink();
+    tui.add(sink);
+    tui.focus(sink);
+
+    const claimed: string[] = [];
+    tui.onKey(
+      (key) => {
+        if (key.name !== "end") return false;
+        claimed.push(key.name);
+        return true;
+      },
+      { priority: true },
+    );
+
+    expect(tui.dispatchKey(createKey("end"))).toBe(true);
+    expect(claimed).toEqual(["end"]);
+    expect(sink.seen).toEqual([]); // the focused component never saw it
+
+    // Anything the priority handler declines still reaches the component.
+    tui.dispatchKey(createKey("home"));
+    expect(sink.seen).toEqual(["home"]);
+  });
+
+  it("keeps ordinary handlers behind the focused component", () => {
+    const terminal = new TestTerminal({ columns: 20, rows: 6 });
+    const tui = new TUI(terminal, { manageCursor: false });
+    const sink = new Sink();
+    tui.add(sink);
+    tui.focus(sink);
+    const fallback: string[] = [];
+    tui.onKey((key) => {
+      fallback.push(key.name);
+      return true;
+    });
+    tui.dispatchKey(createKey("end"));
+    expect(sink.seen).toEqual(["end"]);
+    expect(fallback).toEqual([]);
+  });
+
+  it("unsubscribes a priority handler", () => {
+    const terminal = new TestTerminal({ columns: 20, rows: 6 });
+    const tui = new TUI(terminal, { manageCursor: false });
+    const sink = new Sink();
+    tui.add(sink);
+    tui.focus(sink);
+    const off = tui.onKey(() => true, { priority: true });
+    tui.dispatchKey(createKey("end"));
+    expect(sink.seen).toEqual([]);
+    off();
+    tui.dispatchKey(createKey("end"));
+    expect(sink.seen).toEqual(["end"]);
+  });
+});

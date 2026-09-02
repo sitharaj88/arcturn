@@ -293,6 +293,10 @@ export class InteractiveApp {
       // A fresh session floats its welcome block mid-screen like a splash;
       // the first transcript line returns it to the bottom-anchored flow.
       centered: () => this.#transcript.length === 0 && !this.#streaming,
+      // A trackpad flick lands as one stdin chunk of many wheel reports, so
+      // the viewport shows it a bounded number of rows at a time. This is
+      // what keeps the rest of the flick moving once the input has stopped.
+      onScrollPending: () => this.#tui.requestRender(),
     });
     this.#imageSupport = detectImageSupport();
     this.#formatter = this.#newFormatter();
@@ -358,6 +362,12 @@ export class InteractiveApp {
     this.#tui.setComponents(this.#liveComponents());
     this.#tui.focus(this.#inputBox);
     this.#tui.onKey((key) => this.#onGlobalKey(key));
+    // Home/End belong to the editor — except while the transcript is scrolled
+    // away from the tail, which is when the reader is reading rather than
+    // typing and when the scroll banner offers them. A priority handler is the
+    // only way to reach a key the focused editor already binds; it declines
+    // every other key, and every key at all once the view is following again.
+    this.#tui.onKey((key) => this.#onScrollJumpKey(key), { priority: true });
   }
 
   /** The command registry, exposed for tests and extensions. */
@@ -1152,6 +1162,21 @@ export class InteractiveApp {
     return false;
   }
 
+  /**
+   * `Home`/`End` while the transcript is scrolled up: jump to the top of the
+   * session, or back to the live tail. Declined in every other state, so the
+   * editor keeps both keys for the line they are on — and, since this is a
+   * priority handler that runs ahead of the focused component, declined
+   * outright while a dialog is open so an overlaid `SelectList` (a permission
+   * prompt, plan approval, a picker) keeps both keys for its own selection.
+   */
+  #onScrollJumpKey(key: Key): boolean {
+    if (this.#dialogDepth > 0) return false;
+    if (this.#mode !== "screen" || this.#viewport.isFollowing) return false;
+    if (!matchesKey(key, "end") && !matchesKey(key, "home")) return false;
+    return this.#viewport.handleInput(key);
+  }
+
   /** See {@link #selecting}: the drag is the selection, the release is the copy. */
   #onMouseSelection(key: Key): void {
     const cell = key.mouse;
@@ -1319,6 +1344,9 @@ export class InteractiveApp {
   async #onSubmit(text: string): Promise<void> {
     const trimmed = text.trim();
     if (trimmed === "") return;
+    // Sending is the strongest possible "I am done reading back there": the
+    // answer arrives at the tail, so the view goes there to meet it.
+    this.#viewport.follow();
 
     if (trimmed.startsWith("/")) {
       const result = await this.#commands.dispatch(trimmed, {

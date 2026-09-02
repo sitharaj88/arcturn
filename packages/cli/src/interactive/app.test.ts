@@ -585,6 +585,100 @@ describe("InteractiveApp in screen mode", () => {
     await waitFor(() => !h.runtime.agent.isRunning, { timeout: 12_000 });
   });
 
+  /** The frame as it stands right now, not the whole output history. */
+  function frameNow(h: Harness): string {
+    return h.app.tui
+      .buildFrame(80, 24)
+      .lines.map((line) => stripAnsi(line))
+      .join("\n");
+  }
+
+  it("takes End and Home for the transcript only while it is scrolled up", async () => {
+    // The scroll banner offers "End to follow"; the editor binds End to
+    // end-of-line. While the reader is scrolled away from the tail the
+    // transcript wins, and only then.
+    const h = await screenHarness([{ text: "the amber answer" }]);
+    h.terminal.injectInput("ask\r");
+    await waitFor(() => h.text().includes("the amber answer"), { timeout: 12_000 });
+    await waitFor(() => !h.runtime.agent.isRunning, { timeout: 12_000 });
+
+    // Following: Home and End belong to the editor.
+    h.terminal.injectInput("abc");
+    await tick();
+    h.terminal.injectInput("\u001b[H"); // Home → column 0
+    await tick();
+    h.terminal.injectInput("X");
+    await tick();
+    expect(h.app.editor.text).toBe("Xabc");
+    h.terminal.injectInput("\u001b[F"); // End → after "abc"
+    await tick();
+    h.terminal.injectInput("Y");
+    await tick();
+    expect(h.app.editor.text).toBe("XabcY");
+
+    // Scroll up, and the same keys drive the transcript instead.
+    for (let i = 0; i < 10; i++) h.terminal.injectInput("\u001b[<64;10;5M");
+    await waitFor(() => frameNow(h).includes("lines below"), { label: "scroll banner" });
+    const typed = h.app.editor.text;
+    h.terminal.injectInput("\u001b[F"); // End → back to the tail
+    await tick(4);
+    expect(frameNow(h)).not.toContain("lines below");
+    expect(h.app.editor.text).toBe(typed); // the editor was left alone
+  });
+
+  it("leaves End/Home for an open dialog's own list instead of jumping the transcript", async () => {
+    // The priority handler that gives the scrolled-up transcript End/Home
+    // must stand down while a dialog (a SelectList overlay: a permission
+    // prompt here) is open, so the same keys reach the dialog's own list.
+    const h = await screenHarness([
+      { toolCalls: [{ id: "t1", name: "bash", arguments: { command: "rm -rf /" } }] },
+      { text: "understood" },
+    ]);
+    h.terminal.injectInput(`delete everything${ENTER}`);
+    await waitFor(() => h.app.tui.overlay !== null);
+
+    // Scroll the transcript up while the dialog is open: wheel input is not
+    // among the keys SelectList claims, so it falls through to the viewport
+    // exactly like it would with no dialog open.
+    for (let i = 0; i < 10; i++) h.terminal.injectInput("\u001b[<64;10;5M");
+    await waitFor(() => frameNow(h).includes("lines below"), { label: "scroll banner" });
+
+    h.terminal.injectInput("\u001b[F"); // End
+    await tick();
+    // The transcript did not move...
+    expect(frameNow(h)).toContain("lines below");
+    // ...because End went to the dialog's list instead, landing on its last
+    // item ("Deny and tell the model why") the same way it would for a list
+    // with nothing above it. The outcome is read straight from the agent's
+    // messages rather than scrollback text: content produced while the view
+    // is scrolled away from the tail is not flushed to the terminal until it
+    // follows again, which is a separate, unrelated mechanism.
+    h.terminal.injectInput(ENTER);
+    await waitFor(() => h.runtime.agent.messages.some((message) => message.role === "toolResult"));
+    const results = h.runtime.agent.messages.filter((message) => message.role === "toolResult");
+    expect(results[0]?.isError).toBe(true);
+    expect(h.app.tui.overlay).toBeNull();
+
+    // With no dialog open, the same key goes back to the transcript.
+    h.terminal.injectInput("\u001b[F"); // End
+    await tick(4);
+    expect(frameNow(h)).not.toContain("lines below");
+  });
+
+  it("returns to the live tail when a prompt is sent from a scrolled-up view", async () => {
+    const h = await screenHarness([{ text: "first answer" }, { text: "second answer" }]);
+    h.terminal.injectInput("one\r");
+    await waitFor(() => h.text().includes("first answer"), { timeout: 12_000 });
+    await waitFor(() => !h.runtime.agent.isRunning, { timeout: 12_000 });
+
+    for (let i = 0; i < 10; i++) h.terminal.injectInput("\u001b[<64;10;5M");
+    await waitFor(() => frameNow(h).includes("lines below"), { label: "scroll banner" });
+
+    h.terminal.injectInput("two\r");
+    await waitFor(() => h.text().includes("second answer"), { timeout: 12_000 });
+    expect(frameNow(h)).not.toContain("lines below");
+  });
+
   it("rings the terminal notification only for a run that ends unfocused", async () => {
     const h = await screenHarness([{ text: "one" }, { text: "two" }]);
     const notified = () => h.terminal.output.split("\u001b]9;Arcturn").length - 1;

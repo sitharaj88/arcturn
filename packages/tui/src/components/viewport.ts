@@ -33,6 +33,17 @@ export interface ViewportOptions {
    * treatment for an empty session. Scrolling behavior is unaffected.
    */
   readonly centered?: () => boolean;
+  /**
+   * Called at the end of a render that still has wheel motion left to show.
+   *
+   * Wheel motion is metered — see {@link Viewport.scrollBudget} — so a burst
+   * that arrives faster than the host paints is spread over several frames
+   * instead of teleporting the view in one. The host wires this to whatever
+   * schedules its next frame (`tui.requestRender()`), which is what keeps the
+   * remainder moving after the input has stopped. Without it a burst still
+   * lands in full, just on the next frame the host happens to paint.
+   */
+  readonly onScrollPending?: () => void;
 }
 
 /**
@@ -55,6 +66,31 @@ export class Viewport implements Component {
 
   /** Display rows scrolled up from the bottom; `0` follows the tail. */
   private offset = 0;
+  /**
+   * Wheel rows accepted but not yet shown, signed like {@link Viewport.offset}.
+   *
+   * A flick reaches the process as a burst of wheel reports inside a single
+   * stdin chunk: every one is decoded and dispatched before the renderer gets
+   * a turn, so applying them all would move the view by the whole burst in one
+   * frame — a teleport, not a scroll. The surplus waits here and is paid out a
+   * bounded number of rows per frame, so the motion stays continuous and no
+   * notch is ever dropped.
+   */
+  private pendingScroll = 0;
+  /**
+   * A single wheel notch opposite {@link Viewport.pendingScroll}, held rather
+   * than acted on yet.
+   *
+   * Real trackpads occasionally misreport one frame of a flick's direction, so
+   * a lone opposite notch is indistinguishable, on its own, from the start of
+   * a deliberate reversal. The next notch settles it: the same direction as
+   * this one confirms a reversal and the backlog is abandoned; the original
+   * direction resuming means this one was noise, and it is dropped. See
+   * {@link Viewport.queueScroll}.
+   */
+  private heldReversal: number | undefined;
+  /** Rows of wheel motion already spent on the frame being composed. */
+  private scrolledThisFrame = 0;
   /** Height most recently given to {@link Viewport.renderArea}. */
   private lastHeight = 10;
   /** Total display rows at the previous render, for anchored reading. */
@@ -82,12 +118,18 @@ export class Viewport implements Component {
 
   /** `true` while the view is pinned to the newest rows. */
   get isFollowing(): boolean {
-    return this.offset === 0;
+    return this.offset === 0 && this.pendingScroll === 0;
+  }
+
+  /** Display rows the view is scrolled up from the bottom, as painted. */
+  get scrollOffset(): number {
+    return this.offset;
   }
 
   /** Snaps the view back to the bottom (offset `0`). */
   follow(): void {
     this.offset = 0;
+    this.abandonPending();
   }
 
   /** Drops the wrap cache so every line re-wraps on the next render. */
@@ -110,6 +152,9 @@ export class Viewport implements Component {
     // Anchored reading: while scrolled up, growth below must not move the view.
     if (this.offset > 0 && total > this.lastTotal) this.offset += total - this.lastTotal;
     this.lastTotal = total;
+    // Pay out whatever wheel motion this frame's budget still allows, now that
+    // the row count (and therefore the clamp) is current.
+    this.drainScroll();
     this.offset = Math.max(0, Math.min(this.offset, Math.max(0, total - height)));
 
     // The window of `height` rows ending `offset` rows above the bottom.
@@ -140,46 +185,59 @@ export class Viewport implements Component {
     if (this.offset > 0 && lines.length > 0) {
       const unit = this.offset === 1 ? "line" : "lines";
       lines[0] = themeStyle("muted")(
-        truncateToWidth(`… ${this.offset} ${unit} below · End/G to follow`, width),
+        truncateToWidth(`… ${this.offset} ${unit} below · End to follow`, width),
       );
     }
+
+    // The frame is composed: the next one starts with a fresh scroll budget,
+    // and while motion is left over the host is asked to paint it.
+    this.scrolledThisFrame = 0;
+    if (this.pendingScroll !== 0) this.options.onScrollPending?.();
     return lines;
   }
 
   handleInput(key: Key): boolean {
     const page = Math.max(1, this.lastHeight - 1);
     if (matchesKey(key, "wheelup")) {
-      this.scrollBy(this.wheelStep());
+      this.queueScroll(this.wheelStep());
       return true;
     }
     if (matchesKey(key, "wheeldown")) {
-      this.scrollBy(-this.wheelStep());
+      this.queueScroll(-this.wheelStep());
       return true;
     }
     // One line per arrow. Only ever reached while the viewport holds focus,
     // where alternate scroll (terminal.ts) can deliver wheel motion as arrow
-    // keys — so this never competes with an editor.
+    // keys — so this never competes with an editor, and it is metered exactly
+    // like the wheel it stands in for.
     if (matchesKey(key, "up")) {
-      this.scrollBy(1);
+      this.queueScroll(1);
       return true;
     }
     if (matchesKey(key, "down")) {
-      this.scrollBy(-1);
+      this.queueScroll(-1);
       return true;
     }
+    // Paging and the ends are discrete destinations, not motion: they land
+    // whole on the next frame and abandon any wheel motion still in flight,
+    // which is what makes them feel like a jump rather than a queue.
     if (matchesKey(key, "pageup")) {
+      this.abandonPending();
       this.scrollBy(page);
       return true;
     }
     if (matchesKey(key, "pagedown")) {
+      this.abandonPending();
       this.scrollBy(-page);
       return true;
     }
     if (matchesKey(key, "home")) {
+      this.abandonPending();
       this.offset = this.maxOffset();
       return true;
     }
     if (matchesKey(key, "end")) {
+      this.abandonPending();
       this.offset = 0;
       return true;
     }
@@ -341,6 +399,102 @@ export class Viewport implements Component {
   /** Scrolls by `delta` display rows (positive = up, away from the tail). */
   private scrollBy(delta: number): void {
     this.offset = Math.max(0, Math.min(this.offset + delta, this.maxOffset()));
+  }
+
+  /** Accepts wheel motion and shows as much of it as this frame allows. */
+  private queueScroll(delta: number): void {
+    if (this.heldReversal !== undefined) {
+      if (Math.sign(delta) === Math.sign(this.heldReversal)) {
+        // A second notch against the backlog confirms a deliberate reversal —
+        // more than the single stray notch below guards against — so the
+        // backlog is abandoned rather than unwound: a flick up followed by a
+        // flick down must track the second flick, not replay the first one
+        // backwards.
+        this.pendingScroll = this.heldReversal + delta;
+      } else {
+        // The original direction resumed, so the held notch was noise: drop
+        // it and apply this one as ordinary motion.
+        this.pendingScroll += delta;
+      }
+      this.heldReversal = undefined;
+      this.clampPending();
+      this.drainScroll();
+      return;
+    }
+    if (this.pendingScroll !== 0 && Math.sign(delta) !== Math.sign(this.pendingScroll)) {
+      // A lone notch against the backlog is indistinguishable, on its own,
+      // from a real trackpad's occasional one-frame misreport in the middle
+      // of an otherwise one-directional flick. Hold it rather than deciding
+      // yet — see {@link Viewport.heldReversal}.
+      this.heldReversal = delta;
+      return;
+    }
+    this.pendingScroll += delta;
+    this.clampPending();
+    this.drainScroll();
+  }
+
+  /**
+   * Pays out pending wheel motion, up to this frame's budget.
+   *
+   * Motion that would run past an end is dropped rather than banked: a long
+   * flick into the top of the transcript must not leave a backlog that the
+   * next notch downwards has to unwind first.
+   */
+  private drainScroll(): void {
+    if (this.heldReversal !== undefined) {
+      // The frame is painting before a follow-up notch arrived to confirm or
+      // discard the hold — fold it in as ordinary motion so it is shown
+      // rather than silently lost.
+      this.pendingScroll += this.heldReversal;
+      this.heldReversal = undefined;
+      this.clampPending();
+    }
+    if (this.pendingScroll === 0) return;
+    const budget = this.scrollBudget() - this.scrolledThisFrame;
+    if (budget <= 0) return;
+    const direction = Math.sign(this.pendingScroll);
+    const want = direction * Math.min(Math.abs(this.pendingScroll), budget);
+    const before = this.offset;
+    this.scrollBy(want);
+    const moved = this.offset - before;
+    this.scrolledThisFrame += Math.abs(moved);
+    this.pendingScroll = moved === want ? this.pendingScroll - want : 0;
+  }
+
+  /**
+   * Clamps queued wheel motion so `offset + pendingScroll` never asks for
+   * more than {@link Viewport.maxOffset} or less than `0`.
+   *
+   * Unbounded, an enormous flick (thousands of notches, e.g. a trackpad held
+   * down for a while) would queue far more motion than the transcript can
+   * ever show, and {@link Viewport.drainScroll}'s per-frame budget would pay
+   * it out for seconds after the gesture ended. Clamped at queue time instead
+   * of drain time, the backlog can never exceed what actually reaches an end.
+   */
+  private clampPending(): void {
+    const lo = -this.offset;
+    const hi = this.maxOffset() - this.offset;
+    this.pendingScroll = Math.max(lo, Math.min(this.pendingScroll, hi));
+  }
+
+  /** Discards any queued or held wheel motion, e.g. before a discrete jump. */
+  private abandonPending(): void {
+    this.pendingScroll = 0;
+    this.heldReversal = undefined;
+  }
+
+  /**
+   * Rows of wheel motion a single frame may show.
+   *
+   * A quarter of the area keeps three quarters of the previous frame on
+   * screen, which is what the eye reads as motion rather than a cut, and at
+   * ~60fps still carries a fast flick at roughly two screens per second. One
+   * notch is never split, however large {@link ViewportOptions.wheelStep} is:
+   * a notch is the smallest gesture there is and must land whole.
+   */
+  private scrollBudget(): number {
+    return Math.max(this.wheelStep(), Math.ceil(this.lastHeight / 4));
   }
 
   private maxOffset(): number {

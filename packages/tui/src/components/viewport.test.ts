@@ -36,14 +36,14 @@ describe("Viewport", () => {
 
     viewport.handleInput(createKey("wheelup")); // offset 3
     const scrolled = viewport.renderArea(60, 4);
-    expect(scrolled[0]).toBe("… 3 lines below · End/G to follow");
+    expect(scrolled[0]).toBe("… 3 lines below · End to follow");
     expect(scrolled.slice(1)).toEqual(["l4", "l5", "l6"]);
     expect(viewport.isFollowing).toBe(false);
 
     lines.push("l10", "l11");
     const after = viewport.renderArea(60, 4);
     // The offset grew by the appended rows, so the window content stayed put.
-    expect(after[0]).toBe("… 5 lines below · End/G to follow");
+    expect(after[0]).toBe("… 5 lines below · End to follow");
     expect(after.slice(1)).toEqual(["l4", "l5", "l6"]);
   });
 
@@ -81,7 +81,7 @@ describe("Viewport", () => {
     viewport.handleInput(createKey("wheeldown"));
     viewport.handleInput(createKey("wheelup")); // net offset 3
     const scrolled = viewport.renderArea(60, 4);
-    expect(scrolled[0]).toBe("… 3 lines below · End/G to follow");
+    expect(scrolled[0]).toBe("… 3 lines below · End to follow");
     expect(scrolled.slice(1)).toEqual(["l2", "l3", "l4"]);
   });
 
@@ -89,7 +89,7 @@ describe("Viewport", () => {
     const viewport = makeViewport(["a", "b", "c"], 1);
     viewport.renderArea(60, 2);
     viewport.handleInput(createKey("wheelup"));
-    expect(viewport.renderArea(60, 2)[0]).toBe("… 1 line below · End/G to follow");
+    expect(viewport.renderArea(60, 2)[0]).toBe("… 1 line below · End to follow");
   });
 
   it("truncates the indicator to the available width", () => {
@@ -108,15 +108,18 @@ describe("Viewport", () => {
     expect(viewport.handleInput(createKey("wheeldown"))).toBe(true); // already at bottom
     expect(viewport.isFollowing).toBe(true);
 
-    viewport.handleInput(createKey("wheelup")); // 4
-    viewport.handleInput(createKey("wheelup")); // clamped to 6
-    expect(viewport.renderArea(60, 4)[0]).toBe("… 6 lines below · End/G to follow");
+    viewport.handleInput(createKey("wheelup")); // 4 — one notch lands whole
+    expect(viewport.renderArea(60, 4)[0]).toBe("… 4 lines below · End to follow");
+    // A second notch in the same frame is metered: it shows on the next one,
+    // where it clamps at the top.
+    viewport.handleInput(createKey("wheelup"));
+    expect(viewport.renderArea(60, 4)[0]).toBe("… 6 lines below · End to follow");
 
     viewport.handleInput(createKey("wheelup")); // stays 6
-    expect(viewport.renderArea(60, 4)[0]).toBe("… 6 lines below · End/G to follow");
+    expect(viewport.renderArea(60, 4)[0]).toBe("… 6 lines below · End to follow");
 
     viewport.handleInput(createKey("wheeldown")); // 2
-    expect(viewport.renderArea(60, 4)[0]).toBe("… 2 lines below · End/G to follow");
+    expect(viewport.renderArea(60, 4)[0]).toBe("… 2 lines below · End to follow");
     viewport.handleInput(createKey("wheeldown")); // clamped to 0
     expect(viewport.isFollowing).toBe(true);
   });
@@ -127,12 +130,12 @@ describe("Viewport", () => {
     viewport.renderArea(60, 5); // page = 4, max offset 7
 
     expect(viewport.handleInput(createKey("pageup"))).toBe(true);
-    expect(viewport.renderArea(60, 5)[0]).toBe("… 4 lines below · End/G to follow");
+    expect(viewport.renderArea(60, 5)[0]).toBe("… 4 lines below · End to follow");
     viewport.handleInput(createKey("pageup")); // clamped to 7
-    expect(viewport.renderArea(60, 5)[0]).toBe("… 7 lines below · End/G to follow");
+    expect(viewport.renderArea(60, 5)[0]).toBe("… 7 lines below · End to follow");
 
     expect(viewport.handleInput(createKey("pagedown"))).toBe(true);
-    expect(viewport.renderArea(60, 5)[0]).toBe("… 3 lines below · End/G to follow");
+    expect(viewport.renderArea(60, 5)[0]).toBe("… 3 lines below · End to follow");
     viewport.handleInput(createKey("pagedown")); // clamped to 0
     expect(viewport.isFollowing).toBe(true);
     expect(viewport.renderArea(60, 5)).toEqual(["l7", "l8", "l9", "l10", "l11"]);
@@ -145,7 +148,7 @@ describe("Viewport", () => {
 
     expect(viewport.handleInput(createKey("home"))).toBe(true);
     const top = viewport.renderArea(60, 3);
-    expect(top[0]).toBe("… 6 lines below · End/G to follow");
+    expect(top[0]).toBe("… 6 lines below · End to follow");
     expect(top.slice(1)).toEqual(["l1", "l2"]);
     viewport.handleInput(createKey("home")); // already at the top
     expect(viewport.renderArea(60, 3).slice(1)).toEqual(["l1", "l2"]);
@@ -163,13 +166,177 @@ describe("Viewport", () => {
     viewport.renderArea(60, 4); // max offset 6
 
     expect(viewport.handleInput(createKey("up"))).toBe(true);
-    expect(viewport.renderArea(60, 4)[0]).toBe("… 1 line below · End/G to follow");
+    expect(viewport.renderArea(60, 4)[0]).toBe("… 1 line below · End to follow");
     viewport.handleInput(createKey("up"));
-    expect(viewport.renderArea(60, 4)[0]).toBe("… 2 lines below · End/G to follow");
+    expect(viewport.renderArea(60, 4)[0]).toBe("… 2 lines below · End to follow");
 
     expect(viewport.handleInput(createKey("down"))).toBe(true);
-    expect(viewport.renderArea(60, 4)[0]).toBe("… 1 line below · End/G to follow");
+    expect(viewport.renderArea(60, 4)[0]).toBe("… 1 line below · End to follow");
     viewport.handleInput(createKey("down")); // back to following
+    expect(viewport.isFollowing).toBe(true);
+  });
+
+  it("spreads a burst of wheel notches over frames instead of one jump", () => {
+    // The bug: a trackpad flick arrives as many wheel reports in ONE stdin
+    // chunk, every one of them is applied, and the single frame that follows
+    // teleports the view by the whole burst.
+    const lines = Array.from({ length: 400 }, (_, i) => `l${i}`);
+    const viewport = makeViewport(lines);
+    viewport.renderArea(60, 32);
+
+    for (let i = 0; i < 30; i++) viewport.handleInput(createKey("wheelup"));
+
+    const budget = Math.ceil(32 / 4);
+    const seen: number[] = [];
+    let previous = 0;
+    for (let frame = 0; frame < 12; frame++) {
+      viewport.renderArea(60, 32);
+      seen.push(viewport.scrollOffset - previous);
+      previous = viewport.scrollOffset;
+    }
+    expect(Math.max(...seen)).toBeLessThanOrEqual(budget);
+    // Not a single notch is dropped: the sum of the frames is the burst.
+    expect(viewport.scrollOffset).toBe(30);
+  });
+
+  it("tracks a reversal instead of unwinding the backlog behind it", () => {
+    // Flick up, then flick down before the first one has finished showing:
+    // the finger is going down now, so the view must go down now.
+    const lines = Array.from({ length: 400 }, (_, i) => `l${i}`);
+    const viewport = makeViewport(lines);
+    viewport.renderArea(60, 32);
+    for (let i = 0; i < 40; i++) viewport.handleInput(createKey("wheelup"));
+    viewport.renderArea(60, 32);
+    const high = viewport.scrollOffset;
+    expect(high).toBeGreaterThan(0);
+
+    for (let i = 0; i < 3; i++) viewport.handleInput(createKey("wheeldown"));
+    viewport.renderArea(60, 32);
+    expect(viewport.scrollOffset).toBe(high - 3);
+    // …and settling adds nothing back: the abandoned up-motion is gone.
+    for (let i = 0; i < 6; i++) viewport.renderArea(60, 32);
+    expect(viewport.scrollOffset).toBe(high - 3);
+  });
+
+  it("absorbs a single stray opposite notch instead of discarding the backlog", () => {
+    // Real trackpads occasionally misreport one frame of a flick's direction.
+    // A lone reversed notch mid-flick must not be read as "the user reversed":
+    // the rest of the flick, arriving in the same stdin chunk, settles it.
+    const lines = Array.from({ length: 400 }, (_, i) => `l${i}`);
+    const viewport = makeViewport(lines);
+    viewport.renderArea(60, 32);
+    for (let i = 0; i < 40; i++) {
+      // The stray notch lands late, once a real backlog has built up behind
+      // it — the exact shape of the bug: 38 real notches queue, one stray
+      // reversal arrives, then the flick's last notch confirms the original
+      // direction resumed.
+      viewport.handleInput(createKey(i === 38 ? "wheeldown" : "wheelup"));
+    }
+    for (let frame = 0; frame < 30; frame++) viewport.renderArea(60, 32);
+    // 39 real up-notches once the stray one is discounted — not the ~9 rows a
+    // full backlog reset would leave behind.
+    expect(viewport.scrollOffset).toBe(39);
+  });
+
+  it("clamps queued wheel motion to what the transcript can actually show", () => {
+    // 20 scrollable rows: queuing thousands of notches must not leave a
+    // backlog that keeps draining long after the transcript has topped out.
+    const height = 8;
+    const lines = Array.from({ length: height + 20 }, (_, i) => `l${i}`);
+    const viewport = new Viewport({ getLines: () => lines });
+    viewport.renderArea(60, height);
+    for (let i = 0; i < 5000; i++) viewport.handleInput(createKey("wheelup"));
+
+    const budget = Math.max(1, Math.ceil(height / 4));
+    const maxFramesToSettle = Math.ceil(20 / budget) + 1;
+    let frames = 0;
+    while (viewport.scrollOffset < 20 && frames <= maxFramesToSettle) {
+      viewport.renderArea(60, height);
+      frames++;
+    }
+    expect(viewport.scrollOffset).toBe(20);
+    expect(frames).toBeLessThanOrEqual(maxFramesToSettle);
+  });
+
+  it("settles in time bounded by the remaining distance, not the notch count", () => {
+    // A 10-row/frame budget (wheelStep 10) against a transcript with far more
+    // scrollable rows than the queued notches could ever reach unclamped.
+    const height = 8;
+    const scrollable = 200;
+    const lines = Array.from({ length: height + scrollable }, (_, i) => `l${i}`);
+    const viewport = makeViewport(lines, 10);
+    viewport.renderArea(60, height);
+    // 1000 notches * wheelStep 10 = 10 000 rows requested against 200
+    // scrollable: wildly more than the backlog should ever hold onto.
+    for (let i = 0; i < 1000; i++) viewport.handleInput(createKey("wheelup"));
+
+    const budget = 10;
+    const maxFramesToSettle = Math.ceil(scrollable / budget) + 1;
+    let frames = 0;
+    while (viewport.scrollOffset < scrollable && frames <= maxFramesToSettle) {
+      viewport.renderArea(60, height);
+      frames++;
+    }
+    expect(viewport.scrollOffset).toBe(scrollable);
+    // Bounded by the transcript, not by the 1000 notches (which would take
+    // 1000 frames to drain at one notch's budget per frame, unclamped).
+    expect(frames).toBeLessThanOrEqual(maxFramesToSettle);
+  });
+
+  it("asks for another frame while wheel motion is still pending", () => {
+    const lines = Array.from({ length: 400 }, (_, i) => `l${i}`);
+    let asked = 0;
+    const viewport = new Viewport({
+      getLines: () => lines,
+      onScrollPending: () => {
+        asked++;
+      },
+    });
+    viewport.renderArea(60, 32);
+    for (let i = 0; i < 20; i++) viewport.handleInput(createKey("wheelup"));
+
+    viewport.renderArea(60, 32);
+    expect(asked).toBe(1);
+    // Drain to the end; the last frame must not ask for another.
+    for (let i = 0; i < 10; i++) viewport.renderArea(60, 32);
+    expect(viewport.scrollOffset).toBe(20);
+    const settled = asked;
+    viewport.renderArea(60, 32);
+    expect(asked).toBe(settled);
+  });
+
+  it("lands one notch whole and immediately, however large the step", () => {
+    const lines = Array.from({ length: 40 }, (_, i) => `l${i}`);
+    const viewport = makeViewport(lines, 6);
+    viewport.renderArea(60, 8);
+    viewport.handleInput(createKey("wheelup"));
+    expect(viewport.renderArea(60, 8)[0]).toBe("\u2026 6 lines below \u00b7 End to follow");
+  });
+
+  it("drops residual wheel motion once the view is clamped at an end", () => {
+    const lines = Array.from({ length: 40 }, (_, i) => `l${i}`);
+    const viewport = makeViewport(lines);
+    viewport.renderArea(60, 8);
+    for (let i = 0; i < 100; i++) viewport.handleInput(createKey("wheelup"));
+    // Settle at the top.
+    for (let i = 0; i < 20; i++) viewport.renderArea(60, 8);
+    expect(viewport.scrollOffset).toBe(32);
+    // One notch down must move one row, not unwind a 68-notch backlog.
+    viewport.handleInput(createKey("wheeldown"));
+    viewport.renderArea(60, 8);
+    expect(viewport.scrollOffset).toBe(31);
+  });
+
+  it("applies paging and home/end at once, flushing any pending wheel motion", () => {
+    const lines = Array.from({ length: 400 }, (_, i) => `l${i}`);
+    const viewport = makeViewport(lines);
+    viewport.renderArea(60, 32);
+    for (let i = 0; i < 50; i++) viewport.handleInput(createKey("wheelup"));
+    viewport.handleInput(createKey("home"));
+    viewport.renderArea(60, 32);
+    expect(viewport.scrollOffset).toBe(400 - 32);
+    viewport.handleInput(createKey("end"));
+    viewport.renderArea(60, 32);
     expect(viewport.isFollowing).toBe(true);
   });
 
@@ -265,7 +432,7 @@ describe("Viewport", () => {
     viewport.handleInput(createKey("home")); // offset 6
     lines = lines.slice(0, 5); // shrink below the previous offset
     expect(viewport.renderArea(60, 4)).toEqual([
-      "… 1 line below · End/G to follow",
+      "… 1 line below · End to follow",
       "l1",
       "l2",
       "l3",

@@ -109,8 +109,10 @@ export {
 } from "./osc.js";
 /* Terminal ----------------------------------------------------------------- */
 export {
+  detectScrollRegionSupport,
   ProcessTerminal,
   type ProcessTerminalOptions,
+  type ScrollRegionDetectionEnv,
   type Terminal,
   type TerminalSize,
   TestTerminal,

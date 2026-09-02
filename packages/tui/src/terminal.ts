@@ -78,6 +78,14 @@ export interface Terminal {
    */
   readonly reflowsOnResize?: boolean;
 
+  /**
+   * Whether the emulator implements a vertical scrolling region (DECSTBM) and
+   * the SU/SD scroll operations, so a screen-mode scroll can move rows instead
+   * of rewriting them. Every VT100-descended terminal does; absent means
+   * `true`, and `false` keeps the renderer on the plain row diff.
+   */
+  readonly supportsScrollRegion?: boolean;
+
   /** Subscribes to size changes. Returns an unsubscribe function. */
   onResize(listener: (size: TerminalSize) => void): Unsubscribe;
 
@@ -176,6 +184,48 @@ const DISABLE_FOCUS = "\u001b[?1004l";
 const PUSH_KITTY_KEYBOARD = "\u001b[>1u";
 const POP_KITTY_KEYBOARD = "\u001b[<u";
 
+/** Environment variables consulted by {@link detectScrollRegionSupport}. */
+export interface ScrollRegionDetectionEnv {
+  /** `TERM`, e.g. `xterm-256color`. `dumb` has no cursor addressing at all. */
+  TERM?: string | undefined;
+  /** Opt-out escape hatch: any non-empty value forces no scroll-region support. */
+  ARCTURN_NO_SCROLL_REGION?: string | undefined;
+  /** Allow other keys without widening the type surface. */
+  [key: string]: string | undefined;
+}
+
+/**
+ * Detects whether the terminal supports a DECSTBM scroll region plus SU/SD,
+ * which every VT100-descended emulator implements — Terminal.app, iTerm2,
+ * kitty, alacritty, wezterm, tmux, screen and xterm.js among them.
+ *
+ * Mirrors the environment-sniffing style of {@link "./images.js".detectImageSupport}:
+ * a pure function over an injectable `env`, defaulting to `process.env`. `false`
+ * for a non-TTY output (no cursor addressing to speak of), for `TERM=dumb`, and
+ * behind the `ARCTURN_NO_SCROLL_REGION` escape hatch for the field.
+ *
+ * @param isTTY - Whether the output stream is an interactive terminal.
+ * @param env - Environment to inspect (defaults to `process.env`).
+ *
+ * @example
+ * ```ts
+ * detectScrollRegionSupport(true, { TERM: "xterm-256color" });     // true
+ * detectScrollRegionSupport(true, { TERM: "dumb" });                // false
+ * detectScrollRegionSupport(false, { TERM: "xterm-256color" });     // false
+ * detectScrollRegionSupport(true, { ARCTURN_NO_SCROLL_REGION: "1" }); // false
+ * ```
+ */
+export function detectScrollRegionSupport(
+  isTTY: boolean,
+  env: ScrollRegionDetectionEnv = process.env,
+): boolean {
+  if (!isTTY) return false;
+  if (env.ARCTURN_NO_SCROLL_REGION !== undefined && env.ARCTURN_NO_SCROLL_REGION !== "") {
+    return false;
+  }
+  return env.TERM !== "dumb";
+}
+
 const DEFAULT_SIZE: TerminalSize = { columns: 80, rows: 24 };
 // SIGQUIT (Ctrl-\) is POSIX-only but harmless to register on Windows: Node simply
 // never delivers it there, so no platform guard is needed for this array itself.
@@ -215,6 +265,22 @@ export class ProcessTerminal implements Terminal {
   private kittyKeyboard = false;
   private disposed = false;
   private inputAttached = false;
+  /**
+   * Bytes handed to {@link ProcessTerminal.writeChunk} whose write has not
+   * completed yet.
+   *
+   * Node reports backpressure on a stream only past its high-water mark, which
+   * for `process.stdout` is 64 KB — about ten full-screen frames, or several
+   * seconds of stale frames queued ahead of the newest one on a terminal that
+   * drains slowly (ssh, tmux over a link, a busy emulator). The composer's
+   * latest-wins dropping never gets a chance to engage, and the frames it
+   * would have dropped are exactly the ones nobody needs. Counting bytes in
+   * flight ourselves turns "the buffer is enormous" into "the terminal has
+   * not caught up", which is the signal the composer actually wants.
+   */
+  private inFlightBytes = 0;
+  /** Callbacks waiting for {@link ProcessTerminal.inFlightBytes} to reach zero. */
+  private drainWaiters: (() => void)[] = [];
 
   private readonly onStdoutResize = (): void => {
     const size = { columns: this.columns, rows: this.rows };
@@ -292,17 +358,55 @@ export class ProcessTerminal implements Terminal {
     this.stdout.write(data);
   }
 
+  /**
+   * Writes bytes and reports whether the terminal has kept up.
+   *
+   * `false` means a previous write is still in flight — one frame ahead is as
+   * far as the terminal is ever allowed to fall behind, because a frame that
+   * is already stale when it reaches the wire is a frame the user watches
+   * arrive late. The caller is expected to hold its newest frame and re-flush
+   * from {@link ProcessTerminal.onceDrain}.
+   */
   writeChunk(data: string): boolean {
     if (this.disposed || data === "") return true;
-    return this.stdout.write(data);
+    const bytes = Buffer.byteLength(data, "utf8");
+    const wasBusy = this.inFlightBytes > 0;
+    this.inFlightBytes += bytes;
+    let settled = false;
+    const done = (): void => {
+      if (settled) return;
+      settled = true;
+      this.inFlightBytes = Math.max(0, this.inFlightBytes - bytes);
+      if (this.inFlightBytes === 0) this.releaseDrainWaiters();
+    };
+    // Node calls the callback whether the write succeeded, errored or was
+    // dropped on a destroyed stream, so the accounting cannot leak.
+    const accepted = this.stdout.write(data, done);
+    return accepted && !wasBusy;
   }
 
   onceDrain(callback: () => void): void {
-    this.stdout.once("drain", callback);
+    if (this.disposed || this.inFlightBytes === 0) {
+      callback();
+      return;
+    }
+    this.drainWaiters.push(callback);
+  }
+
+  private releaseDrainWaiters(): void {
+    if (this.drainWaiters.length === 0) return;
+    const waiting = this.drainWaiters;
+    this.drainWaiters = [];
+    for (const callback of waiting) callback();
   }
 
   get supportsSyncOutput(): boolean {
     return this.isTTY;
+  }
+
+  /** See {@link detectScrollRegionSupport}. */
+  get supportsScrollRegion(): boolean {
+    return detectScrollRegionSupport(this.isTTY);
   }
 
   get reflowsOnResize(): boolean {
@@ -430,6 +534,10 @@ export class ProcessTerminal implements Terminal {
     if (this.disposed) return;
     this.restore();
     this.disposed = true;
+    // Nothing will ever complete on a disposed stream, so anyone holding a
+    // frame back for a drain is released now rather than left waiting.
+    this.inFlightBytes = 0;
+    this.releaseDrainWaiters();
     this.resizeListeners.clear();
     this.inputListeners.clear();
     this.stdout.removeListener("resize", this.onStdoutResize);

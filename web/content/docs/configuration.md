@@ -71,6 +71,13 @@ Every key `.arcturn/config.json` accepts, in both user and project files:
 | `canaries` | `string[]` | *(unset)* | Literal values that must never leave this machine; concatenates across layers. |
 | `consensus` | `{ models: string[], sampleRate?, similarityThreshold? }` | *(unset)* | Cross-check sampled turns against extra models; costs one extra call per listed model per sampled turn. |
 
+In `"screen"` mode the transcript scrolls inside the app: mouse wheel, PgUp/PgDn, and — while
+the view is scrolled up — Home and End; sending a prompt returns to the live tail. A pure
+vertical scroll is painted by moving the terminal's own rows (a DECSTBM scroll region) rather
+than repainting the screen, which is what keeps a flick smooth on a slow connection. If your
+terminal misrenders it, `ARCTURN_NO_SCROLL_REGION=1` turns that shortcut off and every frame
+takes the plain row diff.
+
 Any key not in this table is rejected with a warning and ignored — there is no silent
 extension surface beyond `systemPromptAppend`.
 

@@ -6,7 +6,7 @@ import {
   HIDE_CURSOR,
   SHOW_CURSOR,
 } from "./ansi.js";
-import { ProcessTerminal, TestTerminal } from "./terminal.js";
+import { detectScrollRegionSupport, ProcessTerminal, TestTerminal } from "./terminal.js";
 
 /** A minimal non-TTY stand-in for `process.stdout`/`process.stdin`. */
 function fakeStream(written?: string[]): NodeJS.WriteStream & NodeJS.ReadStream {
@@ -111,6 +111,87 @@ describe("TestTerminal", () => {
   });
 });
 
+/**
+ * A stdout whose writes complete only when the test says so — which is how a
+ * real terminal behaves once it is slower than the app that feeds it.
+ */
+function slowStream(pending: ((error?: Error) => void)[]): NodeJS.WriteStream {
+  const stream = new EventEmitter() as unknown as NodeJS.WriteStream;
+  stream.isTTY = false;
+  stream.write = ((_data: string, callback?: (error?: Error) => void) => {
+    if (callback) pending.push(callback);
+    return true; // Node's own high-water mark never trips: 64 KB is ~10 frames.
+  }) as NodeJS.WriteStream["write"];
+  return stream;
+}
+
+describe("ProcessTerminal backpressure", () => {
+  it("reports a full pipe while a previous write is still in flight", () => {
+    // Node reports backpressure on `process.stdout` only past a 64 KB
+    // high-water mark, which on a slow terminal is seconds of stale frames
+    // queued ahead of the newest one — latest-wins never gets to engage.
+    const pending: ((error?: Error) => void)[] = [];
+    const term = new ProcessTerminal({
+      stdout: slowStream(pending),
+      stdin: fakeStream(),
+      handleSignals: false,
+    });
+
+    expect(term.writeChunk("frame one")).toBe(true);
+    expect(term.writeChunk("frame two")).toBe(false);
+    expect(term.writeChunk("frame three")).toBe(false);
+    term.dispose();
+  });
+
+  it("drains once every write has completed, and not before", () => {
+    const pending: ((error?: Error) => void)[] = [];
+    const term = new ProcessTerminal({
+      stdout: slowStream(pending),
+      stdin: fakeStream(),
+      handleSignals: false,
+    });
+    term.writeChunk("a");
+    term.writeChunk("b");
+    let drained = 0;
+    term.onceDrain(() => drained++);
+    expect(drained).toBe(0);
+
+    pending.shift()?.();
+    expect(drained).toBe(0); // one still in flight
+    pending.shift()?.();
+    expect(drained).toBe(1);
+    expect(term.writeChunk("c")).toBe(true);
+    term.dispose();
+  });
+
+  it("releases drain waiters on dispose so nothing waits on a dead stream", () => {
+    const pending: ((error?: Error) => void)[] = [];
+    const term = new ProcessTerminal({
+      stdout: slowStream(pending),
+      stdin: fakeStream(),
+      handleSignals: false,
+    });
+    term.writeChunk("a");
+    let drained = 0;
+    term.onceDrain(() => drained++);
+    term.dispose();
+    expect(drained).toBe(1);
+  });
+
+  it("serves a drain callback immediately when nothing is in flight", () => {
+    const pending: ((error?: Error) => void)[] = [];
+    const term = new ProcessTerminal({
+      stdout: slowStream(pending),
+      stdin: fakeStream(),
+      handleSignals: false,
+    });
+    let drained = 0;
+    term.onceDrain(() => drained++);
+    expect(drained).toBe(1);
+    term.dispose();
+  });
+});
+
 describe("ProcessTerminal signal cleanup", () => {
   // Ctrl-\ delivers SIGQUIT; without a handler for it, the process dies via the
   // default disposition and skips ProcessTerminal.restore(), leaving the real
@@ -173,5 +254,31 @@ describe("ProcessTerminal signal cleanup", () => {
     });
     expect(process.listenerCount("SIGQUIT")).toBe(before);
     term.dispose();
+  });
+});
+
+describe("detectScrollRegionSupport", () => {
+  it("is on for a normal xterm TTY", () => {
+    expect(detectScrollRegionSupport(true, { TERM: "xterm-256color" })).toBe(true);
+  });
+
+  it("is off for TERM=dumb, which has no cursor addressing at all", () => {
+    expect(detectScrollRegionSupport(true, { TERM: "dumb" })).toBe(false);
+  });
+
+  it("is off for a non-TTY stream regardless of TERM", () => {
+    expect(detectScrollRegionSupport(false, { TERM: "xterm-256color" })).toBe(false);
+  });
+
+  it("is off behind the ARCTURN_NO_SCROLL_REGION escape hatch", () => {
+    expect(
+      detectScrollRegionSupport(true, { TERM: "xterm-256color", ARCTURN_NO_SCROLL_REGION: "1" }),
+    ).toBe(false);
+  });
+
+  it("ignores an empty ARCTURN_NO_SCROLL_REGION", () => {
+    expect(
+      detectScrollRegionSupport(true, { TERM: "xterm-256color", ARCTURN_NO_SCROLL_REGION: "" }),
+    ).toBe(true);
   });
 });

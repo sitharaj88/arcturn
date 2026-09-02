@@ -97,6 +97,37 @@ CLI, the SDK, or the wire protocol.
 
 ### Fixed
 
+- **Scrolling the transcript is smooth, and stays smooth on a slow
+  terminal.** Three measured causes, on the shipped binary under a
+  pseudo-terminal. A one-row scroll changed every row of the frame, so the
+  row diff — exactly right for a keystroke — degenerated into a 6.8 KB
+  full-screen repaint for the smallest possible change; at 60 fps that was
+  410 KB/s to move one line. A trackpad flick lands many wheel reports in
+  one stdin chunk; all were applied and then painted once, so a 30-notch
+  flick was one 30-row jump. And backpressure never engaged: stdout's
+  high-water mark is 64 KB, about ten frames, so on a slow terminal the
+  composer queued stale frames instead of dropping them — a 160 ms flick
+  took 3.7 s to finish painting, and a keystroke typed during it took 3.7 s
+  to echo.
+
+  A pure vertical scroll is now handed to the terminal: the composer finds
+  the band of rows that moved, scrolls it with a DECSTBM region and SU/SD,
+  and repaints only the rows the move exposed — 273 bytes for one row
+  instead of 6,814, and any frame that is not a pure shift takes the full
+  diff exactly as before (`ARCTURN_NO_SCROLL_REGION=1` disables it).
+  Wheel motion is metered: notches accumulate and are paid out a bounded
+  number of rows per frame, so a flick is a run of small frames rather than
+  a jump, and no notch is ever lost — the final position is the sum of the
+  input. And the terminal now counts bytes in flight from its own write
+  callbacks, so latest-wins frame dropping engages the moment the terminal
+  falls behind: on a 20 KB/s drain the same flick finishes in 178 ms and a
+  mid-flick keystroke echoes in 140 ms.
+
+  Also fixed on the way: the footer's `End/G to follow` was a promise
+  nothing kept — the editor bound End unconditionally, so the transcript
+  never saw it. While the view is scrolled up, Home and End now go to the
+  transcript; sending a prompt returns to the live tail.
+
 - **A team member that produced nothing is `failed`, not `done`.** The same
   hole the workflow engine closed for steps, in the team supervisor: a member
   whose agent returned no text and changed no file was recorded `done`, then

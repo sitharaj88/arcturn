@@ -211,6 +211,8 @@ export class TUI {
   private readonly options: Required<TUIOptions>;
   private readonly decoder = new KeyDecoder();
   private readonly keyHandlers: KeyHandler[] = [];
+  /** Handlers that see a key *before* the focused component. */
+  private readonly priorityKeyHandlers: KeyHandler[] = [];
   private readonly keyObservers: ((key: Key) => void)[] = [];
 
   private componentList: Component[] = [];
@@ -241,6 +243,10 @@ export class TUI {
       // shares the shell's screen and passes no canvas at all.
       ...(screen
         ? {
+            // A scroll moves every row, so the row diff would rewrite the
+            // whole viewport for the smallest change on screen. When the
+            // terminal can move rows itself, let it.
+            scrollRegion: terminal.supportsScrollRegion !== false,
             // Ground AND default ink: an unstyled cell must be legible on our
             // canvas, never the terminal's own foreground. When the host has
             // synced the TERMINAL's default background to the theme (OSC 11),
@@ -400,16 +406,27 @@ export class TUI {
   /* ---------------------------------------------------------------------- */
 
   /**
-   * Registers a fallback key handler, invoked when no component consumed the key.
+   * Registers a key handler.
+   *
+   * By default the handler is a *fallback*: it runs only for keys the focused
+   * component (or overlay) declined, which is what a global shortcut wants.
+   * With `priority`, it runs **before** the focused component instead — the
+   * only way a host can claim a key an input already binds, and therefore the
+   * escape hatch for chrome that owns a key contextually (a transcript that
+   * takes `End` while it is scrolled away from the tail, say). Use it
+   * sparingly and conditionally: a priority handler that always consumes takes
+   * the key away from the editor for good.
    *
    * @param handler - Returns `true` to mark the key as handled.
+   * @param options - `priority` runs the handler ahead of the focused component.
    * @returns A function that removes the handler.
    */
-  onKey(handler: KeyHandler): Unsubscribe {
-    this.keyHandlers.push(handler);
+  onKey(handler: KeyHandler, options: { priority?: boolean } = {}): Unsubscribe {
+    const handlers = options.priority ? this.priorityKeyHandlers : this.keyHandlers;
+    handlers.push(handler);
     return () => {
-      const index = this.keyHandlers.indexOf(handler);
-      if (index !== -1) this.keyHandlers.splice(index, 1);
+      const index = handlers.indexOf(handler);
+      if (index !== -1) handlers.splice(index, 1);
     };
   }
 
@@ -439,8 +456,15 @@ export class TUI {
    */
   dispatchKey(key: Key): boolean {
     for (const observer of [...this.keyObservers]) observer(key);
+    let handled = false;
+    for (const handler of [...this.priorityKeyHandlers]) {
+      if (handler(key) === true) {
+        handled = true;
+        break;
+      }
+    }
     const target = this.overlayEntry?.component ?? this.focusedComponent;
-    let handled = target?.handleInput?.(key) ?? false;
+    if (!handled) handled = target?.handleInput?.(key) ?? false;
     if (!handled) {
       for (const handler of [...this.keyHandlers]) {
         if (handler(key) === true) {
