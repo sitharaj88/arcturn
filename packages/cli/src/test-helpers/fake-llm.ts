@@ -39,19 +39,20 @@ function usageOf(partial: Partial<Usage> | undefined): Usage {
 }
 
 /**
- * Build a scripted client.
+ * The one stream implementation behind {@link fakeLLM} and {@link respondingLLM}.
  *
- * @param turns - One entry per model turn. The last turn repeats if the agent
- *   asks for more, which keeps a runaway loop from hanging a test.
+ * `next` decides *what* the model says to a request; this decides *how* it is
+ * said — one well-formed stream per request, the request recorded first so a
+ * `next` that throws still leaves it on the record.
+ *
+ * @param next - Picks the turn for each request, in arrival order.
  */
-export function fakeLLM(turns: readonly ScriptedTurn[]): FakeLLM {
+function fakeClient(next: (request: LLMRequest) => ScriptedTurn): FakeLLM {
   const requests: LLMRequest[] = [];
-  let index = 0;
 
   async function* stream(request: LLMRequest): AsyncIterable<StreamEvent> {
     requests.push(request);
-    const turn = turns[Math.min(index, turns.length - 1)] ?? {};
-    index++;
+    const turn = next(request);
 
     const modelId = request.model.id;
     yield { type: "start", model: modelId };
@@ -128,4 +129,33 @@ export function fakeLLM(turns: readonly ScriptedTurn[]): FakeLLM {
       return last;
     },
   };
+}
+
+/**
+ * Build a scripted client.
+ *
+ * @param turns - One entry per model turn. The last turn repeats if the agent
+ *   asks for more, which keeps a runaway loop from hanging a test.
+ */
+export function fakeLLM(turns: readonly ScriptedTurn[]): FakeLLM {
+  let index = 0;
+  return fakeClient(() => {
+    const turn = turns[Math.min(index, turns.length - 1)] ?? {};
+    index++;
+    return turn;
+  });
+}
+
+/**
+ * Build a client that decides each turn from the request it was sent.
+ *
+ * Where {@link fakeLLM} replays a fixed sequence, this answers *whatever* the
+ * agent asks — the shape a test needs when it does not know in advance how
+ * many steps, tool results and nudges a real pipeline will produce. The
+ * stream a turn becomes is exactly {@link fakeLLM}'s.
+ *
+ * @param respond - Called once per request, in order; its turn is streamed.
+ */
+export function respondingLLM(respond: (request: LLMRequest) => ScriptedTurn): FakeLLM {
+  return fakeClient(respond);
 }
