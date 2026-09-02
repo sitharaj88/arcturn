@@ -1197,6 +1197,46 @@ function statOf(diff: string | undefined): DiffStat {
 }
 
 /**
+ * Whether a member that finished produced nothing: no text AND no file.
+ *
+ * The team's copy of the workflow engine's `stepProducedNothing`, opened by
+ * the same fault — a `done` nobody had checked against evidence. Either half
+ * alone is a result: a member that changed a file but said nothing has a
+ * patch to merge, and one that changed nothing but said why is the honest
+ * "no changes" that {@link TeamManager.merge} reports as `empty`. Only the
+ * intersection, no words *and* no file, is nothing.
+ *
+ * The file half is asked of what git saw in the worktree, never of the agent:
+ * `patchFile` is written only from a non-empty captured diff and `diffStat`
+ * is counted from that same diff.
+ *
+ * @param member - The member, after its final text and diff were captured.
+ */
+function memberProducedNothing(member: StoredMember): boolean {
+  return (
+    (member.finalText ?? "").trim() === "" &&
+    (member.patchFile === undefined || member.diffStat.files === 0)
+  );
+}
+
+/**
+ * The message an empty member fails with — see {@link memberProducedNothing}.
+ *
+ * Written to be read by whoever finds the report: it names what was expected
+ * (a file, or failing that a reason), what came back (neither), and the two
+ * levers that work — run the team again, or ask the member for less.
+ *
+ * @param memberId - The member that produced nothing.
+ */
+function emptyMemberError(memberId: string): string {
+  return (
+    `member "${memberId}" produced nothing — no file was changed and no text was returned. ` +
+    "A member that reports neither a result nor a reason has not run; run the team again, " +
+    "or narrow what it was asked to do."
+  );
+}
+
+/**
  * Decomposes a goal, runs one agent per subtask in its own worktree, and
  * reconciles the results.
  *
@@ -2003,6 +2043,19 @@ export class TeamManager {
     live.worktrees.delete(member.id);
     member.worktreeDir = undefined;
     member.endedAt = this.#now();
+    // THE VOID GATE, the team's copy of the one the workflow engine keeps for
+    // steps (see `stepProducedNothing` in workflow.ts): a member that finished
+    // on its own, changed no file and said nothing has produced nothing, and
+    // `done` is a lie — merge() folds it into "empty", `complete` comes up
+    // true and the record flips to "merged" while the member's work never
+    // existed. It fails, and merge() reports the failure. Judged last on
+    // purpose: a cancelled member was stopped by the team and a thrown one
+    // has its own reason, so only a member the gate can still see as `done`
+    // is judged here. A reason the run already recorded — the turn ceiling —
+    // outranks the generic message, because it says WHY nothing came back.
+    if (!cancelled && failure === undefined && memberProducedNothing(member)) {
+      failure = member.error ?? emptyMemberError(member.id);
+    }
     member.status = cancelled ? "cancelled" : failure !== undefined ? "failed" : "done";
     if (failure !== undefined) member.error = failure;
     else if (cancelled) member.error ??= live.cutoffReason ?? "cancelled";

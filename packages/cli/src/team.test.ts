@@ -709,6 +709,9 @@ describe("TeamManager dispatch", () => {
       { plan: scriptedPlanner([fiveWay]), concurrency: 2 },
       () =>
         new FakeAgent({
+          // Says something, so the member is `done` rather than tripping the
+          // void gate — this test is about concurrency, not about silence.
+          text: "worked",
           run: async () => {
             inFlight++;
             peak = Math.max(peak, inFlight);
@@ -824,6 +827,9 @@ describe("TeamManager dispatch", () => {
       { plan: scriptedPlanner([twoWay]) },
       () =>
         new FakeAgent({
+          // Same reason as the concurrency fixture: a member that says nothing
+          // and changes nothing is a failure now, and that is not this test.
+          text: "read and edited",
           run: async (agent) => {
             agent.emit({ type: "toolStart", toolCallId: "1", toolName: "read", input: {} });
             agent.emit({ type: "toolStart", toolCallId: "2", toolName: "edit", input: {} });
@@ -1164,7 +1170,12 @@ describe("TeamManager merge", () => {
 
   it("reports an empty member instead of calling git apply", async () => {
     const git = fakeGit();
-    const { manager } = await harness({ plan: scriptedPlanner([twoWay]), execFn: git.execFn });
+    // Each member SAYS it changed nothing: text with no diff is the honest
+    // "empty". A member with neither is failed by the void gate, not empty.
+    const { manager } = await harness(
+      { plan: scriptedPlanner([twoWay]), execFn: git.execFn },
+      () => new FakeAgent({ text: "nothing to change" }),
+    );
     const status = await manager.start("go");
     const report = await manager.merge(status.id);
     expect(report?.outcomes.every((outcome) => outcome.result === "empty")).toBe(true);
@@ -1194,6 +1205,144 @@ describe("TeamManager merge", () => {
 
     const report = await manager.merge(status.id);
     expect(report?.outcomes.every((outcome) => outcome.result === "discarded")).toBe(true);
+  });
+});
+
+// ================================================================= void gate
+
+describe("TeamManager void gate", () => {
+  // The team's copy of the workflow engine's `stepProducedNothing`: a member
+  // that finished on its own, changed no file and said nothing has not run.
+  // Before the gate it was recorded `done`, merge() folded it into "empty",
+  // and the team read as merged-and-complete while the member's work never
+  // existed. Either half alone is a result — a patch with no words, or words
+  // with no patch — and both must keep merging as they always have.
+  const twoWay = planJson([
+    { id: "a", files: ["a/**"] },
+    { id: "b", files: ["b/**"] },
+  ]);
+  const DIFF = ["diff --git a/x b/x", "--- a/x", "+++ b/x", "@@", "+one", ""].join("\n");
+
+  it("fails a member that returned no text and changed no file, and merge() says so", async () => {
+    const git = fakeGit();
+    const { manager } = await harness(
+      { plan: scriptedPlanner([twoWay]), execFn: git.execFn },
+      (brief) =>
+        brief.id === "a"
+          ? new FakeAgent({ text: "" })
+          : new FakeAgent({ text: "b: nothing to change here" }),
+    );
+    const status = await manager.start("go");
+    expect(status.members[0]?.finalText).toBeUndefined();
+    expect(status.members[0]?.patchFile).toBeUndefined();
+    expect(status.members[0]?.status).toBe("failed");
+    expect(status.members[0]?.error).toContain('member "a" produced nothing');
+    // The sibling that said why it changed nothing is the honest "no changes".
+    expect(status.members[1]?.status).toBe("done");
+    expect(status.members[1]?.error).toBeUndefined();
+
+    const report = await manager.merge(status.id);
+    expect(report?.outcomes[0]?.result).toBe("failed");
+    expect(report?.outcomes[0]?.failure).toContain("produced nothing");
+    expect(report?.outcomes[1]?.result).toBe("empty");
+    // The two lines that were lying before:
+    expect(report?.complete).toBe(false);
+    expect(manager.get(status.id)?.status).not.toBe("merged");
+    expect(git.argv().some((line) => line.startsWith("apply"))).toBe(false);
+    // And the report carries the reason where the user reads it.
+    expect(formatMergeReport(report as NonNullable<typeof report>)).toContain("produced nothing");
+  });
+
+  it("keeps a member that said why it changed nothing done, and merges it as empty", async () => {
+    const git = fakeGit();
+    const { manager } = await harness(
+      { plan: scriptedPlanner([twoWay]), execFn: git.execFn },
+      () => new FakeAgent({ text: "nothing to change" }),
+    );
+    const status = await manager.start("go");
+    expect(status.members.map((member) => member.status)).toEqual(["done", "done"]);
+    expect(status.members.every((member) => member.error === undefined)).toBe(true);
+
+    const report = await manager.merge(status.id);
+    expect(report?.outcomes.map((outcome) => outcome.result)).toEqual(["empty", "empty"]);
+    expect(report?.complete).toBe(true);
+    expect(manager.get(status.id)?.status).toBe("merged");
+  });
+
+  it("keeps a member that changed a file but said nothing done — the patch is the result", async () => {
+    const git = fakeGit((args) =>
+      args[0] === "diff" ? { stdout: DIFF, stderr: "" } : { stdout: "", stderr: "" },
+    );
+    const { manager } = await harness(
+      { plan: scriptedPlanner([twoWay]), execFn: git.execFn },
+      () => new FakeAgent({ text: "" }),
+    );
+    const status = await manager.start("go");
+    expect(status.members.map((member) => member.status)).toEqual(["done", "done"]);
+    expect(status.members[0]?.patchFile).toBeDefined();
+    expect(status.members[0]?.error).toBeUndefined();
+
+    const report = await manager.merge(status.id);
+    expect(report?.merged).toBe(2);
+    expect(report?.complete).toBe(true);
+  });
+
+  it("keeps a cancelled member that produced nothing cancelled, not failed", async () => {
+    const { manager } = await harness(
+      { plan: scriptedPlanner([twoWay]) },
+      () => new FakeAgent({ run: never }),
+    );
+    const run = manager.start("go");
+    await delay(20);
+    const live = manager.list()[0];
+    expect(live).toBeDefined();
+    if (!live) return;
+    manager.cancel(live.id);
+    const status = await run;
+
+    expect(status.status).toBe("cancelled");
+    expect(status.members.map((member) => member.status)).toEqual(["cancelled", "cancelled"]);
+    for (const member of status.members) {
+      expect(member.error).toBeDefined();
+      expect(member.error).not.toContain("produced nothing");
+    }
+  });
+
+  it("lets a thrown error win over the produced-nothing message", async () => {
+    const { manager } = await harness({ plan: scriptedPlanner([twoWay]) }, (brief) =>
+      brief.id === "a"
+        ? new FakeAgent({ run: () => Promise.reject(new Error("member blew up")) })
+        : new FakeAgent({ text: "b fine" }),
+    );
+    const status = await manager.start("go");
+    expect(status.members[0]?.status).toBe("failed");
+    expect(status.members[0]?.error).toContain("member blew up");
+    expect(status.members[0]?.error).not.toContain("produced nothing");
+
+    const report = await manager.merge(status.id);
+    expect(report?.outcomes[0]?.result).toBe("failed");
+    expect(report?.outcomes[0]?.failure).toContain("member blew up");
+    expect(report?.complete).toBe(false);
+  });
+
+  it("fails a member stopped at its turn ceiling with nothing to show, and keeps the ceiling as the reason", async () => {
+    // The ceiling note is a reason the run already recorded — it says WHY
+    // nothing came back — so it outranks the generic message. The member is
+    // still not `done`: it produced nothing.
+    const { manager, spawned } = await harness(
+      { plan: scriptedPlanner([twoWay]), maxTurnsPerMember: 1 },
+      () =>
+        new FakeAgent({
+          run: async (agent) => {
+            agent.emit({ type: "turnEnd", turnIndex: 0, usage: usage() });
+          },
+        }),
+    );
+    const status = await manager.start("go");
+    expect(spawned[0]?.agent.aborts).toBeGreaterThan(0);
+    expect(status.members[0]?.status).toBe("failed");
+    expect(status.members[0]?.error).toContain("turn ceiling");
+    expect(status.members[0]?.error).not.toContain("produced nothing");
   });
 });
 
