@@ -525,7 +525,9 @@ describe("real kit workflows, read from disk", () => {
     ).toBe(true);
 
     const ragSetup = parseOk(readFileSync(files[2] ?? "", "utf8"));
-    expect(ragSetup.doc.stages).toHaveLength(13);
+    // Fourteen since the entry-point stage was added; the registry's `stages`
+    // and the hub test hold the same number, so a drift shows up in two places.
+    expect(ragSetup.doc.stages).toHaveLength(14);
     expect(ragSetup.doc.stages.some((stage) => stage.parallel)).toBe(true);
   });
 });
