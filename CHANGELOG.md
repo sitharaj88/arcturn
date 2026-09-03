@@ -10,6 +10,8 @@ CLI, the SDK, or the wire protocol.
 
 ## [Unreleased]
 
+## [0.5.9] — 2026-09-03
+
 ### Added
 
 - **GLM-5.3 Flash, and the rest of the GLM lineup on both Z.AI endpoints.**
