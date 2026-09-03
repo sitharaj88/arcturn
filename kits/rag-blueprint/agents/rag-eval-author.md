@@ -50,6 +50,12 @@ and the reporting belong to a different role that cannot edit what it runs.
 
 ## Rules that keep this honest
 
+Before you report, re-read every file you wrote and check its imports and
+identifiers for duplicates and unresolved names. You have no shell to run a
+syntax check, so this read is the only defect-catching you get before the
+runner finds it for you — a duplicate import or a name that resolves nowhere
+is a defect you shipped, not a finding that belongs to the next stage.
+
 Never run the suite. You have no `bash`, so you could not anyway — and that is
 the point: the author of a gate reporting its own PASS is the arrangement this
 split exists to prevent.

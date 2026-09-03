@@ -398,6 +398,24 @@ CLI, the SDK, or the wire protocol.
   reports real pass/fail counts and exit codes, instead of paying a separate
   run-to-red then run-to-green round trip for every assertion.
 
+- **`rag-setup` now wires the thing it built.** The first complete run
+  delivered fifteen modules and fifty-nine tests and no `rag index` /
+  `rag ask` — no stage ever said "wire the entry point the spec names", so
+  `package.json` shipped with no `bin`. A new build step lands after the
+  observability slice and before the eval author: `rag-builder` wires the
+  spec's commands, flags and env as a `bin` (or the language's equivalent),
+  importing the modules the earlier slices already built rather than
+  reimplementing them, refuses to start without the required credential, and
+  — holding `bash` — proves it by running the entry point once against the
+  real corpus and pasting the exit code and output (`rag-setup` grows from
+  thirteen stages to fourteen). The same run's eval author shipped
+  `eval/thresholds.mjs` with a duplicate `import assert`, a syntax error that
+  left the eval runner unable to run the suite at all; the author now
+  re-reads every file it wrote for duplicate imports and unresolved names
+  before reporting, and the runner's first action, before it establishes a
+  target, is a syntax check on every eval file, reported as its own finding
+  with the file and line.
+
 
 ## [0.5.8] — 2026-08-30
 

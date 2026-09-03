@@ -53,7 +53,7 @@
     "workflows": [
       {
         "name": "rag-setup",
-        "stages": 13,
+        "stages": 14,
         "budgetUsd": 40
       },
       {

@@ -74,9 +74,10 @@ Or reach one skill directly, without a pipeline: `/rag-architecture`,
 | 8 | `rag-builder` | write | build | Retrieval 2/2: entitlement filter, entitlement-keyed cache, model routing, the two entitlement tests |
 | 9 | `rag-builder` | write | build | Observability 1/2: per-query cost/token by routing class and cache hit, latency decomposed |
 | 10 | `rag-builder` | write | build | Observability 2/2: retrieval-quality and freshness signals, eval-facing logs, no-credential-in-logs test |
-| 11 | `rag-eval-author` | write | build | The suite, the labelled set, the thresholds — **no shell** |
-| 12 | `rag-red-teamer` ∥ `rag-eval-runner` | exec ∥ exec | judgment ∥ build | Drills with reproductions ∥ measured numbers |
-| 13 | `rag-lead` | read | build | The go-live packet and one DECISION-REQUEST |
+| 11 | `rag-builder` | write | build | The entry point: the spec's commands, flags and env as a `bin`, reusing the ingestion, retrieval and observability modules already built, credential-gated and proven with one real run against the corpus |
+| 12 | `rag-eval-author` | write | build | The suite, the labelled set, the thresholds — **no shell** |
+| 13 | `rag-red-teamer` ∥ `rag-eval-runner` | exec ∥ exec | judgment ∥ build | Drills with reproductions ∥ measured numbers |
+| 14 | `rag-lead` | read | build | The go-live packet and one DECISION-REQUEST |
 
 `rag-review` is the same discipline pointed at a system that already exists:
 survey → threat model → build the missing suite → measure and attack in
@@ -93,7 +94,12 @@ must match the schema ingestion created, and observability instruments both.
 Each slice is cut into two or three small steps (ingestion 4–6, retrieval 7–8,
 observability 9–10) so that no step is scoped as an entire subsystem in one
 turn budget — the defect that made this stage retry three times before it was
-re-sized. Stage 12's two branches are the only parallel pair, and they are
+re-sized. Stage 11 wires the entry point the spec names — the commands, flags
+and env, as a `bin` — on top of those three slices rather than reimplementing
+them, refuses to start without the credential the ADR names, and proves
+itself by running once against the real corpus before the eval author ever
+sees the repository. Stage 13's two branches are the only parallel pair, and
+they are
 **disjoint by construction**: both hold `bash` with neither `write` nor
 `edit`, so both are on the exec lane, neither can land a change, and there is
 no shared scope to partition.
@@ -156,7 +162,7 @@ where a dollar ceiling never can.
 
 Two limits are not going away, and should not:
 
-**No step in this kit decides anything.** Stage 13 ends in a `DECISION-REQUEST`
+**No step in this kit decides anything.** Stage 14 ends in a `DECISION-REQUEST`
 naming what a person is approving. Nothing here deploys, tags, publishes or
 signs off, and the red-teamer's vocabulary contains no verdict that clears.
 
@@ -229,7 +235,7 @@ rag-red-teamer       exec   tier:judgment   maxTurns=50
 rag-surveyor         read   tier:fast       maxTurns=40
 rag-threat-modeler   read   tier:judgment   maxTurns=40
 role warnings: none
-rag-setup    stages=13 steps/stage=1,1,1,1,1,1,1,1,1,1,1,2p,1 budgetUsd=40 unresolved-roles=none
+rag-setup    stages=14 steps/stage=1,1,1,1,1,1,1,1,1,1,1,1,2p,1 budgetUsd=40 unresolved-roles=none
 rag-review   stages=5 steps/stage=1,1,1,2p,1 budgetUsd=20 unresolved-roles=none
 ```
 

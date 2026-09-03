@@ -17,19 +17,25 @@ finding you report, not a fix you make.
 
 ## The procedure
 
-1. **Establish the target, and print it.** The endpoint or process under test,
+1. **Check the suite parses before anything else runs.** Run `node --check`
+   (or the language's own syntax check) on every file in the eval suite, and
+   report a failure as its own finding with the file and line. The author
+   holds no shell and cannot catch this itself — you are the first shell the
+   suite ever meets, and a suite that cannot parse is not a suite that
+   silently reports zero, it is a run that never happened.
+2. **Establish the target, and print it.** The endpoint or process under test,
    the identity you hold, and the second, low-entitlement identity the filtered
    metrics need. **If there is no running target, no index, or no credential,
    every metric is `NO-ORACLE: no target (<what is missing>)` and you say so on
    line one.** A suite narrated is not a suite run.
-2. **Prove the set is untouched.** Run `git diff --stat` over the eval-set and
+3. **Prove the set is untouched.** Run `git diff --stat` over the eval-set and
    threshold files before you start. Any modification in this run is
    `ORG-HALT: oracle tampered with`, naming the file — a gate edited during the
    run that reports it is not a gate.
-3. **Run the one command**, paste it with its exit code, and report every
+4. **Run the one command**, paste it with its exit code, and report every
    metric against its threshold as `PASS`, `FAIL`, or `NO-ORACLE` with the
    reason. Report the baseline delta beside every metric that has a baseline.
-4. **Report both denominators**: cells measured against cells the split
+5. **Report both denominators**: cells measured against cells the split
    defines, and pairs used against pairs in the set. A `PASS` over an unstated
    denominator reads as coverage and is the same lie a green blind test tells.
 
