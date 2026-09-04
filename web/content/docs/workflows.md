@@ -99,6 +99,226 @@ All three are validated at parse time: a non-numeric or negative value — or, f
 `budgetTokens`, a fractional one — is a parse error naming the line, not a silently
 ignored key.
 
+### Options on a stage line
+
+The bracket prefix is not limited to one model tag. A stage line — or a parallel branch —
+may carry **zero or more bracket groups** before the optional `@role`, in any order. A
+group whose `key:` is one of the three reserved words `contract`, `judges` and `race` is an
+**option**; anything else in brackets is the model tag it has always been, so
+`[tier:judgment]` still selects a model and nothing about an existing file changes.
+
+```markdown
+1. [tier:judgment] [contract:release-verdict] [judges:3] @reviewer Judge this release: {{input}}
+2. [race:tier:cheap|anthropic/claude-haiku-4-5] Write the release note for {{contract.decision}}
+```
+
+- **`[contract:<name>]`** names a reply shape, declared elsewhere in the same file (see
+  [Contracts](#contracts) below). The engine validates the step's reply against the contract
+  and retries the step once with the validator's message when it does not match. The name is
+  lowercase letters, digits and `-`, starting with a letter.
+- **`[judges:N]`** — `2` or `3` — runs the step N times and arbitrates on disagreement. It
+  needs both an `@role` (there has to be one consistent voter to run repeatedly) and a
+  `[contract:…]` (there has to be a typed answer to compare), and it cannot be combined with
+  `race`.
+- **`[race:a|b]`** or **`[race:a|b|c]`** runs the step on each of 2 or 3 model tags at once
+  and keeps the first that clears the gate. Each entry is an ordinary model tag, they must be
+  distinct, and `race` **replaces** the `[tag]` rather than joining it — writing both on one
+  line is a parse error.
+
+#### What a race actually does
+
+A raced step is dispatched once per model, concurrently. Each arm gets its own abort
+signal (derived from the run's), its own worktree on the write and exec lanes, its own live
+row labelled with its model — `@builder · step 3 [glm-5.3-flash]` — and its own usage
+accounting. The step still has exactly **one** ending: one journal terminal, one status,
+one retry decision, one patch.
+
+- **The winner is the first arm to CLEAR THE GATE**, not the first to finish. Clearing means
+  the outcome is not an error, not [void](#a-failed-step-is-a-question-not-a-tombstone), and
+  — when the step also carries `[contract:<name>]` — a reply that validates against that
+  contract. A model that fails fast has not won; it has merely gone first.
+- **The moment one arm clears, every other arm is aborted.** Their work is not discarded: a
+  write-lane loser takes the ordinary cancel path, so its diff is captured to a patch file
+  and its worktree is kept, unapplied, for you to read.
+- **Exactly one patch ever reaches your checkout.** On the write lane the arms ask
+  permission to apply at the last atomic moment, and only the first whose work would clear
+  the gate is granted it — so two models finishing at the same instant cannot both land.
+  That claim is *provisional* until the patch is actually in your tree: an arm whose
+  `git apply` is refused releases it, and a sibling that is still running can land and win
+  instead. The losers are cut off when a patch lands or when an arm clears, never on the
+  strength of a claim that has not.
+- **If no arm clears, the step fails once.** The last arm to settle is the outcome the
+  retry policy sees, with every other arm's complaint folded into its message, so a race of
+  three failures parks with one question rather than three.
+- **Every arm is billed.** The step's own `usage` is the winner's; the journal also records
+  `raceUsage`, the sum over all arms. That sum is what the **run** is charged: the run total,
+  the `budgetUsd:`/`budgetTokens:` ceilings, the stage-boundary budget question and the
+  ledger's run terminal all count the whole race, not the winning third of it.
+
+Afterwards, `/workflow status <run-id>` names the outcome under the step:
+
+```text
+  ✔ 3 @builder — done  · patch applied · 4.1k · 41s
+      race: zai/glm-5.3-flash won in 41s · zai/glm-5.3 aborted
+```
+
+…and the insights ledger records **one terminal per arm** — the winner as the step's own
+record, each loser as a superseded record carrying its own model and duration — so
+`arcturn insights` and `/workflow forecast` learn how these models compare on this exact
+step rather than only which one you kept.
+
+Everything above is checked at parse time, naming the line: a duplicate option key, a
+`judges` count that is not 2 or 3, a race of one or four, a race repeating a tag, `race`
+alongside a model tag, `judges` without a role or without a contract, a contract name in the
+wrong charset, and a contract the file never declares. An option written *after* the `@role`
+is rejected the same way a stray model tag there is — the prefix order is `[…] @role prompt`.
+
+### Contracts
+
+A contract declares the shape of a reply, once, at the top level of the workflow file, in a
+fenced block whose info string is `contract <name>`:
+
+````markdown
+```contract release-verdict
+# one field per line; blank lines and # comments are ignored
+decision: SHIP | SHIP-WITH-FIXES | DO-NOT-SHIP
+reasons: string[]
+blockers?: string[]
+confidence: number
+```
+````
+
+Each line is `<field>: <type>`, or `<field>?: <type>` for a field that may be absent. A field
+name is letters, digits and `_`, starting with a letter. A type is one of `string`, `number`,
+`integer`, `boolean`, `string[]`, `number[]`, or an **enum** — two or more distinct values
+separated by `|`, each starting with a letter and otherwise letters, digits, `_` and `-`.
+
+A step carrying `[contract:<name>]` must end its final reply with one fenced ` ```json `
+block matching the declaration; the engine reads the **last** such block in the reply, so a
+model that quotes an example first still answers correctly, and prose after the closing
+fence is tolerated. Contracts are **exact**: a field the declaration does not list is an
+error, not a tolerated extra.
+
+The block may sit anywhere in the file, before or after the step list, and a declaration no
+step references is fine — an undeclared *reference* is not. Every problem is a parse error
+naming the line: an unnamed or badly named block, a duplicate name, a block with no fields,
+an unterminated fence, a malformed field line, a duplicate field, an unknown type, and a bad
+or repeated enum value.
+
+Two placeholders read the result:
+
+- **`{{contract}}`** is the previous stage's validated object as JSON — or a JSON array when
+  the previous stage ran in parallel. The array is **positional**: slot `i` is branch `i`,
+  and a branch that produced no validated object (it failed its contract, or it never
+  declared one — a parallel stage may mix the two) is `null` rather than being left out. So
+  `{{contract}}[0]` names the same branch on every run, including a flaky one. A stage where
+  no branch carried a contract at all splices `[]`.
+- **`{{contract.<field>}}`** is one field of it, and is only available when the previous
+  stage is a single step, since a parallel stage produces several objects rather than one.
+
+Both are rejected in stage 1 exactly as `{{prev}}` is, and both require the previous stage to
+actually carry a `[contract:…]`; naming a field the contract does not declare is a parse
+error too.
+
+#### What the run does with one
+
+The contract's fields are turned into instructions and **appended to the step's prompt** —
+the shape, each field's type, and the two rules the validator enforces (no extra fields, the
+block goes last). That text is part of the prompt the engine records and hashes, not just the
+one it dispatches, so a resume still matches.
+
+When the step's reply comes back, the engine reads its last fenced `json` block and checks it.
+If it does not match, the step gets **exactly one more attempt**: the same prompt, with the
+validator's own messages appended in a fenced note —
+
+```text
+Your previous reply did not satisfy the contract: decision: expected one of SHIP,
+DO-NOT-SHIP, got "ship"; missing required field confidence.
+Reply again and end with a valid json block.
+```
+
+That note goes only to the model. The recorded prompt stays the original, so the retry cannot
+make a later resume think the workflow file changed. A **second** miss fails the step with the
+kind `contract`, and the run parks on it like any other failed step — with the validator's
+messages in the question, because "step 3 failed its contract" is not something a person can
+act on and `decision: expected one of SHIP, DO-NOT-SHIP, got "ship"` is. The void gate still
+runs first: a step that said nothing at all is empty, not malformed, and gets its own fresh
+attempt before anything is validated.
+
+`{{contract}}` and `{{contract.<field>}}` splice the **validated object** and nothing else.
+A step whose reply failed validation failed, so it contributes no object; a step with no
+contract never had one. What is spliced is *scrubbed* on the way into the next prompt — the
+engine's control markers (`ORG-ASK:`, `ORG-HALT:`, `ARCTURN-PATCH:`), the fence delimiters
+that bracket untrusted regions in a prompt, and invisible/bidi characters are neutralised,
+exactly as they are for `{{prev}}` and `{{journal}}`, so a free `string` field cannot steer
+the role reading it. The object recorded on the journal keeps the model's own bytes. The object rides on the step's journal terminal, so a resume
+re-expands the placeholder from the object the validator passed rather than re-parsing the
+recorded prose — the step is not run again. A string field splices bare (`{{contract.decision}}`
+becomes `DO-NOT-SHIP`, not `"DO-NOT-SHIP"`); everything else splices as JSON.
+
+`/workflow status <run-id>` prints the value under the step it came from:
+
+```text
+  ✓ 1 @reviewer — done  ·  1.2k  ·  38s
+      contract: decision=DO-NOT-SHIP confidence=0.8
+```
+
+The insights ledger records only that a step returned a validated typed reply — never what it
+decided. A miss is counted through the ordinary failure-kind table, as `contract`.
+
+### Judges
+
+`[judges:2]` or `[judges:3]` runs the step that many times, **concurrently**, as independent
+subagents given the identical prompt and no sight of each other, and then compares one field
+of their contract replies. The compared field is the contract's first enum-typed field, or
+failing that a field named `decision` or `verdict`.
+
+Two refusals happen at **pre-flight**, before a token is spent, exactly like an unknown model
+tag:
+
+```text
+step 3: judges requires a read-only role; "builder" can write
+step 3: judges needs a contract with an enum field to compare
+```
+
+The first is the important one. A judged step runs N times; on the write lane that is N
+patches racing for one checkout, which is not arbitration. Judging is a read, and the role's
+declared tools have to prove it — the same `roleLane` rule dispatch uses.
+
+Each judge is an ordinary step underneath: its own transient retries, its own single contract
+retry — and a seat's contract retry re-sends *that seat's* prompt, so an arbiter asked again
+is still shown the disagreement it was seated to settle. A judge whose reply never satisfied
+the contract has not voted, and its silence is not counted as a dissent. If **every** judge misses the shape the step fails as `contract`.
+
+When the valid verdicts agree — and agreement needs at least **two** valid votes, since one
+surviving reply is not a panel agreeing with itself — the first judge's reply is the step's
+reply and the run continues. When they do not, one **arbiter** runs: the same role, the same
+prompt, plus both judges' replies in full, fenced, and the instruction to decide rather than
+average. The
+arbiter's validated object is final and becomes the step's answer; if the arbiter itself
+misses the shape, the split stands unresolved and the step fails as `contract` rather than the
+engine casting the deciding vote.
+
+The whole panel is **one step**: one journal terminal, one row in the live view, one
+`{{prev}}`, and one spend line that covers every seat — two judges and an arbiter is three
+runs and is billed as three. It is also **one assignment** of the role, so the role's own
+`budget:` ceiling is spent once across every seat and the arbiter, not once per seat; a
+panel that crosses it stops the step with the ordinary budget failure. The step's `attempts`
+stays a measure of *flapping* — the worst any one seat needed — so a clean panel is not
+reported as a step that needed two tries; how many seats ran is `judges: N`. A split raises a one-line notice as it happens, and the panel is
+printed under the step in `/workflow status`:
+
+```text
+judges disagreed on step 3 (SHIP vs DO-NOT-SHIP) — arbitrating
+
+  ✓ 3 @reviewer — done  ·  4.1k  ·  1m 12s
+      judges: 2 · SHIP / DO-NOT-SHIP · arbiter: DO-NOT-SHIP
+      contract: decision=DO-NOT-SHIP confidence=0.8
+```
+
+Cancelling the run aborts every judge at once. The ledger records the count, whether they
+agreed and whether an arbiter ran — never the verdicts.
+
 ### The stage-boundary budget ask
 
 A hard ceiling ends the run as `failed`, and a failed run is permanently unresumable — by
@@ -134,6 +354,28 @@ stage, never over a failure, a cancellation, a role's own pause, or a ceiling th
 tripped. And because the raise grammar only applies when the pending question *is* the
 budget ask, answering a role's `ORG-ASK` with the words "raise 40" threads through as an
 ordinary answer, untouched.
+
+#### When the ask can and cannot fire
+
+The ask is a **stage-boundary** question, and that is the whole of its reach. It fires when,
+at the moment a stage ends, the run has spent between 80% and 100% of a ceiling and at least
+one stage is still to come. Everything outside that window belongs to the hard ceiling:
+
+- **A ceiling crossed inside a single step** is a hard stop, never an ask. The check runs
+  between stages, so a step that takes a run from 40% to 140% of its budget is finished, and
+  over the line, before any boundary is reached. This is not a corner case with real models:
+  the same step of the same workflow has been measured costing 27k tokens on one run and 72k
+  on the next, so a ceiling within ~2× of a single stage's typical cost will usually be
+  passed rather than approached. **Set a ceiling with room for at least one more stage of
+  headroom above the priciest stage you expect**, or the polite question never gets a turn.
+- **The final stage never asks.** There is nothing after it to save.
+- **`budgetUsd:` on an unpriced model never asks**, because the run's dollar spend is
+  unknown rather than low, and an unknown cannot be 80% of anything. Subscription models
+  (`zai/…`) are the usual case; use `budgetTokens:` for those.
+- **A failure, a cancellation, a role's own pause, or a ceiling that already tripped**
+  suppresses it — the run is already stopping, and a second question would only be noise.
+- **Once per ceiling per run.** An acknowledged ceiling runs on to the hard stop with your
+  consent on record.
 
 ## A failed step is a question, not a tombstone
 
@@ -208,10 +450,21 @@ never fires. The wrap-up warning a role gets near its ceiling goes to the model,
 model can ignore it. The park is the version a person sees, and it says in words that a
 turn ceiling — not a crash — is what stopped the step, and that `raise <n>` is available.
 
+A step that declared a `[contract:…]` has one more way to reach this park. Its reply came
+back, and it was not the shape the file promised — twice, because the engine already spent
+the step's one contract retry handing the model the validator's own complaint. It parks with
+the kind `contract` and the validator's messages in the question, so the choice in front of
+you is a real one: fix the role's brief, fix the contract's fields, or `retry` knowing what
+the last two attempts got wrong. See [Contracts](#contracts).
+
 Two failures deliberately do **not** park, because a retry could not change them: a resume
 refused because the workflow file changed under the run (every attempt re-derives the same
 prompt hash and is refused identically — start a fresh run), and a fatal `ORG-HALT`, where
 the role itself declared the work unrecoverable.
+
+Every park and failure above is also evidence: `arcturn retro <runId>` reads a run's journal
+and proposes a patch to the kit's role prompts or stage definitions that its own parks and
+failures argue for, as a diff you approve before it lands. See [Retro](/docs/retro).
 
 ## Model tags
 
@@ -392,9 +645,15 @@ naming the role and telling you to approve the plan or leave plan mode and re-ru
 /workflow status                   # every recent run: status, stage reached, turns, spend
 /workflow status <run-id>          # one run, step by step, with the reason it stopped
 /workflow resume <run-id>          # re-enter an interrupted run where it left off
+/workflow forecast ship-fix        # predict THIS run's duration, cost, tokens, stop risk
+/workflow fork <run-id> --at 4     # re-run everything from step 4 on, keeping stages 1-3
+/workflow diff <run-a> <run-b>     # two runs side by side, stage by stage
 ```
 
-`/workflow status` answers "what happened to *this* run". The question it cannot answer —
+`/workflow forecast <name>` predicts what a run of that pipeline will cost before it starts
+— duration, cost, tokens and stop risk per stage, on the models it will actually use — from
+the same local ledger `/insights` reads; `/workflow status` answers "what happened to
+*this* run". The question neither answers —
 "which step keeps parking, which model keeps going quiet, and what have these runs been
 costing" — is [`/insights`](/docs/insights), which folds a small local ledger of parks,
 silent turns, step failures and step durations into one report. Nothing leaves the
@@ -495,6 +754,157 @@ its cost still folds into the same running total, but its tools come from the ro
 `tools:`, not from the parent's narrowing, and its turn ceiling is `def.maxTurns` clamped to
 the session's own `subagentMaxTurns`, in both lanes alike.
 
+## Forking a run
+
+A run that got three stages in and then took a wrong turn is mostly good work. `/workflow
+fork` keeps it:
+
+```text
+/workflow fork <run-id> --at <step-id> [--revert] [--model <tag>] [--raise <n>] [--input <text>]
+```
+
+It mints a **new run id** whose journal opens with a header recording where it came from,
+followed by a verbatim copy of every stage the source run finished *before* the `--at`
+step: their terminals, their patch files (copied into the new run's own directory and
+re-pointed, so the fork survives the original being pruned) and the frozen picture of your
+checkout that run started against. From there the ordinary resume machinery takes over.
+
+That is the whole design: **a fork is a resume that starts in a new directory.** Copied
+steps are not re-run, their patches are not re-applied, and the new run's later stages seed
+their worktrees from exactly the state the original had reached.
+
+- `--model <tag>` pins **only the `--at` step** to a different model. It is journalled as a
+  run-scoped grant — the workflow file and the role file are never edited — and it beats
+  both the step's own `[tag]` and the role's `model:`. It also collapses a `[race:…]` on
+  that step to a single run, because you have just said which model you want.
+- `--raise <n>` grants that step a turn ceiling for this run, exactly as answering `raise
+  <n>` at a park does.
+- `--input <text>` replaces the run's `{{input}}`; without it the fork carries the original's.
+- `--revert` undoes the source run's work for `--at` and every step after it in your
+  checkout before the fork starts. See below — it is what makes forking a *finished* run
+  possible at all.
+
+A fork refuses, before creating anything, when the `--at` step is not in the workflow, when
+it is in the first stage (nothing finished before it), when the run id has no journal, and —
+most importantly — when the workflow file has changed under one of the steps it would
+reuse. The last one is checked by recomputing each copied step's prompt hash from the file
+on disk; a mismatch names the step and tells you to run the workflow fresh, because reusing
+an answer to a question the file no longer asks is worse than starting over.
+
+Every refusal happens **before the new run's directory exists**, so a fork that will not
+start leaves nothing behind to read back or clean up.
+
+Because a copied patch file moves into the new run's directory, a reused step's
+`ARCTURN-PATCH:` trailer — the thing `{{prev}}` carries into the next stage — names a
+different path in the fork than it did in the source run. The fork therefore re-stamps the
+copied terminals' prompt hashes with the ones its own resume will recompute, through the
+same replay that checked the file for changes. Without that, forking past a write-lane
+stage whose output the next step reads via `{{prev}}` refused with "the workflow changed
+since this run" about a file nobody had touched.
+
+### Forking a run that finished: `--revert`
+
+A fork writes into the **same checkout** the source run wrote into. Forking a run that
+*stopped* at `--at` is therefore free — nothing from that step onwards ever reached your
+files. Forking a run that **finished** is not: its patches for `--at` and every step after
+it are still sitting in those files, so the first step the fork re-runs produces a patch
+`git apply` refuses, and the fork dies after paying for a model call.
+
+So it does not start. Without `--revert`, a fork of a run with applied work at or after the
+fork point is refused up front, from the journal alone:
+
+```text
+Run 20260904-91c4d0f2 already applied steps 3-5 into this checkout; add --revert to undo
+them first, or fork a run that stopped at 3.
+```
+
+`--revert` is the answer, and the flag itself is the consent — there is no second prompt,
+so `arcturn -p` behaves exactly like the interactive session. It reverse-applies the source
+run's patches for every step from `--at` onwards, **newest first** (applying is a stack:
+stage 5's patch was cut against a tree that already held stage 4's, so it comes off first).
+The list is printed before anything moves:
+
+```text
+Reverting 3 patch(es) applied by 20260904-91c4d0f2 at or after step 3, newest first:
+  step 5 — step-5-shipper.patch
+  step 4 — step-4-tester.patch
+  step 3 — step-3-builder.patch
+Reverted 3 patch(es) from steps 3-5 of 20260904-91c4d0f2; the checkout now matches the end
+of stage 2.
+```
+
+Then the fork continues normally, and nothing is copied for the steps it just undid.
+
+**Nothing is touched until the whole sequence is known to work.** The files those patches
+touch are copied into a scratch directory and the entire reverse series is really applied
+there first. Only if that rehearsal succeeds does your checkout change, and the real revert
+then runs through the same apply queue the engine's own `git apply` uses — so a live run
+writing into the same repository can never interleave with it.
+
+If the rehearsal fails, the fork is refused with nothing undone, and the message says which
+of the two things went wrong:
+
+- **The tree moved on.** `Cannot revert step 4 of run <id>: git will not take its patch back
+  out (…). The checkout has moved on since that run; nothing was undone.`
+- **You have your own edits in the revert set.** Same refusal, naming the files:
+  `the checkout has uncommitted changes in src/auth.ts that step 4's patch no longer
+  reverses out of (…). Commit, stash or discard them and fork again; nothing was undone.`
+
+Note what is *not* a refusal: a run leaves its own patches uncommitted, so "the working tree
+differs from `HEAD`" is the normal state after any write-lane run and can never be the test.
+The rehearsal succeeding **is** the proof that those files still hold exactly what the run
+left in them.
+
+A `--revert` fork records what it did as a durable `forkRevert` line in the **new** run's
+journal, so the rewind is never something only your terminal scrollback remembers.
+
+`/workflow status` shows the provenance, and the rewind when there was one:
+
+```text
+Run 20260904-2b71e0a1 — ship-fix [running]
+  source: /Users/you/.arcturn/workflows/ship-fix.md
+  forked from 20260904-91c4d0f2 at step 4
+  reverted 3 patch(es) from steps 3-5 of the source run before starting
+```
+
+Headless works the same way — `arcturn -p "/workflow fork <run-id> --at 4 --revert"` — with
+the same exit codes as any run: `0` finished, `1` failed, `3` stopped for a person.
+
+## Comparing two runs
+
+```text
+/workflow diff <run-a> <run-b> [--json]
+```
+
+Two runs, stage by stage, from their durable journals alone — no discovery, no engine, no
+agent, so a run whose workflow file has since been deleted is still comparable. Each step
+is one row: status, attempts, turns, tool calls, writes, duration and cost for A above B,
+with a marker on every row where something a reader would act on changed, plus the model,
+the race winner, the judges' verdict, the contract's headline fields, and the first line of
+each step's output when the two differ. A totals line closes it.
+
+```text
+A 20260904-91c4d0f2 — ship-fix [failed]
+B 20260904-2b71e0a1 — ship-fix [done] (forked from 20260904-91c4d0f2 at 4)
+
+    step  role            A → B
+    1     @builder        done 4t 6c 1w 41s $0.02
+                          done 4t 6c 1w 41s $0.02
+  ! 4     @reviewer       failed 2a 80t 12c 3m20s $0.31
+                          done 31t 9c 1m02s $0.08
+      model anthropic/claude-haiku-4-5 → zai/glm-5.3-flash
+      A: —
+      B: The retry path is covered; the flake was the fake clock.
+
+Totals  A 4 step(s) 6m11s $0.44 18.2k · B 5 step(s) 3m02s $0.19 11.9k
+1 of 5 step(s) differ.
+```
+
+Anything the journals do not record reads `unknown` rather than a fabricated zero — a run
+with one unpriced model reports its total cost as `unknown`, not as a wrong number. Two
+runs of *different* workflows are still comparable: rows align by step id and the header
+says that is what happened. `--json` gives the same comparison structured, for a script.
+
 ## Failure and cancellation semantics
 
 These are the contract worth knowing before relying on a workflow for anything that
@@ -532,6 +942,28 @@ matters:
   in the worktree is thrown away either. An exec-lane step that fails or is cancelled keeps
   its worktree on disk the same way, clearly labelled inspect-only — but there is no patch to
   capture in the first place, because that lane never captures one, on success or on failure.
+- **A losing race arm is a cancellation, not a fault.** It is aborted because another model
+  answered first, so it is never retried, never counted against its role's failure rate, and
+  never applied — but its patch and worktree are preserved exactly like any other cancelled
+  write-lane step's, and its own terminal reaches the insights ledger marked as the losing
+  arm so the comparison survives the run.
+- **A refused tool call is counted and said out loud.** Under `-p` the default permission
+  mode has nobody to ask, so it denies — including every `bash` call a write-lane role
+  makes. The role usually carries on and reports success in prose, so a step whose
+  `node --test` never ran still ends `done`. Each step's terminal now records how many calls
+  were refused; the run report marks the step `[N tool call(s) denied]`, `/workflow status`
+  prints that step's `activity:` line, and the run closes with one notice naming the count
+  and the flag that would have let them through. If a workflow's correctness gate is "run
+  the tests and make them pass", run it with `--permission-mode acceptEdits` or `yolo`, or
+  add permission rules — otherwise that gate never fires.
+- **A pre-flight refusal is journalled as a run that failed before it started.** An unknown
+  `[tag]`, an unresolvable `[race:…]` arm, an unknown `@role` or one that declares no tools,
+  a `[judges:N]` step on a role that can write or over a contract with no closed-set field
+  to compare — all of these are decided from the *file*, before the first dispatch, and end
+  the run `failed` with the refusal as its message, exit code 1 under `-p`, zero tokens
+  spent. The run directory and its `journal.jsonl` are still created, carrying the header
+  and a `runEnd{failed}` and nothing in between, so `/workflow status <id>` can name what
+  was refused instead of showing a nameless stub.
 - **Determinism is the point.** Output concatenation is always written order (not
   completion order), step ids are positional, and nothing in the module reads the wall
   clock except through an injectable `now()` — the same workflow file with the same

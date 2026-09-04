@@ -118,8 +118,24 @@ export async function runPrint(options: RunPrintOptions): Promise<PrintResult> {
   // never commands.
   // Well-formed only: "/etc/hosts is wrong, fix it" is a prompt about a path,
   // not a command, and must still reach the model exactly as it did before.
+  //
+  // One command shape is deliberately NOT dispatched: a markdown skill.
+  // A skill command has no output of its own — its whole body is a prompt
+  // for the main agent (see `skillCommand` in runtime.ts) — so routing it
+  // through the command path would run the agent and print nothing, because
+  // the headless `ui` below only ever sees `print`/`notice` calls. Expanding
+  // it here instead makes `arcturn -p "/my-skill args"` behave exactly like
+  // `arcturn -p "<the skill's prompt>"`: streamed events under `--json`, the
+  // final assistant text under `--text`, exit 1 when the run errors.
+  let skillPrompt: string | undefined;
   if (typeof prompt === "string" && parseCommandLine(prompt.trim())?.wellFormed === true) {
-    return runPrintCommand(prompt.trim(), options, format, out, err);
+    const registry =
+      options.commands ??
+      createCommandRegistry(runtime.extensions.commands, (message) => err(`arcturn: ${message}\n`));
+    skillPrompt = skillPromptFor(prompt.trim(), runtime, registry);
+    if (skillPrompt === undefined) {
+      return runPrintCommand(prompt.trim(), options, format, out, err, registry);
+    }
   }
 
   // Held in an object rather than `let` bindings: assignments happen inside a
@@ -141,15 +157,24 @@ export async function runPrint(options: RunPrintOptions): Promise<PrintResult> {
 
   try {
     // @-mentions expand here rather than at the call site, so print mode
-    // behaves exactly like the interactive app for every caller.
+    // behaves exactly like the interactive app for every caller. A skill's
+    // expanded body is exempt: the interactive path hands it to the agent
+    // verbatim, and a skill that documents an `@name` convention must not
+    // suddenly start inlining files under `-p`.
     const expanded =
-      typeof prompt === "string" ? await expandMentions(prompt, runtime.cwd) : undefined;
+      skillPrompt !== undefined
+        ? undefined
+        : typeof prompt === "string"
+          ? await expandMentions(prompt, runtime.cwd)
+          : undefined;
     await runtime.agent.prompt(
-      expanded === undefined
-        ? prompt
-        : expanded.images.length > 0
-          ? [textBlock(expanded.text), ...expanded.images]
-          : expanded.text,
+      skillPrompt !== undefined
+        ? skillPrompt
+        : expanded === undefined
+          ? prompt
+          : expanded.images.length > 0
+            ? [textBlock(expanded.text), ...expanded.images]
+            : expanded.text,
     );
   } finally {
     unsubscribe();
@@ -173,6 +198,33 @@ export async function runPrint(options: RunPrintOptions): Promise<PrintResult> {
 }
 
 /**
+ * The prompt a `/<name> args` line expands to when `<name>` is a markdown
+ * skill, or `undefined` when it is anything else.
+ *
+ * The registry is consulted rather than `runtime.skills` alone because a
+ * built-in command of the same name wins registration (see
+ * `createCommandRegistry`'s collision guard): a user skill called `skills`
+ * must still run the built-in `/skills` command here, exactly as it does in
+ * the terminal.
+ *
+ * @param input - The trimmed command line, leading slash included.
+ * @param runtime - The runtime whose skills and cwd the prompt is built from.
+ * @param registry - The registry the line would otherwise dispatch through.
+ */
+function skillPromptFor(
+  input: string,
+  runtime: ArcturnRuntime,
+  registry: CommandRegistry,
+): string | undefined {
+  const parsed = parseCommandLine(input);
+  if (!parsed) return undefined;
+  const skill = runtime.skills.find((candidate) => candidate.name === parsed.name);
+  if (!skill) return undefined;
+  if (registry.get(parsed.name)?.source !== skill.source) return undefined;
+  return skill.buildPrompt(parsed.args, runtime.cwd);
+}
+
+/**
  * Run one slash command with no terminal behind it.
  *
  * The interactive app hands a command a transcript, a modal picker and an
@@ -187,11 +239,9 @@ async function runPrintCommand(
   format: OutputFormat,
   out: (chunk: string) => void,
   err: (chunk: string) => void,
+  registry: CommandRegistry,
 ): Promise<PrintResult> {
   const { runtime } = options;
-  const registry =
-    options.commands ??
-    createCommandRegistry(runtime.extensions.commands, (message) => err(`arcturn: ${message}\n`));
   const seen = { error: false, needsHuman: false };
   const emit = (record: Record<string, unknown>): void => out(`${JSON.stringify(record)}\n`);
   const ui: CommandUi = {
@@ -223,6 +273,9 @@ async function runPrintCommand(
     },
     clear() {},
     exit() {},
+    needsHuman() {
+      seen.needsHuman = true;
+    },
     ...(format === "json" ? { workflowLive: (event) => emit({ type: "workflow", event }) } : {}),
   };
   const result = await registry.dispatch(input, { runtime, ui });

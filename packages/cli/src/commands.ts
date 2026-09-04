@@ -13,6 +13,7 @@ import { listModels, listPresets, refreshCatalog, subscriptionPlanFor } from "@a
 import { getTheme, setTheme } from "@arcturn/tui";
 import type { PermissionMode, PermissionRule } from "@arcturn/types";
 import { createBackgroundAgentCommands } from "./background-agents.js";
+import { createBrainCommands } from "./brain.js";
 import { copyToClipboard } from "./clipboard.js";
 import { permissionModes, persistModelPick, persistRoutePatch, persistSetting } from "./config.js";
 import { estimateCost, formatEstimate } from "./cost-preview.js";
@@ -31,6 +32,7 @@ import { createInsightsCommands } from "./insights.js";
 import { createOrgMemoryCommands } from "./org-memory.js";
 import { formatSuggestion } from "./policy-learn.js";
 import { createRegistryCommands } from "./registry.js";
+import { createRetroCommands } from "./retro.js";
 import { bestMatch, explainMatch, searchTurns } from "./rewind-search.js";
 import {
   describeRoutes,
@@ -40,6 +42,7 @@ import {
 } from "./router.js";
 import { type ArcturnRuntime, resolveModelSpec } from "./runtime.js";
 import { formatScoutReport, runScouts } from "./scouts.js";
+import { createSkillCommands } from "./skill-synthesis.js";
 import { createStatsCommands } from "./stats.js";
 import { createTeamCommands } from "./team.js";
 import { resolveTheme } from "./themes.js";
@@ -98,6 +101,15 @@ export interface CommandUi {
    * only the interactive app has a live region to update.
    */
   workflowLive?(event: WorkflowEvent): void;
+  /**
+   * Signal that this command cannot proceed without a person — a picker it
+   * needs is unavailable, or an `--apply`-style step is refusing to act
+   * without an explicit `--yes`. A headless host uses this to set exit code
+   * `3` (see `print.ts`'s `PRINT_EXIT.needsHuman`) instead of grepping
+   * notice text for workflow-specific pause/park wording. Optional, because
+   * the interactive app has no exit code to steer.
+   */
+  needsHuman?(): void;
 }
 
 /** Handed to every command implementation. */
@@ -1288,6 +1300,20 @@ export function createCommandRegistry(
   // `/stats` answers "what did this cost"; `/insights` answers "what keeps
   // going wrong" — parks, silent turns, step failures — off the local ledger.
   registry.registerAll(createInsightsCommands());
+  // `/retro` answers "what should change" — a patch proposal for one run's
+  // kit prompts/stages, built from the same journal and insights `/insights`
+  // reads across many runs.
+  registry.registerAll(createRetroCommands());
+  // `/skills synthesize` drafts a reusable skill from a finished workflow
+  // run's journal. Registered here (a built-in) so a user or project skill
+  // literally named "skills" can never shadow it — see the collision guard
+  // below, which checks `registry.get` before registering an extension
+  // command and skips it (with a warning) when a built-in already owns the
+  // name.
+  registry.registerAll(createSkillCommands());
+  // `/insights` says what keeps going wrong; `/brain` is the repository map
+  // that stops a step re-discovering the tree on every run.
+  registry.registerAll(createBrainCommands());
   registry.registerAll(createRegistryCommands());
   registry.registerAll(createTeamCommands());
   // Org memory is the only writable half of the workflow-role surface, so it

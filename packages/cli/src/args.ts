@@ -113,6 +113,48 @@ export interface InsightsCommand {
   readonly share?: boolean;
 }
 
+/** A parsed `brain [build|status|show] [--full] [--from-run <id>]` command. */
+export interface BrainCommand {
+  /** Command family. */
+  readonly kind: "brain";
+  /** Verb; `status` when none was typed. */
+  readonly action: "build" | "status" | "show";
+  /** Re-distil every directory instead of only the changed ones. */
+  readonly full?: boolean;
+  /** Also distil the lessons from this workflow run. */
+  readonly fromRun?: string;
+}
+
+/**
+ * A parsed `skill synthesize <runId> [...]` command. `skill-synthesis.ts` owns
+ * the flags after the verb (`--name`, `--scope`, `--yes`, `--force`,
+ * `--share`, `--json`) — this only carries them through verbatim, the same
+ * split `registry.ts`'s verbs use.
+ */
+export interface SkillCliCommand {
+  /** Command family. */
+  readonly kind: "skill";
+  /** The only verb so far; kept as a field rather than baked into `kind` so a
+   * second one (e.g. `list`) needs no new `CliCommand` member. */
+  readonly verb: "synthesize";
+  /** Every argument after "synthesize", verbatim. */
+  readonly argv: readonly string[];
+}
+
+/** A parsed `retro <runId> [--apply] [--yes] [--json]` command. */
+export interface RetroCommand {
+  /** Command family. */
+  readonly kind: "retro";
+  /** The run to read the journal and insights for. */
+  readonly runId: string;
+  /** Actually land the proposed patch (default: preview only). */
+  readonly apply?: boolean;
+  /** Bypass the non-interactive approval gate; required alongside `apply` off a TTY. */
+  readonly yes?: boolean;
+  /** Emit `{findings, diff, files, applied}` as one JSON object. */
+  readonly json?: boolean;
+}
+
 /** A parsed `serve` command. */
 export interface ServeCommand {
   /** Command family. */
@@ -198,6 +240,9 @@ export type CliCommand =
   | BisectCommand
   | DoctorCommand
   | InsightsCommand
+  | RetroCommand
+  | BrainCommand
+  | SkillCliCommand
   | TrustCommand
   | McpCliCommand
   | RegistryCliCommand;
@@ -351,6 +396,15 @@ export const DOCTOR_COMMAND_NAME = "doctor";
 
 /** First positional that switches into insights-command parsing. */
 export const INSIGHTS_COMMAND_NAME = "insights";
+
+/** First positional that switches into retro-command parsing. */
+export const RETRO_COMMAND_NAME = "retro";
+
+/** First positional that switches into skill-command parsing. */
+export const SKILL_COMMAND_NAME = "skill";
+
+/** First positional that switches into brain-command parsing. */
+export const BRAIN_COMMAND_NAME = "brain";
 
 /** First positional that switches into trust-command parsing. */
 export const TRUST_COMMAND_NAME = "trust";
@@ -687,6 +741,121 @@ export function parseArgs(
       ...(workflow === undefined ? {} : { workflow }),
       ...(json ? { json } : {}),
       ...(share ? { share } : {}),
+    };
+    args.prompt = "";
+    return { ok: true, args };
+  }
+
+  // `retro` owns its argument list too: a positional runId plus `--apply`,
+  // `--yes` and `--json`, none of which the global flag loop knows about.
+  // Same escape as every other positional verb — quoting makes it a prompt.
+  if (argv[0] === RETRO_COMMAND_NAME) {
+    const rest = argv.slice(1);
+    if (rest.includes("--help") || rest.includes("-h")) {
+      args.help = true;
+      return { ok: true, args };
+    }
+    let runId: string | undefined;
+    let apply = false;
+    let yes = false;
+    let json = false;
+    for (const token of rest) {
+      if (token === "--apply") apply = true;
+      else if (token === "--yes") yes = true;
+      else if (token === "--json") json = true;
+      else if (!token.startsWith("--") && runId === undefined) runId = token;
+      else {
+        return {
+          ok: false,
+          error:
+            `unknown argument "${token}" for retro. ` +
+            "Usage: arcturn retro <runId> [--apply] [--yes] [--json]. " +
+            'To send this as a prompt instead, quote it: arcturn "retro ..."',
+        };
+      }
+    }
+    if (runId === undefined)
+      return { ok: false, error: "retro requires a run id: arcturn retro <runId>" };
+    args.command = {
+      kind: "retro",
+      runId,
+      ...(apply ? { apply } : {}),
+      ...(yes ? { yes } : {}),
+      ...(json ? { json } : {}),
+    };
+    args.prompt = "";
+    return { ok: true, args };
+  }
+
+  // `skill` owns its argument list too: its one verb, `synthesize`, and every
+  // flag after it (`--name`, `--scope`, `--yes`, `--force`, `--share`,
+  // `--json`) belong to `skill-synthesis.ts`, which parses them itself —
+  // this layer only recognises the verb so an unrecognised one still reads as
+  // a usage error rather than a prompt.
+  if (argv[0] === SKILL_COMMAND_NAME) {
+    const rest = argv.slice(1);
+    if (rest.includes("--help") || rest.includes("-h")) {
+      args.help = true;
+      return { ok: true, args };
+    }
+    const verb = rest[0];
+    if (verb !== "synthesize") {
+      return {
+        ok: false,
+        error:
+          `unknown "skill" subcommand "${verb ?? ""}". ` +
+          "Usage: arcturn skill synthesize <runId> [--name <n>] [--scope user|project] " +
+          "[--yes] [--force] [--share] [--json]. " +
+          'To send this as a prompt instead, quote it: arcturn "skill ..."',
+      };
+    }
+    args.command = { kind: "skill", verb: "synthesize", argv: rest.slice(1) };
+    args.prompt = "";
+    return { ok: true, args };
+  }
+
+  // `brain` owns its argument list for the same reason `insights` does:
+  // `--full` and `--from-run` are flags of THIS command, and the global loop
+  // would reject both. Quoting still makes it a prompt.
+  if (argv[0] === BRAIN_COMMAND_NAME) {
+    const rest = argv.slice(1);
+    if (rest.includes("--help") || rest.includes("-h")) {
+      args.help = true;
+      return { ok: true, args };
+    }
+    let action: "build" | "status" | "show" = "status";
+    let sawVerb = false;
+    let full = false;
+    let fromRun: string | undefined;
+    for (let i = 0; i < rest.length; i++) {
+      const token = rest[i];
+      if (!sawVerb && (token === "build" || token === "status" || token === "show")) {
+        action = token;
+        sawVerb = true;
+      } else if (token === "--full") {
+        full = true;
+      } else if (token === "--from-run") {
+        const value = rest[i + 1];
+        if (value === undefined) return { ok: false, error: "--from-run requires a value" };
+        fromRun = value;
+        i++;
+      } else if (token?.startsWith("--from-run=")) {
+        fromRun = token.slice("--from-run=".length);
+      } else {
+        return {
+          ok: false,
+          error:
+            `unknown argument "${token}" for brain. ` +
+            "Usage: arcturn brain [build|status|show] [--full] [--from-run <runId>]. " +
+            'To send this as a prompt instead, quote it: arcturn "brain ..."',
+        };
+      }
+    }
+    args.command = {
+      kind: "brain",
+      action,
+      ...(full ? { full } : {}),
+      ...(fromRun === undefined ? {} : { fromRun }),
     };
     args.prompt = "";
     return { ok: true, args };
@@ -1089,6 +1258,17 @@ Commands
            [--workflow <name>]  step failures and slow roles, from
            [--json] [--share]   ~/.arcturn/insights. --share prints a markdown block
                                 and a pre-filled issue link; it sends nothing.
+  retro <runId> [--apply]       Propose a patch to a kit's role prompts / workflow stages
+        [--yes] [--json]        from one run's journal and insights; --apply lands it after
+                                approval, --yes is required to apply non-interactively.
+  skill synthesize <runId>      Draft a reusable skill from a finished workflow run's
+       [--name <n>]              journal: /roles/prompts/activity become a SKILL.md.
+       [--scope user|project]    --yes saves it; --share prints a pre-filled issue
+       [--yes] [--force]         link proposing it for the hub. Sends nothing.
+       [--share] [--json]
+  brain [build|status|show]     The distilled repository map every agent reads: build or
+        [--full]                refresh it (only changed directories are re-distilled),
+        [--from-run <runId>]    report what is stale, or print the prompt block.
   blame <file> [session]        Explain which turn and evidence wrote each line.
   bisect <session>              Find the turn where behaviour left a recording.
   serve                         Host sessions over WebSocket for remote attach.

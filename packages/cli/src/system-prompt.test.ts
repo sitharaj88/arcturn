@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LARGE_CONTENT_CHARS, LARGE_CONTENT_LINES } from "@arcturn/core";
 import { describe, expect, it } from "vitest";
+import { BRAIN_FENCE_CLOSE, BRAIN_FENCE_OPEN } from "./brain.js";
 import {
   buildSystemPrompt,
   collectSystemPromptContext,
@@ -80,10 +81,55 @@ describe("buildSystemPrompt", () => {
     expect(prompt).toContain("Prefer tabs.");
   });
 
+  it("carries the project brain, fenced, after project memory", () => {
+    // The brain arrives ALREADY fenced (`renderBrainPrompt` owns the
+    // delimiters) because, unlike ARCTURN.md and memory, it was distilled from
+    // files a cloned repository controls. This prompt only frames it.
+    const brain = `${BRAIN_FENCE_OPEN}\n## Modules\n- src — code\n${BRAIN_FENCE_CLOSE}`;
+    const prompt = buildSystemPrompt({ ...base, memories: "Note one.", brain });
+    expect(prompt).toContain("# Project brain");
+    expect(prompt).toContain(BRAIN_FENCE_OPEN);
+    expect(prompt).toContain("- src — code");
+    expect(prompt).toContain(BRAIN_FENCE_CLOSE);
+    // Ordering: what the user/model wrote comes before what was derived.
+    expect(prompt.indexOf("# Project brain")).toBeGreaterThan(prompt.indexOf("# Project memory"));
+  });
+
+  it("omits the project brain when there is none", () => {
+    expect(buildSystemPrompt(base)).not.toContain("# Project brain");
+    expect(buildSystemPrompt({ ...base, brain: "   " })).not.toContain("# Project brain");
+  });
+
   it("ignores blank optional values", () => {
     const prompt = buildSystemPrompt({ ...base, projectDoc: "   ", append: "" });
     expect(prompt).not.toContain("# Project instructions");
     expect(prompt).not.toContain("# User instructions");
+  });
+});
+
+describe("collectSystemPromptContext", () => {
+  it("passes memories, agents and the brain through to the context", async () => {
+    // A REGRESSION test for a silent drop. These three fields are gathered by
+    // the caller, not by this function, and they were not declared on its
+    // options — so `buildRuntime`'s conditional spreads handed them over and
+    // this function returned a context without them. Project memory and the
+    // named-agent roster never reached a real session's system prompt.
+    const context = await collectSystemPromptContext({
+      cwd: "/work/repo",
+      skipRepoLookup: true,
+      memories: "Remember the flaky test.",
+      brain: "BRAINBLOCK",
+      agents: [{ name: "reviewer", description: "reviews" }],
+    });
+    expect(context.memories).toBe("Remember the flaky test.");
+    expect(context.brain).toBe("BRAINBLOCK");
+    expect(context.agents).toEqual([{ name: "reviewer", description: "reviews" }]);
+
+    const prompt = buildSystemPrompt(context);
+    expect(prompt).toContain("# Project memory");
+    expect(prompt).toContain("Remember the flaky test.");
+    expect(prompt).toContain("# Project brain");
+    expect(prompt).toContain("# Specialized agents");
   });
 });
 

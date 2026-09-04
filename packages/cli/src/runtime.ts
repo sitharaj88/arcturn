@@ -80,6 +80,13 @@ import {
   createAuditLog,
 } from "./audit.js";
 import {
+  type BrainConfigView,
+  brainDirFor,
+  brainEnabled,
+  createBrainTool,
+  loadBrainPrompt,
+} from "./brain.js";
+import {
   type CanaryGuard,
   createCanaryGuard,
   generateCanary,
@@ -213,12 +220,25 @@ export const BUILT_IN_TOOL_NAMES: readonly string[] = [
   "symbols",
   "search_code",
   "memory",
+  "brain",
   "todo",
   "plan",
   "subagent",
   "skill",
   "tool_search",
 ];
+
+/**
+ * Read-only tool names, plus `brain`.
+ *
+ * `brain` reads the distilled repository map and can touch nothing else: its
+ * only filesystem reach is the note files `index.json` names, all of them
+ * inside `<cwd>/.arcturn/brain/dirs/`. Without this it would be refused in
+ * PLAN mode — the one mode where a map of the repository is worth the most —
+ * because the engine's default read-only list names only the four core
+ * reading tools.
+ */
+const READ_ONLY_TOOLS_WITH_BRAIN: readonly string[] = [...DEFAULT_READ_ONLY_TOOLS, "brain"];
 
 /**
  * Default turn budget for one delegated sub-agent or scout.
@@ -549,6 +569,22 @@ export function routedCompactionOptions(seat: ModelSpec, router: ModelRouter): C
   };
 }
 
+/**
+ * Splice the project brain onto a sub-agent's system prompt.
+ *
+ * One helper so the two prompt sources `createSubagent` chooses between — a
+ * named role's own file and the anonymous sub-agent prompt — cannot drift into
+ * one getting the map and the other not.
+ *
+ * @param prompt - The base system prompt.
+ * @param brain - The rendered brain block, or `undefined`.
+ */
+function withBrain(prompt: string, brain: string | undefined): string {
+  return brain === undefined || brain.trim().length === 0
+    ? prompt
+    : `${prompt}\n\n# Project brain\nA distilled map of this repository, refreshed from the checkout. Read it before exploring:\n${brain.trim()}`;
+}
+
 /** The system prompt handed to sub-agents. */
 export function subagentSystemPrompt(cwd: string, canMutate: boolean): string {
   return [
@@ -644,6 +680,14 @@ export interface ArcturnRuntimeInit {
   /** Markdown skills discovered by `loadSkills`, in discovery order. */
   skills: Skill[];
   systemPrompt: string;
+  /**
+   * The project brain, pre-rendered and fenced by `renderBrainPrompt`.
+   *
+   * Held separately from `systemPrompt` (which already contains it) because
+   * sub-agents build their prompts from scratch: `createSubagent` appends
+   * this so a delegated role gets the same map the main loop has.
+   */
+  brainPrompt?: string;
   permissionMode: PermissionMode;
   maxTurns?: number;
   onPermissionAsk?: PermissionPrompt;
@@ -783,6 +827,15 @@ export class ArcturnRuntime {
   readonly overlay: Overlay | undefined;
   /** Speculative-edit controller when `speculation` is on. */
   readonly speculation: SpeculationController | undefined;
+  /**
+   * The project brain block, or `undefined` for a project with none.
+   *
+   * Loaded once by `buildRuntime` and never refreshed mid-session — see the
+   * comment at its load site. Appended to every sub-agent's system prompt by
+   * {@link ArcturnRuntime.createSubagent}, and never to the distiller's, which
+   * builds it.
+   */
+  readonly brainPrompt: string | undefined;
   /** Tracks text that entered the conversation from untrusted sources. */
   readonly taint: TaintTracker;
   /** Guards registered canary tokens from leaving via an egress tool. */
@@ -882,6 +935,7 @@ export class ArcturnRuntime {
     this.verifier = init.verifier;
     this.overlay = init.overlay;
     this.speculation = init.speculation;
+    this.brainPrompt = init.brainPrompt;
     this.taint = init.taint;
     this.canary = init.canary;
     this.router = init.router;
@@ -1362,7 +1416,7 @@ export class ArcturnRuntime {
     // included even though it is not read-only — network egress stays gated,
     // so it prompts through the parent — but under a plan-mode parent it is
     // dropped entirely: plan mode promises no egress and no prompts.
-    const investigative = new Set([...DEFAULT_READ_ONLY_TOOLS, ...(planMode ? [] : ["fetch"])]);
+    const investigative = new Set([...READ_ONLY_TOOLS_WITH_BRAIN, ...(planMode ? [] : ["fetch"])]);
     // A named agent's `tools:` list may only NARROW what the permission mode
     // already allows — never widen it — so delegating can't be used to slip
     // past a non-yolo parent's read-only restriction.
@@ -1402,7 +1456,17 @@ export class ArcturnRuntime {
     const child = new Agent({
       llm: this.llm,
       model,
-      systemPrompt: def?.systemPrompt ?? subagentSystemPrompt(this.cwd, yolo),
+      // The map, for every child: a named role, an ad-hoc `subagent` call and
+      // every workflow step alike. This is the seam the 80-turn read loop was
+      // on the wrong side of — a role file's own prompt says what the role is,
+      // and nothing said what the repository is. Appended rather than
+      // prepended so a role's own instructions still open its prompt, and
+      // withheld from the distiller, which would otherwise be handed the
+      // output of the last build as input to the next.
+      systemPrompt: withBrain(
+        def?.systemPrompt ?? subagentSystemPrompt(this.cwd, yolo),
+        def?.name === "brain-distiller" ? undefined : this.brainPrompt,
+      ),
       tools,
       cwd: this.cwd,
       // A named role's own `maxTurns:` (RFC 0001 §3.2 budget fields) may only
@@ -1421,6 +1485,7 @@ export class ArcturnRuntime {
       permissions: {
         mode: childMode,
         rules: this.livePermissionRules(),
+        readOnlyTools: [...READ_ONLY_TOOLS_WITH_BRAIN],
         onPersistRule: (rule: PermissionRule) => this.#persistRule(rule),
       },
       compaction: routedCompactionOptions(model, this.router),
@@ -1936,6 +2001,7 @@ export class ArcturnRuntime {
         ...(this.#defersTools(overrides.fixedToolset === true)
           ? { alwaysAllowTools: [...DEFAULT_ALWAYS_ALLOW_TOOLS, this.#searchToolName()] }
           : {}),
+        readOnlyTools: [...READ_ONLY_TOOLS_WITH_BRAIN],
         onPersistRule: (rule: PermissionRule) => this.#persistRule(rule),
       },
       onPermissionAsk: (request) =>
@@ -2594,6 +2660,23 @@ export async function buildRuntime(options: BuildRuntimeOptions = {}): Promise<A
     createMemoryTool({
       dir: (ctx) => (ctx.cwd === paths.cwd ? memoryDir : join(ctx.cwd, ".arcturn", "memory")),
     }),
+    // The map, beside the notes. Read-only and confined to the note files
+    // `index.json` names, so — like `memory`'s write path — there is nothing
+    // to request permission about. Resolved per call from the CALLING agent's
+    // cwd for the same reason: a scout in a worktree reads that tree's brain.
+    ...(brainEnabled(config.brain)
+      ? [
+          createBrainTool({
+            dir: (ctx) =>
+              ctx.cwd === paths.cwd
+                ? brainDirFor(paths.project)
+                : brainDirFor(join(ctx.cwd, ".arcturn")),
+            // Same gate as the prompt block above: a tool that handed back
+            // what the prompt withheld would be no gate at all.
+            trusted: projectTrust.allowed,
+          }),
+        ]
+      : []),
     createSubagentTool({
       agentNames: [...agents.keys()],
       factory: (task, agentName) => {
@@ -2747,11 +2830,26 @@ export async function buildRuntime(options: BuildRuntimeOptions = {}): Promise<A
   warnings.push(...memoryWarnings);
   const memoryText = formatMemoriesForPrompt(memories);
 
+  // The project brain: loaded ONCE per runtime, exactly like memory above and
+  // for the same reason — a map that changed under a live session would make a
+  // compaction summary disagree with the prompt it was written against. Empty
+  // for a project that has never run `arcturn brain build`.
+  const brainText = await loadBrainPrompt(
+    paths.project,
+    config.brain as BrainConfigView | undefined,
+    // `.arcturn/brain/` is a directory a cloned repository can commit, so its
+    // content is gated on the same trust decision that gates project hooks,
+    // extensions and MCP servers. An untrusted project gets the one-line
+    // notice that it HAS a brain and nothing from inside it.
+    { trusted: projectTrust.allowed },
+  );
+
   const promptContext = await collectSystemPromptContext({
     cwd: paths.cwd,
     ...(config.systemPromptAppend === undefined ? {} : { append: config.systemPromptAppend }),
     toolNames: baseTools.map((tool) => tool.definition.name),
     ...(memoryText === "" ? {} : { memories: memoryText }),
+    ...(brainText === "" ? {} : { brain: brainText }),
     ...(agentDefs.length === 0
       ? {}
       : {
@@ -2787,6 +2885,7 @@ export async function buildRuntime(options: BuildRuntimeOptions = {}): Promise<A
     themes,
     skills,
     systemPrompt: buildSystemPrompt(promptContext),
+    ...(brainText === "" ? {} : { brainPrompt: brainText }),
     permissionMode,
     // `--max-turns` wins over the config key, which wins over core's default.
     ...((options.maxTurns ?? config.maxTurns) === undefined
@@ -2954,6 +3053,13 @@ export async function buildRuntime(options: BuildRuntimeOptions = {}): Promise<A
  * Adapt a markdown skill to the extension-command shape: expanding the
  * template and submitting it exactly as if the user had typed the result —
  * steering an in-flight run, prompting otherwise.
+ *
+ * This handler only ever runs in the interactive app, where the transcript
+ * shows the agent's turn as it streams. Headless (`arcturn -p "/<name>"`)
+ * never reaches it: `print.ts` recognises a skill line first and runs the
+ * expanded body down its ordinary prompt path, because a `ui` that can only
+ * `print`/`notice` would otherwise swallow the whole run (see
+ * `skillPromptFor`).
  */
 function skillCommand(skill: Skill): ExtensionCommand {
   return {

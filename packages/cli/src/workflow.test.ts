@@ -866,6 +866,21 @@ describe("createWorkflowCommands", () => {
     expect(commands[0]?.source).toBe("built-in");
   });
 
+  it("the description string names every real verb, including forecast", () => {
+    // The description is what /help and the command registry print. Every
+    // branch below it (status/forecast/resume/fork/diff) is a real,
+    // dispatchable verb, so each must be named here or a user running
+    // /help never learns it exists.
+    const [command] = createWorkflowCommands();
+    const description = command?.description ?? "";
+    expect(description).toContain("/workflow list");
+    expect(description).toContain("/workflow status");
+    expect(description).toContain("/workflow forecast");
+    expect(description).toContain("/workflow resume");
+    expect(description).toContain("/workflow fork");
+    expect(description).toContain("/workflow diff");
+  });
+
   it("lists discovered workflows, and reports discovery warnings", async () => {
     const sink = ui();
     const [command] = createWorkflowCommands({
@@ -8115,5 +8130,313 @@ describe("createRuntimeRunStep — write-ahead logging of the apply", () => {
       { tools: ["read", "grep"] },
     )(request(plain, { durability: narrowed.durability }));
     expect(narrowed.log).toEqual(["intent:guarded"]);
+  });
+});
+
+// ------------------------------------------------- stage-line options & contracts
+//
+// The grammar extension: zero or more bracket groups before `@role`, each
+// either the model tag it always was or one of the three reserved options, and
+// top-level ```contract fences declaring the reply shapes those options name.
+// Every assertion below is on an EFFECT of parsing — the fields the engine
+// hands the runner, or the exact byte string it refuses with.
+
+/** A workflow file with the demo frontmatter and the given body lines. */
+function doc(...body: string[]): string {
+  return [FRONT, ...body].join("\n");
+}
+
+const VERDICT = [
+  "```contract release-verdict",
+  "decision: SHIP | SHIP-WITH-FIXES | DO-NOT-SHIP",
+  "reasons: string[]",
+  "blockers?: string[]",
+  "confidence: number",
+  "```",
+];
+
+describe("stage-line options", () => {
+  it("keeps a bracketed key that is not reserved as a model tag", () => {
+    const wf = parseOk(doc("1. [tier:judgment] weigh it up"));
+    expect(wf.stages[0]?.steps[0]).toMatchObject({ modelTag: "tier:judgment" });
+    expect(wf.stages[0]?.steps[0]?.contract).toBeUndefined();
+  });
+
+  it("reads a contract option and records it on the step", () => {
+    const wf = parseOk(doc(...VERDICT, "", "1. [contract:release-verdict] @qa judge {{input}}"));
+    expect(wf.stages[0]?.steps[0]).toMatchObject({
+      contract: "release-verdict",
+      agent: "qa",
+      prompt: "judge {{input}}",
+    });
+    expect(wf.contracts.get("release-verdict")?.fields.map((f) => f.name)).toEqual([
+      "decision",
+      "reasons",
+      "blockers",
+      "confidence",
+    ]);
+    // The fence line is 1-based against the whole file, frontmatter included.
+    expect(wf.contracts.get("release-verdict")?.line).toBe(5);
+  });
+
+  it("accepts the bracket groups in any order", () => {
+    const forward = parseOk(
+      doc(...VERDICT, "", "1. [tier:cheap] [contract:release-verdict] [judges:3] @qa go"),
+    );
+    const reversed = parseOk(
+      doc(...VERDICT, "", "1. [judges:3] [contract:release-verdict] [tier:cheap] @qa go"),
+    );
+    expect(forward.stages[0]?.steps[0]).toEqual(reversed.stages[0]?.steps[0]);
+    expect(forward.stages[0]?.steps[0]).toMatchObject({
+      modelTag: "tier:cheap",
+      contract: "release-verdict",
+      judges: 3,
+      agent: "qa",
+      prompt: "go",
+    });
+  });
+
+  it("reads a race as its model tags in written order", () => {
+    const wf = parseOk(doc("1. [race:tier:cheap|openai/gpt-5|local/qwen] draft {{input}}"));
+    expect(wf.stages[0]?.steps[0]?.race).toEqual(["tier:cheap", "openai/gpt-5", "local/qwen"]);
+    expect(wf.stages[0]?.steps[0]?.modelTag).toBeUndefined();
+  });
+
+  it("carries options on a parallel branch, not just a numbered line", () => {
+    const wf = parseOk(
+      doc(...VERDICT, "", "1. Fan out:", "   - [contract:release-verdict] @qa judge", "   - probe"),
+    );
+    expect(wf.stages[0]?.steps[0]?.contract).toBe("release-verdict");
+    expect(wf.stages[0]?.steps[1]?.contract).toBeUndefined();
+  });
+
+  it("leaves a plain step exactly as it was before options existed", () => {
+    const wf = parseOk(doc("1. [tier:cheap] @architect plan {{input}}"));
+    expect(wf.stages[0]?.steps[0]).toEqual({
+      id: "1",
+      stageIndex: 1,
+      branchIndex: 0,
+      modelTag: "tier:cheap",
+      agent: "architect",
+      prompt: "plan {{input}}",
+    });
+    expect(wf.contracts.size).toBe(0);
+  });
+
+  it("rejects a duplicate option key", () => {
+    expect(parseErr(doc(...VERDICT, "", "1. [judges:2] [judges:3] @qa go"))).toBe(
+      'line 12: option "judges" appears twice',
+    );
+  });
+
+  it("leaves a second model tag in the prompt, as the one-tag grammar did", () => {
+    // Back-compat: `[tier:x] [RFC-1] apply it` has always meant "tag tier:x,
+    // prompt starts with a bracketed reference". Options do not change that.
+    const wf = parseOk(doc("1. [tier:cheap] [RFC-1] apply it"));
+    expect(wf.stages[0]?.steps[0]).toMatchObject({
+      modelTag: "tier:cheap",
+      prompt: "[RFC-1] apply it",
+    });
+    // …and an option that follows a second tag is prompt text too, not an
+    // option — the prefix ended at the second bracket.
+    const shadowed = parseOk(doc("1. [tier:cheap] [RFC-1] [contract:x] apply it"));
+    expect(shadowed.stages[0]?.steps[0]?.contract).toBeUndefined();
+  });
+
+  it("rejects bracket options with no prompt left", () => {
+    expect(parseErr(doc(...VERDICT, "", "1. [contract:release-verdict]"))).toBe(
+      "line 12: step has bracket options but no prompt",
+    );
+    // …while a lone model tag keeps the message it always had.
+    expect(parseErr(doc("1. [tier:cheap]"))).toBe("line 5: step has a model tag but no prompt");
+  });
+
+  it("rejects an option written after the role", () => {
+    expect(parseErr(doc(...VERDICT, "", "1. @qa [contract:release-verdict] go"))).toBe(
+      'line 12: an option must come before the role — write "[contract:release-verdict] @qa prompt…"',
+    );
+  });
+
+  it("rejects a malformed contract name, judges count and race list", () => {
+    expect(parseErr(doc("1. [contract:Release] @qa go"))).toBe(
+      'line 5: contract name "Release" may only contain lowercase letters, digits and "-", and must start with a letter',
+    );
+    expect(parseErr(doc("1. [judges:4] @qa go"))).toBe('line 5: judges must be 2 or 3, got "4"');
+    expect(parseErr(doc("1. [race:solo] go"))).toBe(
+      'line 5: race must list 2 or 3 model tags separated by "|", got "solo"',
+    );
+    expect(parseErr(doc("1. [race:a|b|c|d] go"))).toBe(
+      'line 5: race must list 2 or 3 model tags separated by "|", got "a|b|c|d"',
+    );
+    expect(parseErr(doc("1. [race:a|b c] go"))).toBe(
+      'line 5: race model tag "b c" may only contain letters, digits, ".", "_", "/", ":" and "-"',
+    );
+    expect(parseErr(doc("1. [race:a|a] go"))).toBe('line 5: race lists model tag "a" twice');
+  });
+
+  it("rejects judges without a role, and judges without a contract", () => {
+    expect(parseErr(doc(...VERDICT, "", "1. [judges:2] [contract:release-verdict] go"))).toBe(
+      "line 12: judges requires a role",
+    );
+    expect(parseErr(doc("1. [judges:2] @qa go"))).toBe("line 5: judges requires a contract");
+  });
+
+  it("rejects race combined with a model tag or with judges", () => {
+    expect(parseErr(doc("1. [tier:cheap] [race:a|b] go"))).toBe(
+      "line 5: race replaces the model tag",
+    );
+    expect(
+      parseErr(doc(...VERDICT, "", "1. [race:a|b] [judges:2] [contract:release-verdict] @qa go")),
+    ).toBe("line 12: judges and race cannot be combined");
+  });
+
+  it("rejects a contract the file never declares", () => {
+    expect(parseErr(doc("1. [contract:missing] @qa go"))).toBe(
+      'line 5: no contract named "missing" is declared in this file',
+    );
+  });
+});
+
+describe("contract blocks", () => {
+  it("accepts a fence before the stages and one after them", () => {
+    const wf = parseOk(
+      doc(
+        ...VERDICT,
+        "",
+        "1. [contract:release-verdict] @qa judge {{input}}",
+        "",
+        "```contract summary",
+        "# what the writer produced",
+        "headline: string",
+        "```",
+      ),
+    );
+    expect([...wf.contracts.keys()]).toEqual(["release-verdict", "summary"]);
+    expect(wf.stages).toHaveLength(1);
+  });
+
+  it("keeps a declared-but-unreferenced contract", () => {
+    const wf = parseOk(doc("```contract spare", "ok: boolean", "```", "", "1. plain step"));
+    expect(wf.contracts.has("spare")).toBe(true);
+  });
+
+  it("does not mistake an ordinary fenced block for a contract", () => {
+    // A ```json block after the step list is still the "no continuations"
+    // error it always was — only ```contract is intercepted.
+    expect(parseErr(doc("1. go", "```json", "{}", "```"))).toBe(
+      "line 6: unexpected text after the step list; a step is exactly one line (no continuations)",
+    );
+  });
+
+  it("rejects a nameless, badly named or duplicated contract", () => {
+    expect(parseErr(doc("```contract", "a: string", "```", "1. go"))).toBe(
+      'line 5: contract block has no name; write "```contract <name>"',
+    );
+    expect(parseErr(doc("```contract Release", "a: string", "```", "1. go"))).toBe(
+      'line 5: contract name "Release" may only contain lowercase letters, digits and "-", and must start with a letter',
+    );
+    expect(
+      parseErr(
+        doc("```contract v", "a: string", "```", "```contract v", "b: string", "```", "1. go"),
+      ),
+    ).toBe('line 8: contract "v" is already defined');
+  });
+
+  it("rejects an empty contract and an unterminated fence", () => {
+    expect(parseErr(doc("```contract v", "# nothing but a comment", "```", "1. go"))).toBe(
+      'line 5: contract "v" declares no fields',
+    );
+    expect(parseErr(doc("```contract v", "a: string", "1. go"))).toBe(
+      'line 5: contract "v" is missing its closing "```" fence',
+    );
+  });
+
+  it("numbers a field error against the whole file", () => {
+    expect(parseErr(doc("```contract v", "a: string", "b: nope", "```", "1. go"))).toBe(
+      'line 7: unknown type "nope"; use string, number, integer, boolean, string[], number[], or an enum like "A | B"',
+    );
+    expect(parseErr(doc("```contract v", "a: string", "a: number", "```", "1. go"))).toBe(
+      'line 7: contract field "a" appears twice',
+    );
+  });
+});
+
+describe("contract placeholders", () => {
+  const withVerdict = (...rest: string[]): string =>
+    doc(...VERDICT, "", "1. [contract:release-verdict] @qa judge {{input}}", ...rest);
+
+  it("accepts {{contract}} and {{contract.<field>}} after a contract step", () => {
+    const wf = parseOk(withVerdict("2. act on {{contract.decision}} given {{contract}}"));
+    expect(wf.stages[1]?.steps[0]?.prompt).toBe("act on {{contract.decision}} given {{contract}}");
+  });
+
+  it("rejects a contract placeholder in stage 1", () => {
+    expect(parseErr(doc("1. use {{contract}}"))).toBe(
+      "line 5: {{contract}} has no value in the first step",
+    );
+    expect(parseErr(doc("1. use {{contract.decision}}"))).toBe(
+      "line 5: {{contract.decision}} has no value in the first step",
+    );
+  });
+
+  it("rejects a contract placeholder when the previous stage carries none", () => {
+    expect(parseErr(doc("1. plan it", "2. use {{contract}}"))).toBe(
+      "line 6: {{contract}} needs a step with a contract in stage 1",
+    );
+  });
+
+  it("rejects a field placeholder after a parallel stage", () => {
+    expect(
+      parseErr(
+        doc(
+          ...VERDICT,
+          "",
+          "1. Fan out:",
+          "   - [contract:release-verdict] @qa judge",
+          "   - probe it",
+          "2. read {{contract.decision}}",
+        ),
+      ),
+    ).toBe("line 15: {{contract.decision}} needs a single-step stage; stage 1 runs in parallel");
+  });
+
+  it("accepts plain {{contract}} after a parallel stage — it is the array form", () => {
+    const wf = parseOk(
+      doc(
+        ...VERDICT,
+        "",
+        "1. Fan out:",
+        "   - [contract:release-verdict] @qa judge",
+        "   - probe it",
+        "2. read {{contract}}",
+      ),
+    );
+    expect(wf.stages[1]?.steps[0]?.prompt).toBe("read {{contract}}");
+  });
+
+  it("names the field the contract does not declare", () => {
+    expect(parseErr(withVerdict("2. read {{contract.verdict}}"))).toBe(
+      'line 13: {{contract.verdict}} names no field of contract "release-verdict"',
+    );
+  });
+
+  it("lists the contract placeholders when an unknown one is used", () => {
+    expect(parseErr(doc("1. use {{previous}}"))).toBe(
+      'line 5: unknown placeholder "{{previous}}"; only {{prev}}, {{input}}, {{journal}}, {{contract}} and {{contract.<field>}} exist',
+    );
+    expect(parseErr(withVerdict("2. read {{contract.}}"))).toBe(
+      'line 13: unknown placeholder "{{contract.}}"; only {{prev}}, {{input}}, {{journal}}, {{contract}} and {{contract.<field>}} exist',
+    );
+  });
+
+  it("splices a contract value, and the empty string when there is none", () => {
+    const template = "a {{contract}} b {{contract.decision}} c {{prev}}";
+    expect(
+      expandStepPrompt(template, "P", "I", "", {
+        json: '{"decision":"SHIP"}',
+        fields: new Map([["decision", "SHIP"]]),
+      }),
+    ).toBe('a {"decision":"SHIP"} b SHIP c P');
+    expect(expandStepPrompt(template, "P", "I")).toBe("a  b  c P");
   });
 });

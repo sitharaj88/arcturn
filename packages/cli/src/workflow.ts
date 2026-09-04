@@ -243,12 +243,64 @@ import type {
   Usage,
 } from "@arcturn/types";
 import type { AgentDef } from "./agents.js";
+import { type BrainHost, brainAutoRefresh, describeBrainBuild, refreshBrain } from "./brain.js";
 import type { CommandContext, CommandUi, SlashCommand } from "./commands.js";
+import {
+  CONTRACT_FIELD_NAME,
+  CONTRACT_NAME,
+  contractPromptLines,
+  extractContractJson,
+  isContractParseError,
+  parseContractBody,
+  validateContract,
+  type WorkflowContract,
+  type WorkflowContractField,
+  type WorkflowContractType,
+} from "./contracts.js";
 import { nearingCeiling, shouldAbortForCost, shouldAbortForTokens } from "./cost-guard.js";
+import {
+  forecastWorkflow,
+  formatForecastJson,
+  renderForecast,
+  renderForecastBanner,
+  resolveForecastStepModel,
+} from "./forecast.js";
 import { formatCost, formatDuration, oneLine, totalTokens } from "./format.js";
-import { type InsightsRecorder, type InsightsRunScope, parkCauseKind } from "./insights.js";
-import { loadOrgMemoryInjector, orgMemoryPath, renderRunJournalDigest } from "./org-memory.js";
+import {
+  type InsightsLedger,
+  type InsightsRecorder,
+  type InsightsRunScope,
+  parkCauseKind,
+  readInsightsLedger,
+} from "./insights.js";
+import {
+  contractRetryPrompt,
+  type JudgeOutcome,
+  type JudgesRecord,
+  judgeCompareField,
+  judgesDisagreementNotice,
+  judgesNoEnumFieldError,
+  judgesWriteLaneError,
+  runJudgePanel,
+} from "./judges.js";
+import {
+  loadOrgMemoryInjector,
+  orgMemoryPath,
+  renderRunJournalDigest,
+  sanitizeSplicedText,
+} from "./org-memory.js";
 import { createWorktree } from "./scouts.js";
+import { diffWorkflowRuns, formatWorkflowDiff, formatWorkflowDiffJson } from "./workflow-diff.js";
+import { createForkRevert, describeFork, forkWorkflowRun, parseForkArgs } from "./workflow-fork.js";
+import {
+  describeRace,
+  loserOutcome,
+  type RaceApplyClaim,
+  type RaceArmSpec,
+  type RaceVerdict,
+  runStepRace,
+  type StepRaceSummary,
+} from "./workflow-race.js";
 import {
   BUDGET_ACK_ANSWER,
   BUDGET_ASK_STEP_ID,
@@ -335,6 +387,12 @@ declare module "./agents.js" {
 
 // ---------------------------------------------------------------- model shape
 
+// The typed-reply contract shapes live in `contracts.ts` (pure, engine-free)
+// but are part of the workflow model, so they are re-exported from here: a
+// caller reading a `Workflow` should not have to know which file the field
+// grammar happens to be implemented in.
+export type { WorkflowContract, WorkflowContractField, WorkflowContractType };
+
 /** One executable step: a single prompt handed to a single child agent. */
 export interface WorkflowStep {
   /** Stable id: `"2"` for a lone step in stage 2, `"2.1"` for its first branch. */
@@ -350,6 +408,23 @@ export interface WorkflowStep {
    * line named no role. Resolved against the host's markdown agents.
    */
   readonly agent?: string;
+  /**
+   * The `[contract:<name>]` option: the step's final reply must end with a
+   * fenced json block matching the named {@link WorkflowContract}, which the
+   * same file declares. `undefined` when the line carried no such option.
+   */
+  readonly contract?: string;
+  /**
+   * The `[judges:N]` option: run this step N times (2 or 3) and arbitrate on
+   * disagreement. Only meaningful alongside {@link contract} and an `@role`,
+   * which the parser enforces.
+   */
+  readonly judges?: number;
+  /**
+   * The `[race:a|b]` option: the model tags to run this step on concurrently,
+   * in written order. Replaces {@link modelTag} rather than joining it.
+   */
+  readonly race?: readonly string[];
   /** The step's prompt template, still containing `{{prev}}` / `{{input}}`. */
   readonly prompt: string;
 }
@@ -409,6 +484,14 @@ export interface Workflow {
   readonly budgetTokens?: number;
   /** Stages in execution order; always at least one. */
   readonly stages: readonly WorkflowStage[];
+  /**
+   * Every ```contract block the file declared, keyed by name, in written
+   * order. Empty when the file declared none. A contract that no step
+   * references is kept rather than dropped: a file may declare the shape of a
+   * reply before a stage is wired to it, and an unused declaration is not an
+   * error the way an undeclared *reference* is.
+   */
+  readonly contracts: ReadonlyMap<string, WorkflowContract>;
   /** Absolute path of the file it was loaded from; empty for an inline parse. */
   readonly source: string;
 }
@@ -514,6 +597,63 @@ export interface WorkflowStepRequest {
    * never edited, and the grant belongs to one run.
    */
   readonly turnCeiling?: number;
+  /**
+   * MODEL RACING: which arm of a race this request is, 0-based.
+   *
+   * Read by exactly one thing — the worktree slug — because two arms of one
+   * step share a step id, a role and an attempt index, so without it they
+   * would ask `git worktree add` for the same path and the second would fail
+   * with "a worktree already exists". Deliberately NOT folded into
+   * {@link attempt}: that number is the retry ledger a park and a resume both
+   * read, and inflating it would report a step that raced twice as a step that
+   * failed sixteen times.
+   */
+  readonly raceSlot?: number;
+  /**
+   * MODEL RACING: the suffix that tells one arm's live row from another's,
+   * e.g. `glm-5.3-flash`.
+   *
+   * The host keys its rows by agent id, so two arms sharing one would
+   * overwrite each other and an operator would watch a single row flicker
+   * between two models. Absent for every step that is not raced.
+   */
+  readonly raceLabel?: string;
+  /**
+   * MODEL RACING, write lane only: **may this arm apply its patch?**
+   *
+   * THE DOUBLE-APPLY THIS CLOSES. Two arms of one race capture their diffs
+   * independently and then queue for the same checkout. Deciding the winner
+   * from the *settled* outcome is one instant too late: by the time an arm has
+   * settled it has already applied, and a sibling that entered the apply queue
+   * a moment earlier applies as well — two models' patches, both in the user's
+   * tree, from a step that promises exactly one.
+   *
+   * So the write lane asks first, at the only atomic point there is: after the
+   * path audit and before the write-ahead intent. The race answers `true` for
+   * the first arm whose work would CLEAR THE GATE (not merely the first to
+   * arrive), aborts the others the same instant, and answers `false` for
+   * everyone else forever after. An arm refused the claim keeps its patch on
+   * disk, unapplied, exactly like a cancelled one.
+   *
+   * Absent for every step that is not raced, in which case the lane applies
+   * exactly as it always did.
+   */
+  readonly raceApplyClaim?: (preview: { readonly text: string; readonly files: number }) => boolean;
+  /**
+   * Report what became of a granted {@link raceApplyClaim}, once and as soon
+   * as it is known: `true` the instant the patch is in the user's checkout,
+   * `false` when it never got there (`git apply` refused it, the write-ahead
+   * record could not be made).
+   *
+   * This is the half that makes the claim safe to *release*. Without it a
+   * refused apply would keep the claim forever and every sibling arm — one of
+   * which may hold a patch that applies cleanly — has already been cut off,
+   * so a race would end with no winner and park a run that racing was
+   * supposed to make more likely to finish.
+   *
+   * Absent for every step that is not raced.
+   */
+  readonly raceApplySettled?: (landed: boolean) => void;
 }
 
 /**
@@ -634,6 +774,18 @@ export interface WorkflowStepOutcome {
    * ran at all (a refusal, a cancelled step). See {@link StepActivity}.
    */
   readonly activity?: StepActivity;
+  /**
+   * MODEL RACING: how the race that produced this outcome resolved.
+   *
+   * The outcome itself is ONE arm's — the winner's, or (when nobody cleared
+   * the gate) the last arm to settle — because everything above this contract
+   * is built on "one step, one ending". This is the only trace that the other
+   * arms ran at all, and it is what reaches the journal, the status view and
+   * the diff. See `workflow-race.ts`.
+   */
+  readonly race?: StepRaceSummary;
+  /** What every arm of the race spent, where {@link usage} is the winner's. */
+  readonly raceUsage?: Usage;
 }
 
 /** Executes one step. Injected so the engine is testable without an LLM. */
@@ -743,6 +895,23 @@ export interface WorkflowStepResult {
    * not just a failed one. See {@link StepActivity}.
    */
   readonly activity?: StepActivity;
+  /**
+   * TYPED REPLY CONTRACT: the validated object this step's reply carried.
+   *
+   * Present only on a `done` step that declared `[contract:<name>]` and whose
+   * final reply satisfied it. This — never {@link text} — is what the next
+   * stage's `{{contract}}` and `{{contract.<field>}}` splice, which is the
+   * whole point: a placeholder that re-parsed the prose would hand the next
+   * role whatever the model happened to say, and the failure it exists to
+   * prevent is precisely a stage acting on an answer nobody checked.
+   */
+  readonly contract?: Record<string, unknown>;
+  /** What a `[judges:N]` step's panel decided. See {@link JudgesRecord}. */
+  readonly judges?: JudgesRecord;
+  /** MODEL RACING: how this step's race resolved. See {@link StepRaceSummary}. */
+  readonly race?: StepRaceSummary;
+  /** What every arm of that race spent, where {@link usage} is the winner's. */
+  readonly raceUsage?: Usage;
 }
 
 /** The record of one workflow run. */
@@ -855,6 +1024,22 @@ export type WorkflowEvent =
       readonly model?: string;
     }
   | { readonly type: "stepEnd"; readonly result: WorkflowStepResult }
+  | {
+      /**
+       * A `[judges:N]` step's panel split, and an arbiter is about to run.
+       *
+       * Its own event rather than a line on `stepEnd`, because it happens
+       * mid-step: the step has no terminal yet, and the thing worth saying —
+       * "the answer your pipeline is about to act on was not stable" — is
+       * worth saying at the moment it is discovered, not after the arbiter has
+       * quietly papered over it.
+       */
+      readonly type: "judgesDisagreed";
+      readonly id: string;
+      readonly stageIndex: number;
+      /** The compared field's values, in judge order. */
+      readonly verdicts: readonly string[];
+    }
   | {
       readonly type: "stageEnd";
       readonly stageIndex: number;
@@ -1020,6 +1205,17 @@ const VALID_TAG = /^[A-Za-z0-9._/:-]+$/;
 const ROLE_TAG = /^@(\S*)(?:[ \t]+(.*))?$/;
 const VALID_ROLE = /^[a-z0-9][a-z0-9-]*$/;
 const PLACEHOLDER = /\{\{([^{}]*)\}\}/g;
+// A `key:value` bracket group whose key is one of these is an OPTION, not a
+// model tag. The list is closed and reserved: every other bracketed
+// `key:value` (`[tier:judgment]`, say) stays a model tag exactly as before,
+// which is what keeps every workflow written against the old grammar reading
+// the same way.
+const OPTION_KEYS: ReadonlySet<string> = new Set(["contract", "judges", "race"]);
+// A top-level ```contract fence, at column 0 — indenting one would make it a
+// list continuation, and the stage scanner has never looked inside those.
+const CONTRACT_FENCE = /^```contract(?:[ \t]+(.*))?$/;
+const CONTRACT_FENCE_CLOSE = /^```[ \t]*$/;
+const CONTRACT_PLACEHOLDER_PREFIX = "contract.";
 
 /**
  * Normalise a raw name into the `[a-z0-9-]` charset the registry expects.
@@ -1112,7 +1308,32 @@ function parseFrontmatter(raw: string): {
 interface ParsedStepLine {
   modelTag?: string;
   agent?: string;
+  contract?: string;
+  judges?: number;
+  race?: readonly string[];
   prompt: string;
+}
+
+/** One bracket group, already classified as an option or a model tag. */
+type BracketGroup = { kind: "tag"; tag: string } | { kind: "option"; key: string; value: string };
+
+/**
+ * Classify one bracket group's contents.
+ *
+ * The split is on the FIRST `:` and the key must be reserved, so a tag that
+ * merely *contains* a colon (`tier:judgment`, `openai/gpt-5:preview`) is
+ * unaffected — the reserved list is the entire difference between the old
+ * grammar and the new one.
+ */
+function classifyBracket(group: string): BracketGroup {
+  const colon = group.indexOf(":");
+  if (colon > 0) {
+    const key = group.slice(0, colon).trim();
+    if (OPTION_KEYS.has(key)) {
+      return { kind: "option", key, value: group.slice(colon + 1).trim() };
+    }
+  }
+  return { kind: "tag", tag: group };
 }
 
 /**
@@ -1134,28 +1355,74 @@ interface ParsedStepLine {
 function parseStepLine(text: string, line: number): ParsedStepLine | WorkflowParseError {
   let rest = text;
   let modelTag: string | undefined;
+  let contract: string | undefined;
+  let judges: number | undefined;
+  let race: readonly string[] | undefined;
+  const seenOptions = new Set<string>();
 
-  const tagged = MODEL_TAG.exec(rest);
-  if (tagged) {
-    const tag = (tagged[1] ?? "").trim();
-    if (tag.length === 0) {
+  // Zero or more bracket groups, in any order. Order does not matter because
+  // each group names itself; requiring one would only add a rule to get wrong.
+  for (;;) {
+    const bracket = MODEL_TAG.exec(rest);
+    if (!bracket) break;
+    const group = (bracket[1] ?? "").trim();
+    if (group.length === 0) {
       return {
         error: `line ${line}: model tag is empty; write "[tier:cheap] prompt…" or drop the brackets`,
       };
     }
-    if (!VALID_TAG.test(tag)) {
+    const classified = classifyBracket(group);
+    if (classified.kind === "tag") {
+      // A SECOND model tag ends the prefix instead of erroring, and is left in
+      // the prompt — exactly what the one-tag grammar did with `[tier:x]
+      // [RFC-1] apply it`. Only one tag can pick the model, and a workflow
+      // that quotes a bracketed reference right after its tag has always been
+      // legal; making it an error now would break files that run today.
+      if (modelTag !== undefined) break;
+      if (!VALID_TAG.test(classified.tag)) {
+        return {
+          error: `line ${line}: model tag "${classified.tag}" may only contain letters, digits, ".", "_", "/", ":" and "-"`,
+        };
+      }
+      modelTag = classified.tag;
+    } else {
+      if (seenOptions.has(classified.key)) {
+        return { error: `line ${line}: option "${classified.key}" appears twice` };
+      }
+      seenOptions.add(classified.key);
+      const bad = readOption(classified.key, classified.value, line, (parsed) => {
+        if (parsed.kind === "contract") contract = parsed.value;
+        else if (parsed.kind === "judges") judges = parsed.value;
+        else race = parsed.value;
+      });
+      if (bad) return bad;
+    }
+    rest = (bracket[2] ?? "").trim();
+    if (rest.length === 0) {
+      // The historical message when the only prefix was a model tag; options
+      // get their own, so "you wrote [contract:x] and nothing else" does not
+      // arrive as advice about model tags.
       return {
-        error: `line ${line}: model tag "${tag}" may only contain letters, digits, ".", "_", "/", ":" and "-"`,
+        error:
+          seenOptions.size === 0
+            ? `line ${line}: step has a model tag but no prompt`
+            : `line ${line}: step has bracket options but no prompt`,
       };
     }
-    rest = (tagged[2] ?? "").trim();
-    if (rest.length === 0) {
-      return { error: `line ${line}: step has a model tag but no prompt` };
-    }
-    modelTag = tag;
+  }
+
+  // Cross-option rules, checked once the whole prefix is known so they hold
+  // whichever order the groups were written in.
+  if (race !== undefined && modelTag !== undefined) {
+    return { error: `line ${line}: race replaces the model tag` };
+  }
+  if (race !== undefined && judges !== undefined) {
+    return { error: `line ${line}: judges and race cannot be combined` };
   }
 
   const roled = ROLE_TAG.exec(rest);
+  let agent: string | undefined;
+  let prompt: string;
   if (roled) {
     const raw = (roled[1] ?? "").trim();
     if (raw.length === 0) {
@@ -1163,32 +1430,113 @@ function parseStepLine(text: string, line: number): ParsedStepLine | WorkflowPar
         error: `line ${line}: role name is empty; write "@architect prompt…" or drop the "@"`,
       };
     }
-    const agent = raw.toLowerCase();
+    agent = raw.toLowerCase();
     if (!VALID_ROLE.test(agent)) {
       return {
         error: `line ${line}: role name "${raw}" may only contain letters, digits and "-", and must start with a letter or digit`,
       };
     }
-    const prompt = (roled[2] ?? "").trim();
+    prompt = (roled[2] ?? "").trim();
     if (prompt.length === 0) {
       return { error: `line ${line}: step names role "@${agent}" but has no prompt` };
     }
-    if (modelTag === undefined) {
-      const stray = MODEL_TAG.exec(prompt);
-      const strayTag = (stray?.[1] ?? "").trim();
-      if (strayTag.length > 0 && VALID_TAG.test(strayTag)) {
+    const stray = MODEL_TAG.exec(prompt);
+    const strayGroup = (stray?.[1] ?? "").trim();
+    // An option after the role is the same silent misfire a stray model tag
+    // is — worse, in fact, since a dropped `[contract:…]` means the reply is
+    // never checked at all. Rejected first, and by name.
+    if (strayGroup.length > 0 && classifyBracket(strayGroup).kind === "option") {
+      return {
+        error: `line ${line}: an option must come before the role — write "[${strayGroup}] @${agent} prompt…"`,
+      };
+    }
+    if (modelTag === undefined && race === undefined) {
+      if (strayGroup.length > 0 && VALID_TAG.test(strayGroup)) {
         return {
-          error: `line ${line}: a model tag must come before the role — write "[${strayTag}] @${agent} prompt…"; if "[${strayTag}]" is part of the prompt, move it later in the line`,
+          error: `line ${line}: a model tag must come before the role — write "[${strayGroup}] @${agent} prompt…"; if "[${strayGroup}]" is part of the prompt, move it later in the line`,
         };
       }
     }
-    return { ...(modelTag === undefined ? {} : { modelTag }), agent, prompt };
+  } else {
+    if (rest.length === 0) {
+      return { error: `line ${line}: step has an empty prompt` };
+    }
+    prompt = rest;
   }
 
-  if (rest.length === 0) {
-    return { error: `line ${line}: step has an empty prompt` };
+  // `judges` is arbitration over a typed answer: without a role there is no
+  // consistent voter to run N times, and without a contract there is nothing
+  // to compare but prose.
+  if (judges !== undefined) {
+    if (agent === undefined) return { error: `line ${line}: judges requires a role` };
+    if (contract === undefined) return { error: `line ${line}: judges requires a contract` };
   }
-  return { ...(modelTag === undefined ? {} : { modelTag }), prompt: rest };
+
+  return {
+    ...(modelTag === undefined ? {} : { modelTag }),
+    ...(agent === undefined ? {} : { agent }),
+    ...(contract === undefined ? {} : { contract }),
+    ...(judges === undefined ? {} : { judges }),
+    ...(race === undefined ? {} : { race }),
+    prompt,
+  };
+}
+
+/** One option's parsed value, handed back to {@link parseStepLine}'s locals. */
+type OptionValue =
+  | { kind: "contract"; value: string }
+  | { kind: "judges"; value: number }
+  | { kind: "race"; value: readonly string[] };
+
+/**
+ * Validate one `key:value` option group and hand its value back.
+ *
+ * Split out of {@link parseStepLine} purely for length: the rules are per-key
+ * and independent, and inlining three of them turned one function into a wall.
+ */
+function readOption(
+  key: string,
+  value: string,
+  line: number,
+  accept: (parsed: OptionValue) => void,
+): WorkflowParseError | undefined {
+  if (key === "contract") {
+    if (!CONTRACT_NAME.test(value)) {
+      return {
+        error: `line ${line}: contract name "${value}" may only contain lowercase letters, digits and "-", and must start with a letter`,
+      };
+    }
+    accept({ kind: "contract", value });
+    return undefined;
+  }
+  if (key === "judges") {
+    if (value !== "2" && value !== "3") {
+      return { error: `line ${line}: judges must be 2 or 3, got "${value}"` };
+    }
+    accept({ kind: "judges", value: Number(value) });
+    return undefined;
+  }
+  // race
+  const tags = value.split("|").map((tag) => tag.trim());
+  if (tags.length < 2 || tags.length > 3) {
+    return {
+      error: `line ${line}: race must list 2 or 3 model tags separated by "|", got "${value}"`,
+    };
+  }
+  const seen = new Set<string>();
+  for (const tag of tags) {
+    if (tag.length === 0 || !VALID_TAG.test(tag)) {
+      return {
+        error: `line ${line}: race model tag "${tag}" may only contain letters, digits, ".", "_", "/", ":" and "-"`,
+      };
+    }
+    if (seen.has(tag)) {
+      return { error: `line ${line}: race lists model tag "${tag}" twice` };
+    }
+    seen.add(tag);
+  }
+  accept({ kind: "race", value: tags });
+  return undefined;
 }
 
 /**
@@ -1206,20 +1554,111 @@ function validatePlaceholders(
   prompt: string,
   stageIndex: number,
   line: number,
+  context?: {
+    /** The stage immediately before this one; `undefined` in stage 1. */
+    readonly prev?: WorkflowStage;
+    readonly contracts: ReadonlyMap<string, WorkflowContract>;
+  },
 ): WorkflowParseError | undefined {
   PLACEHOLDER.lastIndex = 0;
   for (const match of prompt.matchAll(PLACEHOLDER)) {
     const name = (match[1] ?? "").trim();
-    if (name !== "prev" && name !== "input" && name !== "journal") {
+    const isContract = name === "contract" || name.startsWith(CONTRACT_PLACEHOLDER_PREFIX);
+    const field = name.startsWith(CONTRACT_PLACEHOLDER_PREFIX)
+      ? name.slice(CONTRACT_PLACEHOLDER_PREFIX.length)
+      : undefined;
+    if (
+      (name !== "prev" && name !== "input" && name !== "journal" && !isContract) ||
+      (field !== undefined && !CONTRACT_FIELD_NAME.test(field))
+    ) {
       return {
-        error: `line ${line}: unknown placeholder "${match[0]}"; only {{prev}}, {{input}} and {{journal}} exist`,
+        error: `line ${line}: unknown placeholder "${match[0]}"; only {{prev}}, {{input}}, {{journal}}, {{contract}} and {{contract.<field>}} exist`,
       };
     }
-    if ((name === "prev" || name === "journal") && stageIndex === 1) {
+    if ((name === "prev" || name === "journal" || isContract) && stageIndex === 1) {
       return { error: `line ${line}: {{${name}}} has no value in the first step` };
+    }
+    if (!isContract) continue;
+
+    // `{{contract}}` reads the PREVIOUS stage's validated object, so the
+    // previous stage has to have produced one. Checked here rather than at run
+    // time because a workflow whose second stage quotes a contract nobody
+    // declared is broken before it costs a token.
+    const prev = context?.prev;
+    const carriers = prev?.steps.filter((step) => step.contract !== undefined) ?? [];
+    if (carriers.length === 0) {
+      return {
+        error: `line ${line}: {{${name}}} needs a step with a contract in stage ${stageIndex - 1}`,
+      };
+    }
+    if (field === undefined) continue;
+    // A single field can only be named when there is exactly one object to
+    // take it from; a parallel stage yields an array, and `{{contract}}` is
+    // the placeholder for that.
+    if (prev?.parallel === true) {
+      return {
+        error: `line ${line}: {{${name}}} needs a single-step stage; stage ${stageIndex - 1} runs in parallel`,
+      };
+    }
+    const carrier = carriers[0]?.contract ?? "";
+    const declared = context?.contracts.get(carrier);
+    if (!declared?.fields.some((entry) => entry.name === field)) {
+      return { error: `line ${line}: {{${name}}} names no field of contract "${carrier}"` };
     }
   }
   return undefined;
+}
+
+/**
+ * Consume one ```contract block and record it.
+ *
+ * @param nameText - Whatever followed `\`\`\`contract` on the fence line.
+ * @param lines - The body lines being scanned.
+ * @param open - Index in `lines` of the opening fence.
+ * @param offset - Lines the frontmatter consumed, so messages carry file lines.
+ * @param into - The file's contract map; mutated on success.
+ * @returns The index of the closing fence (the scanner resumes after it), or
+ *   the first problem found.
+ */
+function readContractBlock(
+  nameText: string,
+  lines: readonly string[],
+  open: number,
+  offset: number,
+  into: Map<string, WorkflowContract>,
+): { next: number } | WorkflowParseError {
+  const line = offset + open + 1;
+  const name = nameText.trim();
+  if (name.length === 0) {
+    return { error: `line ${line}: contract block has no name; write "\`\`\`contract <name>"` };
+  }
+  if (!CONTRACT_NAME.test(name)) {
+    return {
+      error: `line ${line}: contract name "${name}" may only contain lowercase letters, digits and "-", and must start with a letter`,
+    };
+  }
+  if (into.has(name)) {
+    return { error: `line ${line}: contract "${name}" is already defined` };
+  }
+  let close = -1;
+  const bodyLines: string[] = [];
+  for (let j = open + 1; j < lines.length; j++) {
+    if (CONTRACT_FENCE_CLOSE.test(lines[j] ?? "")) {
+      close = j;
+      break;
+    }
+    bodyLines.push(lines[j] ?? "");
+  }
+  if (close === -1) {
+    return { error: `line ${line}: contract "${name}" is missing its closing "\`\`\`" fence` };
+  }
+  const parsed = parseContractBody(bodyLines, offset + open + 2);
+  if (isContractParseError(parsed)) return { error: parsed.error };
+  if (parsed.fields.length === 0) {
+    return { error: `line ${line}: contract "${name}" declares no fields` };
+  }
+  into.set(name, { name, line, fields: parsed.fields });
+  return { next: close };
 }
 
 /** A stage under construction while the body is scanned. */
@@ -1342,11 +1781,24 @@ export function parseWorkflow(
 
   // --- scan the body into stage drafts -----------------------------------
   const drafts: StageDraft[] = [];
+  const contracts = new Map<string, WorkflowContract>();
   const lines = body.split(/\r?\n/);
   for (let i = 0; i < lines.length; i++) {
     const rawLine = lines[i] ?? "";
     const line = offset + i + 1;
     if (rawLine.trim().length === 0) continue;
+
+    // A ```contract fence is neither prose nor a step: it is consumed whole,
+    // before the scanner's "unexpected text after the step list" rule can see
+    // its body. Only this exact fence is intercepted — every other fenced
+    // block still reads the way it always did.
+    const fence = CONTRACT_FENCE.exec(rawLine);
+    if (fence) {
+      const consumed = readContractBlock(fence[1] ?? "", lines, i, offset, contracts);
+      if (isWorkflowParseError(consumed)) return consumed;
+      i = consumed.next;
+      continue;
+    }
 
     const numbered = NUMBERED_LINE.exec(rawLine);
     if (numbered) {
@@ -1396,6 +1848,16 @@ export function parseWorkflow(
 
   // --- turn drafts into stages -------------------------------------------
   const stages: WorkflowStage[] = [];
+  // Contracts are file-scoped and may be declared after the stage that uses
+  // them, so the reference check runs here, once the whole body is scanned.
+  const contractContext = (index: number) => ({
+    ...(index <= 1 ? {} : { prev: stages[index - 2] }),
+    contracts,
+  });
+  const contractDefined = (parsed: ParsedStepLine, line: number): WorkflowParseError | undefined =>
+    parsed.contract !== undefined && !contracts.has(parsed.contract)
+      ? { error: `line ${line}: no contract named "${parsed.contract}" is declared in this file` }
+      : undefined;
   for (const draft of drafts) {
     if (draft.branches.length > 0) {
       // A parent line that carries prose AND branches is ambiguous: is the
@@ -1410,7 +1872,14 @@ export function parseWorkflow(
       for (const [branchIndex, branch] of draft.branches.entries()) {
         const parsed = parseStepLine(branch.text, branch.line);
         if (isWorkflowParseError(parsed)) return parsed;
-        const bad = validatePlaceholders(parsed.prompt, draft.index, branch.line);
+        const undeclared = contractDefined(parsed, branch.line);
+        if (undeclared) return undeclared;
+        const bad = validatePlaceholders(
+          parsed.prompt,
+          draft.index,
+          branch.line,
+          contractContext(draft.index),
+        );
         if (bad) return bad;
         steps.push({
           id: `${draft.index}.${branchIndex + 1}`,
@@ -1418,6 +1887,9 @@ export function parseWorkflow(
           branchIndex,
           ...(parsed.modelTag === undefined ? {} : { modelTag: parsed.modelTag }),
           ...(parsed.agent === undefined ? {} : { agent: parsed.agent }),
+          ...(parsed.contract === undefined ? {} : { contract: parsed.contract }),
+          ...(parsed.judges === undefined ? {} : { judges: parsed.judges }),
+          ...(parsed.race === undefined ? {} : { race: parsed.race }),
           prompt: parsed.prompt,
         });
       }
@@ -1437,7 +1909,14 @@ export function parseWorkflow(
     }
     const parsed = parseStepLine(draft.text, draft.line);
     if (isWorkflowParseError(parsed)) return parsed;
-    const bad = validatePlaceholders(parsed.prompt, draft.index, draft.line);
+    const undeclared = contractDefined(parsed, draft.line);
+    if (undeclared) return undeclared;
+    const bad = validatePlaceholders(
+      parsed.prompt,
+      draft.index,
+      draft.line,
+      contractContext(draft.index),
+    );
     if (bad) return bad;
     stages.push({
       index: draft.index,
@@ -1449,6 +1928,9 @@ export function parseWorkflow(
           branchIndex: 0,
           ...(parsed.modelTag === undefined ? {} : { modelTag: parsed.modelTag }),
           ...(parsed.agent === undefined ? {} : { agent: parsed.agent }),
+          ...(parsed.contract === undefined ? {} : { contract: parsed.contract }),
+          ...(parsed.judges === undefined ? {} : { judges: parsed.judges }),
+          ...(parsed.race === undefined ? {} : { race: parsed.race }),
           prompt: parsed.prompt,
         },
       ],
@@ -1464,6 +1946,7 @@ export function parseWorkflow(
     ...(budgetUsd === undefined ? {} : { budgetUsd }),
     ...(budgetTokens === undefined ? {} : { budgetTokens }),
     stages,
+    contracts,
     source: defaults.source ?? "",
   };
 }
@@ -1544,16 +2027,41 @@ export async function discoverWorkflows(
  * @param prev - The previous stage's combined output.
  * @param input - The user's invocation arguments.
  * @param journal - The run journal digest; omitted where it must not appear.
+ * @param contract - The previous stage's validated contract value, when this
+ *   run has one: `json` is what `{{contract}}` splices, `fields` what
+ *   `{{contract.<field>}}` reads. Optional so every existing call site keeps
+ *   working; a missing value splices the empty string rather than leaking the
+ *   braces, matching how `{{journal}}` behaves on a run with no digest.
  */
 export function expandStepPrompt(
   template: string,
   prev: string,
   input: string,
   journal = "",
+  contract?: { readonly json?: string; readonly fields?: ReadonlyMap<string, string> },
 ): string {
   return template.replace(PLACEHOLDER, (_match, name: string) => {
     const key = name.trim();
-    return key === "prev" ? prev : key === "journal" ? journal : input;
+    if (key === "prev") return prev;
+    if (key === "journal") return journal;
+    // THE CONTRACT SPLICE IS UNTRUSTED TEXT. `validateContract` checks a
+    // reply's shape, never its content: a declared `notes: string` is any
+    // string the previous step's model chose to write, and it lands here, in
+    // the prompt of the role that acts on it. Every neighbouring channel is
+    // already filtered for exactly this — `{{prev}}` loses its patch
+    // trailers, `{{journal}}`'s rows go through the digest's sanitiser so
+    // "a step cannot smuggle a fence delimiter or a control marker into the
+    // prompt of the role that is reviewing it" — and this one was not. So the
+    // scrub happens HERE, at the one splice point both the run loop and
+    // `replayPromptHashes` go through, in the json rendering and in the field
+    // values alike. The journalled object keeps the model's own bytes: this
+    // is about what another model is told, not about rewriting the record.
+    if (key === "contract") return sanitizeSplicedText(contract?.json ?? "");
+    if (key.startsWith(CONTRACT_PLACEHOLDER_PREFIX)) {
+      const value = contract?.fields?.get(key.slice(CONTRACT_PLACEHOLDER_PREFIX.length));
+      return value === undefined ? "" : sanitizeSplicedText(value);
+    }
+    return input;
   });
 }
 
@@ -1582,6 +2090,69 @@ function combineStageText(results: readonly WorkflowStepResult[]): string {
     )
     .filter((text) => text.length > 0)
     .join("\n\n");
+}
+
+/**
+ * Flatten a validated contract object into `{{contract.<field>}}` values.
+ *
+ * A string splices as itself — `{{contract.decision}}` in a prompt must read
+ * `DO-NOT-SHIP`, not `"DO-NOT-SHIP"` — and everything else splices as its json
+ * form, which is the only rendering of a number, a boolean or a list of
+ * reasons that survives being read back. An absent or null field splices the
+ * empty string, matching how every other placeholder handles "no value".
+ *
+ * The values are the model's own, unfiltered — the scrub happens at the
+ * splice itself ({@link expandStepPrompt}), so the one place a contract value
+ * can reach a prompt is the one place it is cleaned.
+ *
+ * @param value - The previous stage's first contract object, when it had one.
+ */
+function contractFieldValues(
+  value: Record<string, unknown> | undefined,
+): ReadonlyMap<string, string> {
+  const fields = new Map<string, string>();
+  if (value === undefined) return fields;
+  for (const [key, raw] of Object.entries(value)) {
+    if (raw === null || raw === undefined) continue;
+    fields.set(key, typeof raw === "string" ? raw : JSON.stringify(raw));
+  }
+  return fields;
+}
+
+/**
+ * Build the `{{contract}}` / `{{contract.<field>}}` splice for one stage.
+ *
+ * Shared by the run loop and {@link replayPromptHashes} so the two can never
+ * disagree about what a step's prompt was — a resume compares hashes, and a
+ * second implementation of this rendering is a resume that refuses a run
+ * nobody changed.
+ *
+ * THE ARRAY IS POSITIONAL. A parallel stage speaks with several voices, so
+ * `{{contract}}` is an array — and slot `i` is BRANCH `i`, `null` where that
+ * branch produced no validated object (it failed, or it never declared a
+ * contract, which the grammar allows). Compacting it, as this once did, meant
+ * `{{contract}}[0]` named `frontend` on a good run and `backend` on a flaky
+ * one, and the role downstream acted on the wrong object with no signal at
+ * all. A stage where NO branch carried a contract splices `[]` — nothing,
+ * rather than a row of nulls describing an absence.
+ *
+ * `{{contract.<field>}}` reads the first branch that actually produced an
+ * object: it is a single value, so "the stage's typed answer" is the only
+ * reading it can have.
+ *
+ * @param contracts - One slot per branch of the previous stage, in branch
+ *   order; `undefined` where that branch produced no validated object.
+ * @param parallel - Was the previous stage a parallel one?
+ */
+function buildContractContext(
+  contracts: readonly (Record<string, unknown> | undefined)[],
+  parallel: boolean,
+): { readonly json: string; readonly fields: ReadonlyMap<string, string> } {
+  const first = contracts.find((value) => value !== undefined);
+  const json = parallel
+    ? JSON.stringify(first === undefined ? [] : contracts.map((value) => value ?? null))
+    : JSON.stringify(first ?? null);
+  return { json, fields: contractFieldValues(first) };
 }
 
 /** A skipped step's record: never started, so no timestamps and no usage. */
@@ -2045,6 +2616,72 @@ interface StepBudgetCeiling {
    * arrive already carrying it, so this is a safety net, not the common path.
    */
   readonly model: ModelSpec | undefined;
+  /**
+   * The seat's slot in a multi-seat step's shared ledger, when it has one.
+   *
+   * A judge panel is ONE assignment of the role — `[judges:3] @reviewer` is
+   * the same reviewer answering three times — so the ceiling has to be judged
+   * on what the whole panel spent. Each seat reports its own running total
+   * here and the check reads the sum, which is what stops `budget: 5` from
+   * licensing $20 the moment a step names a panel. Absent for an ordinary
+   * step, where `priorSpentUsd` plus this attempt is already the whole story.
+   */
+  readonly shared?: StepSpendSlot;
+}
+
+/**
+ * One seat's slot in a multi-seat step's shared spend ledger.
+ *
+ * See {@link StepBudgetCeiling.shared}; built by {@link createPanelSpend}.
+ */
+interface StepSpendSlot {
+  /** Report this seat's total spend so far, priced. Last write wins. */
+  readonly report: (spentUsd: number) => void;
+  /** Every seat's latest reported spend, summed. */
+  readonly totalUsd: () => number;
+}
+
+/**
+ * The shared spend ledger a judge panel's seats are billed against.
+ *
+ * Live rather than after the fact, because the seats run concurrently: a
+ * ceiling that only added the seats up once they had all returned would be an
+ * audit, not a guard. `breached` is what the panel reads when the seat that
+ * actually crossed the line had already finished — the crossing is real
+ * either way, and the step must fail on it.
+ */
+interface PanelSpend {
+  /** A slot for one seat. */
+  readonly seat: () => StepSpendSlot;
+  /** The crossing, once one has happened. */
+  readonly breach: () => { readonly spentUsd: number } | undefined;
+}
+
+/**
+ * Build a judge panel's shared role-budget ledger.
+ *
+ * @param limitUsd - The role's `budget:` ceiling, or `undefined` for a role
+ *   that declared none (every slot is then a no-op and nothing can trip).
+ */
+function createPanelSpend(limitUsd: number | undefined): PanelSpend {
+  const slots: number[] = [];
+  let breach: { readonly spentUsd: number } | undefined;
+  return {
+    seat: () => {
+      const index = slots.push(0) - 1;
+      const totalUsd = (): number => slots.reduce((sum, one) => sum + one, 0);
+      return {
+        report: (spentUsd) => {
+          slots[index] = spentUsd;
+          if (breach !== undefined || limitUsd === undefined) return;
+          const total = totalUsd();
+          if (shouldAbortForCost(total, limitUsd)) breach = { spentUsd: total };
+        },
+        totalUsd,
+      };
+    },
+    breach: () => breach,
+  };
 }
 
 /** What one raced step attempt came back with. */
@@ -2202,7 +2839,12 @@ async function runStepWithDeadline(
     // "never fabricate a price" rule `priceStepUsage` follows.
     const pricedUsd = spent.costUsd ?? (budget.model && calculateCostUsd(budget.model, spent));
     if (pricedUsd === undefined) return;
-    const spentSoFarUsd = budget.priorSpentUsd + pricedUsd;
+    const ownSpentUsd = budget.priorSpentUsd + pricedUsd;
+    // A seat of a judge panel is billed against the PANEL's total (see
+    // {@link StepBudgetCeiling.shared}); every other step is billed against
+    // its own, which is the same number with one seat in the ledger.
+    budget.shared?.report(ownSpentUsd);
+    const spentSoFarUsd = budget.shared === undefined ? ownSpentUsd : budget.shared.totalUsd();
     if (!shouldAbortForCost(spentSoFarUsd, budget.limitUsd)) return;
     budgetTripped = { spentUsd: spentSoFarUsd };
     stepController.abort();
@@ -2318,6 +2960,63 @@ const FRESH_RETRY_KINDS: ReadonlySet<WorkflowFailureKind> = new Set<WorkflowFail
 const AUTOMATIC_FRESH_ATTEMPTS = 1;
 
 /**
+ * How many extra attempts a CONTRACT violation buys — **one**, like the fresh
+ * retry beside it, and for a sharper reason.
+ *
+ * The retry is not a repeat: it re-dispatches the same prompt with the
+ * validator's own errors appended (see {@link contractRetryPrompt}), so the
+ * model is answering a question it has not been asked before — "you missed
+ * `confidence`; do it again". That is worth exactly one go. A model told twice
+ * what it got wrong and still not producing the shape has not misread the
+ * brief, and a third identical ask is a slot machine. The park is where it
+ * goes instead, with the validator's errors in the question.
+ */
+const AUTOMATIC_CONTRACT_ATTEMPTS = 1;
+
+/**
+ * How far apart two judges' attempt indices sit.
+ *
+ * A judged step is the same step run several times, so every seat needs a
+ * marker the lanes can key a worktree slug and a live row off — and the
+ * attempt index is the marker they already use. Striding rather than
+ * numbering 0,1,2 leaves each seat room for its OWN retries (transient,
+ * fresh, contract) without ever reaching the next seat's block, which is what
+ * would otherwise make two judges collide the moment one of them flapped.
+ */
+const JUDGE_SEAT_STRIDE = 100;
+
+/** A settled outcome's verdict against its step's declared contract. */
+type StepContractVerdict =
+  | { readonly ok: true; readonly value: Record<string, unknown> }
+  | { readonly ok: false; readonly errors: readonly string[] };
+
+/**
+ * The contract half of a step's policy, injected into {@link runStepAttempts}.
+ *
+ * Injected rather than imported for the same reason `isVoid` is: the retry
+ * loop is a *policy*, and what "satisfies the contract" means belongs to the
+ * engine, which alone knows which contract this step declared. The loop's only
+ * job is to spend one more attempt on a reply that missed the shape, and to
+ * hand the caller back what the validator said either way.
+ */
+interface StepContractGate {
+  /** Judge a settled, non-error outcome's final text. */
+  readonly check: (text: string) => StepContractVerdict;
+  /**
+   * The prompt to dispatch on the single retry a violation buys.
+   *
+   * `dispatched` is the prompt the failing attempt was ACTUALLY sent, not the
+   * step's — the two differ for every seat of a judge panel, and the seat
+   * they differ most for is the arbiter, whose prompt carries both judges'
+   * replies and "decide; do not average". A gate that closed over the step's
+   * own prompt sent the arbiter's retry off to answer the original brief as a
+   * fresh single reviewer, and recorded whatever came back as the panel's
+   * arbitration.
+   */
+  readonly retryPrompt: (dispatched: string, errors: readonly string[]) => string;
+}
+
+/**
  * The retry budget, by failure class — the whole policy in one place.
  *
  * | class | automatic attempts after the first |
@@ -2393,6 +3092,17 @@ interface StepAttemptResult {
    * of them.
    */
   readonly earlier: readonly EarlierAttempt[];
+  /**
+   * The final attempt's verdict against the step's `[contract:<name>]`, when
+   * the step declared one and reached a settled, non-error outcome.
+   *
+   * `undefined` covers three different things and deliberately does not
+   * distinguish them, because the caller treats them identically: the step
+   * declared no contract, or it never settled (a timeout, a throw, a
+   * cancellation), or it failed for a reason that has nothing to do with its
+   * shape. Only `{ ok: false }` is a contract failure.
+   */
+  readonly contract?: StepContractVerdict;
 }
 
 /** One superseded attempt of a step, for the record a park is built from. */
@@ -2473,6 +3183,16 @@ interface EarlierAttempt {
  *   before the next one starts. The insights ledger's hook: a step that took
  *   two attempts is two step terminals in the ledger, and the count alone
  *   cannot say what the first one did.
+ * @param contract - The step's typed-reply gate, when it declared one. A
+ *   settled outcome the loop would otherwise call `ok` is judged against it,
+ *   and a violation buys exactly {@link AUTOMATIC_CONTRACT_ATTEMPTS} more
+ *   attempt — dispatched with the validator's errors appended, and with the
+ *   attempt index advanced like any other retry so a lane that keys a worktree
+ *   off it gets a fresh one. The verdict rides back on
+ *   {@link StepAttemptResult.contract} either way.
+ * @param sharedSpend - This seat's slot in a multi-seat step's shared role
+ *   budget — see {@link StepBudgetCeiling.shared}. Absent for an ordinary
+ *   step, which is a panel of one.
  */
 async function runStepAttempts(
   runStep: WorkflowStepRunner,
@@ -2485,6 +3205,8 @@ async function runStepAttempts(
   roleBudgetLimitUsd: number | undefined,
   isVoid: (outcome: WorkflowStepOutcome) => boolean = () => false,
   onAttemptEnd?: (attempt: EarlierAttempt) => void,
+  contract?: StepContractGate,
+  sharedSpend?: StepSpendSlot,
 ): Promise<StepAttemptResult> {
   const absoluteDeadline = now() + stepTimeoutMs;
   let attempts = 0;
@@ -2496,15 +3218,28 @@ async function runStepAttempts(
   let turns = 0;
   /** Automatic fresh attempts spent so far — see {@link AUTOMATIC_FRESH_ATTEMPTS}. */
   let freshRetries = 0;
+  /** Contract retries spent so far — see {@link AUTOMATIC_CONTRACT_ATTEMPTS}. */
+  let contractRetries = 0;
+  /**
+   * The prompt to dispatch, once a contract retry has rewritten it.
+   *
+   * Only the DISPATCHED prompt changes. The recorded/hashed prompt is the
+   * caller's `base.prompt` and never sees this, exactly as the journal digest
+   * never does — a resume that re-derived its hash from a prompt carrying a
+   * validator's error list would refuse the run as "the workflow file
+   * changed". See {@link expandStepPrompt}.
+   */
+  let dispatchPrompt: string | undefined;
   const earlier: EarlierAttempt[] = [];
   /** Close the step out with the running ledger attached. */
-  const done = (attempt: StepAttempt): StepAttemptResult => ({
+  const done = (attempt: StepAttempt, verdict?: StepContractVerdict): StepAttemptResult => ({
     attempt,
     attempts,
     usage: spent,
     turns,
     freshRetries,
     earlier,
+    ...(verdict === undefined ? {} : { contract: verdict }),
   });
 
   for (;;) {
@@ -2524,6 +3259,7 @@ async function runStepAttempts(
             limitUsd: roleBudgetLimitUsd,
             priorSpentUsd: spent.costUsd ?? 0,
             model: request.model,
+            ...(sharedSpend === undefined ? {} : { shared: sharedSpend }),
           };
     const run = await runStepWithDeadline(
       runStep,
@@ -2532,7 +3268,11 @@ async function runStepAttempts(
       // this step has already burned in EARLIER runs (see the step-failure
       // park), so a worktree-lane retry across a resume gets a slug of its own
       // instead of colliding with the forensic worktree its last failure kept.
-      { ...request, attempt: (request.attempt ?? 0) + attempts - 1 },
+      {
+        ...request,
+        ...(dispatchPrompt === undefined ? {} : { prompt: dispatchPrompt }),
+        attempt: (request.attempt ?? 0) + attempts - 1,
+      },
       parentSignal,
       Math.max(1, remaining),
       stepBudget,
@@ -2542,20 +3282,26 @@ async function runStepAttempts(
     // on must carry it, including the failure the loop gives up on.
     spent = addUsage(spent, run.usage);
     turns += run.turns;
+    // The seat's own settled figure, which is authoritative over the last
+    // progressive report it made — a panel's ceiling must see what a seat
+    // actually cost even after that seat has finished spending.
+    sharedSpend?.report(spent.costUsd ?? 0);
     last = attempt;
 
-    // A cancelled run never retries — the outcome is the cancellation itself.
-    if (parentSignal.aborted) return done(attempt);
-    const cls = classifyAttempt(attempt, isVoid);
-    if (cls === "ok" || cls === "deterministic") return done(attempt);
-
-    /** Remember what this attempt did before the next one supersedes it. */
-    const record = (): void => {
+    /**
+     * Remember what this attempt did before the next one supersedes it.
+     *
+     * @param kind - The failure kind to record when the attempt itself
+     *   reported none. The contract gate is the case: its attempt came back
+     *   `isError: false`, and a ledger row saying "unclassified" would hide
+     *   the one failure that is entirely the engine's own judgement.
+     */
+    const recordSuperseded = (kind?: WorkflowFailureKind): void => {
+      const failureKind =
+        kind ?? (attempt.kind === "settled" ? attempt.outcome.failureKind : undefined);
       const superseded: EarlierAttempt = {
         attempt: attempts,
-        ...(attempt.kind === "settled" && attempt.outcome.failureKind !== undefined
-          ? { failureKind: attempt.outcome.failureKind }
-          : {}),
+        ...(failureKind === undefined ? {} : { failureKind }),
         ...(attempt.kind === "settled" && attempt.outcome.activity !== undefined
           ? { activity: attempt.outcome.activity }
           : {}),
@@ -2568,6 +3314,32 @@ async function runStepAttempts(
         // A ledger must never be able to fail a step.
       }
     };
+    /** Remember what this attempt did before the next one supersedes it. */
+    const record = (): void => recordSuperseded();
+
+    // A cancelled run never retries — the outcome is the cancellation itself.
+    if (parentSignal.aborted) return done(attempt);
+    const cls = classifyAttempt(attempt, isVoid);
+    // THE CONTRACT GATE, second only to the void. A step that succeeded and
+    // said something is judged against the shape it promised, HERE rather than
+    // at the caller, because this is the last place another attempt is cheap:
+    // the model gets one more go with the validator's own complaint appended,
+    // which is a different question from the one it just answered wrongly.
+    // Ordered after `classifyAttempt` deliberately — a void or failed attempt
+    // has nothing to validate, and calling a stalled step a contract violation
+    // would relabel the fault a person needs to see.
+    if (cls === "ok" && contract !== undefined && attempt.kind === "settled") {
+      const verdict = contract.check(attempt.outcome.text);
+      if (verdict.ok) return done(attempt, verdict);
+      if (contractRetries >= AUTOMATIC_CONTRACT_ATTEMPTS) return done(attempt, verdict);
+      contractRetries += 1;
+      // The prompt this attempt was dispatched with — the seat's own, never
+      // the step's. See {@link StepContractGate.retryPrompt}.
+      dispatchPrompt = contract.retryPrompt(dispatchPrompt ?? request.prompt, verdict.errors);
+      recordSuperseded("contract");
+      continue;
+    }
+    if (cls === "ok" || cls === "deterministic") return done(attempt);
 
     // THE AUTOMATIC FRESH RETRY. No backoff: nothing in the world is going to
     // heal, and every second of a sleep here is a second the step's shared
@@ -3167,6 +3939,22 @@ export async function runWorkflow(
    */
   let journalUnavailable: string | undefined;
 
+  /**
+   * Why the whole run halted — written by `recordStop` far below, read here.
+   *
+   * DECLARED HERE FOR THE SAME REASON `journalUnavailable` is, and it is the
+   * bug this line closes. `finish` reads it for the ledger's `run-end`, and
+   * `finish` runs from the pre-flight validation too — hundreds of lines
+   * before the stage loop's state exists. Left where `recordStop` lives, this
+   * `let` was still in its temporal dead zone at every pre-flight refusal, so
+   * an unknown `[tag]`, an unresolvable race arm and both judges pre-flight
+   * checks threw `Cannot access 'stopReason' before initialization` INSTEAD OF
+   * printing the refusal they had already composed. A refusal that crashes is
+   * a refusal nobody can act on. See {@link WorkflowStopReason} at
+   * `recordStop` for what the values mean.
+   */
+  let stopReason: WorkflowStopReason | undefined;
+
   const finish = (
     status: WorkflowRunStatus,
     steps: WorkflowStepResult[],
@@ -3233,6 +4021,45 @@ export async function runWorkflow(
 
   emit({ type: "workflowStart", workflow: workflow.name, totalSteps: allSteps.length });
 
+  const stepTimeoutMs = workflow.stepTimeoutMs ?? DEFAULT_WORKFLOW_STEP_TIMEOUT_MS;
+  const maxStepRetries =
+    context.retry?.maxRetries ?? workflow.maxStepRetries ?? DEFAULT_MAX_STEP_RETRIES;
+
+  // On a fresh run, open the journal with its header before a single token is
+  // spent; a resumed run appends to the header already there. Fire-and-forget:
+  // serialized appends keep it ordered ahead of the stage lines regardless.
+  //
+  // ABOVE THE PRE-FLIGHT CHECKS, deliberately. Every refusal below this line —
+  // an unknown `[tag]`, an unresolvable race arm, a role that cannot be
+  // resolved or declares no tools, a judged step on the write lane or without
+  // an enum to compare — ends through `finish`, which writes a `runEnd`. That
+  // has always minted a run directory, so the choice is not "directory or no
+  // directory", it is "a readable failed run or a lone orphan terminal". A
+  // refusal is now journalled as what it is: a run that failed at pre-flight,
+  // header and all, so `/workflow status <id>` can name the workflow, the
+  // source file and the reason instead of rendering a nameless stub. It spends
+  // nothing — no `stepStart`, no `stepEnd`, no ledger step record — because
+  // the refusal happens before the first dispatch.
+  if (!resuming) {
+    void journalAppend({
+      kind: "run",
+      v: RUN_JOURNAL_SCHEMA_VERSION,
+      runId: context.runId ?? "",
+      workflow: workflow.name,
+      source: workflow.source,
+      input,
+      stepTimeoutMs,
+      maxStepRetries,
+      startedAt,
+      // The starter's own cap, so a resume enforces it too. Best-effort like
+      // the rest of the header, and safely so: neither resume entry point can
+      // continue a run whose header never landed (both read the workflow's
+      // name from it), so there is no state where the cap is lost and the run
+      // goes on regardless.
+      ...(context.budgetCapUsd === undefined ? {} : { budgetCapUsd: context.budgetCapUsd }),
+    });
+  }
+
   // Resolve every `[tag]` before spending a single token: a workflow whose
   // third step names a model that does not exist must fail now, not after two
   // paid steps.
@@ -3253,6 +4080,31 @@ export async function runWorkflow(
       );
     }
     models.set(step.modelTag, spec);
+  }
+
+  // MODEL RACING, held to the same rule. A `[race:a|b]` names two or three
+  // model tags and the dispatch seam resolves them as it fans out — which
+  // means a typo in the second arm was discovered mid-step, after the run had
+  // already paid for every stage before it AND for the arm that did resolve.
+  // A race is still a set of `[tag]`s, so it is checked here with the rest of
+  // them, arm by arm, in written order.
+  for (const step of allSteps) {
+    for (const tag of step.race ?? []) {
+      if (models.has(tag)) continue;
+      const spec = context.resolveModel?.(tag);
+      if (!spec) {
+        return finish(
+          "failed",
+          allSteps.map((s) => skippedResult(s, "skipped")),
+          "",
+          emptyUsage(),
+          context.resolveModel
+            ? `step ${step.id}: unknown model tag "${tag}" in race`
+            : `workflow races model tag "${tag}" (step ${step.id}) but no model resolver was supplied`,
+        );
+      }
+      models.set(tag, spec);
+    }
   }
 
   // Same reasoning for `@role`: a typo'd role in stage 6 must not be paid for
@@ -3289,6 +4141,45 @@ export async function runWorkflow(
         "",
         emptyUsage(),
         undeclaredToolsError(def.name, step.id),
+      );
+    }
+  }
+
+  // JUDGE DISAGREEMENT, checked here for exactly the reason the model tags and
+  // roles above are: a panel that cannot work must not be discovered in stage
+  // 6, after five stages have been paid for. Both refusals are structural —
+  // they are true of the FILE, not of anything a model might say — so nothing
+  // below them can make them go away.
+  for (const step of allSteps) {
+    if (step.judges === undefined) continue;
+    // The grammar guarantees a judged step named a role and a declared
+    // contract, so both look-ups are total; the checks are on what they are.
+    const def = step.agent === undefined ? undefined : context.resolveAgent?.(step.agent);
+    // A judged step runs N TIMES. On the write lane that is N patches racing
+    // for one checkout, which is not arbitration — it is a merge conflict with
+    // extra steps. Judging is a read: the role must be provably unable to
+    // change the user's files, decided by the same `roleLane` dispatch uses.
+    if (def !== undefined && roleLane(def) !== "read") {
+      return finish(
+        "failed",
+        allSteps.map((s) => skippedResult(s, "skipped")),
+        "",
+        emptyUsage(),
+        judgesWriteLaneError(step.id, step.agent ?? def.name),
+      );
+    }
+    const contract =
+      step.contract === undefined ? undefined : workflow.contracts.get(step.contract);
+    // Something to compare. Two free-text answers to the same question always
+    // differ, so a panel over a contract with no closed-set field would send
+    // every step to an arbiter and call that a finding.
+    if (contract === undefined || judgeCompareField(contract) === undefined) {
+      return finish(
+        "failed",
+        allSteps.map((s) => skippedResult(s, "skipped")),
+        "",
+        emptyUsage(),
+        judgesNoEnumFieldError(step.id),
       );
     }
   }
@@ -3337,41 +4228,14 @@ export async function runWorkflow(
   const priorAttemptsFor = (stepId: string): number =>
     resumeFrom?.stepFailAsk?.stepId === stepId ? resumeFrom.stepFailAsk.attempts : 0;
 
-  const stepTimeoutMs = workflow.stepTimeoutMs ?? DEFAULT_WORKFLOW_STEP_TIMEOUT_MS;
-
   // Self-healing retry policy: an explicit injection wins, else the workflow's
   // own `maxStepRetries:`, else the engine default. Backoff sleep and delay
   // reuse the request-layer's abortable/jittered implementation rather than
   // hand-rolling a second one.
-  const maxStepRetries =
-    context.retry?.maxRetries ?? workflow.maxStepRetries ?? DEFAULT_MAX_STEP_RETRIES;
   const retryPolicy: Required<Pick<WorkflowRetryPolicy, "sleep" | "computeDelay">> = {
     sleep: context.retry?.sleep ?? abortableSleep,
     computeDelay: context.retry?.computeDelay ?? ((attempt) => computeBackoffDelay(attempt)),
   };
-
-  // On a fresh run, open the journal with its header before a single token is
-  // spent; a resumed run appends to the header already there. Fire-and-forget:
-  // serialized appends keep it ordered ahead of the stage lines regardless.
-  if (!resuming) {
-    void journalAppend({
-      kind: "run",
-      v: RUN_JOURNAL_SCHEMA_VERSION,
-      runId: context.runId ?? "",
-      workflow: workflow.name,
-      source: workflow.source,
-      input,
-      stepTimeoutMs,
-      maxStepRetries,
-      startedAt,
-      // The starter's own cap, so a resume enforces it too. Best-effort like
-      // the rest of the header, and safely so: neither resume entry point can
-      // continue a run whose header never landed (both read the workflow's
-      // name from it), so there is no state where the cap is lost and the run
-      // goes on regardless.
-      ...(context.budgetCapUsd === undefined ? {} : { budgetCapUsd: context.budgetCapUsd }),
-    });
-  }
 
   const results: WorkflowStepResult[] = [];
   // The run's own accumulated state: what a later stage's worktree is seeded
@@ -3386,6 +4250,19 @@ export async function runWorkflow(
   // run's. (Spend has no such gap — `usage.costUsd` is on the recorded line.)
   let runTurns = 0;
   let prev = "";
+  /**
+   * TYPED HANDOFF: the previous stage's validated contract objects, in branch
+   * order — what `{{contract}}` and `{{contract.<field>}}` splice.
+   *
+   * Only contract-carrying steps contribute, and only their VALIDATED objects:
+   * a step whose reply failed its contract failed, so it has nothing here, and
+   * a step with no contract never had a typed answer to give. This is the
+   * whole difference between the two handoffs the engine offers — `{{prev}}`
+   * is what the models said, and `{{contract}}` is what the engine checked.
+   */
+  let prevContracts: readonly (Record<string, unknown> | undefined)[] = [];
+  /** Was the stage those objects came from written as parallel branches? */
+  let prevStageParallel = false;
   // `abandon` at a step-failure park seeds the failure the park was holding
   // open, so every stage is skipped and the run ends `failed` with the step's
   // own cause — byte-for-byte the outcome this engine produced before the park
@@ -3420,8 +4297,8 @@ export async function runWorkflow(
    * @param reason - Why the pipeline stopped.
    */
   let stopRecorded = false;
-  /** The reason recorded above, so the run's `run-end` insight can carry it. */
-  let stopReason: WorkflowStopReason | undefined;
+  // The reason itself is `stopReason`, declared above `finish` — which reads
+  // it from the pre-flight refusals, long before this line runs.
   const recordStop = (reason: WorkflowStopReason): void => {
     if (stopRecorded) return;
     stopRecorded = true;
@@ -3453,6 +4330,15 @@ export async function runWorkflow(
    * remembered here or it is lost between the lane and the question.
    */
   const noProgressSteps = new Set<string>();
+  /**
+   * Steps whose reply never satisfied their `[contract:<name>]`, by id.
+   *
+   * {@link noProgressSteps}' sibling, carried for the identical reason: the
+   * park is assembled at the stage boundary from a {@link WorkflowStepResult},
+   * which has no machine-readable kind on it, and "the shape was wrong" is
+   * exactly the word that tells this failure from a broken agent.
+   */
+  const contractSteps = new Set<string>();
   /**
    * Step failures the run must NOT park on, by id.
    *
@@ -3540,7 +4426,9 @@ export async function runWorkflow(
     // The ledger first, and unconditionally: the step DID end, whatever the
     // journal manages to do about it below. Names and numbers only — the
     // line's `text`, `finalText`, `question` and `promptHash` never travel.
-    const model = facts.model ?? line.lastTurn?.model;
+    // A raced step has no `[tag]` to resolve a name from — the race replaced it
+    // — so the winning arm's model is the one this terminal ran on.
+    const model = facts.model ?? line.race?.winner ?? line.lastTurn?.model;
     if (model !== undefined && model !== "") insightsModels.add(model);
     insights?.record({
       kind: "step-end",
@@ -3556,6 +4444,29 @@ export async function runWorkflow(
       attempts: line.attempts,
       ...(line.lastTurn === undefined ? {} : { lastTurn: line.lastTurn }),
       ...(line.activity === undefined ? {} : { activity: line.activity }),
+      // MODEL RACING: this terminal IS the winning arm, so it is recorded as
+      // one. Every losing arm records itself, `superseded`, from the dispatch
+      // seam — together they are what teaches the ledger (and the forecaster)
+      // how two models compare on this exact step.
+      ...(line.race === undefined ? {} : { race: "won" as const }),
+      // A MARKER, NOT A VALUE. That a step returned a validated typed reply is
+      // a fact about the pipeline worth counting; WHAT it decided is the
+      // content of the run and never leaves the machine. Same rule as every
+      // other field on this record — see `insights.ts`'s privacy section.
+      ...(line.contract === undefined ? {} : { contract: true }),
+      // Counts only, for the same reason: how many judges ran, whether they
+      // agreed, whether an arbiter was needed. The verdicts themselves stay in
+      // the journal, which never leaves the machine either but is at least the
+      // run's own record rather than an aggregate.
+      ...(line.judges === undefined
+        ? {}
+        : {
+            judges: {
+              count: line.judges.count,
+              agreed: line.judges.agreed,
+              arbitrated: line.judges.arbitrated,
+            },
+          }),
     });
     try {
       await journalDurable(line);
@@ -3630,11 +4541,43 @@ export async function runWorkflow(
         ...(runTurns > 0 ? { turns: runTurns } : {}),
       });
 
+      // THE TYPED HANDOFF, snapshotted once per stage beside `runDigest` and
+      // for the same reason: every branch of a parallel stage must read the
+      // *same* previous answer whatever order they finish in. Unlike the
+      // digest this one IS deterministic — it is rebuilt identically on a
+      // resume from the journalled objects — so it goes into both expansions,
+      // the recorded one included, and a `{{contract}}` step's prompt hash
+      // stays stable across a resume.
+      // A parallel stage speaks with several voices, so the placeholder is an
+      // ARRAY, positionally indexed by branch; a single-step stage splices the
+      // object itself, because making the common case a one-element array
+      // would put `[ ]` in front of every prompt for a shape nobody has to
+      // disambiguate. See {@link buildContractContext} for both.
+      const contractContext = buildContractContext(prevContracts, prevStageParallel);
       const stageResults = await Promise.all(
         stage.steps.map(async (step): Promise<WorkflowStepResult> => {
+          // The step's declared contract, when it named one. Parse time proved
+          // the name resolves, so an absent entry here is impossible.
+          const stepContract =
+            step.contract === undefined ? undefined : workflow.contracts.get(step.contract);
+          /**
+           * Append the contract's instructions to a prompt.
+           *
+           * Applied to BOTH expansions — the recorded/hashed one and the
+           * dispatched one — because the text is a pure function of the
+           * workflow file. Making it dispatch-only would be the more obvious
+           * choice and the wrong one: the hash would then describe a prompt no
+           * model ever saw, and two different contracts would hash alike.
+           */
+          const withContract = (text: string): string =>
+            stepContract === undefined
+              ? text
+              : `${text}\n\n${contractPromptLines(stepContract).join("\n")}`;
           // Expanded WITHOUT the digest: this is the prompt that is recorded,
           // hashed and resumed against. See {@link expandStepPrompt}.
-          const prompt = expandStepPrompt(step.prompt, prev, input);
+          const prompt = withContract(
+            expandStepPrompt(step.prompt, prev, input, "", contractContext),
+          );
           const base = {
             id: step.id,
             stageIndex: step.stageIndex,
@@ -3780,6 +4723,14 @@ export async function runWorkflow(
               text: resumed.text,
               ...(resumed.record === undefined ? {} : { record: resumed.record }),
               usage: resumed.usage,
+              // THE TYPED HANDOFF SURVIVES A RESUME. The object comes back off
+              // the terminal rather than being re-derived from `text`: the
+              // validator ran once, on the reply it ran on, and re-parsing the
+              // prose here would be a second opinion nobody asked for — and
+              // would silently return `{{contract}}` to guesswork the moment a
+              // resume was involved.
+              ...(resumed.contract === undefined ? {} : { contract: resumed.contract }),
+              ...(resumed.judges === undefined ? {} : { judges: resumed.judges }),
               ...(resumed.startedAt === undefined ? {} : { startedAt: resumed.startedAt }),
               ...(resumed.endedAt === undefined ? {} : { endedAt: resumed.endedAt }),
             };
@@ -3935,7 +4886,9 @@ export async function runWorkflow(
             step,
             // The dispatched prompt is the only place the digest appears: not
             // in `base.prompt`, not in `promptHash`, not on the journal line.
-            prompt: expandStepPrompt(step.prompt, prev, input, runDigest),
+            prompt: withContract(
+              expandStepPrompt(step.prompt, prev, input, runDigest, contractContext),
+            ),
             ...(model === undefined ? {} : { model }),
             ...(step.agent === undefined ? {} : { agent: step.agent }),
             state: { appliedPatches: [...appliedPatches] },
@@ -3960,6 +4913,99 @@ export async function runWorkflow(
           // attempt (§ {@link runStepAttempts}), so a transient blip re-tries
           // and a deterministic failure does not. `spent`/`stepTurns` are the
           // *whole step's* ledger — every attempt, not just the survivor.
+          /**
+           * Each superseded attempt reaches the ledger as its own terminal:
+           * "this step took two attempts" is a number, and "the first one read
+           * for 36 turns and wrote nothing" is the finding.
+           */
+          const recordSupersededAttempt = (superseded: EarlierAttempt): void => {
+            insights?.record({
+              kind: "step-end",
+              workflow: workflow.name,
+              runId: insightsRunId,
+              stepId: step.id,
+              ...(step.agent === undefined ? {} : { role: step.agent }),
+              status: "failed",
+              ...(superseded.failureKind === undefined
+                ? {}
+                : { failureKind: superseded.failureKind }),
+              ...(stepModel === undefined ? {} : { model: stepModel }),
+              durationMs: Math.max(0, now() - stepStartedAt),
+              usage: superseded.usage,
+              attempts: superseded.attempt,
+              // The flag every aggregate that counts STEPS must filter on:
+              // this terminal and the step's own final one describe the same
+              // step, so a rescued step would otherwise add both a `failed`
+              // and a `done` row to its role — inflating that role's failure
+              // rate by exactly the successes the automatic retry produces,
+              // and counting its duration twice. The failure-KIND tally
+              // still wants this record; see `roleStats` in `insights.ts`.
+              superseded: true,
+              ...(superseded.activity === undefined ? {} : { activity: superseded.activity }),
+            });
+          };
+          /**
+           * The step's typed-reply gate, when it declared a contract.
+           *
+           * The retry's prompt is built from the prompt the failing attempt
+           * was DISPATCHED with (digest and contract instructions included) so
+           * the second ask is the first one plus the complaint — and never
+           * from `prompt`, which is what a resume hashes. The loop hands that
+           * prompt in per attempt, which is what keeps a judge panel's arbiter
+           * retrying its own brief rather than the step's.
+           */
+          const contractGate: StepContractGate | undefined =
+            stepContract === undefined
+              ? undefined
+              : {
+                  check: (text) => {
+                    const extracted = extractContractJson(text);
+                    if (!extracted.ok) return { ok: false, errors: [extracted.error] };
+                    return validateContract(stepContract, extracted.value);
+                  },
+                  retryPrompt: (dispatched, errors) => contractRetryPrompt(dispatched, errors),
+                };
+          /** Run this step once, through the whole retry policy. */
+          const runAttempts = (
+            overrides: {
+              readonly prompt?: string;
+              readonly seat?: number;
+              readonly spend?: StepSpendSlot;
+            } = {},
+          ): Promise<StepAttemptResult> =>
+            runStepAttempts(
+              context.runStep,
+              {
+                ...stepRequest,
+                ...(overrides.prompt === undefined ? {} : { prompt: overrides.prompt }),
+                // JUDGE SEATING. Every seat of a panel is the same step, so
+                // each needs a marker of its own or two judges would share a
+                // worktree slug and a live row. The attempt index is that
+                // marker — it is what the lanes already key those things off —
+                // and the stride keeps a seat's own retries inside its own
+                // block instead of colliding with the next seat's.
+                ...(overrides.seat === undefined
+                  ? {}
+                  : {
+                      attempt: (stepRequest.attempt ?? 0) + overrides.seat * JUDGE_SEAT_STRIDE,
+                    }),
+              },
+              controller.signal,
+              stepTimeoutMs,
+              maxStepRetries,
+              retryPolicy,
+              now,
+              roleBudget,
+              // The void gate's own verdict, so the loop can spend this step's
+              // one free attempt on a step that produced nothing rather than
+              // handing it to a human. See {@link stepOutcomeIsVoid}.
+              stepOutcomeIsVoid,
+              recordSupersededAttempt,
+              contractGate,
+              overrides.spend,
+            );
+          /** What a `[judges:N]` panel recorded, for the terminal below. */
+          let judgesRecord: JudgesRecord | undefined;
           const {
             attempt,
             attempts,
@@ -3967,48 +5013,86 @@ export async function runWorkflow(
             turns: stepTurns,
             freshRetries,
             earlier: earlierAttempts,
-          } = await runStepAttempts(
-            context.runStep,
-            stepRequest,
-            controller.signal,
-            stepTimeoutMs,
-            maxStepRetries,
-            retryPolicy,
-            now,
-            roleBudget,
-            // The void gate's own verdict, so the loop can spend this step's
-            // one free attempt on a step that produced nothing rather than
-            // handing it to a human. See {@link stepOutcomeIsVoid}.
-            stepOutcomeIsVoid,
-            // Each superseded attempt reaches the ledger as its own terminal:
-            // "this step took two attempts" is a number, and "the first one
-            // read for 36 turns and wrote nothing" is the finding.
-            (superseded) =>
-              insights?.record({
-                kind: "step-end",
-                workflow: workflow.name,
-                runId: insightsRunId,
-                stepId: step.id,
-                ...(step.agent === undefined ? {} : { role: step.agent }),
-                status: "failed",
-                ...(superseded.failureKind === undefined
-                  ? {}
-                  : { failureKind: superseded.failureKind }),
-                ...(stepModel === undefined ? {} : { model: stepModel }),
-                durationMs: Math.max(0, now() - stepStartedAt),
-                usage: superseded.usage,
-                attempts: superseded.attempt,
-                // The flag every aggregate that counts STEPS must filter on:
-                // this terminal and the step's own final one describe the same
-                // step, so a rescued step would otherwise add both a `failed`
-                // and a `done` row to its role — inflating that role's failure
-                // rate by exactly the successes the automatic retry produces,
-                // and counting its duration twice. The failure-KIND tally
-                // still wants this record; see `roleStats` in `insights.ts`.
-                superseded: true,
-                ...(superseded.activity === undefined ? {} : { activity: superseded.activity }),
-              }),
-          );
+            contract: contractVerdict,
+          } = await (async (): Promise<StepAttemptResult> => {
+            if (step.judges === undefined || stepContract === undefined) return runAttempts();
+            // JUDGE DISAGREEMENT: N independent runs of this one step, then an
+            // arbiter if they split. Every seat goes through the *same* retry
+            // policy as an ordinary step — its own transient retries, its own
+            // one contract retry — so a flaky judge is healed rather than
+            // counted as a dissenting vote.
+            const field = judgeCompareField(stepContract);
+            // ONE role budget for the whole panel: `[judges:3] @reviewer` is
+            // one assignment of that reviewer, so its `budget:` is spent once
+            // across every seat and the arbiter — see {@link createPanelSpend}.
+            const panelSpend = createPanelSpend(roleBudget);
+            const panel = await runJudgePanel<StepAttemptResult>({
+              count: step.judges,
+              field: field?.name ?? "",
+              prompt: stepRequest.prompt,
+              run: async ({ index, prompt: seatPrompt }) => {
+                const run = await runAttempts({
+                  prompt: seatPrompt,
+                  seat: index,
+                  spend: panelSpend.seat(),
+                });
+                const value = run.contract?.ok === true ? run.contract.value : undefined;
+                const outcome: JudgeOutcome<StepAttemptResult> = {
+                  carrier: run,
+                  ...(value === undefined ? {} : { value }),
+                  text: run.attempt.kind === "settled" ? run.attempt.outcome.text : "",
+                };
+                return outcome;
+              },
+              onDisagreement: (verdicts) =>
+                emit({
+                  type: "judgesDisagreed",
+                  id: step.id,
+                  stageIndex: step.stageIndex,
+                  verdicts,
+                }),
+            });
+            judgesRecord = panel.record;
+            // The step's ledger is the WHOLE panel's: three judges and an
+            // arbiter cost four runs, and reporting only the winner's spend
+            // would hide the exact construct a person pays extra to use.
+            const runs = panel.runs.map((seat) => seat.carrier);
+            const settled = panel.winner?.carrier ?? runs[runs.length - 1];
+            // THE PANEL'S ROLE BUDGET, breached. A seat that crossed the
+            // shared ceiling comes back `kind: "budget"` and IS the step's
+            // outcome, whatever the other seats managed to answer: the run
+            // must stop on the ceiling it was given, not proceed on the vote
+            // of the seats that happened to finish under it. Preferred over
+            // the winner deliberately, and reconstructed from the ledger when
+            // the crossing landed on a seat that had already returned.
+            const breached = runs.find((run) => run.attempt.kind === "budget");
+            const breach = panelSpend.breach();
+            const usage = runs.reduce((total, run) => addUsage(total, run.usage), emptyUsage());
+            const winner = breached ?? settled;
+            return {
+              // No winner means nothing valid came back at all; the last seat's
+              // outcome carries its `{ ok: false }` verdict, so the step fails
+              // on its contract below exactly as an unjudged step would.
+              attempt:
+                breached === undefined && breach !== undefined
+                  ? { kind: "budget", usage, spentUsd: breach.spentUsd }
+                  : (winner as StepAttemptResult).attempt,
+              // FLAPPING, not seat count. `attempts` is what `/workflow
+              // status`, `/workflow diff`, the retrospective and the ledger
+              // read as "this step needed N tries", so summing the seats made
+              // a clean two-judge panel indistinguishable from a step that
+              // failed once and healed. The panel's size is `judges.count`;
+              // its flapping is the worst any one seat did.
+              attempts: runs.reduce((worst, run) => Math.max(worst, run.attempts), 1),
+              usage,
+              turns: runs.reduce((total, run) => total + run.turns, 0),
+              freshRetries: runs.reduce((total, run) => total + run.freshRetries, 0),
+              earlier: runs.flatMap((run) => [...run.earlier]),
+              ...((winner as StepAttemptResult).contract === undefined
+                ? {}
+                : { contract: (winner as StepAttemptResult).contract }),
+            };
+          })();
           if (attempt.kind === "settled") {
             const outcome = attempt.outcome;
             const status: WorkflowStepStatus = outcome.isError
@@ -4061,9 +5145,37 @@ export async function runWorkflow(
               ...(finalWords === undefined ? {} : { finalText: finalWords }),
               ...(outcome.lastTurn === undefined ? {} : { lastTurn: outcome.lastTurn }),
               ...(outcome.activity === undefined ? {} : { activity: outcome.activity }),
+              // MODEL RACING: the winner's outcome is the step's, and this is
+              // the only trace that the other arms ran at all.
+              ...(outcome.race === undefined ? {} : { race: outcome.race }),
+              ...(outcome.raceUsage === undefined ? {} : { raceUsage: outcome.raceUsage }),
               startedAt: stepStartedAt,
               endedAt: now(),
             };
+            // THE CONTRACT GATE'S VERDICT, applied to a step the lane called
+            // done. The retry loop has already spent this step's one contract
+            // attempt (the same prompt plus the validator's complaint), so
+            // what reaches here is a reply that missed the shape TWICE.
+            //
+            // A failure is a normal step failure from here on: `failed`, an
+            // empty pipe, the failure kind on the ledger, and the park's
+            // question carrying the validator's own errors — which is the
+            // point, because "you promised `confidence` and sent a string" is
+            // something a person can act on and "the step failed" is not.
+            if (contractVerdict !== undefined && result.status === "done") {
+              if (contractVerdict.ok) {
+                result = { ...result, contract: contractVerdict.value };
+              } else {
+                contractSteps.add(step.id);
+                stepFailureKind = "contract";
+                result = {
+                  ...result,
+                  status: "failed",
+                  text: "",
+                  error: contractFailedError(step.id, step.contract ?? "", contractVerdict.errors),
+                };
+              }
+            }
           } else if (attempt.kind === "timeout") {
             // The deadline fired before an external cancellation, or the two
             // raced together: an external cancel that also happened to be in
@@ -4141,12 +5253,24 @@ export async function runWorkflow(
           // retrospective digest. Only when it actually flapped — see
           // {@link WorkflowStepResult.attempts}.
           if (attempts > 1) result = { ...result, attempts };
+          // ONE terminal for a judged step, however many seats ran under it.
+          // The panel is an implementation of the step, not a stage of its
+          // own: `{{prev}}` carries one answer, the journal carries one line,
+          // and this is the record of how that one answer was reached.
+          if (judgesRecord !== undefined) result = { ...result, judges: judgesRecord };
           // COST: the engine's one mint point (§ {@link priceStepUsage}), run
           // before anything observes the result so the step result, the
           // `stepEnd` line a resume reads back and the run total below can
           // never disagree about what this step cost.
           const pricedUsage = priceStepUsage(result.usage, model);
           if (pricedUsage !== result.usage) result = { ...result, usage: pricedUsage };
+          // The race's own bill goes through the same mint, for the same
+          // reason: it is what the run total and every ceiling are judged on
+          // below, so it must never be the one figure that arrives unpriced.
+          if (result.raceUsage !== undefined) {
+            const pricedRace = priceStepUsage(result.raceUsage, model);
+            if (pricedRace !== result.raceUsage) result = { ...result, raceUsage: pricedRace };
+          }
           // HUMAN-QUESTION GATE: a *completed* step whose output raised a marker
           // is reclassified before it is journalled or observed, so the engine —
           // not the agent's self-reported status — owns the decision (the same
@@ -4248,6 +5372,17 @@ export async function runWorkflow(
               // turns of reading is the one a retrospective wants to find, and
               // it is a handful of integers.
               ...(result.activity === undefined ? {} : { activity: result.activity }),
+              // THE TYPED HANDOFF'S DURABILITY COMMIT. `{{contract}}` in the
+              // next stage reads this object, so a resume that re-splices this
+              // step from its terminal has to find it here — otherwise the
+              // stage after a resumed contract step would splice an empty
+              // string and nobody would notice until the role acted on it.
+              ...(result.contract === undefined ? {} : { contract: result.contract }),
+              ...(result.judges === undefined ? {} : { judges: result.judges }),
+              // MODEL RACING: one terminal for the step, carrying which models
+              // ran, which one this line is, and what the whole race cost.
+              ...(result.race === undefined ? {} : { race: result.race }),
+              ...(result.raceUsage === undefined ? {} : { raceUsage: result.raceUsage }),
               promptHash,
               attempts,
               startedAt: stepStartedAt,
@@ -4266,7 +5401,16 @@ export async function runWorkflow(
 
       for (const result of stageResults) {
         results.push(result);
-        usage = addUsage(usage, result.usage);
+        // THE BILL, and the one place the run's money is counted. A raced step
+        // spent every arm's tokens, not just the winner's, so `raceUsage` —
+        // the summed race — is what folds in here: the run total, the `budget`
+        // journal line, the `budgetUsd:`/`budgetTokens:` ceilings, the budget
+        // ask and the ledger's `run-end` all read this figure, and a run
+        // billed for three arms that reports one is a ceiling that never
+        // trips. `result.usage` stays the WINNER's everywhere a step is
+        // described (its terminal, `{{prev}}`'s accounting, status' per-step
+        // column): the step produced one answer, and it cost what it cost.
+        usage = addUsage(usage, result.raceUsage ?? result.usage);
         // Only a patch that actually landed becomes part of the run's state —
         // a refused one is not in the checkout, so seeding with it would hand
         // the next role a base the user never had.
@@ -4399,7 +5543,9 @@ export async function runWorkflow(
           ? "turn-ceiling"
           : noProgressSteps.has(broken.id)
             ? "no-progress"
-            : undefined;
+            : contractSteps.has(broken.id)
+              ? "contract"
+              : undefined;
         const ask: PendingStepFailAsk = {
           stepId: broken.id,
           ...(broken.agent === undefined ? {} : { role: broken.agent }),
@@ -4572,6 +5718,18 @@ export async function runWorkflow(
       // `continueOnError` stage therefore hands the next stage an empty
       // `{{prev}}` rather than stale text from two stages ago.
       prev = stageText;
+      // …and the typed half of the same pipe. Only the steps whose replies
+      // actually passed their contract contribute, in branch order, so a
+      // parallel stage's `{{contract}}` array indexes by branch and a stage
+      // whose contract step failed hands the next one nothing rather than a
+      // stale object from two stages ago — the same rule `prev` follows.
+      // POSITIONAL, one slot per branch in written order: `{{contract}}[i]`
+      // is branch `i` whatever happened to the others, so a stage that mixes
+      // contract and non-contract branches — or whose first branch missed its
+      // shape on a flaky run — cannot silently shift every index under the
+      // role downstream. See {@link buildContractContext}.
+      prevContracts = stageResults.map((result) => result.contract);
+      prevStageParallel = stage.parallel;
       if (controller.signal.aborted) cancelled = true;
     }
   } finally {
@@ -4726,6 +5884,28 @@ export interface RuntimeRunStepOptions {
    * run's silence to the other.
    */
   insights?: InsightsRunScope;
+  /**
+   * MODEL RACING: the workflow's own contract declarations, by name.
+   *
+   * A raced step's gate is stricter than the ordinary void gate when the step
+   * declares `[contract:<name>]`: an arm whose reply does not validate has not
+   * won anything, however fast it was. The runner cannot reach the parsed
+   * `Workflow` (it is handed one step at a time), so the declaration comes in
+   * here. Omitted, a raced step's gate is the plain "not an error, not void"
+   * one — which is exactly the pre-contract behaviour, never a silent pass of
+   * something that should have been checked.
+   */
+  resolveContract?: (name: string) => WorkflowContract | undefined;
+  /**
+   * A run-scoped model pin for ONE step, from `/workflow fork --model <tag>`.
+   *
+   * Returns the tag a fork pinned to this step id, or `undefined` for every
+   * other step. It wins over the step's own `[tag]` and over the role's
+   * `model:` — that is the whole point of the flag — and it reaches this seam
+   * rather than the parser because the workflow file was never edited: the
+   * grant lives in the forked run's journal and nowhere else.
+   */
+  modelOverride?: (stepId: string) => string | undefined;
 }
 
 // ---------------------------------------------------------------- three lanes
@@ -5458,16 +6638,23 @@ const LIVE_RESULT_MAX = 200;
  * @param step - The step being run.
  * @param prompt - The step's own prompt, already expanded.
  * @param role - The step's `@role`, when it has one.
+ * @param arm - MODEL RACING: the model this arm runs on, when the step is
+ *   raced. Two arms of one step would otherwise share an agent id, and the
+ *   host keys its rows by that alone — an operator would watch one row
+ *   flicker between two models instead of watching both race.
  */
 function stepLiveRow(
   emit: ((event: AgentEvent) => void) | undefined,
   step: WorkflowStep,
   prompt: string,
   role?: string,
+  arm?: string,
 ): StepLiveRow | undefined {
   if (emit === undefined) return undefined;
-  const agentId = workflowStepAgentId(step.id, role);
-  const head = role === undefined ? `step ${step.id}` : `@${role} · step ${step.id}`;
+  const rowId = workflowStepAgentId(step.id, role);
+  const agentId = arm === undefined ? rowId : `${rowId}#${arm}`;
+  const who = role === undefined ? `step ${step.id}` : `@${role} · step ${step.id}`;
+  const head = arm === undefined ? who : `${who} [${arm}]`;
   const task = `${head}: ${oneLine(prompt, LIVE_TASK_MAX)}`;
   // A live region that throws must never be able to fail a pipeline step, so
   // every publish is swallowed the way an event listener's is.
@@ -5717,6 +6904,15 @@ async function driveAgent(
   let turns = 0;
   const toolCalls: Record<string, number> = {};
   /**
+   * Tool calls the permission layer refused outright.
+   *
+   * Counted off the tool result's own `details.permissionDenied` marker — set
+   * at the single place a refusal is minted — rather than off any text, so a
+   * tool that merely failed is never miscounted as one that was blocked. See
+   * {@link StepActivity.denied} for the silence this closes.
+   */
+  let denied = 0;
+  /**
    * In-flight tool calls that could change a file, by id.
    *
    * `toolEnd` names only the call id, so the ids of the calls whose *start*
@@ -5787,8 +6983,9 @@ async function driveAgent(
           writingCalls.add(event.toolCallId);
           stall.progress.mutated();
         }
-      } else if (event.type === "toolEnd" && writingCalls.delete(event.toolCallId)) {
-        stall?.progress.mutated();
+      } else if (event.type === "toolEnd") {
+        if (event.result.details?.permissionDenied === true) denied += 1;
+        if (writingCalls.delete(event.toolCallId)) stall?.progress.mutated();
       }
       // The two events that used to leave no trace outside a person's memory
       // of the run. Both are diagnostics, so both are swallowed if the ledger
@@ -5921,7 +7118,12 @@ async function driveAgent(
     ...(errorKind === undefined ? {} : { errorKind }),
     text,
     ...(lastMessage === undefined ? {} : { lastTurn: turnShapeOf(lastMessage) }),
-    activity: { turns, toolCalls, writes: countWrites(toolCalls) },
+    activity: {
+      turns,
+      toolCalls,
+      writes: countWrites(toolCalls),
+      ...(denied > 0 ? { denied } : {}),
+    },
     ...(stalled ? { stalled: true } : {}),
   };
 }
@@ -6085,6 +7287,32 @@ export function emptyStepError(stepId: string, role: string | undefined): string
     `step ${stepId}${role === undefined ? "" : ` (@${role})`} produced nothing — no file was ` +
     "changed and no text was returned. A step that reports neither a result nor a reason has " +
     "not run; retry it, or narrow what it was asked to do."
+  );
+}
+
+/**
+ * The message a step fails with when its reply never satisfied its contract.
+ *
+ * The validator's errors go in VERBATIM and all of them, because they are the
+ * whole content of the failure: a park saying "step 3 failed its contract" is
+ * unactionable, and one saying `decision: expected one of SHIP, DO-NOT-SHIP,
+ * got "ship"` tells a person whether to fix the workflow file or the role. The
+ * "twice" is load-bearing too — the engine already gave the model the errors
+ * once, so `retry` is not the obvious answer it looks like.
+ *
+ * @param stepId - The step whose reply missed the shape.
+ * @param contract - The name of the contract it declared.
+ * @param errors - Every message the validator collected on the final attempt.
+ */
+export function contractFailedError(
+  stepId: string,
+  contract: string,
+  errors: readonly string[],
+): string {
+  return (
+    `step ${stepId} did not satisfy contract "${contract}" (asked twice): ${errors.join("; ")}. ` +
+    "Fix the role's brief or the contract's fields — the same prompt has now been answered " +
+    "twice in the wrong shape."
   );
 }
 
@@ -6325,6 +7553,35 @@ async function openStepWorktree(
 
 /** How many salted slugs a collision may try before the step gives up. */
 const WORKTREE_SLUG_SALTS = 8;
+
+/**
+ * How far apart two attempts' race arms are spaced in the worktree slug.
+ *
+ * Comfortably wider than {@link WORKTREE_SLUG_SALTS} plus the widest race
+ * (three arms), so attempt 0's arms and attempt 1's arms — including every
+ * salted slug either of them had to fall back to — can never name the same
+ * directory. A collision would not be silent (a losing arm's worktree is kept
+ * on purpose, so `git worktree add` refuses the path and the salt loop runs),
+ * but it would spend a retry's whole slug budget resolving something a
+ * multiplication already prevents.
+ */
+const RACE_SLOT_STRIDE = 16;
+
+/**
+ * The attempt number a worktree slug is minted from.
+ *
+ * Ordinary steps: the attempt index itself, exactly as before. A race arm:
+ * a slot carved out of that attempt's own block, so the two (or three) arms of
+ * one attempt get distinct paths and no arm of attempt 1 can land on a
+ * worktree attempt 0 kept for forensics. The RETRY ledger is untouched —
+ * `request.attempt` still says what it always said.
+ *
+ * @param request - The step request being dispatched.
+ */
+function worktreeSalt(request: WorkflowStepRequest): number | undefined {
+  if (request.raceSlot === undefined) return request.attempt;
+  return (request.attempt ?? 0) * RACE_SLOT_STRIDE + request.raceSlot + 1;
+}
 
 /** Pathspec keeping a role's own agent scratch out of every capture. */
 const CAPTURE_PATHSPEC = ["--", ".", ":(exclude).arcturn"];
@@ -6712,7 +7969,22 @@ async function runWorktreeStep(
     );
   }
 
+  // A fork's `--model` pin for THIS step wins over everything the file says —
+  // the step's own `[tag]` and the role's `model:` alike. Resolved here rather
+  // than at parse time because the workflow file was never edited: the grant
+  // lives in the forked run's journal. An unresolvable pin fails the step
+  // rather than quietly running the model the fork was cut to get away from.
+  const pinned = options.modelOverride?.(step.id);
   let model = request.model;
+  if (pinned !== undefined) {
+    const resolved = options.resolveModel?.(pinned);
+    if (!resolved) {
+      return refusedStep(
+        `step ${step.id} was forked onto model "${pinned}", which is not a known model id`,
+      );
+    }
+    model = resolved;
+  }
   if (model === undefined && def.model !== undefined) {
     if (!options.resolveModel) {
       return refusedStep(
@@ -6732,7 +8004,7 @@ async function runWorktreeStep(
   const seed = { patches: request.state?.appliedPatches ?? [] };
   let opened: OpenedWorktree;
   try {
-    opened = await openStepWorktree(lane, step.id, def.name, request.attempt, seed);
+    opened = await openStepWorktree(lane, step.id, def.name, worktreeSalt(request), seed);
   } catch (error) {
     const detail = errorText(error);
     return {
@@ -6834,8 +8106,9 @@ async function runWorktreeStep(
       buildWriteLanePrompt(def, prompt, worktree.dir, dispatch),
       signal,
       // The row carries the *step's* prompt, not the lane contract wrapped
-      // around it — and it opens here, once there is an agent to watch.
-      stepLiveRow(options.emit, step, prompt, def.name),
+      // around it — and it opens here, once there is an agent to watch. One
+      // row per RACE ARM, labelled with its model.
+      stepLiveRow(options.emit, step, prompt, def.name, request.raceLabel),
       onUsage,
       insightsSignals(options.insights, step.id, def.name),
       // WRITE lane only, exactly like the progress check above and for the
@@ -7055,6 +8328,37 @@ async function runWorktreeStep(
       };
     }
 
+    // MODEL RACING: only ONE arm of a race may reach the user's checkout, and
+    // this is the last instant at which that can still be guaranteed — see
+    // {@link WorkflowStepRequest.raceApplyClaim}. Deliberately AFTER the path
+    // audit above: an out-of-tree patch is refused loudly whether or not this
+    // arm was going to win, because "the other model was faster" is not a
+    // reason to stop telling a human that a role tried to write outside the
+    // checkout.
+    if (
+      request.raceApplyClaim !== undefined &&
+      !request.raceApplyClaim({ text: run.text, files })
+    ) {
+      const lost = record("captured", files, patchFile);
+      return {
+        text: "",
+        usage,
+        ...lastTurnOf(run),
+        ...activityOf(run),
+        isError: true,
+        record: lost,
+        error: withTasks(
+          `step ${step.id} (@${def.name}) lost the race for this step, so nothing it wrote was ` +
+            `applied to ${lane.cwd}. Its patch is preserved at ${patchFile} and its worktree at ` +
+            `${worktree.dir}; read them if you want to see what the other model did differently.` +
+            `\n${formatWriteLaneTrailer(lost)}`,
+        ),
+        // Not a fault of this role or this model: another arm won. Classified
+        // as a cancellation so the self-healing retry loop never re-runs it.
+        failureKind: "cancelled",
+      };
+    }
+
     // WRITE-AHEAD: the next line mutates the user's real checkout, and the
     // step's terminal is not written until this function returns — so a crash
     // in between used to leave the tree changed and the journal saying "not
@@ -7074,6 +8378,9 @@ async function runWorktreeStep(
       });
     } catch (error) {
       const captured = record("captured", files, patchFile);
+      // Nothing was written, so a race's claim goes back: a sibling arm can
+      // still land. See {@link WorkflowStepRequest.raceApplySettled}.
+      request.raceApplySettled?.(false);
       return {
         text: "",
         usage,
@@ -7095,6 +8402,11 @@ async function runWorktreeStep(
       };
     }
     const applied = await serializeApply(lane.cwd, () => applyPatch(lane, patchFile));
+    // A RACE'S CLAIM, settled at the only moment the answer is known: the
+    // patch either is in the user's checkout (irreversible — every other arm
+    // stops now) or never got there (the claim goes back, and a sibling whose
+    // work clears the gate can still win the step).
+    request.raceApplySettled?.(applied.ok);
     // The outcome, immediately and durably: from here the ambiguous window is
     // one `git apply` wide, and a crash inside it is resolved by probing the
     // checkout (see `createPatchVerifier`) rather than by assuming.
@@ -7412,8 +8724,32 @@ export function createRuntimeRunStep(
   host: WorkflowAgentHost,
   options: RuntimeRunStepOptions = {},
 ): WorkflowStepRunner {
-  return async (request): Promise<WorkflowStepOutcome> => {
-    const { step, prompt, model, signal, onUsage } = request;
+  /**
+   * One dispatch of one step on one model — the whole of the four-way lane
+   * decision above, unchanged.
+   *
+   * Named and closed over rather than returned directly so a raced step can
+   * call it once per arm ({@link dispatchRacedStep}). Every arm is an ordinary
+   * step from here down: its own signal, its own worktree, its own live row,
+   * its own usage. Nothing in the lanes knows a race is happening.
+   */
+  const runOne = async (request: WorkflowStepRequest): Promise<WorkflowStepOutcome> => {
+    const { step, prompt, signal, onUsage } = request;
+    // A fork's `--model` pin for THIS step, resolved before anything is built.
+    // The worktree lanes repeat this check for their own `model:` fallback;
+    // this one covers the read lane and the un-roled step, where the id is
+    // handed to `createSubagent` rather than to a lane.
+    const pinned = options.modelOverride?.(step.id);
+    let model = request.model;
+    if (pinned !== undefined) {
+      const resolved = options.resolveModel?.(pinned);
+      if (!resolved) {
+        return refusedStep(
+          `step ${step.id} was forked onto model "${pinned}", which is not a known model id`,
+        );
+      }
+      model = resolved;
+    }
     if (signal.aborted) return { text: "", usage: emptyUsage(), isError: true, error: "cancelled" };
 
     const roleName = request.agent ?? step.agent;
@@ -7486,7 +8822,7 @@ export function createRuntimeRunStep(
       agent,
       prompt,
       signal,
-      stepLiveRow(options.emit, step, prompt, role?.name),
+      stepLiveRow(options.emit, step, prompt, role?.name, request.raceLabel),
       onUsage,
       insightsSignals(options.insights, step.id, role?.name),
     );
@@ -7527,6 +8863,293 @@ export function createRuntimeRunStep(
       ...(finalWords === undefined ? {} : { finalText: finalWords }),
       ...(failureKind === undefined ? {} : { failureKind }),
     };
+  };
+  // MODEL RACING is a decision about *how many* dispatches a step gets, so it
+  // sits above the lane decision rather than inside it: a raced step fans out
+  // here and comes back as the one outcome every layer above already expects.
+  return async (request) => await dispatchStep(request, options, runOne);
+}
+
+/** What a replayed step contributed to the run's pipe. See {@link replayPromptHashes}. */
+export interface ReplayedStepFacts {
+  readonly text: string;
+  readonly record?: WorkflowPatchRecord;
+  readonly contract?: Record<string, unknown>;
+}
+
+/**
+ * Recompute the prompt hash of every step a journal already finished.
+ *
+ * WHY THIS EXISTS. A `stepEnd` line records the hash of the prompt its step
+ * actually ran, and a resume refuses to reuse a step whose hash no longer
+ * matches the file — that is how "the workflow changed under a paused run" is
+ * caught rather than silently honoured. `/workflow fork` needs the same
+ * verdict *before* it copies anything, so it can refuse by name instead of
+ * minting a run that will fail at its first reused step.
+ *
+ * The reconstruction is deterministic because every input is on disk: `prev`
+ * is the previous stage's recorded texts and patch trailers ({@link
+ * combineStageText}), the typed handoff is the previous stage's recorded
+ * contract objects, and neither the run digest (`{{journal}}`) nor anything
+ * else time-varying is part of a hashed prompt. It mirrors the run loop's own
+ * expansion exactly; if the two ever drift, this one is wrong.
+ *
+ * Stops at the first step the journal has no record for — everything after it
+ * runs live anyway, so its hash is not a question anyone is asking.
+ *
+ * @param workflow - The workflow as it is on disk NOW.
+ * @param input - The run's original input.
+ * @param recorded - Step id → what that step's terminal recorded.
+ */
+export function replayPromptHashes(
+  workflow: Workflow,
+  input: string,
+  recorded: ReadonlyMap<string, ReplayedStepFacts>,
+): Map<string, string> {
+  const hashes = new Map<string, string>();
+  let prev = "";
+  let prevContracts: readonly (Record<string, unknown> | undefined)[] = [];
+  let prevStageParallel = false;
+  for (const stage of workflow.stages) {
+    const contractContext = buildContractContext(prevContracts, prevStageParallel);
+    const results: WorkflowStepResult[] = [];
+    for (const step of stage.steps) {
+      const facts = recorded.get(step.id);
+      if (facts === undefined) return hashes;
+      const declared =
+        step.contract === undefined ? undefined : workflow.contracts.get(step.contract);
+      const expanded = expandStepPrompt(step.prompt, prev, input, "", contractContext);
+      const prompt =
+        declared === undefined
+          ? expanded
+          : `${expanded}\n\n${contractPromptLines(declared).join("\n")}`;
+      hashes.set(step.id, hashPrompt(prompt));
+      results.push({
+        id: step.id,
+        stageIndex: step.stageIndex,
+        branchIndex: step.branchIndex,
+        prompt,
+        status: "done",
+        text: facts.text,
+        usage: emptyUsage(),
+        ...(facts.record === undefined ? {} : { record: facts.record }),
+        ...(facts.contract === undefined ? {} : { contract: facts.contract }),
+      });
+    }
+    prev = combineStageText(results);
+    prevContracts = results.map((result) => result.contract);
+    prevStageParallel = stage.parallel;
+  }
+  return hashes;
+}
+
+/**
+ * Dispatch one step: once, or once per model when it declared `[race:a|b]`.
+ *
+ * The seam sits ABOVE the lane decision on purpose. A race is a question about
+ * how many dispatches a step gets, not about how any one of them runs — every
+ * arm below this point is an ordinary step with its own signal, its own
+ * worktree, its own live row and its own bill.
+ *
+ * A fork's `--model` pin COLLAPSES a race to a single run. `/workflow fork …
+ * --model x` is a person saying "the same pipeline, from here, on x"; running
+ * the race the file asked for anyway would answer a question nobody asked and
+ * charge for three models to do it.
+ *
+ * @param request - The step request.
+ * @param options - The runner's wiring.
+ * @param runOne - One dispatch of one step on one model.
+ */
+async function dispatchStep(
+  request: WorkflowStepRequest,
+  options: RuntimeRunStepOptions,
+  runOne: WorkflowStepRunner,
+): Promise<WorkflowStepOutcome> {
+  const tags = request.step.race ?? [];
+  if (tags.length < 2) return await runOne(request);
+  if (options.modelOverride?.(request.step.id) !== undefined) return await runOne(request);
+  return await dispatchRacedStep(request, tags, options, runOne);
+}
+
+/**
+ * Run one step on every model its `[race:…]` names and return ONE outcome.
+ *
+ * Everything about the reduction lives in `workflow-race.ts`; this function is
+ * the engine-side half of it — resolving the tags, building each arm's
+ * request, judging an outcome against the step's own contract, recording every
+ * arm in the insights ledger, and folding the losers' complaints into the one
+ * error the retry classifier sees when nobody clears the gate.
+ *
+ * @param request - The step request.
+ * @param tags - The model tags, in written order.
+ * @param options - The runner's wiring.
+ * @param runOne - One dispatch of one step on one model.
+ */
+async function dispatchRacedStep(
+  request: WorkflowStepRequest,
+  tags: readonly string[],
+  options: RuntimeRunStepOptions,
+  runOne: WorkflowStepRunner,
+): Promise<WorkflowStepOutcome> {
+  const { step } = request;
+  if (!options.resolveModel) {
+    return refusedStep(
+      `step ${step.id} races models ${tags.join(", ")} but no model resolver was supplied`,
+    );
+  }
+  const arms: RaceArmSpec[] = [];
+  for (const tag of tags) {
+    const spec = options.resolveModel(tag);
+    if (!spec) {
+      return refusedStep(`step ${step.id} races model tag "${tag}", which is not a known model id`);
+    }
+    arms.push({ tag, model: spec.id });
+  }
+  // Resolved once, in the same order, so an arm's request and its record can
+  // never name different models.
+  const specs = tags.map((tag) => options.resolveModel?.(tag));
+
+  /**
+   * THE GATE. An arm wins by producing something the pipeline can actually
+   * use: not an error, not the void, and — when the step declared a contract —
+   * a reply that validates against it. Speed decides only among answers that
+   * already qualify, which is the whole difference between racing models and
+   * picking whichever one gives up first.
+   */
+  const judge = (outcome: WorkflowStepOutcome): RaceVerdict => {
+    if (outcome.isError) return "failed";
+    if (stepOutcomeIsVoid(outcome)) return "void";
+    const name = step.contract;
+    if (name === undefined) return "clears";
+    const declared = options.resolveContract?.(name);
+    // Nothing to check against: the pre-contract gate, never a silent pass of
+    // something that should have been checked (the parser refuses a step whose
+    // contract the file never declared, so this is unreachable in production).
+    if (declared === undefined) return "clears";
+    const found = extractContractJson(outcome.text);
+    if (!found.ok) return "failed";
+    return validateContract(declared, found.value).ok ? "clears" : "failed";
+  };
+
+  // THE APPLY CLAIM (write lane): granted to the first arm whose work would
+  // clear the gate, and to nobody else while that arm holds it — see
+  // {@link WorkflowStepRequest.raceApplyClaim} for the double-apply this
+  // closes. The claim itself lives in `runStepRace` (it is what decides when
+  // the losers are cut), and is provisional: an arm whose `git apply` is
+  // refused reports that through {@link WorkflowStepRequest.raceApplySettled}
+  // and the claim goes back, so a sibling can still land and win the step.
+  let claim: RaceApplyClaim | undefined;
+  const claimApply = (index: number, preview: { text: string; files: number }): boolean => {
+    const cleared = judge({
+      text: preview.text,
+      usage: emptyUsage(),
+      isError: false,
+      record: {
+        status: "captured",
+        role: step.agent ?? "",
+        stepId: step.id,
+        files: preview.files,
+      },
+    });
+    if (cleared !== "clears") return false;
+    return claim?.take(index) ?? true;
+  };
+
+  const race = await runStepRace<WorkflowStepOutcome>({
+    arms,
+    signal: request.signal,
+    addUsage,
+    emptyUsage,
+    usageOf: (outcome) => outcome.usage,
+    judge,
+    onClaim: (lever) => {
+      claim = lever;
+    },
+    ...(request.onUsage === undefined ? {} : { onUsage: request.onUsage }),
+    runArm: async (arm, index, signal, onUsage) => {
+      const spec = specs[index];
+      return await runOne({
+        ...request,
+        ...(spec === undefined ? {} : { model: spec }),
+        signal,
+        onUsage,
+        raceSlot: index,
+        raceLabel: arm.model,
+        raceApplyClaim: (preview) => claimApply(index, preview),
+        raceApplySettled: (landed) => claim?.settle(index, landed),
+      });
+    },
+  });
+
+  // Every arm reaches the ledger, because "which model won this step, and how
+  // often" is a question only per-arm records can answer. The winner is
+  // recorded by the engine's own `commitStepEnd` (as `race: "won"`); the
+  // losers are recorded here, `superseded` so nothing that counts steps counts
+  // them twice.
+  const scope = options.insights;
+  if (scope?.recorder.enabled) {
+    const champion = race.winner ?? race.fallback;
+    for (const record of race.records) {
+      if (record.index === champion.index) continue;
+      scope.recorder.record({
+        kind: "step-end",
+        workflow: scope.workflow,
+        runId: scope.runId,
+        stepId: step.id,
+        ...(step.agent === undefined ? {} : { role: step.agent }),
+        status: record.verdict === "clears" ? "done" : "failed",
+        ...(record.outcome?.failureKind === undefined
+          ? {}
+          : { failureKind: record.outcome.failureKind }),
+        model: record.arm.model,
+        durationMs: record.durationMs,
+        usage: record.outcome?.usage ?? emptyUsage(),
+        attempts: 1,
+        superseded: true,
+        race: "lost",
+        // WHY it lost, which is the difference between evidence about the
+        // model and evidence about the race: `aborted` and `slower` say
+        // nothing bad about this arm, and only `failed`/`void` are a stop the
+        // forecast should hold against it. See {@link StepEndRecord.raceOutcome}.
+        raceOutcome: loserOutcome(record),
+        ...(record.outcome?.lastTurn === undefined ? {} : { lastTurn: record.outcome.lastTurn }),
+        ...(record.outcome?.activity === undefined ? {} : { activity: record.outcome.activity }),
+      });
+    }
+  }
+
+  if (race.winner?.outcome !== undefined) {
+    return { ...race.winner.outcome, race: race.summary, raceUsage: race.usage };
+  }
+
+  // NOBODY CLEARED. The step must present exactly one failure to the retry
+  // policy, so it presents the last arm to settle — an ordinary outcome with
+  // an ordinary failure kind — and the other arms' complaints are folded into
+  // its message rather than lost. A run that parks here should not make a
+  // human open three worktrees to find out that all three models failed.
+  const fallback = race.fallback;
+  const base: WorkflowStepOutcome = fallback.outcome ?? {
+    text: "",
+    usage: emptyUsage(),
+    isError: true,
+    error: `step ${step.id} raced ${arms.map((arm) => arm.model).join(" and ")} and the ${fallback.arm.model} arm threw: ${errorText(fallback.thrown)}`,
+    failureKind: "agent-error",
+  };
+  const others = race.records
+    .filter((record) => record.index !== fallback.index)
+    .map(
+      (record) =>
+        `  ${record.arm.model}: ${record.outcome?.error === undefined ? record.verdict : oneLine(record.outcome.error, 160)}`,
+    );
+  const withOthers =
+    base.isError && others.length > 0
+      ? `${base.error ?? `step ${step.id} failed`}\nEvery arm of this race lost:\n${others.join("\n")}`
+      : base.error;
+  return {
+    ...base,
+    ...(withOthers === undefined ? {} : { error: withOthers }),
+    race: race.summary,
+    raceUsage: race.usage,
   };
 }
 
@@ -9566,8 +11189,14 @@ function formatWorkflowRun(result: WorkflowRunResult): string[] {
       step.record === undefined
         ? ""
         : ` [patch ${step.record.status}${step.record.files > 0 ? `, ${step.record.files} file(s)` : ""}]`;
+    // REFUSED CALLS ON THE STEP'S OWN LINE. A step whose every `bash` call was
+    // denied by the permission mode still reports `done`, and the role usually
+    // says in prose that the command it never ran would have passed. This is
+    // the only place the reader of a run report can learn otherwise.
+    const denied = step.activity?.denied ?? 0;
+    const blocked = denied === 0 ? "" : ` [${denied} tool call(s) denied]`;
     lines.push(
-      `  ${step.id}${step.agent ? ` @${step.agent}` : ""} ${step.status}${patch}${detail}`,
+      `  ${step.id}${step.agent ? ` @${step.agent}` : ""} ${step.status}${patch}${blocked}${detail}`,
     );
   }
   if (result.text.trim() !== "") lines.push("", result.text.trim());
@@ -9707,7 +11336,7 @@ export function createWorkflowCommands(
   const command: SlashCommand = {
     name: "workflow",
     description:
-      "Run a scripted multi-step workflow: /workflow <name> [args] · /workflow list · /workflow status [runId] · /workflow resume <runId> [answer]",
+      "Run a scripted multi-step workflow: /workflow <name> [args] · /workflow list · /workflow status [runId] · /workflow forecast <name> · /workflow resume <runId> [answer] · /workflow fork <runId> --at <stepId> · /workflow diff <runA> <runB>",
     source: "built-in",
     async run(context: CommandContext): Promise<void> {
       const { ui } = context;
@@ -9730,6 +11359,84 @@ export function createWorkflowCommands(
           if (!run) ui.notice("error", `No run journal for "${runId}". Try /workflow status.`);
           else ui.print(formatRunDetail(run));
         }
+        return;
+      }
+
+      // Duration/cost/tokens/stop-risk prediction from the local insights
+      // ledger, over the SAME discovery and role catalog the run itself
+      // uses — a forecast that resolved a step's role from a different
+      // catalog than the run would be a forecast of a different pipeline.
+      if (trimmedArgs === "forecast" || trimmedArgs.startsWith("forecast ")) {
+        const rest = trimmedArgs === "forecast" ? "" : trimmedArgs.slice("forecast".length).trim();
+        const tokens = rest.split(/\s+/).filter((token) => token.length > 0);
+        const asJson = tokens.includes("--json");
+        const name = tokens.find((token) => token !== "--json");
+        if (name === undefined) {
+          ui.notice("error", "Usage: /workflow forecast <name> [--json]");
+          return;
+        }
+        const forecastWarnings: string[] = [];
+        const forecastWorkflows = await discover(workflowRoots(runtime), forecastWarnings);
+        for (const warning of forecastWarnings) ui.notice("warn", warning);
+        const target = forecastWorkflows.find((candidate) => candidate.name === name.toLowerCase());
+        if (!target) {
+          ui.notice("error", `No workflow named "${name}". Try /workflow list.`);
+          return;
+        }
+        const forecastRoles = (options.agents ?? ((host) => host.agents ?? new Map()))(runtime);
+        let forecastLedger: InsightsLedger;
+        try {
+          forecastLedger = await readInsightsLedger(runtime.paths.home);
+        } catch (error) {
+          ui.notice("error", error instanceof Error ? error.message : String(error));
+          return;
+        }
+        const forecast = forecastWorkflow({
+          workflow: target,
+          roles: forecastRoles,
+          resolveStepModel: (step) =>
+            resolveForecastStepModel(
+              step,
+              forecastRoles,
+              (tag) => resolveTag?.(tag),
+              // `WorkflowCommandRuntime.router` only declares `specForTier`
+              // (the tier surface this command needs for `[tier:x]` tags);
+              // `specForTier("subagent")` resolves to the same subagent
+              // default `specFor("subagent")` would — an unconfigured tier
+              // name falls back to exactly that route (router.ts).
+              () => runtime.router?.specForTier("subagent"),
+            ),
+          resolveModelSpec: (id) => resolveTag?.(id),
+          events: forecastLedger.events,
+          now: Date.now(),
+        });
+        ui.print(asJson ? formatForecastJson(forecast) : renderForecast(forecast));
+        return;
+      }
+
+      // Two runs side by side, from the durable journals alone — no discovery,
+      // no engine, no agent, so a run whose workflow file has since been
+      // deleted is still comparable. Placed beside `status` because it is the
+      // same kind of surface: a read of what already happened.
+      if (trimmedArgs === "diff" || trimmedArgs.startsWith("diff ")) {
+        const rest = trimmedArgs === "diff" ? "" : trimmedArgs.slice("diff".length).trim();
+        const tokens = rest.split(/\s+/).filter((token) => token.length > 0);
+        const asJson = tokens.includes("--json");
+        const ids = tokens.filter((token) => token !== "--json");
+        if (ids.length !== 2 || ids[0] === undefined || ids[1] === undefined) {
+          ui.notice("error", "Usage: /workflow diff <runA> <runB> [--json]");
+          return;
+        }
+        const compared = await diffWorkflowRuns(
+          join(runtime.paths.home, "workflow-runs"),
+          ids[0],
+          ids[1],
+        );
+        if ("error" in compared) {
+          ui.notice("error", compared.error);
+          return;
+        }
+        ui.print(asJson ? formatWorkflowDiffJson(compared) : formatWorkflowDiff(compared));
         return;
       }
 
@@ -9795,6 +11502,16 @@ export function createWorkflowCommands(
               // run's artifact dir — the ones a resume re-seeds worktrees from.
               ...(lane === undefined ? {} : { writeLane: lane }),
               orgMemory,
+              // MODEL RACING: a raced step whose file declares a contract is
+              // gated on that contract, so the dispatch seam needs the
+              // declarations the parser read.
+              resolveContract: (name) => wf.contracts.get(name),
+              // A fork's `--model` pin, from the forked run's own journal. No
+              // fork, no overrides, and every step resolves its model exactly
+              // as the file says.
+              ...(resumeFrom?.modelOverrides === undefined
+                ? {}
+                : { modelOverride: (stepId: string) => resumeFrom.modelOverrides?.get(stepId) }),
               // The ledger plus this run's coordinates, so a step's own child
               // agent records its silences and progress warnings under the
               // step they belong to. `enabled: false` (or no ledger at all)
@@ -9837,6 +11554,31 @@ export function createWorkflowCommands(
             },
           });
           ui.print(formatWorkflowRun(result));
+          // THE CLOSING NOTICE FOR REFUSED TOOL CALLS.
+          //
+          // The gap it closes: a `ship`-style workflow whose builder is told
+          // "run `node --test` and make it pass" runs under the default
+          // permission mode, which has nobody to ask in a headless run and so
+          // denies every `bash` call. The role reads the files back instead
+          // and asserts in prose that the tests should pass; the step reports
+          // `done`; the run's correctness gate never fired. The only trace was
+          // one stderr line per denied subject, in a busy run.
+          //
+          // Printed for a run that recorded ANY denial, not only a headless
+          // one: the engine cannot see whether a person was at the keyboard,
+          // and a summary of what the permission layer refused is worth the
+          // same line either way.
+          const deniedCalls = result.steps.reduce(
+            (total, step) => total + (step.activity?.denied ?? 0),
+            0,
+          );
+          if (deniedCalls > 0) {
+            ui.notice(
+              "warn",
+              `${deniedCalls} tool call(s) were denied by the permission mode; run with ` +
+                "--permission-mode acceptEdits or yolo, or add rules to allow them.",
+            );
+          }
           // A pause is a clean, resumable stop, not an error — its question is
           // already surfaced (per-step notice + live block) and the caller
           // offers the human a way to answer. Everything else non-`done` is a
@@ -9875,6 +11617,43 @@ export function createWorkflowCommands(
                 ...(spentOn === undefined ? [] : [describeActivity(spentOn)]),
               ].join("\n"),
             );
+          }
+          // THE FEEDBACK LOOP. A run that just finished is the best evidence
+          // this repository will produce about itself — which commands worked,
+          // which step thrashed, where the files it wrote actually live — and
+          // until now every byte of it died with the process. Refresh the map
+          // from the checkout the run left behind, plus this run's own
+          // lessons, so the NEXT run starts where this one ended up.
+          //
+          // Best-effort throughout: this is an epilogue, not part of the run.
+          // It never throws into the caller, it is skipped for a `paused` run
+          // (which has not finished and will be resumed into this same code
+          // path), and its whole output is one line.
+          //
+          // `WorkflowCommandRuntime` is structural and says nothing about a
+          // brain, so the host is recovered by cast and the whole epilogue is
+          // skipped unless it really is one — a stub runtime in a test keeps
+          // the pre-brain behaviour without opting out of anything.
+          const brainHost = runtime as Partial<BrainHost>;
+          if (
+            result.status !== "paused" &&
+            typeof brainHost.cwd === "string" &&
+            typeof brainHost.createSubagent === "function" &&
+            brainHost.config !== undefined &&
+            brainAutoRefresh(brainHost.config.brain)
+          ) {
+            try {
+              const refresh = await refreshBrain({
+                host: brainHost as BrainHost,
+                runDir: join(runsRoot, runId),
+                workflow: wf.name,
+                runId,
+              });
+              ui.notice("info", describeBrainBuild(refresh));
+            } catch {
+              // A brain that cannot be refreshed is a stale map, not a failed
+              // run. The run's own result stands.
+            }
           }
           return result;
         } catch (error) {
@@ -9954,7 +11733,124 @@ export function createWorkflowCommands(
         if (result?.status === "paused" && result.pauses.length > 0) {
           await offerAnswer(result.pauses, runId);
         }
+        if (result === undefined) return;
+        // The two post-run offers: a run that struggled can improve its own kit
+        // (retro); a run that finished clean can become a reusable skill. Both
+        // are one-line hints — nothing is spent and nothing is asked here.
+        try {
+          // `WorkflowCommandRuntime` is structural; only a real ArcturnRuntime
+          // carries `config`. Absent config means the default: hints on.
+          const retroAuto = (runtime as { config?: { retro?: { auto?: boolean } } }).config?.retro
+            ?.auto;
+          if (retroAuto !== false) {
+            const { retroHint } = await import("./retro.js");
+            const hint = retroHint(result, runId);
+            if (hint !== undefined) ui.notice("info", hint);
+          }
+          const { skillSynthesisHint } = await import("./skill-synthesis.js");
+          const skillHint = skillSynthesisHint(result, runId);
+          if (skillHint !== undefined) ui.notice("info", skillHint);
+        } catch {
+          // A hint must never turn a finished run into a failure.
+        }
       };
+
+      // FORK: the same pipeline, from one step on, a different way. Everything
+      // finished before that step is copied in — terminals, patch files and
+      // the run's frozen baseline — and the new run then continues through the
+      // ordinary resume machinery, so a fork is never a second execution mode.
+      // It lives here rather than beside `status` because it needs the run
+      // machinery below (roles, the lane, `runAndOffer`), which a read-only
+      // surface does not.
+      if (trimmed === "fork" || trimmed.startsWith("fork ")) {
+        const parsed = parseForkArgs(trimmed === "fork" ? "" : trimmed.slice("fork".length));
+        if ("error" in parsed) {
+          ui.notice("error", parsed.error);
+          return;
+        }
+        const lines = await readJournalLines(join(runsRoot, parsed.runId));
+        if (lines.length === 0) {
+          ui.notice("error", `No run journal for "${parsed.runId}". Try /workflow status.`);
+          return;
+        }
+        const header = lines.find(
+          (line): line is Extract<JournalLine, { kind: "run" }> => line.kind === "run",
+        );
+        const sourceWorkflow = workflows.find(
+          (candidate) => candidate.name === (header?.workflow ?? ""),
+        );
+        if (!sourceWorkflow) {
+          ui.notice(
+            "error",
+            `Run ${parsed.runId} ran the workflow "${header?.workflow ?? "?"}", which is no ` +
+              "longer discoverable; restore the workflow file to fork it.",
+          );
+          return;
+        }
+        const forkId = createRunId();
+        // `--revert` needs a real checkout and a real `git`, which only the
+        // write lane has. Built for the NEW run id (its directory is created
+        // below, and the lane touches it lazily) so the fork's own patches and
+        // this revert share one apply queue: `serializeApply` keys by checkout,
+        // so a live run applying into the same tree can never interleave with
+        // the reverse apply below. Without a lane there is nothing to revert
+        // *with*, and saying so beats rewinding nothing and running anyway.
+        const forkLane = parsed.revert === true ? options.writeLane?.(runtime, forkId) : undefined;
+        if (parsed.revert === true && forkLane === undefined) {
+          ui.notice(
+            "error",
+            "--revert needs the write lane, and this session has none, so the source run's " +
+              "patches cannot be taken back out of your checkout.",
+          );
+          return;
+        }
+        const forked = await forkWorkflowRun({
+          runsRoot,
+          sourceRunId: parsed.runId,
+          at: parsed.at,
+          newRunId: forkId,
+          workflow: sourceWorkflow,
+          ...(parsed.model === undefined ? {} : { model: parsed.model }),
+          ...(parsed.raise === undefined ? {} : { raise: parsed.raise }),
+          ...(parsed.input === undefined ? {} : { input: parsed.input }),
+          ...(forkLane === undefined
+            ? {}
+            : {
+                revert: createForkRevert({
+                  git: forkLane,
+                  serialize: (task) => serializeApply(forkLane.cwd, task),
+                  // The plan and the outcome go to the same place every other
+                  // fork notice does, so `-p` sees them too: the flag is the
+                  // consent, so there is nothing here to answer.
+                  print: (line) => ui.notice("info", line),
+                }),
+              }),
+          promptHashes: (recorded) =>
+            replayPromptHashes(sourceWorkflow, parsed.input ?? header?.input ?? "", recorded),
+        });
+        if (!forked.ok) {
+          ui.notice("error", forked.error);
+          return;
+        }
+        await writeManifest(join(runsRoot, forkId), {
+          v: RUN_JOURNAL_SCHEMA_VERSION,
+          runId: forkId,
+          workflow: sourceWorkflow.name,
+          source: sourceWorkflow.source,
+          input: forked.input,
+          stepTimeoutMs: sourceWorkflow.stepTimeoutMs ?? DEFAULT_WORKFLOW_STEP_TIMEOUT_MS,
+          maxStepRetries: sourceWorkflow.maxStepRetries ?? DEFAULT_MAX_STEP_RETRIES,
+          startedAt: Date.now(),
+        });
+        ui.notice("info", describeFork(forked, sourceWorkflow.name));
+        // Re-read the journal the fork just wrote rather than trusting an
+        // in-memory copy of it: the state this run continues from must be the
+        // one on disk, which is also the one a later `/workflow resume` would
+        // build. A fork nobody could resume would not be a fork.
+        const forkState = buildResumeState(await readJournalLines(join(runsRoot, forkId)));
+        await runAndOffer(sourceWorkflow, forked.input, forkId, forkState);
+        return;
+      }
 
       // RESUME: continue a killed OR paused run from its journal, under the same
       // runId, so finished steps are never redone and their patches never
@@ -10143,6 +12039,37 @@ export function createWorkflowCommands(
         return;
       }
 
+      // A forecast banner, best-effort: it must never delay or fail a run, so
+      // any failure building it is swallowed rather than surfaced. Printed
+      // now, before the hygiene sweep below, so it is the first thing a
+      // human sees about THIS run before any of it starts.
+      try {
+        const bannerLedger = await readInsightsLedger(runtime.paths.home);
+        const banner = forecastWorkflow({
+          workflow,
+          roles,
+          resolveStepModel: (step) =>
+            resolveForecastStepModel(
+              step,
+              roles,
+              (tag) => resolveTag?.(tag),
+              // `WorkflowCommandRuntime.router` only declares `specForTier`
+              // (the tier surface this command needs for `[tier:x]` tags);
+              // `specForTier("subagent")` resolves to the same subagent
+              // default `specFor("subagent")` would — an unconfigured tier
+              // name falls back to exactly that route (router.ts).
+              () => runtime.router?.specForTier("subagent"),
+            ),
+          resolveModelSpec: (id) => resolveTag?.(id),
+          events: bannerLedger.events,
+          now: Date.now(),
+        });
+        const bannerLines = renderForecastBanner(banner);
+        if (bannerLines.length > 0) ui.notice("info", bannerLines.join("\n"));
+      } catch {
+        // Diagnostic only. A run must never be delayed or blocked by it.
+      }
+
       // Hygiene first, and only for a real run: a failed step keeps its
       // worktree on purpose, so without a sweep the debuggable-forever
       // promise turns into an unbounded pile of checkouts under ~/.arcturn.
@@ -10209,6 +12136,28 @@ export function reportWorkflowEvent(event: WorkflowEvent, ui: Pick<CommandUi, "n
           event.result.status === "failed" ? "error" : "warn",
           `Step ${event.result.id} ${event.result.status}${event.result.error ? `: ${oneLine(event.result.error, 70)}` : ""}`,
         );
+      } else if (event.result.judges !== undefined && !event.result.judges.agreed) {
+        // A step that needed an arbiter succeeded, so nothing above fires —
+        // but "your judges split" is the finding, and it belongs in the
+        // scrollback rather than only in the journal.
+        ui.notice(
+          "warn",
+          `Step ${event.result.id} judges split (${event.result.judges.verdicts.join(" vs ")})` +
+            `${event.result.judges.arbiterVerdict === undefined ? "" : `; arbiter chose ${event.result.judges.arbiterVerdict}`}.`,
+        );
+      } else if (event.result.race !== undefined) {
+        // A race resolving is the one thing about a raced step an operator
+        // cannot see any other way: two rows lit up, one of them stopped, and
+        // without this line nothing ever says which model's answer they got.
+        ui.notice(
+          "info",
+          `Step ${event.result.id} race: ${describeRace(
+            event.result.race,
+            event.result.startedAt !== undefined && event.result.endedAt !== undefined
+              ? event.result.endedAt - event.result.startedAt
+              : undefined,
+          )}.`,
+        );
       } else if (event.result.record?.status === "applied") {
         // A durable one-line record that a patch actually landed — the
         // transcript, not just the ephemeral block, should carry it.
@@ -10217,6 +12166,9 @@ export function reportWorkflowEvent(event: WorkflowEvent, ui: Pick<CommandUi, "n
           `Step ${event.result.id} applied patch (${event.result.record.files} file(s)).`,
         );
       }
+      break;
+    case "judgesDisagreed":
+      ui.notice("warn", judgesDisagreementNotice(event.id, event.verdicts));
       break;
     default:
       break;

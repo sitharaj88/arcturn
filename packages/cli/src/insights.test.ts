@@ -27,6 +27,7 @@ import type { AgentDef } from "./agents.js";
 import {
   aggregateInsights,
   createInsightsRecorder,
+  formatInsightsJson,
   INSIGHTS_PRIVACY_STATEMENT,
   type InsightsEvent,
   insightsFile,
@@ -43,6 +44,7 @@ import {
   SHARE_URL_MAX_BYTES,
   type SilentTurnRecord,
   type StepEndRecord,
+  stampEvent,
 } from "./insights.js";
 import type { ArcturnRuntime } from "./runtime.js";
 import { resolveWindow } from "./stats.js";
@@ -550,6 +552,81 @@ describe("the ledger records failure-shaped events, and nothing else", () => {
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain("insights ledger could not be written");
     expect(warnings[0]).toContain('"insights": false');
+  });
+
+  /**
+   * TYPED CONTRACTS AND JUDGES, through the whitelist.
+   *
+   * The temptation with both is to spread what the engine already has — the
+   * validated object, the panel record — onto the ledger line, and both would
+   * then carry a verdict about the user's own code into the one artefact with
+   * a `--share` button on it. `contract` collapses to a bare `true`, and a
+   * panel contributes three numbers.
+   */
+  it("records a contract as a marker and a panel as counts, never a verdict", async () => {
+    const scratch = await makeScratch();
+    roots.push(scratch.root);
+    const recorder = createInsightsRecorder({ home: scratch.home, now: () => 11 });
+    recorder.record({
+      kind: "step-end",
+      workflow: "pipeline",
+      runId: "r1",
+      stepId: "3",
+      role: "reviewer",
+      status: "done",
+      durationMs: 900,
+      usage: { inputTokens: 1, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      attempts: 1,
+      contract: true,
+      judges: { count: 2, agreed: false, arbitrated: true },
+    });
+    await recorder.flush();
+
+    const { events } = await readInsightsLedger(scratch.home);
+    expect(events[0]).toEqual({
+      v: 1,
+      ts: 11,
+      kind: "step-end",
+      workflow: "pipeline",
+      runId: "r1",
+      stepId: "3",
+      role: "reviewer",
+      status: "done",
+      durationMs: 900,
+      usage: { inputTokens: 1, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      attempts: 1,
+      contract: true,
+      judges: { count: 2, agreed: false, arbitrated: true },
+    });
+  });
+
+  it("drops a contract value or a verdict smuggled in beside the counts", async () => {
+    const scratch = await makeScratch();
+    roots.push(scratch.root);
+    const recorder = createInsightsRecorder({ home: scratch.home, now: () => 12 });
+    recorder.record({
+      kind: "step-end",
+      workflow: "pipeline",
+      runId: "r1",
+      stepId: "3",
+      status: "done",
+      durationMs: 1,
+      usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      attempts: 1,
+      // Neither of these is a field of the record, and the whitelist is what
+      // makes that a guarantee rather than a convention.
+      contract: { decision: "DO-NOT-SHIP" },
+      judges: { count: 2, agreed: false, arbitrated: true, verdicts: ["SHIP", "DO-NOT-SHIP"] },
+    } as never);
+    await recorder.flush();
+
+    const bytes = JSON.stringify((await readInsightsLedger(scratch.home)).events);
+    expect(bytes).not.toContain("DO-NOT-SHIP");
+    expect(bytes).not.toContain("verdicts");
+    // The truthy-but-not-`true` contract is dropped rather than coerced: a
+    // marker whose value came from the run is not a marker.
+    expect(bytes).not.toContain('"contract"');
+    expect(bytes).toContain('"judges":{"count":2,"agreed":false,"arbitrated":true}');
   });
 });
 
@@ -2314,6 +2391,8 @@ describe("arcturn insights", () => {
       "silentTurns",
       "stepFailures",
       "slowestRoles",
+      "judgePanels",
+      "races",
     ]);
     expect(parsed.runs.total).toBe(4);
     expect(parsed.silentTurns[0]?.recoveryRate).toBe(1);
@@ -2439,5 +2518,251 @@ describe("renderInsights omits what it has nothing to say about", () => {
     expect(text).not.toContain("Silent turns");
     expect(text).not.toContain("Step failures");
     expect(text).not.toContain("Slowest roles");
+  });
+});
+
+// ----------------------------------------------------------------- racing
+
+describe("the ledger's record of a model race", () => {
+  it("keeps a step-end's race side, and only the two values that exist", () => {
+    const base = {
+      kind: "step-end" as const,
+      workflow: "wf",
+      runId: "r",
+      stepId: "1",
+      status: "done",
+      durationMs: 41_000,
+      usage: { inputTokens: 1, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      attempts: 1,
+    };
+    expect(stampEvent({ ...base, model: "glm-5.3-flash", race: "won" }, 5)).toMatchObject({
+      race: "won",
+      model: "glm-5.3-flash",
+    });
+    // The losing arm is `superseded`, so every tally that counts steps counts
+    // this step once — and its own model and duration are what make the record
+    // worth keeping at all.
+    expect(
+      stampEvent(
+        { ...base, status: "failed", model: "glm-5.3", superseded: true, race: "lost" },
+        5,
+      ),
+    ).toMatchObject({ race: "lost", superseded: true, model: "glm-5.3", durationMs: 41_000 });
+    // Anything else is dropped by the whitelist, like every other field.
+    expect(
+      stampEvent({ ...base, race: "drew" } as unknown as Parameters<typeof stampEvent>[0], 5),
+    ).not.toHaveProperty("race");
+  });
+
+  it("keeps WHY a loser lost, and only the four outcomes that exist", () => {
+    const base = {
+      kind: "step-end" as const,
+      workflow: "wf",
+      runId: "r",
+      stepId: "1",
+      status: "failed",
+      model: "glm-5.3",
+      durationMs: 41_000,
+      usage: { inputTokens: 1, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      attempts: 1,
+      superseded: true,
+      race: "lost" as const,
+    };
+    for (const raceOutcome of ["aborted", "failed", "void", "slower"] as const) {
+      expect(stampEvent({ ...base, raceOutcome }, 5)).toMatchObject({ raceOutcome });
+    }
+    expect(
+      stampEvent(
+        { ...base, raceOutcome: "gave up" } as unknown as Parameters<typeof stampEvent>[0],
+        5,
+      ),
+    ).not.toHaveProperty("raceOutcome");
+  });
+
+  /**
+   * A lost arm's `failed` is the engine cutting it off, not a fault: counting
+   * its `cancelled` put a phantom step failure in `arcturn insights` on every
+   * single run of a raced step — a fault count describing the engine's own
+   * bookkeeping. Superseded RETRY attempts still count, which is what that
+   * tally is for.
+   */
+  it("leaves a losing arm out of the step counts AND out of the failure-kind tally", () => {
+    const events = [
+      stampEvent(
+        {
+          kind: "step-end",
+          workflow: "wf",
+          runId: "r",
+          stepId: "1",
+          role: "builder",
+          status: "done",
+          model: "fast",
+          durationMs: 1_000,
+          usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 },
+          attempts: 1,
+          race: "won",
+        },
+        1,
+      ),
+      stampEvent(
+        {
+          kind: "step-end",
+          workflow: "wf",
+          runId: "r",
+          stepId: "1",
+          role: "builder",
+          status: "failed",
+          failureKind: "cancelled",
+          model: "slow",
+          durationMs: 2_000,
+          usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 },
+          attempts: 1,
+          superseded: true,
+          race: "lost",
+        },
+        2,
+      ),
+    ];
+    const report = aggregateInsights(events, { window: { label: "all" } });
+    expect(report.stepFailures.byFailureKind).toEqual([]);
+    // …and the winner is still the one step this race ran.
+    expect(report.stepFailures.byRole).toEqual([]);
+  });
+});
+
+// ------------------------------------------- judge panels and races, counted
+
+describe("what `arcturn insights` says about panels and races", () => {
+  const base = {
+    kind: "step-end" as const,
+    workflow: "review",
+    runId: "r1",
+    stepId: "2",
+    role: "reviewer",
+    durationMs: 1_000,
+    usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    attempts: 1,
+  };
+
+  it("counts judge panels by workflow and step, and how many needed an arbiter", () => {
+    const report = aggregateInsights(
+      [
+        stampEvent(
+          {
+            ...base,
+            status: "done",
+            judges: { count: 2, agreed: true, arbitrated: false },
+          },
+          1,
+        ),
+        stampEvent(
+          {
+            ...base,
+            runId: "r2",
+            status: "done",
+            judges: { count: 2, agreed: false, arbitrated: true },
+          },
+          2,
+        ),
+        // A different step's panel is its own row.
+        stampEvent(
+          {
+            ...base,
+            runId: "r3",
+            stepId: "4",
+            status: "done",
+            judges: { count: 3, agreed: true, arbitrated: false },
+          },
+          3,
+        ),
+      ],
+      { window: { label: "all" } },
+    );
+    expect(report.judgePanels).toEqual([
+      { workflow: "review", stepId: "2", panels: 2, agreed: 1, arbitrated: 1 },
+      { workflow: "review", stepId: "4", panels: 1, agreed: 1, arbitrated: 0 },
+    ]);
+    const text = renderInsights(report).join("\n");
+    expect(text).toContain("Judge panels (3, 1 arbitrated)");
+    // Counts and names only: no verdict can reach this surface.
+    expect(text).not.toContain("SHIP");
+  });
+
+  it("counts races by model and says HOW the losers lost", () => {
+    const report = aggregateInsights(
+      [
+        stampEvent({ ...base, status: "done", model: "fast", race: "won" }, 1),
+        stampEvent(
+          {
+            ...base,
+            status: "failed",
+            failureKind: "cancelled",
+            model: "slow",
+            superseded: true,
+            race: "lost",
+            raceOutcome: "aborted",
+          },
+          1,
+        ),
+        stampEvent({ ...base, runId: "r2", status: "done", model: "fast", race: "won" }, 2),
+        stampEvent(
+          {
+            ...base,
+            runId: "r2",
+            status: "failed",
+            failureKind: "agent-error",
+            model: "slow",
+            superseded: true,
+            race: "lost",
+            raceOutcome: "failed",
+          },
+          2,
+        ),
+      ],
+      { window: { label: "all" } },
+    );
+    // Two races, counted once each — on the winner's terminal.
+    expect(report.races.total).toBe(2);
+    expect(report.races.byModel).toEqual([
+      { model: "fast", won: 2, lost: 0 },
+      { model: "slow", won: 0, lost: 2 },
+    ]);
+    expect(report.races.lossesByOutcome).toEqual([
+      { outcome: "aborted", count: 1 },
+      { outcome: "failed", count: 1 },
+    ]);
+    const text = renderInsights(report).join("\n");
+    expect(text).toContain("Races (2)");
+    expect(text).toContain("losses: aborted 1, failed 1");
+    // …and a lost arm is still no step failure and no fault for its role.
+    expect(report.stepFailures.byFailureKind).toEqual([]);
+  });
+
+  /**
+   * A typed-reply miss is already a failure kind like any other, so it needs
+   * no section of its own — this pins that it actually reaches the table an
+   * operator reads.
+   */
+  it("shows a contract miss in the failure-kind table like any other fault", () => {
+    const report = aggregateInsights(
+      [stampEvent({ ...base, status: "failed", failureKind: "contract" }, 1)],
+      { window: { label: "all" } },
+    );
+    expect(report.stepFailures.byFailureKind).toEqual([{ failureKind: "contract", count: 1 }]);
+    expect(renderInsights(report).join("\n")).toContain("contract");
+  });
+
+  it("says nothing about either when a ledger has neither", () => {
+    const report = aggregateInsights([stampEvent({ ...base, status: "done" }, 1)], {
+      window: { label: "all" },
+    });
+    const text = renderInsights(report).join("\n");
+    expect(text).not.toContain("Judge panels");
+    expect(text).not.toContain("Races");
+    // The --json aggregate always carries the shape, empty.
+    expect(JSON.parse(formatInsightsJson(report))).toMatchObject({
+      judgePanels: [],
+      races: { total: 0, byModel: [], lossesByOutcome: [] },
+    });
   });
 });

@@ -685,3 +685,136 @@ describe("rag-blueprint/rag-setup: the architect goes silent, as it did for real
     DYNAMIC_TIMEOUT_MS,
   );
 });
+
+// ------------------------------------------- a synthetic kit, the real engine
+//
+// TYPED CONTRACTS AND JUDGES, driven through exactly the production wiring
+// above but over a kit written here rather than a shipped one. The shipped
+// kits are deliberately untouched — a construct this new does not belong in
+// what users install until it has run somewhere first — and the point of the
+// fixture is that nothing about the path is a stand-in: a real git checkout, a
+// real runtime, `loadAgentDefs` over a real role file, `createRuntimeRunStep`,
+// a file journal, and a model that answers in fenced json blocks.
+
+const SYNTHETIC_FENCE = "```";
+
+/** The reviewer role the synthetic kit ships: read-only, as judges require. */
+const JUDGE_ROLE = [
+  "---",
+  "name: verdict-judge",
+  "description: Judges a change and returns a typed verdict.",
+  "tools: [read, glob]",
+  "---",
+  "",
+  "You are a reviewer. Answer only with the contract's json block.",
+].join("\n");
+
+/** A two-stage workflow: a judged, contract-bound verdict, then a step that reads it. */
+const JUDGED_WORKFLOW = [
+  "---",
+  "name: verdict-check",
+  "description: Judge a change, then act on the decision.",
+  "---",
+  "",
+  "1. [judges:2] [contract:verdict] @verdict-judge Judge {{input}}",
+  "2. Report the decision: {{contract.decision}}",
+  "",
+  `${SYNTHETIC_FENCE}contract verdict`,
+  "decision: SHIP | DO-NOT-SHIP",
+  "confidence: number",
+  SYNTHETIC_FENCE,
+].join("\n");
+
+/** A contract reply, wrapped in the prose a real model puts around it. */
+function contractTurn(decision: string, confidence: number): ScriptedTurn {
+  return {
+    text: [
+      "I looked at the change and here is my call.",
+      "",
+      `${SYNTHETIC_FENCE}json`,
+      JSON.stringify({ decision, confidence }),
+      SYNTHETIC_FENCE,
+    ].join("\n"),
+  };
+}
+
+describe("contracts and judges run through the real engine over a synthetic kit", () => {
+  itPosix(
+    "arbitrates a split and hands the arbiter's decision to the next stage",
+    async () => {
+      const scratch = await gitScratch();
+      const agentsDir = join(scratch.cwd, ".arcturn", "agents");
+      await mkdir(agentsDir, { recursive: true });
+      await writeFile(join(agentsDir, "verdict-judge.md"), JUDGE_ROLE, "utf8");
+
+      const warnings: string[] = [];
+      const defs = await loadAgentDefs([agentsDir], warnings);
+      expect(warnings).toEqual([]);
+      const roles = new Map(defs.map((def) => [def.name, def]));
+      // The pre-flight rule this fixture depends on: judging is a read.
+      expect(roleDispatch(roles.get("verdict-judge") as AgentDef)).toBe("read");
+
+      // Judge 1 says SHIP, judge 2 says DO-NOT-SHIP, and the arbiter — the one
+      // request that carries both replies — sides with the second.
+      let judged = 0;
+      const llm = respondingLLM((request) => {
+        const first = request.messages.find((message) => message.role === "user");
+        const prompt = first === undefined ? "" : contentText(first.content);
+        if (prompt.includes("independent judges disagreed")) {
+          return contractTurn("DO-NOT-SHIP", 0.9);
+        }
+        if (prompt.includes("Judge ")) {
+          judged += 1;
+          return judged === 1 ? contractTurn("SHIP", 0.6) : contractTurn("DO-NOT-SHIP", 0.7);
+        }
+        return { text: "reported" };
+      });
+
+      const runtime = await runtimeWith(scratch, llm);
+      const parsed = parseWorkflow(JUDGED_WORKFLOW, { name: "verdict-check" });
+      if (isWorkflowParseError(parsed)) throw new Error(parsed.error);
+      const resolveAgent = (name: string): AgentDef | undefined => roles.get(name);
+      const agentNames = (): string[] => [...roles.keys()];
+      const resolveModel = composeTagResolver(runtime, undefined);
+      const runId = "conformance-synthetic-judges";
+      const journalDir = join(scratch.home, "journals", runId);
+      const result = await runWorkflow(parsed, {
+        input: "the pending change",
+        resolveAgent,
+        agentNames,
+        ...(resolveModel === undefined ? {} : { resolveModel }),
+        journal: createFileRunJournal(journalDir),
+        runId,
+        runStep: createRuntimeRunStep(runtime, {
+          resolveAgent,
+          agentNames,
+          ...(resolveModel === undefined ? {} : { resolveModel }),
+          writeLane: laneFor(runtime, runId),
+        }),
+      });
+
+      expect(result.status, describeRun(result)).toBe("done");
+      // Two judges plus one arbiter for step 1, then step 2.
+      expect(llm.requests).toHaveLength(4);
+      expect(result.steps[0]?.judges).toEqual({
+        count: 2,
+        verdicts: ["SHIP", "DO-NOT-SHIP"],
+        agreed: false,
+        arbitrated: true,
+        arbiterVerdict: "DO-NOT-SHIP",
+      });
+      expect(result.steps[0]?.contract).toEqual({ decision: "DO-NOT-SHIP", confidence: 0.9 });
+      // The next stage read the ARBITER's field, through the real dispatch path.
+      expect(result.steps[1]?.prompt).toContain("Report the decision: DO-NOT-SHIP");
+
+      const lines = await journalOnceEnded(journalDir);
+      const end = lines.find((line) => line.kind === "stepEnd" && line.id === "1");
+      expect(end).toMatchObject({
+        contract: { decision: "DO-NOT-SHIP", confidence: 0.9 },
+        judges: { count: 2, agreed: false, arbitrated: true },
+      });
+      expect(lines.findLast((line) => line.kind === "runEnd")).toMatchObject({ status: "done" });
+    },
+    DYNAMIC_TIMEOUT_MS,
+  );
+});

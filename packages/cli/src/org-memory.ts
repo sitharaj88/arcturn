@@ -330,6 +330,46 @@ function safeReportLine(raw: string, max: number): string {
   return cleaned.length > max ? `${cleaned.slice(0, max - 1)}…` : cleaned;
 }
 
+/**
+ * Control characters a spliced value may not carry — every one except the
+ * tab, the newline and the carriage return, which are the shape of the text
+ * itself rather than a way to hide something in it.
+ */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: collapsing control chars to spaces is the point.
+const SPLICE_CONTROL_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g;
+
+/**
+ * Neutralise untrusted text that is about to be SPLICED into another role's
+ * prompt, keeping everything a reader needs.
+ *
+ * The third member of this module's sanitiser family, and the loosest one on
+ * purpose. {@link sanitizeMemoryText} *refuses* a bad line (an operator can
+ * rewrite it); `safeReportLine` truncates to one bounded line (a digest row
+ * has a column to fit). This one is for a value the pipeline is built to pass
+ * on whole — a contract's `notes:` or `reasons:` — so it keeps the line
+ * breaks and the length and removes only what can *steer* the reader: the
+ * engine's control markers, the fence delimiters that bracket every untrusted
+ * region in a prompt, and the invisible characters that hide text from the
+ * human reviewing the same bytes.
+ *
+ * Lives here, beside the markers and fences themselves, so "what may not
+ * reach a prompt" has exactly one definition — the injection this closes was
+ * a value that skipped the filter every neighbouring channel already had.
+ *
+ * @param raw - Model-authored text bound for another role's prompt.
+ * @returns The same text with markers and fences neutralised in place.
+ */
+export function sanitizeSplicedText(raw: string): string {
+  let cleaned = raw.replace(INVISIBLE_CHARS, "").replace(SPLICE_CONTROL_CHARS, " ");
+  for (const marker of CONTROL_MARKERS) {
+    cleaned = cleaned.replace(new RegExp(escapeRegExp(marker), "gi"), "(marker removed)");
+  }
+  for (const fence of FENCES) {
+    cleaned = cleaned.replace(new RegExp(escapeRegExp(fence), "gi"), "(fence removed)");
+  }
+  return cleaned;
+}
+
 /** Normalise a role name into the charset `agents.ts` normalises names into. */
 function normalizeRole(raw: string): string {
   return raw.trim().toLowerCase().replace(ROLE_STRIP, "");

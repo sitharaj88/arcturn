@@ -19,10 +19,14 @@
 
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
+import { describeContractValue } from "./contracts.js";
 import { formatDuration, formatTokens, totalTokens } from "./format.js";
 import { FANCY_GLYPHS, type GlyphSet } from "./glyphs.js";
+import { describeJudges, type JudgesRecord } from "./judges.js";
 import type { WorkflowRunStatus, WorkflowStepStatus } from "./workflow.js";
+import { describeRace, raceSummaryFacts, type StepRaceSummary } from "./workflow-race.js";
 import {
+  activityFacts,
   BUDGET_ASK_STEP_ID,
   type BudgetAskAudience,
   type BudgetCeilingKind,
@@ -31,10 +35,12 @@ import {
   budgetAskResumeHint,
   describeActivity,
   describeLastTurn,
+  type ForkOrigin,
   type JournalLine,
   type PendingBudgetAsk,
   type PendingStepFailAsk,
   readJournalLines,
+  type StepActivity,
   stepFailAskFacts,
   stepFailAskQuestion,
   stepFailAskResumeHint,
@@ -58,6 +64,27 @@ export interface JournalStep {
   recordStatus?: string;
   startedAt?: number;
   endedAt?: number;
+  /** The validated object a `[contract:<name>]` step replied with. */
+  contract?: Record<string, unknown>;
+  /** What a `[judges:N]` step's panel decided. */
+  judges?: JudgesRecord;
+  /**
+   * MODEL RACING: how this step's race resolved, when it declared one.
+   *
+   * Read through {@link raceSummaryFacts} rather than trusted off the line: a
+   * journal is written by several versions of this program, and a torn or
+   * hand-edited block must cost this one line, not the whole status view.
+   */
+  race?: StepRaceSummary;
+  /**
+   * What the step's agent spent its turns on, when the terminal recorded it.
+   *
+   * Folded only so the DENIED count can be rendered: a step that reports
+   * `done` while the permission mode refused every command it was told to run
+   * looks perfect in every other column of this view. Validated off disk
+   * through {@link activityFacts} like every other folded record.
+   */
+  activity?: StepActivity;
 }
 
 /** One stage, as reconstructed from the journal. */
@@ -77,6 +104,19 @@ export interface JournalRun {
   stepTimeoutMs?: number;
   maxStepRetries?: number;
   readonly stages: JournalStage[];
+  /**
+   * Where this run was forked from, when its header says it was one.
+   *
+   * A forked run's first stages were copied rather than executed, and without
+   * this an operator reading `/workflow status` sees a run that finished six
+   * steps in nine seconds with no way to know why.
+   */
+  forkedFrom?: ForkOrigin;
+  /**
+   * What a `--revert` fork took back out of the user's checkout before this
+   * run started, from its `forkRevert` line. Absent for every other run.
+   */
+  forkRevert?: { steps: readonly string[]; patches: number };
   /** Last-known running spend, from the newest `budget` line. */
   spentUsd?: number;
   /**
@@ -237,10 +277,27 @@ export function foldJournal(
       case "run":
         run.workflow = line.workflow;
         run.source = line.source;
+        if (
+          line.forkedFrom !== undefined &&
+          typeof line.forkedFrom.runId === "string" &&
+          typeof line.forkedFrom.at === "string"
+        ) {
+          run.forkedFrom = line.forkedFrom;
+        }
         run.startedAt = line.startedAt;
         run.stepTimeoutMs = line.stepTimeoutMs;
         run.maxStepRetries = line.maxStepRetries;
         bumpWrite(run, line.startedAt);
+        break;
+      case "forkRevert":
+        // Tolerated the way every other folded-off-disk fact is: a torn line
+        // with no usable numbers is no revert, not a revert of `NaN` patches.
+        if (Array.isArray(line.steps) && typeof line.patches === "number" && line.patches > 0) {
+          run.forkRevert = {
+            steps: line.steps.filter((step): step is string => typeof step === "string"),
+            patches: line.patches,
+          };
+        }
         break;
       case "stageStart": {
         const stage = stageFor(line.stage);
@@ -284,6 +341,14 @@ export function foldJournal(
           startedAt: line.startedAt,
           endedAt: line.endedAt,
           ...(line.record?.status === undefined ? {} : { recordStatus: line.record.status }),
+          ...(line.contract === undefined ? {} : { contract: line.contract }),
+          ...(line.judges === undefined ? {} : { judges: line.judges }),
+          ...(raceSummaryFacts(line.race) === undefined
+            ? {}
+            : { race: raceSummaryFacts(line.race) }),
+          ...(activityFacts(line.activity) === undefined
+            ? {}
+            : { activity: activityFacts(line.activity) }),
         };
         if (step) Object.assign(step, patch);
         else {
@@ -298,6 +363,14 @@ export function foldJournal(
             startedAt: line.startedAt,
             endedAt: line.endedAt,
             ...(line.record?.status === undefined ? {} : { recordStatus: line.record.status }),
+            ...(line.contract === undefined ? {} : { contract: line.contract }),
+            ...(line.judges === undefined ? {} : { judges: line.judges }),
+            ...(raceSummaryFacts(line.race) === undefined
+              ? {}
+              : { race: raceSummaryFacts(line.race) }),
+            ...(activityFacts(line.activity) === undefined
+              ? {}
+              : { activity: activityFacts(line.activity) }),
           });
         }
         // The human-question gate: a `paused` terminal arms that step's pending
@@ -559,6 +632,21 @@ export function formatRunDetail(
   const state = deriveRunState(run, now);
   const lines = [`Run ${run.runId} — ${run.workflow ?? "?"} [${state}]`];
   if (run.source) lines.push(`  source: ${run.source}`);
+  if (run.forkedFrom) {
+    lines.push(`  forked from ${run.forkedFrom.runId} at step ${run.forkedFrom.at}`);
+  }
+  if (run.forkRevert && run.forkRevert.patches > 0) {
+    const steps = run.forkRevert.steps;
+    const span =
+      steps.length === 0
+        ? "later steps"
+        : steps.length === 1
+          ? `step ${steps[0]}`
+          : `steps ${steps[0]}-${steps[steps.length - 1]}`;
+    lines.push(
+      `  reverted ${run.forkRevert.patches} patch(es) from ${span} of the source run before starting`,
+    );
+  }
   const facts: string[] = [];
   if (run.spentUsd !== undefined) facts.push(`spend $${run.spentUsd.toFixed(2)}`);
   if (run.spentTokens !== undefined) {
@@ -588,6 +676,35 @@ export function formatRunDetail(
       }
       const tail = detail.length > 0 ? `  ${glyphs.dot} ${detail.join(` ${glyphs.dot} `)}` : "";
       lines.push(`  ${mark} ${step.id} ${label} — ${step.status}${tail}`);
+      // MODEL RACING: which models ran this step and how each of them ended.
+      // On its own line because a race answers a different question from "did
+      // this step work", and squeezing a three-arm race into the tail above
+      // would push the row past every terminal width.
+      if (step.race) {
+        const won =
+          step.startedAt !== undefined && step.endedAt !== undefined
+            ? Math.max(0, step.endedAt - step.startedAt)
+            : undefined;
+        lines.push(`      race: ${describeRace(step.race, won, glyphs.dot)}`);
+      }
+      // The typed reply, and how it was reached — on their own lines rather
+      // than in the `·`-joined tail, because both are the ANSWER a step
+      // produced, and the tail is a row of costs. A step that ran a panel is
+      // also the one step whose second line is worth more than its first:
+      // "judges: 2 · SHIP / DO-NOT-SHIP" is the finding.
+      if (step.judges !== undefined) {
+        lines.push(`      ${describeJudges(step.judges, glyphs.dot)}`);
+      }
+      if (step.contract !== undefined) {
+        lines.push(`      contract: ${contractSummary(step.contract)}`);
+      }
+      // REFUSED CALLS, and only refused calls. The whole activity line on
+      // every step would double the height of this view for a number that is
+      // usually zero; a step whose tools were BLOCKED is the one case where
+      // "done" is not the whole truth, so that is the case that gets a line.
+      if ((step.activity?.denied ?? 0) > 0 && step.activity !== undefined) {
+        lines.push(`      ${describeActivity(step.activity)}`);
+      }
     }
   }
   if (state === "paused") {
@@ -634,6 +751,41 @@ export function formatRunDetail(
     lines.push(`Resume with /workflow resume ${run.runId}`);
   }
   return lines;
+}
+
+/**
+ * One line describing a journalled contract value.
+ *
+ * The journal records the validated OBJECT, not the contract that shaped it —
+ * a run's `.md` file may have been edited or deleted by the time anyone reads
+ * its status, and a status view that had to re-parse the workflow to render a
+ * line would show nothing for exactly the runs worth looking at. So the
+ * object's own keys stand in for the declaration, in the order the model wrote
+ * them, and {@link describeContractValue} does the rest: scalars only, arrays
+ * left out, one line.
+ *
+ * @param value - The object recorded on the step's terminal.
+ */
+function contractSummary(value: Record<string, unknown>): string {
+  const keys = Object.keys(value);
+  const rendered = describeContractValue(
+    {
+      name: "contract",
+      line: 0,
+      fields: keys.map((name) => ({
+        name,
+        optional: true,
+        type: { kind: "string" as const },
+      })),
+    },
+    value,
+  );
+  // `describeContractValue` falls back to "<name>: N fields" when nothing in
+  // the object renders as a scalar (a contract whose fields are all arrays),
+  // and the synthetic contract's name is "contract" — which the caller has
+  // already printed. Without this the line read `contract: contract: 2 fields`.
+  const fallback = `${keys.length} field${keys.length === 1 ? "" : "s"}`;
+  return rendered === `contract: ${fallback}` ? fallback : rendered;
 }
 
 function stepMark(status: JournalStep["status"], glyphs: GlyphSet): string {

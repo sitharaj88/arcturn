@@ -40,6 +40,17 @@ export interface SystemPromptContext {
   agents?: readonly { name: string; description: string }[];
   /** Durable project notes, pre-rendered by `formatMemoriesForPrompt`. */
   memories?: string;
+  /**
+   * The project brain, pre-rendered and already fenced by
+   * `renderBrainPrompt` — a distilled map of the repository, refreshed from
+   * the checkout itself.
+   *
+   * Distinct from {@link SystemPromptContext.memories} on purpose: memory is
+   * what the model chose to write down, the brain is what the tree actually
+   * says. It arrives fenced because, unlike `ARCTURN.md` and memory, it was
+   * derived from files a repository someone cloned controls.
+   */
+  brain?: string;
 }
 
 /**
@@ -116,6 +127,13 @@ export function buildSystemPrompt(context: SystemPromptContext): string {
     );
   }
 
+  if (context.brain && context.brain.trim().length > 0) {
+    sections.push(
+      `# Project brain\nA distilled map of this repository, refreshed from the checkout. ` +
+        `Read it before exploring:\n${context.brain.trim()}`,
+    );
+  }
+
   if (context.agents && context.agents.length > 0) {
     const lines = context.agents.map(
       (agent) => `- ${agent.name}${agent.description === "" ? "" : `: ${agent.description}`}`,
@@ -186,6 +204,24 @@ export interface CollectContextOptions {
   append?: string;
   /** Names of the tools registered this session. */
   toolNames?: readonly string[];
+  /**
+   * Fields this function does not gather but its caller does, passed straight
+   * through onto the returned {@link SystemPromptContext}.
+   *
+   * They are declared here because they were not, and an object literal's
+   * excess properties are not checked through a conditional spread — so
+   * `buildRuntime` had been handing this function `memories` and `agents` for
+   * as long as both features have existed, and this function had been
+   * dropping them on the floor. Neither section ever reached a real session's
+   * prompt. Declaring them is the fix; the alternative (assembling the
+   * context at the call site) would leave the same trap set for the next
+   * field somebody adds.
+   */
+  memories?: string;
+  /** Pre-rendered, already-fenced project brain. Passed through, not gathered. */
+  brain?: string;
+  /** Named markdown sub-agents. Passed through, not gathered. */
+  agents?: readonly { name: string; description: string }[];
   /** Skip `git` and `ARCTURN.md` lookups (used by tests and `--print` fast paths). */
   skipRepoLookup?: boolean;
   /** Clock injection point. */
@@ -210,6 +246,9 @@ export async function collectSystemPromptContext(
     date: now.toISOString().slice(0, 10),
     ...(options.append ? { append: options.append } : {}),
     ...(options.toolNames ? { toolNames: options.toolNames } : {}),
+    ...(options.memories ? { memories: options.memories } : {}),
+    ...(options.brain ? { brain: options.brain } : {}),
+    ...(options.agents && options.agents.length > 0 ? { agents: options.agents } : {}),
   };
   if (options.skipRepoLookup) return context;
 

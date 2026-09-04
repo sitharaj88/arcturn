@@ -67,10 +67,21 @@ function normalizeName(raw: string): string {
   return raw.toLowerCase().replace(NAME_STRIP, "");
 }
 
-/** Parsed frontmatter fields understood by skill files. */
+/**
+ * Parsed frontmatter fields understood by skill files.
+ *
+ * `sourceRun` and `generated` are provenance stamps `skill-synthesis.ts`
+ * writes on a synthesized skill (`source-run:` / `generated:` in the file) —
+ * carried here so they parse without warning, but never read back into
+ * anything this loader does: a skill built by hand and one drafted from a run
+ * behave identically once loaded. Every OTHER unrecognised key stays silently
+ * ignored, as it always has (see {@link parseFrontmatter}).
+ */
 interface Frontmatter {
   description?: string;
   name?: string;
+  sourceRun?: string;
+  generated?: string;
 }
 
 /**
@@ -114,6 +125,8 @@ function parseFrontmatter(raw: string): { frontmatter: Frontmatter; body: string
     }
     if (key === "description") frontmatter.description = value;
     else if (key === "name") frontmatter.name = value;
+    else if (key === "source-run") frontmatter.sourceRun = value;
+    else if (key === "generated") frontmatter.generated = value;
   }
   const body = lines.slice(end + 1).join("\n");
   return { frontmatter, body };

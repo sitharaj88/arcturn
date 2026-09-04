@@ -222,8 +222,31 @@ export interface ArcturnConfig {
     maxResults?: number;
     searchToolName?: string;
   };
-  /** Skills features. `modelInvoked` exposes the skill library as a tool (default on). */
-  skills?: { modelInvoked?: boolean };
+  /**
+   * The project brain: a distilled, incrementally refreshed map of the
+   * repository (`<cwd>/.arcturn/brain`) injected into every agent's system
+   * prompt. Derived from the checkout by a read-only sub-agent — not memory,
+   * which the model writes for itself.
+   */
+  brain?: {
+    /** Build, inject and expose the `brain` tool at all (default `true`). */
+    enabled?: boolean;
+    /** Refresh the brain after a workflow run reaches a terminal status (default `true`). */
+    autoRefresh?: boolean;
+    /** Character budget for the injected block (default 6000). */
+    maxChars?: number;
+    /** How many directories get their own note (default 24). */
+    maxDirs?: number;
+    /** Model for the distiller sub-agent. Absent uses the `fast` tier, then the subagent route. */
+    model?: string;
+  };
+  /**
+   * Skills features. `modelInvoked` exposes the skill library as a tool
+   * (default on). `synthesisModel` is the catalog id or `tier:<name>` `arcturn
+   * skill synthesize` drafts with; absent uses the `fast` tier when
+   * configured, else the subagent route (see `skill-synthesis.ts`).
+   */
+  skills?: { modelInvoked?: boolean; synthesisModel?: string };
   /** OS sandbox for foreground bash commands (default "off"). */
   sandbox: "off" | "workspace-write";
   /** How to treat a mutating call that echoes untrusted fetched content. */
@@ -270,6 +293,17 @@ export interface ArcturnConfig {
    * is created.
    */
   insights: boolean;
+  /**
+   * Run retrospectives: after a workflow run, `arcturn retro <runId>` /
+   * `/retro <runId>` reads its journal and insights and proposes a patch to
+   * the kit's role prompts / workflow stages, as a diff you approve before it
+   * lands. `auto` (default `true`) controls whether `/workflow` prints the
+   * one-line hint after a run with any park, failed step or retried step.
+   * `model` overrides the model the retro's read-only sub-agent runs on
+   * (default: the configured `judgment` tier, else the ordinary subagent
+   * route). See [Self-improving kits](/docs/retro).
+   */
+  retro?: { auto?: boolean; model?: string };
   /**
    * Once a day, ask npm whether a newer `arcturn` exists and say so in one
    * line (default `true`). A notice, never an install: replacing a binary
@@ -407,6 +441,7 @@ const KNOWN_KEYS = new Set([
   "offloadLimits",
   "contextEditing",
   "deferredTools",
+  "brain",
   "skills",
   "sandbox",
   "maxCostUsd",
@@ -416,6 +451,7 @@ const KNOWN_KEYS = new Set([
   "verify",
   "audit",
   "insights",
+  "retro",
   "updateCheck",
   "notify",
   "provenance",
@@ -1147,7 +1183,31 @@ export function parseConfigFile(
         if (typeof skills.modelInvoked === "boolean") parsed.modelInvoked = skills.modelInvoked;
         else warnings.push(`${where}: "skills.modelInvoked" must be a boolean`);
       }
+      if (skills.synthesisModel !== undefined) {
+        if (typeof skills.synthesisModel === "string" && skills.synthesisModel.trim() !== "") {
+          parsed.synthesisModel = skills.synthesisModel.trim();
+        } else {
+          warnings.push(`${where}: "skills.synthesisModel" must be a non-empty string`);
+        }
+      }
       out.skills = parsed;
+    }
+  }
+  if (raw.retro !== undefined) {
+    if (!isRecord(raw.retro)) {
+      warnings.push(`${where}: "retro" must be an object`);
+    } else {
+      const retro = raw.retro;
+      const parsed: NonNullable<ArcturnConfig["retro"]> = {};
+      if (retro.auto !== undefined) {
+        if (typeof retro.auto === "boolean") parsed.auto = retro.auto;
+        else warnings.push(`${where}: "retro.auto" must be a boolean`);
+      }
+      if (retro.model !== undefined) {
+        if (typeof retro.model === "string" && retro.model.length > 0) parsed.model = retro.model;
+        else warnings.push(`${where}: "retro.model" must be a non-empty string`);
+      }
+      out.retro = parsed;
     }
   }
   if (raw.deferredTools !== undefined) {
@@ -1189,6 +1249,31 @@ export function parseConfigFile(
         }
       }
       out.deferredTools = parsed;
+    }
+  }
+  if (raw.brain !== undefined) {
+    if (!isRecord(raw.brain)) {
+      warnings.push(`${where}: "brain" must be an object`);
+    } else {
+      const brain = raw.brain;
+      const parsed: NonNullable<ArcturnConfig["brain"]> = {};
+      for (const key of ["enabled", "autoRefresh"] as const) {
+        const value = brain[key];
+        if (value === undefined) continue;
+        if (typeof value === "boolean") parsed[key] = value;
+        else warnings.push(`${where}: "brain.${key}" must be a boolean`);
+      }
+      for (const key of ["maxChars", "maxDirs"] as const) {
+        const value = brain[key];
+        if (value === undefined) continue;
+        if (typeof value === "number" && Number.isInteger(value) && value > 0) parsed[key] = value;
+        else warnings.push(`${where}: "brain.${key}" must be a positive integer`);
+      }
+      if (brain.model !== undefined) {
+        if (typeof brain.model === "string" && brain.model.length > 0) parsed.model = brain.model;
+        else warnings.push(`${where}: "brain.model" must be a non-empty model id`);
+      }
+      out.brain = parsed;
     }
   }
   if (raw.taint !== undefined) {
@@ -1378,6 +1463,9 @@ export function mergeConfig(
     ui: layer.ui ?? base.ui,
     audit: layer.audit ?? base.audit,
     insights: layer.insights ?? base.insights,
+    ...((layer.retro ?? base.retro) === undefined
+      ? {}
+      : { retro: { ...base.retro, ...layer.retro } }),
     updateCheck: layer.updateCheck ?? base.updateCheck,
     notify: layer.notify ?? base.notify,
     provenance: layer.provenance ?? base.provenance,
@@ -1397,6 +1485,9 @@ export function mergeConfig(
     ...((layer.deferredTools ?? base.deferredTools) === undefined
       ? {}
       : { deferredTools: { ...base.deferredTools, ...layer.deferredTools } }),
+    ...((layer.brain ?? base.brain) === undefined
+      ? {}
+      : { brain: { ...base.brain, ...layer.brain } }),
     ...((layer.skills ?? base.skills) === undefined
       ? {}
       : { skills: { ...base.skills, ...layer.skills } }),

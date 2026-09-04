@@ -68,6 +68,7 @@ runs with `--max-turns` instead.
 | `0` | Success — the run completed, or `--help`/`--version`/a listing printed. A tool the model asked for may still have been *refused*: a non-interactive run cannot ask, so it denies, tells the model, and says so on stderr. |
 | `1` | The run started but did not complete — a provider error, an interrupted run, or a ceiling (`--max-turns`, `--max-cost`) stopping it early. |
 | `2` | Nothing ran — a bad flag, an unknown model, a `--cwd` that is not there, a session that could not be read, a port already in use, or a command that needs a terminal and did not get one. |
+| `3` | Stopped for a person: a parked workflow, a budget checkpoint, or a command that needs `--yes` to proceed headless. |
 
 The same table is in `arcturn --help`.
 
@@ -90,6 +91,9 @@ The same table is in `arcturn --help`.
 | `arcturn trust [--list\|--allow\|--deny\|--revoke]` | Show or decide whether this project's declared code runs — see [Permissions](/docs/permissions#project-code) |
 | `arcturn doctor [preset]` | Probe each configured provider endpoint with its real key (a one-token completion) and print a per-endpoint verdict — auth failed, no balance, rate limited, network. An endpoint declared by a project config you have not approved is reported `not enabled` and never probed |
 | `arcturn insights [--since <w>] [--workflow <name>] [--json] [--share]` | What has been going wrong locally — parks, silent turns, step failures, slow roles — from `~/.arcturn/insights`. `--share` prints a markdown block and a pre-filled issue link and sends nothing. See [Insights](/docs/insights) |
+| `arcturn brain [build\|status\|show] [--full] [--from-run <runId>]` | Build or inspect the distilled repository map every agent reads. `build` re-distils only the directories whose content changed (`--full` does all of them); `status` reports what is indexed and what is stale; `show` prints the block that goes into the prompt. See [Project brain](/docs/brain) |
+| `arcturn retro <runId> [--apply] [--yes] [--json]` | Propose a patch to a kit's role prompts / workflow stages from one run's journal and insights, as a diff you approve. `--apply` lands it after validation; `--yes` is required to apply non-interactively. See [Retro](/docs/retro) |
+| `arcturn skill synthesize <runId> [--name x] [--scope user\|project] [--yes] [--force] [--share] [--json]` | Draft a reusable `SKILL.md` from a finished workflow run's journal; previews unless `--yes`. `--share` prints the proposal link for the draft either way (a preview says plainly that nothing was saved). See [Synthesizing a skill from a run](/docs/skills#synthesizing-a-skill-from-a-run) |
 | `arcturn blame` · `arcturn replay` · `arcturn bisect` | Provenance and replay — see [Provenance](/docs/provenance) and [Replay & bisect](/docs/replay-bisect) |
 
 **`arcturn add` never links a package's executable code without being told to.** A package
@@ -178,7 +182,13 @@ exist so it can happen without leaving a session.
 | `/workflow list` | List discovered workflows |
 | `/workflow status [runId]` | What a run reached, its spend and turns, and why it stopped |
 | `/workflow resume <runId> [answer]` | Re-enter an interrupted run, or answer what it parked on: an `ORG-ASK:` (free text), a budget checkpoint (`continue` / `raise <n>`), or a failed step (`retry` / `abandon` / `raise <n>`) |
+| `/workflow forecast <name> [--json]` | Predict duration, cost, tokens and stop risk per stage for the next run, from the local insights ledger |
+| `/workflow fork <runId> --at <stepId> [--revert] [--model <tag>] [--raise <n>] [--input <text>]` | Start a new run that reuses every stage the old one finished before `--at`, then continues; `--revert` first undoes the source run's work from `--at` onwards in your checkout |
+| `/workflow diff <runA> <runB> [--json]` | Compare two runs stage by stage: status, attempts, turns, writes, duration, cost, model, race winner |
+| `/brain [build\|status\|show] [--full] [--from-run <runId>]` | The project map every agent reads: build it, see what is stale, or print the injected block — see [Project brain](/docs/brain) |
 | `/insights [--since <w>] [--workflow <name>] [--json] [--share]` | Across runs: which step keeps parking, which model keeps going quiet, what runs cost — see [Insights](/docs/insights) |
+| `/retro <runId> [--apply] [--yes]` | Propose a patch to this run's kit prompts/stages from its journal — see [Retro](/docs/retro) |
+| `/skills synthesize <runId> [--name x] [--scope user\|project] [--force] [--share]` | Draft a reusable skill from a finished workflow run, with a picker instead of `--yes` — see [Synthesizing a skill from a run](/docs/skills#synthesizing-a-skill-from-a-run) |
 | `/org memory` | Inspect per-role lessons injected into later runs — see [Agent organizations](/docs/agent-organizations) |
 | `/org memory add\|propose\|approve\|revoke\|rm` | Edit that store |
 

@@ -183,4 +183,24 @@ describe("loadSkills", () => {
     const skills = await loadSkills([root], warnings);
     expect(skills[0]?.name).toBe("customname");
   });
+
+  it("accepts (and ignores) a skill-synthesis provenance frontmatter without warning or breaking", async () => {
+    const root = await skillsRoot({
+      "from-a-run/SKILL.md": [
+        "---",
+        "name: from-a-run",
+        "description: Redo what that run did",
+        "source-run: run-abc123",
+        "generated: 2026-09-04T00:00:00.000Z",
+        "---",
+        "1. Do the thing: $ARGUMENTS",
+      ].join("\n"),
+    });
+    const warnings: string[] = [];
+    const skills = await loadSkills([root], warnings);
+    expect(warnings).toEqual([]);
+    expect(skills).toHaveLength(1);
+    expect(skills[0]).toMatchObject({ name: "from-a-run", description: "Redo what that run did" });
+    expect(skills[0]?.buildPrompt("foo", "/cwd")).toBe("1. Do the thing: foo");
+  });
 });

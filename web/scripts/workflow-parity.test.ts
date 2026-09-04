@@ -59,7 +59,21 @@ interface EngineStep {
   readonly branchIndex: number;
   readonly modelTag?: string;
   readonly agent?: string;
+  readonly contract?: string;
+  readonly judges?: number;
+  readonly race?: readonly string[];
   readonly prompt: string;
+}
+
+/** The engine's `WorkflowContract`, as far as parity compares it. */
+interface EngineContract {
+  readonly name: string;
+  readonly line: number;
+  readonly fields: readonly {
+    readonly name: string;
+    readonly optional: boolean;
+    readonly type: { readonly kind: string; readonly values?: readonly string[] };
+  }[];
 }
 
 /** The engine's `WorkflowStage`, as far as parity compares it. */
@@ -80,6 +94,7 @@ interface Workflow {
   readonly budgetUsd?: number;
   readonly budgetTokens?: number;
   readonly stages: readonly EngineStage[];
+  readonly contracts: ReadonlyMap<string, EngineContract>;
   readonly source: string;
 }
 
@@ -143,8 +158,24 @@ function expectBothAcceptAlike(raw: string, name: string): Workflow {
       expect(mirroredStep?.modelTag).toBe(step.modelTag);
       expect(mirroredStep?.role).toBe(step.agent);
       expect(mirroredStep?.prompt).toBe(step.prompt);
+      // The stage-line options.
+      expect(mirroredStep?.contract).toBe(step.contract);
+      expect(mirroredStep?.judges).toBe(step.judges);
+      expect(mirroredStep?.race).toEqual(step.race);
     });
   });
+
+  // Contract declarations: same names in the same order, same fields. The
+  // mirror keeps no line number (an editor addresses a contract by name), so
+  // that one field is compared against the engine only for presence.
+  const mirroredContracts = doc.contracts ?? [];
+  expect(mirroredContracts.map((entry) => entry.name)).toEqual([...engine.contracts.keys()]);
+  for (const contract of mirroredContracts) {
+    const declared = engine.contracts.get(contract.name);
+    expect(declared).toBeDefined();
+    expect(declared?.line).toBeGreaterThan(0);
+    expect(contract.fields).toEqual(declared?.fields);
+  }
   return engine;
 }
 
@@ -159,7 +190,11 @@ const KIT_FILES = [
   { name: "rag-setup", file: join(REPO_DIR, "kits", "rag-blueprint", "workflows", "rag-setup.md") },
 ];
 
-/** Every frontmatter key, a labelled parallel stage, `[tier:x] @role`, all placeholders. */
+/**
+ * Every frontmatter key, a labelled parallel stage, `[tier:x] @role`, every
+ * placeholder, all three stage-line options, and a contract declaration whose
+ * fields cover every type the grammar has.
+ */
 const SYNTHETIC = [
   "---",
   "name: full-corpus",
@@ -177,8 +212,29 @@ const SYNTHETIC = [
   "   - [tier:fast] probe {{prev}}",
   "   - @qa cross-check {{prev}} against {{journal}}",
   "   - measure {{input}} again",
-  "3. @lead assemble {{prev}}",
+  "3. [contract:release-verdict] [judges:3] @lead assemble {{prev}}",
+  "4. [race:tier:cheap|tier:fast] act on {{contract.decision}} given {{contract}}",
+  "",
+  "```contract release-verdict",
+  "decision: SHIP | SHIP-WITH-FIXES | DO-NOT-SHIP",
+  "reasons: string[]",
+  "blockers?: string[]",
+  "confidence: number",
+  "counts: number[]",
+  "settled?: boolean",
+  "rounds: integer",
+  "```",
 ].join("\n");
+
+/** A workflow with every contract's fence line blanked, for round-trip compare. */
+function forget(workflow: Workflow): unknown {
+  return {
+    ...workflow,
+    contracts: new Map(
+      [...workflow.contracts].map(([name, contract]) => [name, { ...contract, line: 0 }]),
+    ),
+  };
+}
 
 describe("accepted documents parse identically", () => {
   it.each(KIT_FILES)("agrees with the engine on kit workflow $name", ({ name, file }) => {
@@ -195,12 +251,33 @@ describe("accepted documents parse identically", () => {
     expect(engine.budgetUsd).toBe(12.5);
     expect(engine.budgetTokens).toBe(250000);
     // …and a labelled parallel stage between two `[tag] @role` singles.
-    expect(engine.stages.map((stage) => stage.parallel)).toEqual([false, true, false]);
+    expect(engine.stages.map((stage) => stage.parallel)).toEqual([false, true, false, false]);
     expect(engine.stages[1]?.label).toBe("Fan out:");
     expect(engine.stages[0]?.steps[0]).toMatchObject({
       modelTag: "tier:cheap",
       agent: "architect",
     });
+    // …and every stage-line option, read onto the step it was written on.
+    expect(engine.stages[2]?.steps[0]).toMatchObject({
+      contract: "release-verdict",
+      judges: 3,
+      agent: "lead",
+    });
+    expect(engine.stages[3]?.steps[0]?.race).toEqual(["tier:cheap", "tier:fast"]);
+    expect(engine.stages[3]?.steps[0]?.modelTag).toBeUndefined();
+    // …and the contract, with every field type the grammar has.
+    const declared = engine.contracts.get("release-verdict");
+    expect(declared?.fields.map((field) => field.type.kind)).toEqual([
+      "enum",
+      "string[]",
+      "string[]",
+      "number",
+      "number[]",
+      "boolean",
+      "integer",
+    ]);
+    expect(declared?.fields.find((field) => field.name === "blockers")?.optional).toBe(true);
+    expect(declared?.fields[0]?.type.values).toEqual(["SHIP", "SHIP-WITH-FIXES", "DO-NOT-SHIP"]);
   });
 
   it.each([
@@ -217,12 +294,18 @@ describe("accepted documents parse identically", () => {
       if (isWorkflowParseError(fromSerialized)) {
         throw new Error(`engine rejected the serialisation: ${fromSerialized.error}`);
       }
-      expect(fromSerialized).toEqual(fromRaw);
+      // A contract's `line` is where its fence sits in THAT file, and the
+      // mirror is free to move a declaration when it re-emits one; everything
+      // else must be identical, the contract's fields included.
+      expect(forget(fromSerialized)).toEqual(forget(fromRaw));
     },
   );
 });
 
 // -------------------------------------------------------------- error corpus
+
+/** Frontmatter plus a one-field contract named `v`, for the option cases. */
+const DECL = ["---", "name: x", "---", "```contract v", "a: string", "```", ""].join("\n");
 
 interface ErrorCase {
   case: string;
@@ -261,6 +344,76 @@ const ERROR_CORPUS: ErrorCase[] = [
   { case: "bad budgetTokens", raw: "---\nname: x\nbudgetTokens: 3.5\n---\n1. go" },
   { case: "no usable name", raw: "1. go", defaults: {} },
   { case: "name normalises to nothing", raw: "---\nname: '!!!'\n---\n1. go", defaults: {} },
+
+  // --- stage-line options ---------------------------------------------------
+  { case: "duplicate option key", raw: `${DECL}1. [judges:2] [judges:3] @qa go` },
+  { case: "options with no prompt", raw: `${DECL}1. [contract:v]` },
+  { case: "option after the role", raw: `${DECL}1. @qa [contract:v] go` },
+  { case: "bad contract name", raw: "---\nname: x\n---\n1. [contract:V] @qa go" },
+  { case: "bad judges count", raw: "---\nname: x\n---\n1. [judges:4] @qa go" },
+  { case: "judges without a role", raw: `${DECL}1. [judges:2] [contract:v] go` },
+  { case: "judges without a contract", raw: "---\nname: x\n---\n1. [judges:2] @qa go" },
+  { case: "judges with race", raw: `${DECL}1. [race:a|b] [judges:2] [contract:v] @qa go` },
+  { case: "race with a model tag", raw: "---\nname: x\n---\n1. [tier:x] [race:a|b] go" },
+  { case: "race of one", raw: "---\nname: x\n---\n1. [race:solo] go" },
+  { case: "race of four", raw: "---\nname: x\n---\n1. [race:a|b|c|d] go" },
+  { case: "race with a bad tag", raw: "---\nname: x\n---\n1. [race:a|b c] go" },
+  { case: "race repeating a tag", raw: "---\nname: x\n---\n1. [race:a|a] go" },
+  { case: "undeclared contract", raw: "---\nname: x\n---\n1. [contract:missing] @qa go" },
+
+  // --- contract declarations ------------------------------------------------
+  { case: "nameless contract", raw: "---\nname: x\n---\n```contract\na: string\n```\n1. go" },
+  {
+    case: "badly named contract",
+    raw: "---\nname: x\n---\n```contract V\na: string\n```\n1. go",
+  },
+  {
+    case: "duplicate contract",
+    raw: `${DECL}\`\`\`contract v\nb: string\n\`\`\`\n1. go`,
+  },
+  { case: "empty contract", raw: "---\nname: x\n---\n```contract v\n# nothing\n```\n1. go" },
+  { case: "unterminated contract", raw: "---\nname: x\n---\n```contract v\na: string\n1. go" },
+  {
+    case: "malformed contract field",
+    raw: "---\nname: x\n---\n```contract v\njust prose\n```\n1. go",
+  },
+  {
+    case: "bad contract field name",
+    raw: "---\nname: x\n---\n```contract v\n2a: string\n```\n1. go",
+  },
+  {
+    case: "duplicate contract field",
+    raw: "---\nname: x\n---\n```contract v\na: string\na: number\n```\n1. go",
+  },
+  {
+    case: "unknown contract type",
+    raw: "---\nname: x\n---\n```contract v\na: nope\n```\n1. go",
+  },
+  {
+    case: "bad enum value",
+    raw: "---\nname: x\n---\n```contract v\na: A | 2B\n```\n1. go",
+  },
+  {
+    case: "duplicate enum value",
+    raw: "---\nname: x\n---\n```contract v\na: A | B | A\n```\n1. go",
+  },
+
+  // --- contract placeholders ------------------------------------------------
+  { case: "{{contract}} in stage 1", raw: "---\nname: x\n---\n1. use {{contract}}" },
+  { case: "{{contract.f}} in stage 1", raw: "---\nname: x\n---\n1. use {{contract.a}}" },
+  {
+    case: "{{contract}} with no carrier",
+    raw: "---\nname: x\n---\n1. plan it\n2. use {{contract}}",
+  },
+  {
+    case: "{{contract.f}} after a parallel stage",
+    raw: `${DECL}1. Fan out:\n   - [contract:v] @qa judge\n   - probe\n2. use {{contract.a}}`,
+  },
+  {
+    case: "{{contract.f}} naming no field",
+    raw: `${DECL}1. [contract:v] @qa judge\n2. use {{contract.nope}}`,
+  },
+  { case: "malformed contract placeholder", raw: "---\nname: x\n---\n1. use {{contract.}}" },
 ];
 
 describe("rejected documents fail identically, error strings included", () => {

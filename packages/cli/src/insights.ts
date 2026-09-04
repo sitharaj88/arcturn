@@ -107,6 +107,14 @@ export interface InsightsActivity {
   readonly turns: number;
   readonly toolCalls: Readonly<Record<string, number>>;
   readonly writes: number;
+  /**
+   * Calls the permission layer refused — the tool never ran.
+   *
+   * A count, like everything beside it, and absent rather than `0` when
+   * nothing was refused. It is the ledger's only trace of a step that reported
+   * `done` while the command it was told to run was blocked.
+   */
+  readonly denied?: number;
 }
 
 /** Token counts only. Money rides on `run-end`'s own `costUsd`. */
@@ -170,8 +178,53 @@ export interface StepEndRecord extends InsightsEventBase {
    * no-progress attempt the retry rescued.
    */
   readonly superseded?: boolean;
+  /**
+   * This terminal is one ARM of a model race, and which side of it.
+   *
+   * A raced step runs the same brief on two or three models at once and keeps
+   * the first answer good enough to use. One record is written per arm — the
+   * winner as the step's ordinary terminal with `"won"`, each loser as a
+   * `superseded` record carrying its OWN model and duration with `"lost"` — so
+   * the ledger learns what it cannot learn any other way: how these models
+   * compare on this exact step. Aggregations exclude `superseded` records from
+   * step counts, and exclude a `"lost"` arm from the failure-KIND tally as
+   * well — an arm the engine cut off is its own bookkeeping, not a fault
+   * anyone can act on — so the losers enrich `/workflow forecast`'s per-model
+   * history without inflating anything.
+   */
+  readonly race?: "won" | "lost";
+  /**
+   * WHY a `"lost"` arm lost. See `RaceLoserOutcome` in `workflow-race.ts`.
+   *
+   * The one field that tells evidence about a MODEL from evidence about a
+   * RACE. Every loser is recorded `failed`, but `aborted` (the winner
+   * appeared first) and `slower` (a good answer, a moment late) say nothing
+   * bad about the model that produced them, while `failed` and `void` do —
+   * so the forecast counts a lost arm's duration and tokens either way and
+   * counts it as a *stop* only for the latter two.
+   */
+  readonly raceOutcome?: "aborted" | "failed" | "void" | "slower";
   readonly lastTurn?: InsightsLastTurn;
   readonly activity?: InsightsActivity;
+  /**
+   * The step declared a `[contract:<name>]` and its reply satisfied it.
+   *
+   * A MARKER, never a value: "how many steps in this pipeline return a typed
+   * reply" is a fact about the workflow, while the decision that reply carried
+   * is the run's own content and stays on the machine. The miss needs nothing
+   * extra here — it arrives as `failureKind: "contract"` on a `failed` record,
+   * counted in the same table as every other failure kind.
+   */
+  readonly contract?: boolean;
+  /** What a `[judges:N]` step's panel concluded — counts only, no verdicts. */
+  readonly judges?: InsightsJudges;
+}
+
+/** A judged step's panel, as the ledger records it: three facts, no verdicts. */
+export interface InsightsJudges {
+  readonly count: number;
+  readonly agreed: boolean;
+  readonly arbitrated: boolean;
 }
 
 /** A failed step parked the run and asked a human what to do. */
@@ -327,13 +380,42 @@ export function insightsActivity(activity: {
   turns: number;
   toolCalls: Readonly<Record<string, number>>;
   writes: number;
+  denied?: number;
 }): InsightsActivity {
   const toolCalls: Record<string, number> = {};
   for (const [name, count] of Object.entries(activity.toolCalls)) {
     const n = positiveInt(count);
     if (name !== "" && n > 0) toolCalls[name] = n;
   }
-  return { turns: positiveInt(activity.turns), toolCalls, writes: positiveInt(activity.writes) };
+  const denied = positiveInt(activity.denied ?? 0);
+  return {
+    turns: positiveInt(activity.turns),
+    toolCalls,
+    writes: positiveInt(activity.writes),
+    ...(denied > 0 ? { denied } : {}),
+  };
+}
+
+/**
+ * Reduce a judged step's panel to the ledger's copy: three facts, no verdicts.
+ *
+ * The verdicts are deliberately not here even though they are single words
+ * from a closed set the workflow file wrote down. "SHIP" and "DO-NOT-SHIP" are
+ * a statement about the user's own code, and the ledger is the one artefact
+ * with a `--share` button on it.
+ *
+ * @param judges - What the step's panel recorded.
+ */
+export function insightsJudges(judges: {
+  count: number;
+  agreed: boolean;
+  arbitrated: boolean;
+}): InsightsJudges {
+  return {
+    count: positiveInt(judges.count),
+    agreed: judges.agreed === true,
+    arbitrated: judges.arbitrated === true,
+  };
 }
 
 /** Include an optional string field only when it is a non-empty string. */
@@ -392,8 +474,21 @@ export function stampEvent(input: InsightsEventInput, ts: number): InsightsEvent
         usage: usageFacts(input.usage),
         attempts: positiveInt(input.attempts),
         ...(input.superseded === true ? { superseded: true } : {}),
+        ...(input.race === "won" || input.race === "lost" ? { race: input.race } : {}),
+        ...(input.raceOutcome === "aborted" ||
+        input.raceOutcome === "failed" ||
+        input.raceOutcome === "void" ||
+        input.raceOutcome === "slower"
+          ? { raceOutcome: input.raceOutcome }
+          : {}),
         ...(input.lastTurn === undefined ? {} : { lastTurn: insightsLastTurn(input.lastTurn) }),
         ...(input.activity === undefined ? {} : { activity: insightsActivity(input.activity) }),
+        // The whitelist is the privacy boundary, so these two are rebuilt
+        // field by field rather than spread: `contract` collapses to the bare
+        // fact that one was satisfied, and a judged step contributes three
+        // numbers and no verdict.
+        ...(input.contract === true ? { contract: true } : {}),
+        ...(input.judges === undefined ? {} : { judges: insightsJudges(input.judges) }),
       };
     case "park":
       return {
@@ -755,6 +850,25 @@ export interface RoleFailureRate {
   readonly rate: number;
 }
 
+/** One workflow+step that ran a judge panel, and how it went. */
+export interface JudgePanelGroup {
+  readonly workflow: string;
+  readonly stepId: string;
+  /** How many panels ran (one per step terminal that recorded one). */
+  readonly panels: number;
+  /** Panels whose judges agreed outright. */
+  readonly agreed: number;
+  /** Panels that went to an arbiter. */
+  readonly arbitrated: number;
+}
+
+/** One model's record across every race in the window. */
+export interface RaceModelRecord {
+  readonly model: string;
+  readonly won: number;
+  readonly lost: number;
+}
+
 /** A role's median step duration. */
 export interface RoleDuration {
   readonly role: string;
@@ -790,6 +904,27 @@ export interface InsightsAggregate {
     readonly byRole: readonly RoleFailureRate[];
   };
   readonly slowestRoles: readonly RoleDuration[];
+  /**
+   * `[judges:N]` panels that ran, by workflow and step.
+   *
+   * Counts only, like everything else here: how often a question a pipeline
+   * acts on turned out NOT to have a stable answer is a fact about the
+   * pipeline, while the verdicts themselves are the run's own content and
+   * never leave the machine (see {@link StepEndRecord.judges}).
+   */
+  readonly judgePanels: readonly JudgePanelGroup[];
+  /**
+   * `[race:a|b]` steps that ran, and how the models did against each other.
+   *
+   * `losses` is by {@link StepEndRecord.raceOutcome}, because "cut off when
+   * the winner appeared" and "failed on its own" are the same `lost` and
+   * completely different evidence about a model.
+   */
+  readonly races: {
+    readonly total: number;
+    readonly byModel: readonly RaceModelRecord[];
+    readonly lossesByOutcome: readonly { readonly outcome: string; readonly count: number }[];
+  };
 }
 
 /** A role needs this many recorded steps before its failure rate means anything. */
@@ -1006,7 +1141,11 @@ export function aggregateInsights(
     // still a stall, and a pipeline whose `no-progress` count is climbing is
     // the finding this tally exists for — even in a week where every one of
     // them was rescued and nobody was ever asked about it.
-    if (step.status === "failed" && step.failureKind !== undefined) {
+    // …but never a race's LOSING ARM. Its `failed` is the engine cutting it
+    // off (normally `cancelled`), so counting it made every run of a raced
+    // step report a phantom step failure — a fault count describing the
+    // engine's own bookkeeping. See {@link StepEndRecord.race}.
+    if (step.status === "failed" && step.failureKind !== undefined && step.race !== "lost") {
       kindCounts.set(step.failureKind, (kindCounts.get(step.failureKind) ?? 0) + 1);
     }
     if (step.role === undefined) continue;
@@ -1046,6 +1185,53 @@ export function aggregateInsights(
     .sort((a, b) => b.medianDurationMs - a.medianDurationMs || a.role.localeCompare(b.role))
     .slice(0, SLOWEST_ROLES_SHOWN);
 
+  // ------------------------------------------------- judge panels and races
+  // Both read the same `step-end` stream the tallies above do, and both are
+  // counts of NAMES and NUMBERS only — a panel contributes "there was a
+  // panel, and it needed an arbiter", never what anyone decided.
+  const panelStats = new Map<string, { panels: number; agreed: number; arbitrated: number }>();
+  const raceStats = new Map<string, { won: number; lost: number }>();
+  const raceOutcomes = new Map<string, number>();
+  let races = 0;
+  for (const step of stepEnds) {
+    if (step.judges !== undefined && step.superseded !== true) {
+      const key = `${step.workflow}\u0000${step.stepId}`;
+      const row = panelStats.get(key) ?? { panels: 0, agreed: 0, arbitrated: 0 };
+      row.panels += 1;
+      if (step.judges.agreed) row.agreed += 1;
+      if (step.judges.arbitrated) row.arbitrated += 1;
+      panelStats.set(key, row);
+    }
+    if (step.race === undefined || step.model === undefined) continue;
+    // One race is counted once, on its winner's terminal — the losers are the
+    // same race seen from the other side.
+    if (step.race === "won") races += 1;
+    const row = raceStats.get(step.model) ?? { won: 0, lost: 0 };
+    if (step.race === "won") row.won += 1;
+    else row.lost += 1;
+    raceStats.set(step.model, row);
+    if (step.race === "lost" && step.raceOutcome !== undefined) {
+      raceOutcomes.set(step.raceOutcome, (raceOutcomes.get(step.raceOutcome) ?? 0) + 1);
+    }
+  }
+  const judgePanels: JudgePanelGroup[] = [...panelStats.entries()]
+    .map(([key, row]) => {
+      const [workflow = "", stepId = ""] = key.split("\u0000");
+      return { workflow, stepId, ...row };
+    })
+    .sort(
+      (a, b) =>
+        b.panels - a.panels ||
+        a.workflow.localeCompare(b.workflow) ||
+        a.stepId.localeCompare(b.stepId),
+    );
+  const raceByModel: RaceModelRecord[] = [...raceStats.entries()]
+    .map(([model, row]) => ({ model, ...row }))
+    .sort((a, b) => b.won - a.won || b.lost - a.lost || a.model.localeCompare(b.model));
+  const lossesByOutcome = [...raceOutcomes.entries()]
+    .map(([outcome, count]) => ({ outcome, count }))
+    .sort((a, b) => b.count - a.count || a.outcome.localeCompare(b.outcome));
+
   return {
     window: {
       label: options.window.label,
@@ -1067,6 +1253,8 @@ export function aggregateInsights(
     silentTurns,
     stepFailures: { byFailureKind, byRole },
     slowestRoles,
+    judgePanels,
+    races: { total: races, byModel: raceByModel, lossesByOutcome },
   };
 }
 
@@ -1214,7 +1402,38 @@ export function renderInsights(
     }
   }
 
-  // 5 --------------------------------------------------------- slowest roles
+  // 5 ---------------------------------------------------------- judge panels
+  if (report.judgePanels.length > 0) {
+    const total = report.judgePanels.reduce((sum, row) => sum + row.panels, 0);
+    const split = report.judgePanels.reduce((sum, row) => sum + row.arbitrated, 0);
+    lines.push("", `Judge panels (${total}, ${split} arbitrated)`);
+    const rows = report.judgePanels.map((row) => [
+      row.workflow,
+      row.stepId,
+      String(row.panels),
+      String(row.agreed),
+      String(row.arbitrated),
+    ]);
+    for (const line of pad(["workflow", "step", "panels", "agreed", "arbitrated"], rows)) {
+      lines.push(`  ${line}`);
+    }
+  }
+
+  // 6 ----------------------------------------------------------------- races
+  if (report.races.byModel.length > 0) {
+    lines.push("", `Races (${report.races.total})`);
+    const rows = report.races.byModel.map((row) => [row.model, String(row.won), String(row.lost)]);
+    for (const line of pad(["model", "won", "lost"], rows)) lines.push(`  ${line}`);
+    if (report.races.lossesByOutcome.length > 0) {
+      lines.push(
+        `  losses: ${report.races.lossesByOutcome
+          .map((row) => `${row.outcome} ${row.count}`)
+          .join(", ")}`,
+      );
+    }
+  }
+
+  // 7 --------------------------------------------------------- slowest roles
   if (report.slowestRoles.length > 0) {
     lines.push("", "Slowest roles (median step)");
     const rows = report.slowestRoles.map((row) => [

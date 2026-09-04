@@ -137,6 +137,24 @@ describe("loadAgentDefs", () => {
     expect(defs[0]?.tools).toEqual(["read", "grep", "glob"]);
   });
 
+  it("parses a YAML inline flow sequence, brackets and quotes and all", async () => {
+    // The spelling that cost a live workflow run its `edit` tool: the closing
+    // bracket stayed glued to the last item, so `edit]` was dropped as unknown
+    // and the agent rewrote whole files for 104 turns instead.
+    const root = await agentsRoot({
+      "writer.md": ["---", "tools: [read, write, edit]", "---", "Body."].join("\n"),
+      "quoted.md": ["---", `tools: ['read', "grep" , glob]`, "---", "Body."].join("\n"),
+      "truncated.md": ["---", "tools: [read, write", "---", "Body."].join("\n"),
+    });
+    const warnings: string[] = [];
+    const defs = await loadAgentDefs([root], warnings, ["read", "write", "edit", "grep", "glob"]);
+    expect(warnings).toEqual([]);
+    const byName = new Map(defs.map((def) => [def.name, def.tools]));
+    expect(byName.get("writer")).toEqual(["read", "write", "edit"]);
+    expect(byName.get("quoted")).toEqual(["read", "grep", "glob"]);
+    expect(byName.get("truncated")).toEqual(["read", "write"]);
+  });
+
   it("drops unknown tool names with a warning when a valid set is given", async () => {
     const root = await agentsRoot({
       "scoped.md": ["---", "tools: read, teleport, bash", "---", "Body."].join("\n"),

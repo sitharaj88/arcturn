@@ -75,7 +75,7 @@ Recognized frontmatter, all optional:
 |---|---|
 | `name` | Defaults to the filename stem, normalized to `[a-z0-9-]`. |
 | `description` | One-line summary shown to the model when it's choosing which agent to delegate to. |
-| `tools` | A single comma-separated line, e.g. `tools: read, grep, glob`. An unknown tool name (checked against the runtime's known tool set) is dropped with a warning rather than rejecting the whole file. |
+| `tools` | A single line, either bare (`tools: read, grep, glob`) or YAML's inline flow sequence (`tools: [read, grep, glob]`, quoted items allowed). An unknown tool name (checked against the runtime's known tool set) is dropped with a warning rather than rejecting the whole file. |
 | `model` | A model id, passed through uninterpreted — `agents.ts` itself never resolves it against the catalog. |
 
 Everything after the frontmatter is the system prompt verbatim — no `$ARGUMENTS`-style

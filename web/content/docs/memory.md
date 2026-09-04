@@ -95,8 +95,23 @@ file gets renamed, a workaround stops being needed. The system prompt says so ex
 independently verify anything; treat an old note as a hint to check, not as ground truth,
 the same caution the prompt itself asks the model to exercise.
 
+## Memory vs brain
+
+Memory is what the model chose to write down. The [project brain](/docs/brain) is what the
+repository actually says — a map of modules, entry points and build commands, distilled
+from the checkout by a read-only sub-agent and re-derived whenever a directory's content
+hash moves. Memory is authored and never expires; the brain is derived and expires
+constantly. Because the brain comes out of repository files, it is injected **fenced** and
+labelled as data, while memory (first-party, like `ARCTURN.md`) is not.
+
+The practical rule: if it is a fact about the tree — "the CLI lives in `packages/cli`",
+"tests run with `pnpm test`" — leave it to the brain, which will keep it true. Memory is for
+what no file states: a preference you were told, a workaround you discovered, a decision and
+its reason.
+
 ## Related
 
+- [Project brain](/docs/brain) — the derived, self-refreshing map memory is not.
 - [Markdown skills](/docs/skills) — the sibling `.md`-file mechanism this reuses the
   frontmatter format from.
 - [Dry run & sandbox](/docs/dry-run) — where a memory write actually lands under

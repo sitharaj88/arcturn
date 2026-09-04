@@ -1,8 +1,14 @@
+import { join } from "node:path";
 import type { AgentEvent } from "@arcturn/types";
 import { describe, expect, it } from "vitest";
 import { CommandRegistry, type SlashCommand } from "./commands.js";
 import { PRINT_EXIT, runPrint } from "./print.js";
-import { buildTestRuntime, makeScratch } from "./test-helpers/scratch.js";
+import {
+  buildTestRuntime,
+  makeScratch,
+  type Scratch,
+  writeFileAt,
+} from "./test-helpers/scratch.js";
 
 function capture() {
   const out: string[] = [];
@@ -405,5 +411,133 @@ describe("runPrint with a slash command", () => {
     });
     expect(result.exitCode).toBe(0);
     expect(io.stdoutText()).toBe("from the model\n");
+  });
+});
+
+describe("runPrint with a markdown skill", () => {
+  /** Write `<home>/skills/<name>.md` with the given body. */
+  async function writeSkill(scratch: Scratch, name: string, body: string): Promise<void> {
+    await writeFileAt(
+      join(scratch.home, "skills", `${name}.md`),
+      ["---", `name: ${name}`, `description: ${name} skill`, "---", body].join("\n"),
+    );
+  }
+
+  it("expands the skill and prints the agent's final text, exit 0", async () => {
+    const scratch = await makeScratch();
+    await writeSkill(scratch, "haiku", "Write a haiku about $ARGUMENTS in $CWD.");
+    const runtime = await buildTestRuntime(scratch, [{ text: "rain on the roof" }]);
+    const io = capture();
+
+    const result = await runPrint({
+      runtime,
+      prompt: "/haiku rain",
+      stdout: io.stdout,
+      stderr: io.stderr,
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.reason).toBe("completed");
+    expect(io.stdoutText()).toBe("rain on the roof\n");
+    expect(io.stderrText()).toBe("");
+    // Effect: the model was asked the SKILL's expanded body, not "/haiku rain".
+    expect(JSON.stringify(runtime.agent.messages)).toContain(
+      `Write a haiku about rain in ${scratch.cwd}.`,
+    );
+    await runtime.dispose();
+  });
+
+  it("exits 1 when the skill's agent run fails, with the error on stderr", async () => {
+    const scratch = await makeScratch();
+    await writeSkill(scratch, "boomer", "Do the thing with $ARGUMENTS.");
+    const runtime = await buildTestRuntime(scratch, [{ error: "provider exploded" }]);
+    const io = capture();
+
+    const result = await runPrint({
+      runtime,
+      prompt: "/boomer now",
+      stdout: io.stdout,
+      stderr: io.stderr,
+    });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.reason).toBe("error");
+    expect(io.stderrText()).toContain("provider exploded");
+    await runtime.dispose();
+  });
+
+  it("emits the ordinary agent event stream under --output-format json", async () => {
+    const scratch = await makeScratch();
+    await writeSkill(scratch, "jsonic", "Say something about $ARGUMENTS.");
+    const runtime = await buildTestRuntime(scratch, [{ text: "said" }]);
+    const io = capture();
+
+    const result = await runPrint({
+      runtime,
+      prompt: "/jsonic things",
+      outputFormat: "json",
+      stdout: io.stdout,
+      stderr: io.stderr,
+    });
+
+    expect(result.exitCode).toBe(0);
+    const events = io
+      .stdoutText()
+      .split("\n")
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line) as AgentEvent);
+    expect(events[0]?.type).toBe("runStart");
+    expect(events.at(-1)?.type).toBe("runEnd");
+    expect(events.some((event) => event.type === "messageEnd")).toBe(true);
+    await runtime.dispose();
+  });
+
+  it("lets a built-in command win a name collision instead of running the skill", async () => {
+    // `createCommandRegistry` protects built-in names; the headless skill
+    // route must honour that same resolution, not shortcut past it.
+    const scratch = await makeScratch();
+    await writeSkill(scratch, "help", "This skill must never run.");
+    const runtime = await buildTestRuntime(scratch, [{ text: "MODEL SPOKE" }]);
+    const io = capture();
+
+    const result = await runPrint({
+      runtime,
+      prompt: "/help",
+      stdout: io.stdout,
+      stderr: io.stderr,
+    });
+
+    expect(result.exitCode).toBe(PRINT_EXIT.ok);
+    expect(io.stdoutText()).not.toContain("MODEL SPOKE");
+    expect(runtime.agent.messages.length).toBe(0);
+    await runtime.dispose();
+  });
+
+  it("leaves the interactive skill command handler untouched: it prompts the agent directly", async () => {
+    // The TUI path still goes through `skillCommand`'s handler in runtime.ts
+    // — this asserts the handler that print.ts now bypasses is still there
+    // and still works, so the two paths agree on what a skill run is.
+    const scratch = await makeScratch();
+    await writeSkill(scratch, "tui", "Interactive body for $ARGUMENTS.");
+    const runtime = await buildTestRuntime(scratch, [{ text: "tui answer" }]);
+    const command = runtime.extensions.commands.find((entry) => entry.name === "tui");
+    expect(command).toBeDefined();
+    const printed: string[] = [];
+    await command?.handler({
+      runtime,
+      args: "args here",
+      commands: new CommandRegistry(),
+      ui: {
+        print: (content) => void printed.push(String(content)),
+        notice: (_level, text) => void printed.push(text),
+        select: async () => undefined,
+        setInput: () => {},
+        clear: () => {},
+        exit: () => {},
+      },
+    });
+    expect(runtime.agent.finalText()).toBe("tui answer");
+    expect(JSON.stringify(runtime.agent.messages)).toContain("Interactive body for args here.");
+    await runtime.dispose();
   });
 });

@@ -326,6 +326,38 @@ export async function runCli(args: CliArgs, options: RunCliOptions = {}): Promis
     });
   }
 
+  if (args.command?.kind === "retro") {
+    const { runRetroCommand } = await import("./retro.js");
+    return runRetroCommand({
+      runId: args.command.runId,
+      ...(args.cwd === undefined ? {} : { cwd: args.cwd }),
+      ...(args.command.apply === undefined ? {} : { apply: args.command.apply }),
+      ...(args.command.yes === undefined ? {} : { yes: args.command.yes }),
+      ...(args.command.json === undefined ? {} : { json: args.command.json }),
+    });
+  }
+
+  if (args.command?.kind === "skill") {
+    const { runSkillSynthesizeCommand } = await import("./skill-synthesis.js");
+    const { resolveArcturnPaths } = await import("./paths.js");
+    const paths = resolveArcturnPaths(args.cwd === undefined ? {} : { cwd: args.cwd });
+    return runSkillSynthesizeCommand({
+      argv: args.command.argv,
+      cwd: paths.cwd,
+      home: paths.home,
+    });
+  }
+
+  if (args.command?.kind === "brain") {
+    const { runBrainCommand } = await import("./brain.js");
+    return runBrainCommand({
+      action: args.command.action,
+      ...(args.cwd === undefined ? {} : { cwd: args.cwd }),
+      ...(args.command.full === undefined ? {} : { full: args.command.full }),
+      ...(args.command.fromRun === undefined ? {} : { fromRun: args.command.fromRun }),
+    });
+  }
+
   if (args.command?.kind === "trust") {
     const { runTrustCommand } = await import("./project-trust.js");
     return runTrustCommand({

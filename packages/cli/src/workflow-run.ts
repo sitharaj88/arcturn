@@ -46,7 +46,9 @@ import { appendFile, mkdir, open, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { AssistantMessage, Usage } from "@arcturn/types";
 import { formatCost, oneLine } from "./format.js";
+import type { JudgesRecord } from "./judges.js";
 import type { WorkflowPatchRecord, WorkflowRunStatus, WorkflowStepStatus } from "./workflow.js";
+import type { StepRaceSummary } from "./workflow-race.js";
 
 /** Bumped when a journal line's shape changes incompatibly. */
 export const RUN_JOURNAL_SCHEMA_VERSION = 1;
@@ -105,6 +107,33 @@ export interface RunHeaderLine {
    * and the run still continues. Absent for every run started from a terminal.
    */
   readonly budgetCapUsd?: number;
+  /**
+   * This run is a FORK of an earlier one: `/workflow fork <runId> --at <step>`.
+   *
+   * The journal below this header opens with a verbatim copy of the source
+   * run's finished stages — their `stepEnd` lines, their patch records
+   * rewritten to point at this run's own copies of the patch files — so from
+   * the resume machinery's point of view a fork is indistinguishable from a
+   * resume that happens to have started in a new directory. This field is the
+   * only thing that remembers it was not: which run the copied prefix came
+   * from, which step the fork was cut at, and when.
+   *
+   * On the header rather than a line of its own for the same reason
+   * {@link budgetCapUsd} is: a journal with no header cannot be resumed at
+   * all, so there is no state in which the provenance is missing and the run
+   * continues regardless.
+   */
+  readonly forkedFrom?: ForkOrigin;
+}
+
+/** Where a forked run came from. See {@link RunHeaderLine.forkedFrom}. */
+export interface ForkOrigin {
+  /** The run whose finished stages were copied in. */
+  readonly runId: string;
+  /** The step id the fork was cut at — the first step that runs live. */
+  readonly at: string;
+  /** When the fork was cut. */
+  readonly ts: number;
 }
 
 /** A stage began. */
@@ -219,6 +248,43 @@ export interface StepEndLine {
    * step is the one worth being able to find later.
    */
   readonly activity?: StepActivity;
+  /**
+   * MODEL RACING: how this step's race resolved, when the step declared one.
+   *
+   * A raced step still has exactly ONE terminal — this line, carrying the
+   * winner's status, text, patch record and usage — because everything
+   * downstream (resume, the pipe, the retry classifier) is built on "one step,
+   * one ending". This block is what stops that simplification from erasing the
+   * race: which models ran, which one the line is, and how each of the others
+   * ended. See `workflow-race.ts`.
+   */
+  readonly race?: StepRaceSummary;
+  /**
+   * What the WHOLE race spent, across every arm — where {@link usage} is the
+   * winner's alone.
+   *
+   * Both numbers are true and they answer different questions. `usage` is what
+   * this step's answer cost, which is what feeds the pipe's own accounting;
+   * `raceUsage` is what the run was actually billed, which is what a budget
+   * has to be judged against. Absent for every step that did not race.
+   */
+  readonly raceUsage?: Usage;
+  /**
+   * The validated object a `[contract:<name>]` step replied with.
+   *
+   * Journalled for the same reason `text` is: the next stage reads it through
+   * `{{contract}}` / `{{contract.<field>}}`, and a resume that re-splices this
+   * step from its terminal has to re-expand those placeholders without
+   * re-running anything. It is the object the validator PASSED, never a
+   * re-parse of `text` — which is what makes `{{contract}}` a typed handoff
+   * rather than a second guess at the model's prose.
+   */
+  readonly contract?: Record<string, unknown>;
+  /**
+   * What a `[judges:N]` step's panel decided — one terminal for the step,
+   * however many judges and arbiters ran underneath it. See {@link JudgesRecord}.
+   */
+  readonly judges?: JudgesRecord;
 }
 
 /**
@@ -434,6 +500,53 @@ export interface TurnRaiseLine {
   readonly ts: number;
 }
 
+/**
+ * A fork pinned ONE step of this run to a different model.
+ *
+ * `/workflow fork <runId> --at <step> --model <tag>`: the fork is an
+ * experiment — "the same pipeline, from here, on a different model" — and the
+ * override belongs to this run and this step only. The workflow file is never
+ * touched, which is exactly why the grant has to live in the journal:
+ * re-reading the file would give the fork the original model back.
+ *
+ * Folded by STEP ID, like {@link TurnRaiseLine} and for the same reason: an
+ * override answers one `--at` and nothing else. A later line for the same step
+ * wins, so a fork of a fork can re-pin it.
+ */
+export interface StepModelOverrideLine {
+  readonly kind: "stepModelOverride";
+  readonly stepId: string;
+  /** The model tag exactly as the human typed it, resolved at dispatch. */
+  readonly tag: string;
+  readonly ts: number;
+}
+
+/**
+ * A fork UNDID the source run's later work in the user's checkout before it
+ * started: `/workflow fork <runId> --at <step> --revert`.
+ *
+ * A fork is a resume in a new directory, and a resume never re-applies a patch
+ * it already applied. That is exactly why forking a run that *finished* used to
+ * be impossible: the checkout still held the source run's patches for the very
+ * steps the fork was about to run again, so the first `git apply` refused. The
+ * `--revert` flag reverse-applies those patches, newest first, before the fork
+ * is cut — and this line is the only record that it happened.
+ *
+ * Durable, and journaled in the NEW run, because it describes an irreversible
+ * change to the user's own files made on this run's behalf. Nothing folds it
+ * (the reverted steps were never copied in, so resume has nothing to reconcile);
+ * `/workflow status` and `/workflow diff` read it so an operator looking at a
+ * fork can see that a checkout was rewound under it and by how much.
+ */
+export interface ForkRevertLine {
+  readonly kind: "forkRevert";
+  /** The source run's steps whose patches were taken back out, in run order. */
+  readonly steps: readonly string[];
+  /** How many patch files were reverse-applied. */
+  readonly patches: number;
+  readonly ts: number;
+}
+
 /** The whole run was halted by a STOP condition. */
 export interface StopLine {
   readonly kind: "stop";
@@ -464,6 +577,8 @@ export type JournalLine =
   | StepFailAskLine
   | StepAbandonLine
   | TurnRaiseLine
+  | StepModelOverrideLine
+  | ForkRevertLine
   | StopLine
   | RunEndLine;
 
@@ -492,6 +607,13 @@ export const DURABLE_JOURNAL_KINDS: ReadonlySet<JournalLine["kind"]> = new Set<J
     "stepFailAsk",
     "stepAbandon",
     "turnRaise",
+    // A fork's per-step model override is the same shape of commitment: a run
+    // that lost it would silently continue on the model the fork was cut to
+    // get away from, which is the one outcome a fork must never produce.
+    "stepModelOverride",
+    // A `--revert` fork rewound the user's own files. Losing that line would
+    // leave the strongest evidence of an irreversible act nowhere on disk.
+    "forkRevert",
   ],
 );
 
@@ -930,6 +1052,27 @@ export interface StepActivity {
   readonly toolCalls: Readonly<Record<string, number>>;
   /** Calls to a tool that authors files (`write`, `edit`, `multiedit`). */
   readonly writes: number;
+  /**
+   * Calls the permission layer REFUSED — the tool never ran.
+   *
+   * The silence this closes: under `-p` the default permission mode denies
+   * every `bash` call a write-lane role makes, because there is nobody to ask.
+   * The child agent is told so and carries on, usually by asserting in prose
+   * that the command it never ran would have passed — and the step reports
+   * `done`. A pipeline whose correctness gate is "run the tests and make them
+   * pass" then ships false confidence, with the only trace a stderr line in a
+   * busy run.
+   *
+   * A denial is read from the tool result's own `details.permissionDenied`
+   * marker (set at the one place a refusal is minted, `loop.ts`), never from
+   * message text: a tool that merely fails is not a tool that was refused, and
+   * a model can write the words "permission denied" whenever it likes.
+   *
+   * Absent, not `0`, when nothing was refused — the same "unknown is
+   * undefined" rule the rest of this file follows, and it keeps every journal
+   * line that predates the field readable as what it is.
+   */
+  readonly denied?: number;
 }
 
 /** Tools whose call means a file was authored. Mirrors `workflow.ts`'s `WRITE_TOOLS`. */
@@ -978,7 +1121,18 @@ export function activityFacts(value: unknown): StepActivity | undefined {
       toolCalls[name] = Math.floor(count);
     }
   }
-  return { turns: Math.floor(raw.turns), toolCalls, writes: countWrites(toolCalls) };
+  // Dropped rather than coerced, like every other field here: a denial count
+  // that is not a positive whole number is no count at all.
+  const denied =
+    typeof raw.denied === "number" && Number.isFinite(raw.denied) && raw.denied > 0
+      ? Math.floor(raw.denied)
+      : undefined;
+  return {
+    turns: Math.floor(raw.turns),
+    toolCalls,
+    writes: countWrites(toolCalls),
+    ...(denied === undefined ? {} : { denied }),
+  };
 }
 
 /**
@@ -988,6 +1142,11 @@ export function activityFacts(value: unknown): StepActivity | undefined {
  * busiest {@link ACTIVITY_TOOLS_SHOWN} are named and the rest are summarised.
  * The write count is spelled out rather than omitted when it is zero: "no file
  * written" is the whole point of the line on a write-lane step.
+ *
+ * Refused calls get their own segment, next to the tools they were refused
+ * for, and only when there were any: `12 turns · bash 3 · 3 denied · 2 writes`
+ * is the line that tells an operator the `node --test` this step reported as
+ * `done` never actually ran.
  *
  * @example
  * activity: 80 turns · bash 77 · read 17 · grep 1 · no file written
@@ -1006,9 +1165,11 @@ export function describeActivity(activity: StepActivity): string {
     activity.writes === 0
       ? "no file written"
       : `${activity.writes} write${activity.writes === 1 ? "" : "s"}`;
+  const denied = activity.denied ?? 0;
   return [
     `activity: ${activity.turns} turn${activity.turns === 1 ? "" : "s"}`,
     ...calls,
+    ...(denied > 0 ? [`${denied} denied`] : []),
     writes,
   ].join(" · ");
 }
@@ -1409,6 +1570,15 @@ export interface ResumedStep {
    * empty one — a resume that cannot restate the question cannot be answered.
    */
   readonly question?: string;
+  /**
+   * The validated contract object this step replied with, so the stage after
+   * it re-expands `{{contract}}` from the object the validator PASSED rather
+   * than from a second parse of the recorded prose. See
+   * {@link StepEndLine.contract}.
+   */
+  readonly contract?: Record<string, unknown>;
+  /** What a `[judges:N]` step's panel decided. See {@link JudgesRecord}. */
+  readonly judges?: JudgesRecord;
 }
 
 /**
@@ -1562,6 +1732,15 @@ export interface ResumeState {
    * the grant lives.
    */
   readonly turnRaises?: ReadonlyMap<string, number>;
+  /**
+   * Run-scoped MODEL overrides a fork pinned, latest per step id.
+   *
+   * The fork's `--model <tag>` reaches the dispatch layer through this map —
+   * step id → the tag the human typed — and it wins over the step's own
+   * `[tag]` and the role's `model:` for that one step. Every other step of the
+   * forked run resolves its model exactly as the file says.
+   */
+  readonly modelOverrides?: ReadonlyMap<string, string>;
   /**
    * The human's reply to the pending {@link stepFailAsk}, supplied by the
    * resume flow — never read from the journal (the same rule as
@@ -1806,6 +1985,9 @@ export function buildResumeState(lines: readonly JournalLine[]): ResumeState {
   // a gesture nobody made twice.
   let stepFailAsk: PendingStepFailAsk | undefined;
   const turnRaises = new Map<string, number>();
+  // A fork's per-step model pins, folded the same way: step id → tag, latest
+  // wins, so a fork of a fork re-pins the step rather than stacking.
+  const modelOverrides = new Map<string, string>();
 
   for (const line of lines) {
     switch (line.kind) {
@@ -1905,6 +2087,13 @@ export function buildResumeState(lines: readonly JournalLine[]): ResumeState {
           turnRaises.set(turnRaiseKey(line.stepId), Math.floor(line.value));
         }
         break;
+      case "stepModelOverride":
+        // Same tolerance rule: an empty or non-string tag is no override, not
+        // an override to the empty model.
+        if (typeof line.tag === "string" && line.tag.trim() !== "") {
+          modelOverrides.set(line.stepId, line.tag.trim());
+        }
+        break;
       case "runEnd":
         ended = true;
         endedStatus = line.status;
@@ -1926,6 +2115,11 @@ export function buildResumeState(lines: readonly JournalLine[]): ResumeState {
       ...(line.record === undefined ? {} : { record: line.record }),
       usage: line.usage,
       promptHash: line.promptHash,
+      // The typed handoff comes back with the step: the stage after a resumed
+      // contract step splices `{{contract}}` from this, and without it that
+      // stage would silently receive an empty string.
+      ...(line.contract === undefined ? {} : { contract: line.contract }),
+      ...(line.judges === undefined ? {} : { judges: line.judges }),
       ...(line.startedAt === undefined ? {} : { startedAt: line.startedAt }),
       ...(line.endedAt === undefined ? {} : { endedAt: line.endedAt }),
     });
@@ -1994,6 +2188,7 @@ export function buildResumeState(lines: readonly JournalLine[]): ResumeState {
     ...(budgetCapUsd === undefined ? {} : { budgetCapUsd }),
     ...(stepFailAsk === undefined ? {} : { stepFailAsk }),
     ...(turnRaises.size === 0 ? {} : { turnRaises }),
+    ...(modelOverrides.size === 0 ? {} : { modelOverrides }),
   };
 }
 
@@ -2041,6 +2236,12 @@ export type WorkflowFailureKind =
   | "agent-error"
   | "turn-ceiling"
   | "no-progress"
+  // TYPED REPLY CONTRACTS: the step answered, and the answer was not the shape
+  // its `[contract:<name>]` declared. Deterministic here — the engine has
+  // already spent this step's one contract retry, which re-dispatched the same
+  // prompt with the validator's own errors appended, and a THIRD identical ask
+  // is not a different question. What is left is a person's to look at.
+  | "contract"
   | "cancelled";
 
 /** The transient kinds, in one place so the classifier and tests agree. */

@@ -21,8 +21,9 @@
  * - `name` — defaults to the filename stem, normalized to `[a-z0-9-]`.
  * - `description` — one-line summary shown to the model when it is choosing
  *   an agent to delegate to.
- * - `tools` — a single comma-separated line, e.g. `tools: read, grep, glob`.
- *   Unknown tool names (checked against a caller-supplied allow-list, such as
+ * - `tools` — a single comma-separated line, e.g. `tools: read, grep, glob`,
+ *   or YAML's inline flow sequence, `tools: [read, grep, glob]` (quoted items
+ *   allowed). Unknown tool names (checked against a caller-supplied allow-list, such as
  *   `BUILT_IN_TOOL_NAMES` from `./runtime.ts`) are dropped with a warning
  *   rather than rejecting the whole file.
  * - `model` — a model id string, passed through uninterpreted (this module
@@ -143,17 +144,41 @@ export function parseAgentFrontmatter(raw: string): { frontmatter: Frontmatter; 
 /**
  * Parse a `tools:` frontmatter value into individual tool names.
  *
- * Kept deliberately simple, matching the doc comment's "comma-separated on
- * one line" contract: split on commas, trim, drop empties. No YAML list
- * syntax (`- read`) is understood.
+ * Two spellings mean the same thing and both appear in the wild: the bare
+ * comma-separated line this loader documented (`tools: read, grep, glob`) and
+ * YAML's inline flow sequence (`tools: [read, write, edit]`), which is what
+ * anyone who has written a frontmatter block before will type. The brackets
+ * used to survive the split, so `[read, write, edit]` yielded `"[read"` and
+ * `"edit]"` — the first and LAST tool were dropped as unknown names, silently
+ * costing an agent its editor. Quotes are stripped per item for the same
+ * reason (`tools: ["read", "edit"]` is valid YAML too).
+ *
+ * Multi-line YAML block lists (`- read` on its own line) are still not
+ * understood: `parseAgentFrontmatter` only reads `key: value` lines, so those
+ * never reach here.
  *
  * @param raw - The raw frontmatter value.
  */
 function parseToolsList(raw: string): string[] {
-  return raw
+  let value = raw.trim();
+  if (value.startsWith("[")) {
+    // Tolerate a missing `]` rather than dropping the whole list: a truncated
+    // line should still name the tools it did manage to spell.
+    value = value.slice(1);
+    if (value.endsWith("]")) value = value.slice(0, -1);
+  }
+  return value
     .split(",")
-    .map((part) => part.trim())
+    .map((part) => stripQuotes(part.trim()))
     .filter((part) => part.length > 0);
+}
+
+/** Strip one matched pair of surrounding quotes, if any. */
+function stripQuotes(value: string): string {
+  if (value.length < 2) return value;
+  const first = value[0];
+  if ((first === '"' || first === "'") && value.endsWith(first)) return value.slice(1, -1).trim();
+  return value;
 }
 
 /**

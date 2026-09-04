@@ -25,6 +25,7 @@ import {
   parseWorkflowDoc,
   placeholderError,
   serializeWorkflowDoc,
+  stepOptionErrors,
   stepReparseIssues,
   validateWorkflowDoc,
   type WorkflowDoc,
@@ -243,7 +244,7 @@ describe("body grammar", () => {
       "line 4: {{journal}} has no value in the first step",
     );
     expect(parseErr("---\nname: x\n---\n1. use {{previous}}")).toBe(
-      'line 4: unknown placeholder "{{previous}}"; only {{prev}}, {{input}} and {{journal}} exist',
+      'line 4: unknown placeholder "{{previous}}"; only {{prev}}, {{input}}, {{journal}}, {{contract}} and {{contract.<field>}} exist',
     );
     // Inner whitespace is trimmed, and later stages may use prev.
     const { doc } = parseOk("---\nname: x\n---\n1. start from {{ input }}\n2. refine {{prev}}");
@@ -529,5 +530,169 @@ describe("real kit workflows, read from disk", () => {
     // and the hub test hold the same number, so a drift shows up in two places.
     expect(ragSetup.doc.stages).toHaveLength(14);
     expect(ragSetup.doc.stages.some((stage) => stage.parallel)).toBe(true);
+  });
+});
+
+// ------------------------------------------- stage-line options and contracts
+
+const DECL = [
+  "```contract release-verdict",
+  "decision: SHIP | SHIP-WITH-FIXES | DO-NOT-SHIP",
+  "reasons: string[]",
+  "blockers?: string[]",
+  "confidence: number",
+  "```",
+];
+
+/** A document with the demo frontmatter and the given body lines. */
+function file(...body: string[]): string {
+  return ["---", "name: x", "---", ...body].join("\n");
+}
+
+describe("stage-line options in the mirror", () => {
+  it("reads all three options onto the step", () => {
+    const { doc } = parseOk(
+      file(
+        ...DECL,
+        "",
+        "1. [tier:cheap] [contract:release-verdict] [judges:2] @qa judge {{input}}",
+        "2. [race:tier:cheap|tier:fast] act on {{contract.decision}}",
+      ),
+    );
+    expect(doc.stages[0]?.steps[0]).toEqual({
+      modelTag: "tier:cheap",
+      contract: "release-verdict",
+      judges: 2,
+      role: "qa",
+      prompt: "judge {{input}}",
+    });
+    expect(doc.stages[1]?.steps[0]?.race).toEqual(["tier:cheap", "tier:fast"]);
+    expect(doc.contracts?.map((entry) => entry.name)).toEqual(["release-verdict"]);
+  });
+
+  it("keeps the contract's fields, optionality and enum members", () => {
+    const { doc } = parseOk(file(...DECL, "", "1. [contract:release-verdict] @qa judge"));
+    expect(doc.contracts?.[0]?.fields).toEqual([
+      {
+        name: "decision",
+        optional: false,
+        type: { kind: "enum", values: ["SHIP", "SHIP-WITH-FIXES", "DO-NOT-SHIP"] },
+      },
+      { name: "reasons", optional: false, type: { kind: "string[]" } },
+      { name: "blockers", optional: true, type: { kind: "string[]" } },
+      { name: "confidence", optional: false, type: { kind: "number" } },
+    ]);
+  });
+
+  it("leaves `contracts` off a document that declares none", () => {
+    expect(parseOk(file("1. go")).doc.contracts).toBeUndefined();
+  });
+
+  it("round-trips options and declarations to a fixed point", () => {
+    const raw = file(
+      ...DECL,
+      "",
+      "1. [contract:release-verdict] [judges:3] @qa judge {{input}}",
+      "2. [race:tier:cheap|tier:fast] act on {{contract.decision}}",
+    );
+    const { doc } = parseOk(raw);
+    const serialized = serializeWorkflowDoc(doc);
+    expect(serialized).toContain("1. [contract:release-verdict] [judges:3] @qa judge {{input}}");
+    expect(serialized).toContain("2. [race:tier:cheap|tier:fast] act on {{contract.decision}}");
+    expect(serialized).toContain("```contract release-verdict");
+    expect(serialized).toContain("decision: SHIP | SHIP-WITH-FIXES | DO-NOT-SHIP");
+    expect(serialized).toContain("blockers?: string[]");
+    const again = parseOk(serialized);
+    expect(again.doc).toEqual(doc);
+    expect(serializeWorkflowDoc(again.doc)).toBe(serialized);
+  });
+
+  it("serialises the options in canonical order whatever order they were written", () => {
+    const written = parseOk(
+      file(...DECL, "", "1. [judges:3] [contract:release-verdict] @qa judge"),
+    ).doc;
+    expect(serializeWorkflowDoc(written)).toContain(
+      "1. [contract:release-verdict] [judges:3] @qa judge",
+    );
+  });
+});
+
+describe("stepOptionErrors", () => {
+  it("stays quiet on a well-formed step", () => {
+    expect(
+      stepOptionErrors({ contract: "release-verdict", judges: 2, role: "qa", prompt: "go" }),
+    ).toEqual([]);
+  });
+
+  it("names each broken option rule in the engine's words", () => {
+    expect(stepOptionErrors({ contract: "Bad", prompt: "go" })).toEqual([
+      'contract name "Bad" may only contain lowercase letters, digits and "-", and must start with a letter',
+    ]);
+    expect(stepOptionErrors({ judges: 2, prompt: "go" })).toEqual([
+      "judges requires a role",
+      "judges requires a contract",
+    ]);
+    expect(stepOptionErrors({ race: ["a"], prompt: "go" })).toEqual([
+      'race must list 2 or 3 model tags separated by "|", got "a"',
+    ]);
+    expect(stepOptionErrors({ race: ["a", "a"], prompt: "go" })).toEqual([
+      'race lists model tag "a" twice',
+    ]);
+    expect(stepOptionErrors({ race: ["a", "b"], modelTag: "tier:x", prompt: "go" })).toEqual([
+      "race replaces the model tag",
+    ]);
+  });
+
+  it("flags a contract no declaration in the document defines", () => {
+    expect(stepOptionErrors({ contract: "missing", prompt: "go" }, [])).toEqual([
+      'no contract named "missing" is declared in this file',
+    ]);
+    expect(
+      stepOptionErrors({ contract: "known", prompt: "go" }, [
+        { name: "known", fields: [{ name: "a", optional: false, type: { kind: "string" } }] },
+      ]),
+    ).toEqual([]);
+  });
+});
+
+describe("validateWorkflowDoc with contracts", () => {
+  const withContract = (steps: DocStep[], contracts = ["v"]): WorkflowDoc => ({
+    frontmatter: { name: "x" },
+    preamble: "",
+    stages: steps.map((step) => ({ parallel: false, steps: [step] })),
+    contracts: contracts.map((name) => ({
+      name,
+      fields: [{ name: "decision", optional: false, type: { kind: "string" as const } }],
+    })),
+  });
+
+  it("accepts a document whose second stage reads the first's contract", () => {
+    const doc = withContract([
+      { contract: "v", role: "qa", prompt: "judge {{input}}" },
+      { prompt: "act on {{contract.decision}}" },
+    ]);
+    expect(validateWorkflowDoc(doc).filter((issue) => issue.severity === "error")).toEqual([]);
+  });
+
+  it("flags a field the contract does not declare, addressed to the stage", () => {
+    const doc = withContract([
+      { contract: "v", role: "qa", prompt: "judge {{input}}" },
+      { prompt: "act on {{contract.verdict}}" },
+    ]);
+    const issues = validateWorkflowDoc(doc).filter((issue) => issue.severity === "error");
+    expect(issues).toEqual([
+      {
+        severity: "error",
+        location: "stage 2",
+        message: '{{contract.verdict}} names no field of contract "v"',
+      },
+    ]);
+  });
+
+  it("warns about a declaration no step references, and errors on a duplicate", () => {
+    const doc = withContract([{ prompt: "plain step" }], ["v", "v"]);
+    const messages = validateWorkflowDoc(doc).map((issue) => `${issue.severity}:${issue.message}`);
+    expect(messages).toContain('error:contract "v" is already defined');
+    expect(messages).toContain("warning:no step references this contract");
   });
 });

@@ -10,6 +10,153 @@ CLI, the SDK, or the wire protocol.
 
 ## [Unreleased]
 
+### Added
+
+- **A project brain: the map every agent reads before it reads the repo.**
+  `arcturn brain build` distils the repository into `.arcturn/brain/` —
+  purpose, module map, entry points, the real build/test/lint commands,
+  conventions, gotchas, and a note per directory — and injects the overview,
+  fenced and labelled as data, into the main system prompt, every sub-agent,
+  every named role and every workflow step. Per-directory notes are fetched on
+  demand through the read-only `brain` tool. A directory's identity is a
+  content hash over its git blobs, so a rebuild re-distils only what actually
+  moved, deletes notes for directories that are gone, and makes zero model
+  calls when nothing changed; a finished workflow run refreshes the map and
+  writes that run's own lessons into `runs.md` (`brain.autoRefresh`). The model
+  never writes the brain: a read-only sub-agent returns text in a fixed format,
+  and Arcturn parses it, strips engine control markers, invisible characters
+  and fence delimiters, enforces the caps and writes the files itself — and
+  runs the same scrub on every byte it reads back, so a brain committed by a
+  cloned repository cannot close its own fence or smuggle an engine control
+  line into your prompt. In a project you have not trusted, only a one-line
+  "brain present but withheld" stub is injected. Credential-shaped files
+  (`.env*`, keys, certificates, `.npmrc`, `*secret*`, …) are never listed to
+  the distiller, manifest excerpts pass through a secret redactor, and the
+  brain directory carries its own `.gitignore`: the brain is per clone, by
+  design. Directories over 80 files split one level deeper, up to depth 3.
+  `arcturn brain status|show`, `/brain`, and a `brain` config block.
+
+- **Workflow stage lines take options, and workflows declare typed contracts.**
+  `[contract:<name>]` pins a step's reply to a declared shape, `[judges:2|3]`
+  marks a step for repeated arbitration, and `[race:a|b]` names the models to
+  run it on. Groups may be written in any order before `@role`; anything
+  bracketed that is not one of those three reserved keys is still the model
+  tag it always was. A contract is a top-level ```` ```contract <name> ````
+  block — one `field: type` per line, optional fields with `?:`, enums as
+  `A | B | C` — and the next stage reads the validated result with
+  `{{contract}}` and `{{contract.<field>}}`. Every construct is checked at
+  parse time with a line-numbered message, and the workflow builder's parser
+  mirrors all of it error string for error string.
+
+- **A step with a contract is validated, retried once with the validator's
+  own words, and handed on as data.** The contract's fields are appended to
+  the step prompt; the reply's fenced json block is validated; the object —
+  never the prose — is what `{{contract}}` splices into the next stage, and it
+  is journalled so a resume re-splices it without re-running the step. A reply
+  that misses its shape buys exactly one more attempt with the errors
+  appended; a second miss fails the step as `contract` and parks the run with
+  those errors in the question.
+
+- **Judge disagreement.** `[judges:2|3]` runs a read-only step that many times
+  as independent sub-agents and compares one enum field of their contract
+  replies. They agree and the first answer stands; they split and an arbiter
+  runs on both replies in full and decides. It is one step throughout — one
+  journal terminal, one `{{prev}}`, one bill covering every seat — and
+  `/workflow status` prints `judges: 2 · SHIP / DO-NOT-SHIP · arbiter:
+  DO-NOT-SHIP` under it. A judged step whose role can write, or whose
+  contract has nothing to compare, is refused before a token is spent.
+
+- **Model racing.** `[race:a|b]` really runs a step on both models at once.
+  Each arm gets its own worktree, its own live row labelled with its model
+  and its own bill; the first answer that clears the gate — not an error, not
+  the void, valid against the step's contract when it has one — wins, every
+  other arm is aborted the same instant, and exactly one patch reaches the
+  checkout because arms claim the apply at the last atomic moment rather than
+  racing into `git apply` together. The journal keeps which models ran, who
+  won and how each other arm ended, plus `raceUsage` so the budget sees every
+  arm's spend; the insights ledger gets one terminal per arm, so `arcturn
+  insights` and the forecast learn how models compare on that exact step. An
+  unresolvable race tag is refused before the run starts.
+
+- **`/workflow forecast <name>`: what this run will cost before it starts.**
+  Per stage — resolved on the exact models the run would use — the median and
+  p90 duration, cost, tokens and stop risk from the local insights ledger,
+  the best alternative model seen on that step, and a totals line; with no
+  exact history it falls back to the same step on any model, then the same
+  role on any workflow, each labelled. `/workflow <name>` prints a two-line
+  forecast banner before a fresh run, best-effort and never able to delay or
+  block it. An unpriced sample makes a stage's cost read `unknown` rather than
+  a wrong `$0.00`. `--json` for scripts.
+
+- **Retrospectives: a run that struggled can improve its own kit.**
+  `arcturn retro <runId>` / `/retro` reads the run's journal and insights —
+  parks, ceilings, tool histograms, retries, the shape of the last turn — and
+  a read-only agent proposes edits to the kit's role prompts and workflow
+  stages as search/replace blocks that must match the file exactly once.
+  Arcturn renders the unified diff itself, self-checks it with `git apply
+  --check`, shows findings, diff and risk, and applies only on an explicit yes
+  (`--apply --yes` headless; exit 3 when a human is needed). The evidence
+  packet carries the full text of every editable file and says so when one
+  had to be cut; a block that matches zero or many times earns one correction
+  turn quoting the nearest real text. Phases print to stderr with a
+  "still thinking" tick so a five-minute retro never looks like a hang.
+  After any run that parked, failed or retried, `/workflow` names the command.
+
+- **Skill synthesis: a run that finished clean becomes a reusable skill.**
+  `arcturn skill synthesize <runId>` / `/skills synthesize` draft a `SKILL.md`
+  from the procedure the run actually followed — the steps, the checks it ran,
+  the pitfalls it hit — with `source-run:` and `generated:` provenance, and
+  save it under your user or project skills root after you approve. `--share`
+  prints a prefilled hub proposal URL and never sends anything. A run with a
+  failed stage is refused unless `--force`.
+
+- **`/workflow fork` and `/workflow diff`.** `fork <runId> --at <stepId>
+  [--model <tag>] [--raise <n>]` starts a new run that reuses every stage the
+  old one finished before `--at` — terminals, patch files and the frozen
+  baseline — and continues through the resume machinery, so nothing before
+  the fork point is paid for twice; `--model` pins that one step to another
+  model as a journalled grant. A fork writes into the same checkout the
+  original wrote into, so forking a run that *finished* is refused up front
+  (`Run <id> already applied steps 3-5 into this checkout; add --revert…`)
+  unless `--revert` is passed, which reverse-applies those patches newest
+  first — after really applying the whole reverse series to a scratch copy
+  of the touched files, since `git apply` does not chain patches within one
+  invocation — and records a durable `forkRevert` line in the new run's
+  journal. `diff <runA> <runB>` lays two runs side by
+  side stage by stage — status, attempts, turns, tool calls, writes, duration,
+  cost, model, race winner, judges, contract and the first output line that
+  differs — marking every changed row.
+
+- **A step can no longer report done while its commands were silently
+  refused.** Tool calls denied by the permission mode are counted per step
+  (`activity: 12 turns · bash 3 denied · write 2`), journalled, recorded in
+  the insights ledger, and a run with any denials ends with one notice naming
+  the count and the permission flag that would allow them. Found live: a
+  headless write-lane role asked to run `node --test` had every `bash` call
+  denied and still finished "done".
+
+### Fixed
+
+- **A skill run headlessly printed nothing.** `arcturn -p "/<skill> args"`
+  ran the skill's agent turn — files changed — but wrote nothing to stdout or
+  stderr and exited 0. A skill line is now expanded and run down the ordinary
+  prompt path: it streams events under `--output-format json`, prints the
+  final text in text mode, and exits 1 when the run errors. A built-in
+  command still wins a name collision.
+
+- **A markdown agent's `tools: [read, write, edit]` silently lost `edit`.**
+  The inline YAML flow sequence is parsed properly now — brackets, spaces and
+  quoted items — instead of dropping the first and last tool as unknown
+  names. A role that had lost `edit` this way burned 104 turns rewriting
+  files whole before the bug was caught in a live run.
+
+- **Project memory and the named-agent roster never reached the system
+  prompt.** `collectSystemPromptContext` silently dropped both: they were
+  passed through a conditional spread of fields its options type did not
+  declare, which TypeScript's excess-property check does not catch. Both
+  sections now appear, as they always should have, with a regression test
+  that builds a runtime over a real memory note and reads the prompt back.
+
 ## [0.5.9] — 2026-09-03
 
 ### Added

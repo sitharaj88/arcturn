@@ -771,7 +771,9 @@ describe("buildRuntime", () => {
     const runtime = await buildTestRuntime(scratch);
     const child = runtime.createSubagent("go find things");
     const names = child.tools.map((tool) => tool.definition.name).sort();
-    expect(names).toEqual(["fetch", "glob", "grep", "ls", "read"]);
+    // `brain` joins the read-only set: it reads note files the index names and
+    // can touch nothing else, so a read-only child may have it.
+    expect(names).toEqual(["brain", "fetch", "glob", "grep", "ls", "read"]);
     expect(child.sessionId).not.toBe(runtime.agent.sessionId);
     await runtime.dispose();
 

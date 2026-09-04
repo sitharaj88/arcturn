@@ -61,10 +61,17 @@ Every key `.arcturn/config.json` accepts, in both user and project files:
 | `verify` | `string \| VerifyConfig` | *(unset)* | Command run after edits; failures are fed back to the model. String is sugar for `{ command }`. See below. |
 | `audit` | `boolean` | `false` | Record an append-only audit trail per session. See [Audit trail](/docs/audit-cost) and `arcturn audit`. |
 | `insights` | `boolean` | `true` | Keep the local insights ledger (`~/.arcturn/insights/`) — parks, silent turns, step failures, run costs. Names and numbers only; no prompts, reasoning, paths or content. `false` writes nothing at all. See [Insights](/docs/insights). |
+| `retro` | `{ auto?, model? }` | `{ auto: true }` | `auto` controls whether `/workflow` prints the retro hint after a run with a park, a failed step or a retried step; `model` overrides the model `arcturn retro`'s read-only sub-agent runs on (default: the configured `judgment` tier, else the subagent route). See [Retro](/docs/retro). |
+| `brain.enabled` | `boolean` | `true` | Build, inject and expose the distilled repository map every agent reads. `false` builds nothing, injects nothing and does not register the `brain` tool. See [Project brain](/docs/brain). |
+| `brain.autoRefresh` | `boolean` | `true` | Refresh the brain — and distil that run's lessons into `runs.md` — after a workflow run reaches a terminal status. Paused runs are skipped. |
+| `brain.maxChars` | `integer > 0` | `6000` | Character budget for the fenced brain block injected into system prompts. |
+| `brain.maxDirs` | `integer > 0` | `40` | How many directories get their own note. Busiest first; a directory over 80 files is split one level deeper, to a depth of three. |
+| `brain.model` | `string` | *(unset)* | Catalog id or `tier:<name>` for the read-only distiller sub-agent. Unset uses the `fast` tier when `route.tiers.fast` is configured, else the `subagent` route. |
 | `provenance` | `boolean` | `false` | Record reasoning-level provenance so `arcturn blame <file>` can explain a line. See [Provenance](/docs/provenance). |
 | `dryRun` | `boolean` | `false` | Route file mutations to a shadow copy for review instead of the real tree. Same as `--dry-run`. See [Dry-run mode](/docs/dry-run). |
 | `speculation` | `boolean` | `false` | Keep editing speculatively while a permission prompt is open. |
 | `route` | `RouterConfig` | `{}` | Per-role model overrides (`main`, `subagent`, `compaction`, `title`). See below. |
+| `skills.synthesisModel` | `string` | *(unset)* | Catalog id or `tier:<name>` the `arcturn skill synthesize` / `/skills synthesize` drafting sub-agent uses. Unset uses the `fast` tier when `route.tiers.fast` is configured, else the `subagent` route. See [Synthesizing a skill from a run](/docs/skills#synthesizing-a-skill-from-a-run). |
 | `providers` | `Record<string, ProviderEntry>` | `{}` | Extra provider endpoints — a gateway, a vLLM cluster, Ollama elsewhere — reachable as `<name>/<model>`. Merged key-wise with the **user** layer winning, unlike `route`. A project-declared entry is inert until approved. See below and [Providers](/docs/providers#from-configuration). |
 | `sessionTitles` | `boolean` | `true` | Generate a session title with one small LLM call (on the `title` route) after an interactive session's first completed run. `false` turns the call off. See [Sessions](/docs/sessions#session-titles). |
 | `taint` | `"off" \| "warn" \| "confirm" \| "deny"` | `"warn"` | How to treat a mutating call that echoes untrusted fetched content. See [Injection defense](/docs/injection-defense). |
