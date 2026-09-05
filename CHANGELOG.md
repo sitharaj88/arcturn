@@ -10,6 +10,8 @@ CLI, the SDK, or the wire protocol.
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-09-05
+
 ### Added
 
 - **A project brain: the map every agent reads before it reads the repo.**
@@ -2384,7 +2386,8 @@ servers unspawnable because npm ships them as `.cmd` shims. All fixed, with the
 matrix as referee. Shell resolution, path handling and case sensitivity are
 resolved per platform at runtime.
 
-[Unreleased]: https://github.com/sitharaj88/arcturn/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/sitharaj88/arcturn/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/sitharaj88/arcturn/compare/v0.5.9...v0.6.0
 [0.4.0]: https://github.com/sitharaj88/arcturn/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/sitharaj88/arcturn/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/sitharaj88/arcturn/compare/v0.1.0...v0.2.0

@@ -1,6 +1,6 @@
 {
   "name": "@arcturn/tools",
-  "version": "0.5.9",
+  "version": "0.6.0",
   "description": "Built-in tools for the Arcturn agent harness",
   "license": "Apache-2.0",
   "publishConfig": {
