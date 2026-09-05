@@ -441,9 +441,14 @@ describe("runPrint with a markdown skill", () => {
     expect(io.stdoutText()).toBe("rain on the roof\n");
     expect(io.stderrText()).toBe("");
     // Effect: the model was asked the SKILL's expanded body, not "/haiku rain".
-    expect(JSON.stringify(runtime.agent.messages)).toContain(
-      `Write a haiku about rain in ${scratch.cwd}.`,
-    );
+    // Asserted against the message TEXT, never a JSON dump of it: a Windows
+    // cwd is full of backslashes, and JSON.stringify doubles every one of
+    // them, so the raw path could never be found inside the encoded string.
+    const asked = runtime.agent.messages
+      .flatMap((message) => message.content)
+      .map((part) => (part.type === "text" ? part.text : ""))
+      .join("\n");
+    expect(asked).toContain(`Write a haiku about rain in ${scratch.cwd}.`);
     await runtime.dispose();
   });
 

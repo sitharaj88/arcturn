@@ -40,7 +40,7 @@
 import { execFile as execFileCb } from "node:child_process";
 import { mkdir, mkdtemp, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, join, relative } from "node:path";
+import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { promisify } from "node:util";
 import type { AgentDef } from "./agents.js";
 import { loadAgentDefs } from "./agents.js";
@@ -165,6 +165,35 @@ const PROJECT_PREFIX = "project/";
 const HOME_SUBTREES: readonly string[] = ["agents", "workflows", "packages"];
 
 /**
+ * A root-relative path in POSIX form, whatever the platform's separator is.
+ *
+ * WHY every internal key is `/`-separated. Two things downstream of the
+ * editable set only ever speak POSIX: a unified diff's `--- a/<path>` header
+ * (which `git apply` reads back with `/`), and the path a model writes on an
+ * `<<<<<<< EDIT` line. On Windows `path.relative` hands back `agents\\x.md`,
+ * and every one of those comparisons — the `HOME_SUBTREES` first segment, the
+ * `relSet` membership check in {@link validateDiff}, the editable-path lookup
+ * in {@link resolveEditBlocks} — then misses. Normalising once, here at the
+ * boundary, is what keeps the rest of the module platform-blind.
+ *
+ * `path.join` accepts `/` on Windows, so a POSIX key is still safe to rejoin
+ * with its root when a real filesystem call needs an absolute path.
+ */
+function toPosixRel(rel: string, separator: string = sep): string {
+  return separator === "/" ? rel : rel.split(separator).join("/");
+}
+
+/**
+ * The `node:path` surface {@link anchorFile} needs, injectable so the Windows
+ * semantics can be asserted with `path.win32` from any platform.
+ */
+export interface AnchorPathOps {
+  readonly sep: string;
+  isAbsolute(path: string): boolean;
+  relative(from: string, to: string): string;
+}
+
+/**
  * Anchor one realpath-resolved file on the tree it came from.
  *
  * WHY not a common prefix. The editable set is drawn from TWO independent
@@ -185,23 +214,25 @@ const HOME_SUBTREES: readonly string[] = ["agents", "workflows", "packages"];
  *
  * @param abs - Realpath-resolved absolute path.
  * @param paths - The two trees.
+ * @param ops - Path semantics; defaults to this platform's.
  * @returns The anchoring, or `undefined` when the file is outside both.
  */
-function anchorFile(
+export function anchorFile(
   abs: string,
   paths: { home: string; project: string },
+  ops: AnchorPathOps = { sep, isAbsolute, relative },
 ): { root: string; rel: string; path: string } | undefined {
-  const homeRel = relative(paths.home, abs);
+  const homeRel = toPosixRel(ops.relative(paths.home, abs), ops.sep);
   if (
     homeRel !== "" &&
     !homeRel.startsWith("..") &&
-    !isAbsolute(homeRel) &&
+    !ops.isAbsolute(homeRel) &&
     HOME_SUBTREES.includes(homeRel.split("/")[0] as string)
   ) {
     return { root: paths.home, rel: homeRel, path: homeRel };
   }
-  const projectRel = relative(paths.project, abs);
-  if (projectRel !== "" && !projectRel.startsWith("..") && !isAbsolute(projectRel)) {
+  const projectRel = toPosixRel(ops.relative(paths.project, abs), ops.sep);
+  if (projectRel !== "" && !projectRel.startsWith("..") && !ops.isAbsolute(projectRel)) {
     return {
       root: paths.project,
       rel: projectRel,
@@ -314,9 +345,13 @@ async function discoverEditable(
   let packageName: string | undefined;
   const wfEntry = deduped.find((entry) => entry.kind === "workflow");
   if (wfEntry) {
-    const pkgRoot = join(paths.home, "packages");
-    if (wfEntry.abs.startsWith(`${pkgRoot}/`)) {
-      const pkg = wfEntry.abs.slice(pkgRoot.length + 1).split("/")[0];
+    // Anchored on the RESOLVED home, because `wfEntry.abs` is resolved too: a
+    // scratch `/var/...` home on macOS and a `\\?\\`-free realpath on Windows
+    // both make a raw string prefix test miss.
+    const pkgRoot = join(trees.home, "packages");
+    const pkgRel = toPosixRel(relative(pkgRoot, wfEntry.abs));
+    if (pkgRel !== "" && !pkgRel.startsWith("..") && !isAbsolute(pkgRel)) {
+      const pkg = pkgRel.split("/")[0];
       if (pkg) {
         packageName = pkg;
         try {
@@ -1201,6 +1236,25 @@ function parseDiffFiles(diff: string): DiffParseResult {
   return { ok: true, files: [...new Set(files)] };
 }
 
+/**
+ * Git flags that make `apply` move bytes and nothing else.
+ *
+ * WHY. Git for Windows ships `core.autocrlf=true` by default, so a plain `git
+ * apply` rewrites the line endings of every line it touches — and retro's
+ * whole contract is that the file after the patch is the file before it plus
+ * the resolved edit blocks, byte for byte. The diff is rendered from the
+ * file's own bytes (a CRLF file's lines carry their `\r`), so any EOL filter
+ * between the patch and the disk turns a correct patch into a whole-file
+ * rewrite, or into a `git apply --check` failure. Pinned per-invocation rather
+ * than trusted from the user's config.
+ */
+export const GIT_LITERAL_BYTES: readonly string[] = [
+  "-c",
+  "core.autocrlf=false",
+  "-c",
+  "core.eol=lf",
+];
+
 type ValidateResult = { ok: true; files: string[] } | { ok: false; reason: string };
 
 /**
@@ -1236,7 +1290,9 @@ async function validateDiff(patch: RootPatch, editable: EditableSet): Promise<Va
     const patchFile = join(tmpDir, "patch.diff");
     await writeFile(patchFile, patch.diff.endsWith("\n") ? patch.diff : `${patch.diff}\n`, "utf8");
     try {
-      await execFileAsync("git", ["apply", "--check", patchFile], { cwd: patch.root });
+      await execFileAsync("git", [...GIT_LITERAL_BYTES, "apply", "--check", patchFile], {
+        cwd: patch.root,
+      });
     } catch (error) {
       const stderr = (error as { stderr?: string } | undefined)?.stderr;
       const detail = stderr && stderr.trim() !== "" ? stderr.trim() : errorMessage(error);
@@ -1278,7 +1334,9 @@ async function applyRootPatch(patch: RootPatch): Promise<string[]> {
     const patchFile = join(scratch, "__retro__.patch");
     await writeFile(patchFile, patch.diff.endsWith("\n") ? patch.diff : `${patch.diff}\n`, "utf8");
     try {
-      await execFileAsync("git", ["apply", "__retro__.patch"], { cwd: scratch });
+      await execFileAsync("git", [...GIT_LITERAL_BYTES, "apply", "__retro__.patch"], {
+        cwd: scratch,
+      });
     } catch (error) {
       const stderr = (error as { stderr?: string } | undefined)?.stderr;
       throw new Error(

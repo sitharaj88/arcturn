@@ -18,13 +18,15 @@
 import { execFile as execFileCb } from "node:child_process";
 import { mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, win32 } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import { PRINT_EXIT, runPrint } from "./print.js";
 import {
+  anchorFile,
   computeRetro,
   createRetroCommands,
+  GIT_LITERAL_BYTES,
   parseEditBlocks,
   renderUnifiedDiff,
   resolveEditBlocks,
@@ -795,10 +797,31 @@ describe("renderUnifiedDiff", () => {
       }
       await writeFile(target, before, "utf8");
       await writeFile(patchFile, `${diff}\n`, "utf8");
-      await execFileAsync("git", ["apply", "--check", "p.patch"], { cwd: dir });
-      await execFileAsync("git", ["apply", "p.patch"], { cwd: dir });
+      await execFileAsync("git", [...GIT_LITERAL_BYTES, "apply", "--check", "p.patch"], {
+        cwd: dir,
+      });
+      await execFileAsync("git", [...GIT_LITERAL_BYTES, "apply", "p.patch"], { cwd: dir });
       expect(await readFile(target, "utf8")).toBe(after);
     }
+  });
+
+  it("reproduces a CRLF file byte for byte, as a Windows checkout stores one", async () => {
+    // A repository cloned with core.autocrlf=true has CRLF on disk. The
+    // renderer splits on "\n" only, so each line carries its own "\r" — and
+    // the patch must put the file back exactly, CRs included.
+    const dir = await mkdtemp(join(tmpdir(), "arcturn-retro-crlf-"));
+    const target = join(dir, "role.md");
+    const before = "line one\r\nline two\r\nline three\r\n";
+    const after = "line one\r\nline TWO\r\nline three\r\n";
+    const diff = renderUnifiedDiff("role.md", before, after);
+    expect(diff).toContain("-line two\r");
+    expect(diff).toContain("+line TWO\r");
+    await writeFile(target, before, "utf8");
+    await writeFile(join(dir, "p.patch"), `${diff}\n`, "utf8");
+    await execFileAsync("git", [...GIT_LITERAL_BYTES, "apply", "--check", "p.patch"], { cwd: dir });
+    await execFileAsync("git", [...GIT_LITERAL_BYTES, "apply", "p.patch"], { cwd: dir });
+    expect(await readFile(target, "utf8")).toBe(after);
+    await rm(dir, { recursive: true, force: true });
   });
 
   it("is empty for identical texts, and marks a missing final newline", () => {
@@ -1098,5 +1121,53 @@ describe("retro anchors every editable file on the tree it came from", () => {
     expect(await readFile(outside, "utf8")).toContain(PROJECT_ROLE_LINE);
     expect(await readFile(outside, "utf8")).not.toContain(PROJECT_ROLE_FIX);
     await rm(s.root, { recursive: true, force: true });
+  });
+});
+
+describe("anchoring under Windows path semantics", () => {
+  // The real defect these cover: `path.relative` answers with backslashes on
+  // win32, so `homeRel.split("/")[0]` was the WHOLE path, matched no
+  // HOME_SUBTREE, and every editable file fell out of the set — retro then
+  // said "no editable file could be resolved for this run" for every Windows
+  // run. Asserted with `path.win32` so it is provable off Windows.
+  const ops = { sep: win32.sep, isAbsolute: win32.isAbsolute, relative: win32.relative };
+  const trees = { home: "C:\\Users\\dev\\.arcturn", project: "D:\\repo\\.arcturn" };
+
+  it("keys a home-tree role on a POSIX path, whatever the platform separator is", () => {
+    expect(anchorFile("C:\\Users\\dev\\.arcturn\\agents\\reviewer.md", trees, ops)).toEqual({
+      root: trees.home,
+      rel: "agents/reviewer.md",
+      path: "agents/reviewer.md",
+    });
+    expect(
+      anchorFile("C:\\Users\\dev\\.arcturn\\packages\\kit\\workflows\\a.md", trees, ops),
+    ).toEqual({
+      root: trees.home,
+      rel: "packages/kit/workflows/a.md",
+      path: "packages/kit/workflows/a.md",
+    });
+  });
+
+  it("prefixes a project-tree role with `project/`, still POSIX", () => {
+    expect(anchorFile("D:\\repo\\.arcturn\\agents\\local.md", trees, ops)).toEqual({
+      root: trees.project,
+      rel: "agents/local.md",
+      path: "project/agents/local.md",
+    });
+  });
+
+  it("refuses a file in neither tree, including one on a THIRD drive letter", () => {
+    // `win32.relative` across volumes returns the target absolute, with no
+    // ".." to reject — the case a `startsWith("..")` guard alone lets through.
+    expect(win32.relative(trees.home, "E:\\elsewhere\\evil.md")).toBe("E:\\elsewhere\\evil.md");
+    expect(anchorFile("E:\\elsewhere\\evil.md", trees, ops)).toBeUndefined();
+    // Inside the home tree, but not in a subtree a run's kit may come from.
+    expect(anchorFile("C:\\Users\\dev\\.arcturn\\sessions\\s1.json", trees, ops)).toBeUndefined();
+  });
+
+  it("matches a drive letter case-insensitively, as win32 itself does", () => {
+    expect(anchorFile("c:\\Users\\dev\\.arcturn\\agents\\reviewer.md", trees, ops)?.path).toBe(
+      "agents/reviewer.md",
+    );
   });
 });

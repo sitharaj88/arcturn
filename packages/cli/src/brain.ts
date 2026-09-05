@@ -41,8 +41,19 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import type { Dirent } from "node:fs";
-import { mkdir, readdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
-import { isAbsolute, join, relative, sep } from "node:path";
+import {
+  mkdir,
+  open,
+  readdir,
+  readFile,
+  rename,
+  rm,
+  stat,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import type { Tool, ToolExecutionContext, ToolResult } from "@arcturn/types";
 import type { SlashCommand } from "./commands.js";
@@ -957,6 +968,48 @@ function ancestors(path: string): string[] {
 }
 
 /**
+ * The `node:path` surface {@link resolveLookupPath} needs, injectable so the
+ * Windows semantics can be asserted with `path.win32` from any platform.
+ */
+export interface LookupPathOps {
+  readonly sep: string;
+  isAbsolute(path: string): boolean;
+  relative(from: string, to: string): string;
+}
+
+/**
+ * Turn a `lookup` path into the project-relative, POSIX-separated key the
+ * index is written with, or `undefined` when it names something outside the
+ * project.
+ *
+ * Two things this has to get right, both of them Windows:
+ *
+ * - **Separators.** `path.relative` answers `src\\nested` there, while every
+ *   index key and {@link ancestors} itself walk `/`. Normalising here, at the
+ *   one boundary a caller-supplied path enters through, keeps the rest of the
+ *   lookup platform-blind.
+ * - **Volumes.** `path.win32.relative` cannot express "up from `C:` to `D:`",
+ *   so for a path on another drive it returns the target ABSOLUTE — no `..`
+ *   prefix to reject. `C:\\project` looking up `/etc/passwd` (which resolves
+ *   against the process's own drive) took that route, fell through the `..`
+ *   guard, and was answered with the repository ROOT's note: a note about
+ *   somebody else's directory, presented as if it were about that path.
+ *
+ * @param raw - The path as the model wrote it, already trimmed.
+ * @param cwd - The calling agent's working directory, which an absolute path
+ *   is made relative to.
+ */
+export function resolveLookupPath(
+  raw: string,
+  cwd: string,
+  ops: LookupPathOps = { sep, isAbsolute, relative },
+): string | undefined {
+  const rel = (ops.isAbsolute(raw) ? ops.relative(cwd, raw) : raw).split(ops.sep).join("/");
+  if (rel.startsWith("..") || ops.isAbsolute(rel) || /^[A-Za-z]:/.test(rel)) return undefined;
+  return rel;
+}
+
+/**
  * Build the read-only `brain` tool: the model's way to ask for the note on
  * one directory without spending the prompt budget on all of them.
  *
@@ -1033,8 +1086,8 @@ export function createBrainTool(options: CreateBrainToolOptions): Tool {
       // An absolute path is made relative to the agent's own cwd so a model
       // that pasted a path out of a tool result gets the same answer as one
       // that typed `packages/cli`.
-      const relativePath = isAbsolute(raw) ? relative(ctx.cwd, raw) : raw;
-      if (relativePath.startsWith("..")) {
+      const relativePath = resolveLookupPath(raw, ctx.cwd);
+      if (relativePath === undefined) {
         return textResult(`No note: ${raw} is outside this project.`, { dir: undefined });
       }
 
@@ -1492,6 +1545,79 @@ export interface BuildBrainOptions {
 }
 
 /**
+ * In-process build queues, one per resolved brain directory.
+ *
+ * Module-level rather than per-runtime because the brain directory IS the
+ * shared resource: two runtimes in one process (a workflow's sub-agent and the
+ * shell that started it) map the same tree and must not both be mid-build.
+ */
+const buildQueues = new Map<string, Promise<void>>();
+
+/** A lock older than this belonged to a process that died; it is taken over. */
+const BUILD_LOCK_STALE_MS = 10 * 60_000;
+
+/** How long a build waits for another PROCESS's lock before it steals it. */
+const BUILD_LOCK_WAIT_MS = 30_000;
+
+const BUILD_LOCK_POLL_MS = 25;
+
+/**
+ * Hold an exclusive lock for the duration of one build.
+ *
+ * WHY a file and not only the in-process queue: `arcturn brain build` in one
+ * terminal and a workflow run's auto-refresh in another are two processes over
+ * one directory, and the corruption they can cause is real — build A deletes
+ * the note of a directory that vanished while build B writes an `index.json`
+ * that still names it, and every later read of that entry misses a file.
+ *
+ * WHY the lock lives in the temp directory rather than in the brain: the brain
+ * directory sits INSIDE the tree being mapped, and a build's first act is to
+ * enumerate that tree. A lock file there would be a file the build indexes
+ * itself. Keyed by a hash of the resolved brain path, so two projects never
+ * share one, and so a brain that does not exist yet can still be locked.
+ *
+ * The lock never fails a build. If it cannot be created at all the build
+ * simply runs unlocked, and a lock left behind by a killed process is taken
+ * over once it is {@link BUILD_LOCK_STALE_MS} old, or once this build has
+ * waited {@link BUILD_LOCK_WAIT_MS} for it — a stuck lock must never be a
+ * brain nobody can rebuild.
+ */
+async function withBuildLock<T>(key: string, run: () => Promise<T>): Promise<T> {
+  const lockPath = join(tmpdir(), `arcturn-brain-${sha1(key)}.lock`);
+  let held = false;
+  const deadline = Date.now() + BUILD_LOCK_WAIT_MS;
+  try {
+    for (;;) {
+      try {
+        const handle = await open(lockPath, "wx");
+        await handle.writeFile(`${process.pid}\n`);
+        await handle.close();
+        held = true;
+        break;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") break;
+        const age = await stat(lockPath)
+          .then((info) => Date.now() - info.mtimeMs)
+          .catch(() => Number.POSITIVE_INFINITY);
+        if (age > BUILD_LOCK_STALE_MS || Date.now() > deadline) {
+          await unlink(lockPath).catch(() => {});
+          continue;
+        }
+        await new Promise((settle) => setTimeout(settle, BUILD_LOCK_POLL_MS));
+      }
+    }
+  } catch {
+    // No lock to be had (an unwritable temp directory) — a build that runs is
+    // worth more than one refused over a lock it could not take.
+  }
+  try {
+    return await run();
+  } finally {
+    if (held) await unlink(lockPath).catch(() => {});
+  }
+}
+
+/**
  * Build or refresh a project's brain.
  *
  * The incremental contract, which the whole feature rests on: a directory is
@@ -1500,11 +1626,46 @@ export interface BuildBrainOptions {
  * something actually changed. A build over an unchanged checkout with no run
  * to learn from makes **zero** model calls and returns `"current"`.
  *
+ * **Builds of one brain are serialised**, in-process and across processes
+ * alike — see {@link withBuildLock}. Two racing builds are a real scenario (a
+ * workflow run's auto-refresh, plus the `arcturn brain build` a user types
+ * while it runs), and interleaving them would let the loser's `index.json`
+ * name notes the winner had already deleted. Serialised, the second build
+ * simply finds nothing stale and returns `"current"`: correct, and the honest
+ * answer, since the first build's result is already on disk.
+ *
  * @param options - What to map, how to distil it, and what to reuse.
  */
 export async function buildBrain(options: BuildBrainOptions): Promise<BrainBuildResult> {
-  const warnings: string[] = [];
   const brainDir = options.brainDir ?? brainDirFor(join(options.cwd, ".arcturn"));
+  const key = resolve(brainDir);
+
+  // In-process queue first: two builds inside ONE process (the auto-refresh a
+  // finished workflow run schedules, and the `arcturn brain build` the user
+  // typed while it ran) would otherwise both hold the file lock's own promise
+  // and interleave. The queue's promise never rejects, so a failed build never
+  // poisons the one waiting behind it.
+  const ahead = buildQueues.get(key) ?? Promise.resolve();
+  let release: () => void = () => {};
+  const mine = new Promise<void>((resolveMine) => {
+    release = resolveMine;
+  });
+  buildQueues.set(key, mine);
+  await ahead;
+  try {
+    return await withBuildLock(key, () => buildBrainOnce(options, brainDir));
+  } finally {
+    release();
+    if (buildQueues.get(key) === mine) buildQueues.delete(key);
+  }
+}
+
+/** One build, already serialised by {@link buildBrain}. */
+async function buildBrainOnce(
+  options: BuildBrainOptions,
+  brainDir: string,
+): Promise<BrainBuildResult> {
+  const warnings: string[] = [];
   const now = options.now ?? new Date();
 
   let scan: Awaited<ReturnType<typeof scanFiles>>;

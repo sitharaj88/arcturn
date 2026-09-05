@@ -8,7 +8,7 @@
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, win32 } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import { parseArgs } from "./args.js";
@@ -40,6 +40,7 @@ import {
   parseDistilled,
   redactSecrets,
   renderBrainPrompt,
+  resolveLookupPath,
   runBrainCommand,
   runEvidence,
   runsBrief,
@@ -521,6 +522,30 @@ describe("the brain tool", () => {
     const outside = await tool.execute({ action: "lookup", path: "/etc/passwd" }, ctx(root));
     expect(outside.details?.dir).toBeUndefined();
     await rm(root, { recursive: true, force: true });
+  });
+
+  // The Windows shape of the same lookup, provable off Windows: `path.relative`
+  // there hands back backslashes (which `ancestors` cannot walk), and across
+  // two drive letters it hands back a bare absolute path with no ".." in front
+  // of it — which used to fall through the "outside this project" guard and be
+  // answered with the repository ROOT's note.
+  it("resolves a lookup path under Windows semantics: separators and drive letters", () => {
+    const ops = { sep: win32.sep, isAbsolute: win32.isAbsolute, relative: win32.relative };
+    const cwd = "C:\\repo";
+    expect(resolveLookupPath("src", cwd, ops)).toBe("src");
+    expect(resolveLookupPath("src\\nested\\thing.ts", cwd, ops)).toBe("src/nested/thing.ts");
+    expect(resolveLookupPath("C:\\repo\\docs", cwd, ops)).toBe("docs");
+    // Up and out of the project.
+    expect(resolveLookupPath("C:\\other\\secrets", cwd, ops)).toBeUndefined();
+    // Another volume entirely: win32.relative cannot express it, so it answers
+    // absolute. There is no ".." here to catch it by.
+    expect(win32.relative(cwd, "D:\\etc\\passwd")).toBe("D:\\etc\\passwd");
+    expect(resolveLookupPath("D:\\etc\\passwd", cwd, ops)).toBeUndefined();
+  });
+
+  it("looks a path up on this platform the same way", () => {
+    expect(resolveLookupPath("src/nested", "/repo")).toBe("src/nested");
+    expect(resolveLookupPath("/etc/passwd", "/repo")).toBeUndefined();
   });
 
   it("says so, kindly, when no brain has been built", async () => {
@@ -1303,8 +1328,15 @@ describe("a build never lies about what a note was distilled from", () => {
       buildBrain({ cwd: root, brainDir, distill }),
       buildBrain({ cwd: root, brainDir, distill }),
     ]);
+    // Builds of one brain are serialised, so this is deterministic rather
+    // than a race: the first one maps the tree, and the second — running
+    // AFTER it, over a checkout nothing has touched since — honestly reports
+    // there was nothing left to do.
     expect(one.status).toBe("built");
-    expect(two.status).toBe("built");
+    expect(two.status).toBe("current");
+    // The lock lives outside the mapped tree, so a build never indexes it.
+    const { readdir } = await import("node:fs/promises");
+    expect(await readdir(brainDir)).not.toContain("build.lock");
     const parsed = JSON.parse(await readFile(join(brainDir, "index.json"), "utf8")) as {
       dirs: Record<string, { note: string }>;
     };
