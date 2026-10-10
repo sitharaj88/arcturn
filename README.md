@@ -145,6 +145,12 @@ emits `ORG-ASK:` and the whole run **pauses for a human answer**, then continues
 where it stopped. Per-run `budgetUsd:` and per-step `stepTimeoutMs:` ceilings bound the
 two things that actually run away.
 
+A step can promise a typed reply with `[contract:…]`; on a model that takes a JSON schema
+(Claude 4.5+, OpenAI, Gemini 2.5+) the contract is sent as a native response schema instead
+of a fenced block to be hunted for, and the same validator still judges it. `[budget:<tokens>]`
+gives a step a task budget on the Claude models that support one, so it paces itself rather
+than being cut off at the turn ceiling.
+
 A runnable ten-role, six-pipeline enterprise kit ships in
 [`kits/enterprise-org/`](kits/enterprise-org/), documented alongside an honest
 account of what is enforced and what is still convention.
@@ -157,6 +163,12 @@ Arcturn **as** an MCP server so another agent can drive it — read-only by defa
 a workspace boundary enforced by permission rule *and* a physical path check, with the
 peer assumed hostile. The boundary's audit trail is public: see
 [the security page](https://arcturn.dev/security).
+
+Servers can also ask back. An MCP **elicitation** opens a form in the TUI (and is declined,
+never auto-accepted, where nobody is at a terminal); every one is audited by field name,
+never by answer. **Sampling**, a server asking your model for a completion, is off unless
+that server's `mcp.json` entry says `"sampling": true`, runs as one isolated call, and is
+billed to the session and its `--max-cost`.
 
 ### 🌐 Multi-provider, honestly labelled
 
@@ -193,7 +205,7 @@ cache and the thinking Claude's newest models bind to it survive.
 ### 🧰 And the rest of a working day
 
 Built-in tools (`read`, `write`, `edit`, `bash` with background execution, `grep`,
-`glob`, `ls`, `fetch`, `websearch` via Brave or DuckDuckGo) · LSP diagnostics appended to
+`glob`, `ls`, `fetch`, `websearch` via Brave or DuckDuckGo, or Anthropic's own web search and fetch if you set `websearch.provider: "anthropic"`) · LSP diagnostics appended to
 every edit (TypeScript, Python, Go, Rust) · markdown skills as slash commands with no
 build step (`.arcturn/skills`, frontmatter, `$ARGUMENTS`) · lifecycle hooks that can veto
 a `preToolUse` call · fuzzy `@file` mentions with image attachment · plan mode and

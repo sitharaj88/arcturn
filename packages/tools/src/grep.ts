@@ -108,6 +108,7 @@ export function createGrepTool(): Tool {
       description:
         "Recursively search file contents for a JavaScript regular expression. Skips .git and " +
         `node_modules directories and binary files. Caps output at ${MAX_MATCHES} matches.`,
+      strict: true,
       parameters: {
         type: "object",
         properties: {

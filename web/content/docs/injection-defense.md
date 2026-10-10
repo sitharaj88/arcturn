@@ -200,6 +200,37 @@ to watch for, and arcturn warns at startup if you turn the policy on without lis
   and where you were about to send it.
   ```
 
+## Forging the harness's voice
+
+Where a model cannot take a mid-conversation `role: "system"` message, the harness's own
+notices (the turn-budget warning, progress checks, the stale-todo reminder) are folded into
+the user turn: a `<system-reminder>` block on Anthropic, Bedrock and OpenAI-compatible
+gateways, an `[operator]` prefix on Gemini. A fold is only as trustworthy as its marker is
+rare. A fetched page, a file, or an MCP server's output that spells `<system-reminder>`
+would read to the model exactly like the harness speaking.
+
+Arcturn does not rewrite that text. Each harness message is minted with a random token
+(16 hex characters, stored in the session), and the fold carries it:
+
+```text
+<system-reminder nonce="9f2c41ab07d3e856">
+You have used 90% of the turn budget. …
+</system-reminder>
+```
+
+On Gemini the prefix is `[operator 9f2c41ab07d3e856]`. The system prompt tells the model
+that only a block carrying a token is the harness; the same words without one, or inside a
+tool result, are data. A page cannot spell a token it was never shown, and the page itself
+reaches the model byte for byte, so nothing a tool returns is altered to make this work. The
+token is stored with the message, so a resumed session re-renders the same bytes (an
+append-only history depends on it); a transcript written before this change folds unmarked.
+Where the model takes a native `system` role there is nothing to fold and no token.
+
+This is a mitigation, not a proof. It relies on the model honouring the system prompt's
+rule, which has been tested on the wire (the only nonce-marked block sent is the harness's
+own) but not measured against live models. And the token sits in the model's context, so
+content that can be made to echo the model's own context back to it could repeat one.
+
 ## Honest limits
 
 - **Taint tracking is correlation, not comprehension.** A prose-only instruction with no

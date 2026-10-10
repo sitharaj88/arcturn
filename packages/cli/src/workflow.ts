@@ -220,7 +220,14 @@ import { cp, lstat, mkdir, readdir, readFile, rm, stat, writeFile } from "node:f
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
-import { abortableSleep, calculateCostUsd, computeBackoffDelay } from "@arcturn/ai";
+import {
+  abortableSleep,
+  calculateCostUsd,
+  computeBackoffDelay,
+  listModels,
+  supportsStructuredOutput,
+  supportsTaskBudget,
+} from "@arcturn/ai";
 import {
   addUsage,
   createSessionId,
@@ -240,6 +247,7 @@ import type {
   ModelSpec,
   PermissionRule,
   PermissionScope,
+  ResponseFormat,
   Usage,
 } from "@arcturn/types";
 import type { AgentDef } from "./agents.js";
@@ -248,11 +256,12 @@ import type { CommandContext, CommandUi, SlashCommand } from "./commands.js";
 import {
   CONTRACT_FIELD_NAME,
   CONTRACT_NAME,
+  type ContractMode,
+  checkContractReply,
   contractPromptLines,
-  extractContractJson,
+  contractToJsonSchema,
   isContractParseError,
   parseContractBody,
-  validateContract,
   type WorkflowContract,
   type WorkflowContractField,
   type WorkflowContractType,
@@ -290,6 +299,11 @@ import {
   sanitizeSplicedText,
 } from "./org-memory.js";
 import { createWorktree } from "./scouts.js";
+import {
+  parseTaskBudget,
+  taskBudgetModelError,
+  taskBudgetUnsupportedModel,
+} from "./task-budget.js";
 import { diffWorkflowRuns, formatWorkflowDiff, formatWorkflowDiffJson } from "./workflow-diff.js";
 import { createForkRevert, describeFork, forkWorkflowRun, parseForkArgs } from "./workflow-fork.js";
 import {
@@ -425,6 +439,13 @@ export interface WorkflowStep {
    * in written order. Replaces {@link modelTag} rather than joining it.
    */
   readonly race?: readonly string[];
+  /**
+   * The `[budget:<tokens>]` option: a task budget the step's model paces
+   * itself against (Anthropic `output_config.task_budget`). Beats the role's
+   * `taskBudgetTokens:`. A tag naming a model without task budgets is refused
+   * at parse time.
+   */
+  readonly budget?: number;
   /** The step's prompt template, still containing `{{prev}}` / `{{input}}`. */
   readonly prompt: string;
 }
@@ -654,6 +675,21 @@ export interface WorkflowStepRequest {
    * Absent for every step that is not raced.
    */
   readonly raceApplySettled?: (landed: boolean) => void;
+  /**
+   * NATIVE STRUCTURED OUTPUT: the step's contract as a JSON schema, when it
+   * declared one. The runner asks the provider for it only when the step's
+   * resolved model can honour it, and reports which path ran on
+   * {@link WorkflowStepOutcome.contractMode}; either way the reply is still
+   * validated against the contract. Absent for a step without a contract.
+   */
+  readonly responseFormat?: ResponseFormat;
+  /**
+   * TASK BUDGET, in tokens: the step's `[budget:N]`. The runner falls back to
+   * the role's `taskBudgetTokens:`, and sends it only to a model that paces
+   * itself against one (see `supportsTaskBudget`); anywhere else it says so
+   * once and the turn ceiling is the only limit.
+   */
+  readonly taskBudget?: number;
 }
 
 /**
@@ -786,6 +822,14 @@ export interface WorkflowStepOutcome {
   readonly race?: StepRaceSummary;
   /** What every arm of the race spent, where {@link usage} is the winner's. */
   readonly raceUsage?: Usage;
+  /**
+   * How a contract step's reply was asked for: `"native"` when the provider
+   * was given the contract's schema (the whole reply is then the JSON),
+   * `"fenced"` when the prompt's fenced-block instruction was the only ask.
+   * Absent for a step without a contract, and from a runner that predates it
+   * (read as `"fenced"`).
+   */
+  readonly contractMode?: ContractMode;
 }
 
 /** Executes one step. Injected so the engine is testable without an LLM. */
@@ -912,6 +956,8 @@ export interface WorkflowStepResult {
   readonly race?: StepRaceSummary;
   /** What every arm of that race spent, where {@link usage} is the winner's. */
   readonly raceUsage?: Usage;
+  /** How a contract step's reply was asked for. See {@link WorkflowStepOutcome.contractMode}. */
+  readonly contractMode?: ContractMode;
 }
 
 /** The record of one workflow run. */
@@ -1210,7 +1256,7 @@ const PLACEHOLDER = /\{\{([^{}]*)\}\}/g;
 // `key:value` (`[tier:judgment]`, say) stays a model tag exactly as before,
 // which is what keeps every workflow written against the old grammar reading
 // the same way.
-const OPTION_KEYS: ReadonlySet<string> = new Set(["contract", "judges", "race"]);
+const OPTION_KEYS: ReadonlySet<string> = new Set(["contract", "judges", "race", "budget"]);
 // A top-level ```contract fence, at column 0 — indenting one would make it a
 // list continuation, and the stage scanner has never looked inside those.
 const CONTRACT_FENCE = /^```contract(?:[ \t]+(.*))?$/;
@@ -1311,6 +1357,7 @@ interface ParsedStepLine {
   contract?: string;
   judges?: number;
   race?: readonly string[];
+  budget?: number;
   prompt: string;
 }
 
@@ -1358,6 +1405,7 @@ function parseStepLine(text: string, line: number): ParsedStepLine | WorkflowPar
   let contract: string | undefined;
   let judges: number | undefined;
   let race: readonly string[] | undefined;
+  let budget: number | undefined;
   const seenOptions = new Set<string>();
 
   // Zero or more bracket groups, in any order. Order does not matter because
@@ -1393,6 +1441,7 @@ function parseStepLine(text: string, line: number): ParsedStepLine | WorkflowPar
       const bad = readOption(classified.key, classified.value, line, (parsed) => {
         if (parsed.kind === "contract") contract = parsed.value;
         else if (parsed.kind === "judges") judges = parsed.value;
+        else if (parsed.kind === "budget") budget = parsed.value;
         else race = parsed.value;
       });
       if (bad) return bad;
@@ -1418,6 +1467,17 @@ function parseStepLine(text: string, line: number): ParsedStepLine | WorkflowPar
   }
   if (race !== undefined && judges !== undefined) {
     return { error: `line ${line}: judges and race cannot be combined` };
+  }
+  // A task budget on a model the tag NAMES and that has none is refused here,
+  // by name. A tier or an alias resolves only at run time, where a model
+  // without budgets gets a notice instead — the turn ceiling still binds.
+  if (budget !== undefined) {
+    for (const tag of [...(modelTag === undefined ? [] : [modelTag]), ...(race ?? [])]) {
+      const model = taskBudgetUnsupportedModel(tag);
+      if (model !== undefined) {
+        return { error: `line ${line}: ${taskBudgetModelError(tag, model)}` };
+      }
+    }
   }
 
   const roled = ROLE_TAG.exec(rest);
@@ -1478,6 +1538,7 @@ function parseStepLine(text: string, line: number): ParsedStepLine | WorkflowPar
     ...(contract === undefined ? {} : { contract }),
     ...(judges === undefined ? {} : { judges }),
     ...(race === undefined ? {} : { race }),
+    ...(budget === undefined ? {} : { budget }),
     prompt,
   };
 }
@@ -1486,7 +1547,8 @@ function parseStepLine(text: string, line: number): ParsedStepLine | WorkflowPar
 type OptionValue =
   | { kind: "contract"; value: string }
   | { kind: "judges"; value: number }
-  | { kind: "race"; value: readonly string[] };
+  | { kind: "race"; value: readonly string[] }
+  | { kind: "budget"; value: number };
 
 /**
  * Validate one `key:value` option group and hand its value back.
@@ -1514,6 +1576,12 @@ function readOption(
       return { error: `line ${line}: judges must be 2 or 3, got "${value}"` };
     }
     accept({ kind: "judges", value: Number(value) });
+    return undefined;
+  }
+  if (key === "budget") {
+    const parsed = parseTaskBudget(value);
+    if (typeof parsed !== "number") return { error: `line ${line}: ${parsed.error}` };
+    accept({ kind: "budget", value: parsed });
     return undefined;
   }
   // race
@@ -1890,6 +1958,7 @@ export function parseWorkflow(
           ...(parsed.contract === undefined ? {} : { contract: parsed.contract }),
           ...(parsed.judges === undefined ? {} : { judges: parsed.judges }),
           ...(parsed.race === undefined ? {} : { race: parsed.race }),
+          ...(parsed.budget === undefined ? {} : { budget: parsed.budget }),
           prompt: parsed.prompt,
         });
       }
@@ -1931,6 +2000,7 @@ export function parseWorkflow(
           ...(parsed.contract === undefined ? {} : { contract: parsed.contract }),
           ...(parsed.judges === undefined ? {} : { judges: parsed.judges }),
           ...(parsed.race === undefined ? {} : { race: parsed.race }),
+          ...(parsed.budget === undefined ? {} : { budget: parsed.budget }),
           prompt: parsed.prompt,
         },
       ],
@@ -3000,8 +3070,11 @@ type StepContractVerdict =
  * hand the caller back what the validator said either way.
  */
 interface StepContractGate {
-  /** Judge a settled, non-error outcome's final text. */
-  readonly check: (text: string) => StepContractVerdict;
+  /**
+   * Judge a settled, non-error outcome's final text, read the way it was
+   * asked for: the whole text on the native path, the fenced block otherwise.
+   */
+  readonly check: (text: string, mode: ContractMode) => StepContractVerdict;
   /**
    * The prompt to dispatch on the single retry a violation buys.
    *
@@ -3329,7 +3402,10 @@ async function runStepAttempts(
     // has nothing to validate, and calling a stalled step a contract violation
     // would relabel the fault a person needs to see.
     if (cls === "ok" && contract !== undefined && attempt.kind === "settled") {
-      const verdict = contract.check(attempt.outcome.text);
+      const verdict = contract.check(
+        attempt.outcome.text,
+        attempt.outcome.contractMode ?? "fenced",
+      );
       if (verdict.ok) return done(attempt, verdict);
       if (contractRetries >= AUTOMATIC_CONTRACT_ATTEMPTS) return done(attempt, verdict);
       contractRetries += 1;
@@ -4454,6 +4530,7 @@ export async function runWorkflow(
       // content of the run and never leaves the machine. Same rule as every
       // other field on this record — see `insights.ts`'s privacy section.
       ...(line.contract === undefined ? {} : { contract: true }),
+      ...(line.contractMode === undefined ? {} : { contractMode: line.contractMode }),
       // Counts only, for the same reason: how many judges ran, whether they
       // agreed, whether an arbiter was needed. The verdicts themselves stay in
       // the journal, which never leaves the machine either but is at least the
@@ -4903,6 +4980,18 @@ export async function runWorkflow(
             // role file, which was never touched — and handed to the runner,
             // which is the only thing that can reach the child's ceiling.
             ...(turnCeilingFor(step) === undefined ? {} : { turnCeiling: turnCeilingFor(step) }),
+            // NATIVE STRUCTURED OUTPUT, offered; the runner decides whether
+            // the step's model can take it. The prompt keeps the field list
+            // either way, so the hashed prompt never depends on the model.
+            ...(stepContract === undefined
+              ? {}
+              : {
+                  responseFormat: {
+                    name: stepContract.name,
+                    schema: contractToJsonSchema(stepContract),
+                  },
+                }),
+            ...(step.budget === undefined ? {} : { taskBudget: step.budget }),
           };
           let result: WorkflowStepResult;
           // ENFORCED PER-ROLE BUDGETS (RFC 0001 §8.4): resolved once per step
@@ -4958,11 +5047,7 @@ export async function runWorkflow(
             stepContract === undefined
               ? undefined
               : {
-                  check: (text) => {
-                    const extracted = extractContractJson(text);
-                    if (!extracted.ok) return { ok: false, errors: [extracted.error] };
-                    return validateContract(stepContract, extracted.value);
-                  },
+                  check: (text, mode) => checkContractReply(stepContract, text, mode),
                   retryPrompt: (dispatched, errors) => contractRetryPrompt(dispatched, errors),
                 };
           /** Run this step once, through the whole retry policy. */
@@ -5149,6 +5234,9 @@ export async function runWorkflow(
               // the only trace that the other arms ran at all.
               ...(outcome.race === undefined ? {} : { race: outcome.race }),
               ...(outcome.raceUsage === undefined ? {} : { raceUsage: outcome.raceUsage }),
+              ...(stepContract === undefined
+                ? {}
+                : { contractMode: outcome.contractMode ?? "fenced" }),
               startedAt: stepStartedAt,
               endedAt: now(),
             };
@@ -5378,6 +5466,9 @@ export async function runWorkflow(
               // stage after a resumed contract step would splice an empty
               // string and nobody would notice until the role acted on it.
               ...(result.contract === undefined ? {} : { contract: result.contract }),
+              // Which path asked for it (the provider's schema or the fence),
+              // so `/workflow status` and `arcturn insights` can say.
+              ...(result.contractMode === undefined ? {} : { contractMode: result.contractMode }),
               ...(result.judges === undefined ? {} : { judges: result.judges }),
               // MODEL RACING: one terminal for the step, carrying which models
               // ran, which one this line is, and what the whole race cost.
@@ -5768,6 +5859,16 @@ export interface WorkflowChildAgent {
   prompt(input: string): Promise<void>;
   abort(): void;
   finalText(): string;
+  /**
+   * The model the child runs on. Optional so a test double need not have
+   * one; without it (or without the setters below) a step's contract runs
+   * fenced and its task budget is reported as unsupported.
+   */
+  readonly model?: ModelSpec;
+  /** Ask every later request for a reply shaped by `format` (core `Agent.setResponseFormat`). */
+  setResponseFormat?(format: ResponseFormat | undefined): void;
+  /** Set the task budget for later requests (core `Agent.setTaskBudget`). */
+  setTaskBudget?(budget: { total: number } | undefined): void;
 }
 
 /** The slice of `ArcturnRuntime` {@link createRuntimeRunStep} needs. */
@@ -6674,6 +6775,8 @@ function stepLiveRow(
 
 /** How one agent run ended, plus what it spent. */
 interface AgentRunOutcome {
+  /** Which path a contract step's reply was asked for on, when it had a contract. */
+  contractMode?: ContractMode;
   usage: Usage;
   reason: "completed" | "aborted" | "error";
   errorMessage?: string;
@@ -6886,7 +6989,9 @@ async function driveAgent(
   onUsage?: (usage: Usage) => void,
   signals?: AgentRunSignals,
   stall?: AgentStallGuard,
+  ask: ChildAsk = {},
 ): Promise<AgentRunOutcome> {
+  const contractMode = configureChild(agent, ask, live);
   let usage = emptyUsage();
   let reason: "completed" | "aborted" | "error" = "completed";
   let errorMessage: string | undefined;
@@ -7111,7 +7216,9 @@ async function driveAgent(
       reason !== "completed",
     );
   }
+  const answeredMode = answeredContractMode(contractMode, lastMessage?.model, agent.model);
   return {
+    ...(answeredMode === undefined ? {} : { contractMode: answeredMode }),
     usage,
     reason,
     ...(errorMessage === undefined ? {} : { errorMessage }),
@@ -7138,8 +7245,98 @@ function lastTurnOf(run: AgentRunOutcome): { lastTurn?: LastTurnShape } {
  * {@link lastTurnOf}. A child that took no turns and called no tool is not an
  * absence of data; it is the loudest datum this record has.
  */
-function activityOf(run: AgentRunOutcome): { activity: StepActivity } {
-  return { activity: run.activity };
+function activityOf(run: AgentRunOutcome): {
+  activity: StepActivity;
+  contractMode?: ContractMode;
+} {
+  // The contract path rides the same spread: every lane outcome that drove an
+  // agent carries both, and none can forget one without the other.
+  return {
+    activity: run.activity,
+    ...(run.contractMode === undefined ? {} : { contractMode: run.contractMode }),
+  };
+}
+
+/**
+ * What a step asks of its child: its contract schema, and its task budget —
+ * the step's own `[budget:N]`, else the role's `taskBudgetTokens:`.
+ */
+function childAsk(request: WorkflowStepRequest, role: AgentDef | undefined): ChildAsk {
+  const taskBudget = request.taskBudget ?? role?.taskBudgetTokens;
+  return {
+    ...(request.responseFormat === undefined ? {} : { responseFormat: request.responseFormat }),
+    ...(taskBudget === undefined ? {} : { taskBudget }),
+  };
+}
+
+/** What a step asks of its child agent beyond the prompt. */
+interface ChildAsk {
+  /** The step's contract as a schema; see {@link WorkflowStepRequest.responseFormat}. */
+  readonly responseFormat?: ResponseFormat;
+  /** Tokens; see {@link WorkflowStepRequest.taskBudget}. */
+  readonly taskBudget?: number;
+}
+
+/**
+ * The contract path of the model that ANSWERED, given the one configured.
+ *
+ * The child is set up for the model it starts on; a failover link or a
+ * mid-run `/model` can answer from one that never saw the schema (the adapter
+ * withholds it there). The reply is then prose with a fence, and judging or
+ * journalling it as "native" would fail it now and on every resume. A wire
+ * name the catalog does not know is treated as unable.
+ *
+ * @param configured - What {@link configureChild} chose.
+ * @param answered - `model` of the final assistant message, when there was one.
+ * @param asked - The model the child was built on.
+ */
+export function answeredContractMode(
+  configured: ContractMode | undefined,
+  answered: string | undefined,
+  asked: ModelSpec | undefined,
+): ContractMode | undefined {
+  if (configured !== "native" || answered === undefined || answered === asked?.model) {
+    return configured;
+  }
+  const spec = listModels().find((candidate) => candidate.model === answered);
+  return spec !== undefined && supportsStructuredOutput(spec) ? "native" : "fenced";
+}
+
+/**
+ * Configure the child for its step before it runs: the contract schema where
+ * its model can honour it, the task budget where its model paces itself.
+ *
+ * @returns The contract path, when the step has a contract.
+ */
+function configureChild(
+  agent: WorkflowChildAgent,
+  ask: ChildAsk,
+  live: StepLiveRow | undefined,
+): ContractMode | undefined {
+  const model = agent.model;
+  let mode: ContractMode | undefined;
+  if (ask.responseFormat !== undefined) {
+    if (model !== undefined && agent.setResponseFormat && supportsStructuredOutput(model)) {
+      agent.setResponseFormat(ask.responseFormat);
+      mode = "native";
+    } else {
+      mode = "fenced";
+    }
+  }
+  if (ask.taskBudget !== undefined) {
+    if (model !== undefined && agent.setTaskBudget && supportsTaskBudget(model)) {
+      agent.setTaskBudget({ total: ask.taskBudget });
+    } else {
+      live?.relay({
+        type: "notice",
+        level: "info",
+        text:
+          `Task budget of ${ask.taskBudget.toLocaleString("en-US")} tokens not sent: ` +
+          `${model?.id ?? "this model"} does not support pacing, so the turn ceiling is the only limit.`,
+      });
+    }
+  }
+  return mode;
 }
 
 /**
@@ -8125,6 +8322,7 @@ async function runWorktreeStep(
             progress,
           }
         : undefined,
+      childAsk(request, def),
     );
     usage = run.usage;
     // The agent has stopped, so anything it left running is orphaned by
@@ -8825,6 +9023,8 @@ export function createRuntimeRunStep(
       stepLiveRow(options.emit, step, prompt, role?.name, request.raceLabel),
       onUsage,
       insightsSignals(options.insights, step.id, role?.name),
+      undefined,
+      childAsk(request, role),
     );
 
     const isError = run.reason !== "completed";
@@ -9026,9 +9226,9 @@ async function dispatchRacedStep(
     // something that should have been checked (the parser refuses a step whose
     // contract the file never declared, so this is unreachable in production).
     if (declared === undefined) return "clears";
-    const found = extractContractJson(outcome.text);
-    if (!found.ok) return "failed";
-    return validateContract(declared, found.value).ok ? "clears" : "failed";
+    return checkContractReply(declared, outcome.text, outcome.contractMode ?? "fenced").ok
+      ? "clears"
+      : "failed";
   };
 
   // THE APPLY CLAIM (write lane): granted to the first arm whose work would

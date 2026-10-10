@@ -143,6 +143,7 @@ export function createWebSearchTool(): Tool {
       description:
         "Search the web and return a numbered list of results (title, URL, and snippet). Uses " +
         "the Brave Search API when BRAVE_API_KEY is set, otherwise falls back to DuckDuckGo.",
+      strict: true,
       parameters: {
         type: "object",
         properties: {

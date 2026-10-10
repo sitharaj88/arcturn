@@ -18,6 +18,8 @@ interface ToolDefinition {
   name: string;
   description: string;
   parameters: JsonSchema; // Record<string, unknown> — a JSON Schema (2020-12 subset)
+  strict?: boolean; // ask the API to guarantee the arguments match `parameters`
+  eagerInputStreaming?: boolean; // stream the input as it is generated (first-party Anthropic)
 }
 
 interface ToolResult {
@@ -103,6 +105,24 @@ Walking through it:
 - **`details`** rides on the `ToolResultMessage` alongside the human-readable `content`
   — the place for a machine-readable payload (a URL, an id, a diff) that a downstream
   consumer of the session (a UI, a log processor) wants without re-parsing text.
+
+## Strict schemas, streamed input and malformed arguments
+
+`strict: true` asks the provider to guarantee the model's arguments match `parameters`.
+Set it only when the schema fits the strict grammar — `additionalProperties: false` on every
+object, no numeric or string-length constraints, no top-level `oneOf` — and for OpenAI every
+property required. An adapter whose limits the schema misses drops the flag instead of
+sending a 400 (Anthropic: 20 strict tools, 24 optional properties and 16 union-typed
+properties per request, exported as `ANTHROPIC_STRICT_LIMITS`; Google ignores it). Never
+set it on a schema you do not own.
+
+`eagerInputStreaming: true` streams the input while it is generated, worth it for a tool that
+takes a file body. It is sent only on streaming requests to first-party Anthropic, and the
+API then validates nothing, so the input can arrive cut off. Arcturn sets the raw text on
+`ToolCallContent.malformedArguments` and the loop answers the call itself — before hooks,
+permissions and your `execute` — with an error result carrying `{"INVALID_JSON": <raw>}`
+(first 2000 characters) and `details.malformedArguments: true`. Your `execute` never sees
+invalid JSON.
 
 ## Mixing tool sources
 

@@ -9,7 +9,10 @@ import { supportsServerContextManagement } from "./context-management.js";
 import { AIErrorException, toAIError } from "./errors.js";
 import { withIdleTimeout } from "./idle-timeout.js";
 import { completeFromStream, MessageAssembler } from "./internal/stream.js";
-import type { AnthropicThinkingBinding } from "./providers/anthropic.js";
+import type {
+  AnthropicThinkingBinding,
+  AnthropicToolSearchVariant,
+} from "./providers/anthropic.js";
 import { registerBuiltinProviders } from "./providers/builtins.js";
 import {
   getProviderFactory,
@@ -64,6 +67,11 @@ export interface CreateClientOptions {
    * `anthropic` provider; see {@link AnthropicProviderOptions.thinkingBinding}.
    */
   thinkingBinding?: AnthropicThinkingBinding;
+  /**
+   * The server-side tool search the first-party `anthropic` provider sends
+   * beside deferred tools; see {@link AnthropicProviderOptions.toolSearch}.
+   */
+  toolSearch?: AnthropicToolSearchVariant;
 }
 
 export { supportsServerContextManagement } from "./context-management.js";
@@ -161,6 +169,7 @@ export function createClient(options: CreateClientOptions = {}): LLMClient {
       ...(options.thinkingBinding === undefined
         ? {}
         : { thinkingBinding: options.thinkingBinding }),
+      ...(options.toolSearch === undefined ? {} : { toolSearch: options.toolSearch }),
     });
     cache.set(cacheKey, created);
     return created;

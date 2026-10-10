@@ -83,7 +83,42 @@ export interface ModelCapabilities {
    * stops sending it for the rest of the process.
    */
   systemMessages?: boolean;
+  /**
+   * The model can constrain its reply to a JSON schema (`LLMRequest.responseFormat`).
+   * Absent means "infer from the provider and model id": Claude 4.5 and later,
+   * every current OpenAI model, Gemini 2.5 and later say yes; an
+   * OpenAI-compatible or Anthropic-compatible endpoint says no unless declared,
+   * since many such servers reject the field outright.
+   */
+  structuredOutput?: boolean;
+  /**
+   * The model paces itself against a task budget (`LLMRequest.taskBudget`,
+   * Anthropic beta `task-budgets-2026-03-13`). Absent means "infer from the
+   * model id": Opus 4.7 / 4.8 / 5 / 5.5, Fable 5 / 5.1, Sonnet 5.5 and Haiku
+   * 5.5 on the first-party API say yes; Sonnet 5 says no.
+   */
+  taskBudget?: boolean;
+  /**
+   * Which provider-native web tools the model takes (`LLMRequest.serverTools`
+   * entries of kind `webSearch` / `webFetch`); see {@link NativeWebTools}.
+   * Absent means "infer from the provider and model id": on the first-party
+   * Claude API, Opus and Sonnet 4.6 and later say `"dynamic"` and other Claude
+   * 4+ models `"basic"`; Vertex says `"basicSearch"`; Bedrock and every
+   * gateway say `"none"` unless they declare otherwise.
+   */
+  webTools?: NativeWebTools;
 }
+
+/**
+ * The provider-native web tools a model takes.
+ *
+ * - `"dynamic"` — Anthropic `web_search_20260209` + `web_fetch_20260209`
+ *   (dynamic filtering: the server runs code over results itself).
+ * - `"basic"` — `web_search_20250305` + `web_fetch_20250910`.
+ * - `"basicSearch"` — `web_search_20250305` only (Vertex AI has no fetch).
+ * - `"none"` — neither; the client-side tools stay.
+ */
+export type NativeWebTools = "dynamic" | "basic" | "basicSearch" | "none";
 
 export interface ModelSpec {
   /** Catalog key, e.g. "anthropic/claude-sonnet-5". */

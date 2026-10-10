@@ -255,10 +255,105 @@ export interface ToolCallProgress {
   readonly chars: number;
   /** How many tool calls are streaming right now. */
   readonly count: number;
+  /**
+   * The file body the most recently started call is dictating, as far as it
+   * has streamed — `write`'s `content`, `edit`'s `newText` — so a large file
+   * appears as it is written instead of as a character count. Absent for any
+   * other tool, and until the body field has begun.
+   */
+  readonly preview?: StreamingBodyPreview;
+}
+
+/** What {@link streamingBodyPreview} recovered from a call's partial arguments. */
+export interface StreamingBodyPreview {
+  /** The target path, once its value has fully streamed. */
+  readonly path?: string;
+  /** The body so far, decoded from its JSON string escapes. */
+  readonly body: string;
 }
 
 /** Name used when a provider sends argument deltas without a start event. */
 const UNNAMED_TOOL = "tool";
+
+/** The argument that carries a tool's file body, for the tools that stream one. */
+const BODY_FIELD: Readonly<Record<string, string>> = {
+  write: "content",
+  edit: "newText",
+};
+
+/** How much raw argument text a live call keeps for its preview. */
+const MAX_PREVIEW_RAW = 256 * 1024;
+
+const SIMPLE_ESCAPES: Readonly<Record<string, string>> = {
+  '"': '"',
+  "\\": "\\",
+  "/": "/",
+  b: "\b",
+  f: "\f",
+  n: "\n",
+  r: "\r",
+  t: "\t",
+};
+
+/**
+ * Decode a JSON string body that may be cut off anywhere, stopping at its
+ * closing quote if it has one. A dangling escape at the end is dropped rather
+ * than guessed at.
+ */
+function decodePartialJsonString(raw: string, start: number): { text: string; closed: boolean } {
+  let text = "";
+  for (let i = start; i < raw.length; i++) {
+    const char = raw[i]!;
+    if (char === '"') return { text, closed: true };
+    if (char !== "\\") {
+      text += char;
+      continue;
+    }
+    const next = raw[i + 1];
+    if (next === undefined) break;
+    if (next === "u") {
+      const hex = raw.slice(i + 2, i + 6);
+      if (!/^[0-9a-fA-F]{4}$/.test(hex)) break;
+      text += String.fromCharCode(Number.parseInt(hex, 16));
+      i += 5;
+      continue;
+    }
+    text += SIMPLE_ESCAPES[next] ?? next;
+    i += 1;
+  }
+  return { text, closed: false };
+}
+
+/** Where the string value of `"field":` begins in `raw`, or `-1`. */
+function stringValueStart(raw: string, field: string): number {
+  const match = new RegExp(`"${field}"\\s*:\\s*"`).exec(raw);
+  return match === null ? -1 : match.index + match[0].length;
+}
+
+/**
+ * The file body a streaming `write` / `edit` call has dictated so far.
+ *
+ * Reads the raw, still-incomplete argument JSON the provider is streaming —
+ * eager input streaming delivers it as the model writes — and decodes just
+ * the body field, so the live region can show the file taking shape.
+ *
+ * @param toolName - The call's tool.
+ * @param raw - The argument text streamed so far.
+ * @returns The preview, or `undefined` for another tool or a body not begun.
+ */
+export function streamingBodyPreview(
+  toolName: string,
+  raw: string,
+): StreamingBodyPreview | undefined {
+  const field = BODY_FIELD[toolName];
+  if (field === undefined) return undefined;
+  const bodyAt = stringValueStart(raw, field);
+  if (bodyAt < 0) return undefined;
+  const body = decodePartialJsonString(raw, bodyAt).text;
+  const pathAt = stringValueStart(raw, "path");
+  const path = pathAt < 0 ? undefined : decodePartialJsonString(raw, pathAt);
+  return { ...(path?.closed === true ? { path: path.text } : {}), body };
+}
 
 /**
  * Tracks the tool call the model is dictating right now.
@@ -277,18 +372,21 @@ const UNNAMED_TOOL = "tool";
  */
 export class ToolCallProgressTracker {
   /** Live calls keyed by block index, in the order they started. */
-  readonly #live = new Map<number, { name: string; chars: number }>();
+  readonly #live = new Map<number, { name: string; chars: number; raw: string }>();
 
   /** The in-flight tool call, or `undefined` when nothing is streaming. */
   get progress(): ToolCallProgress | undefined {
     if (this.#live.size === 0) return undefined;
     let chars = 0;
     let name = UNNAMED_TOOL;
+    let raw = "";
     for (const entry of this.#live.values()) {
       chars += entry.chars;
       name = entry.name;
+      raw = entry.raw;
     }
-    return { name, chars, count: this.#live.size };
+    const preview = this.#live.size === 1 ? streamingBodyPreview(name, raw) : undefined;
+    return { name, chars, count: this.#live.size, ...(preview === undefined ? {} : { preview }) };
   }
 
   /** Forget every in-flight call, so no ghost line survives the turn. */
@@ -306,10 +404,19 @@ export class ToolCallProgressTracker {
       case "messageStream": {
         const inner = event.event;
         if (inner.type === "toolCallStart") {
-          this.#live.set(inner.blockIndex, { name: inner.name, chars: 0 });
+          this.#live.set(inner.blockIndex, { name: inner.name, chars: 0, raw: "" });
         } else if (inner.type === "toolCallDelta") {
-          const entry = this.#live.get(inner.blockIndex) ?? { name: UNNAMED_TOOL, chars: 0 };
+          const entry = this.#live.get(inner.blockIndex) ?? {
+            name: UNNAMED_TOOL,
+            chars: 0,
+            raw: "",
+          };
           entry.chars += inner.argumentsDelta.length;
+          // Only a tool with a body to preview keeps its text, and only up to
+          // a bound: a preview shows the tail of the file, never all of it.
+          if (BODY_FIELD[entry.name] !== undefined && entry.raw.length < MAX_PREVIEW_RAW) {
+            entry.raw += inner.argumentsDelta;
+          }
           this.#live.set(inner.blockIndex, entry);
         } else if (inner.type === "toolCallEnd" || inner.type === "blockEnd") {
           this.#live.delete(inner.blockIndex);

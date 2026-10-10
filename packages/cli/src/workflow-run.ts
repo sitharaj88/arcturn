@@ -281,6 +281,13 @@ export interface StepEndLine {
    */
   readonly contract?: Record<string, unknown>;
   /**
+   * How a contract step's reply was asked for: `"native"` (the provider was
+   * handed the contract's JSON schema) or `"fenced"` (the prompt's fenced
+   * block was the only ask). Absent on a step without a contract and on lines
+   * written before this field existed.
+   */
+  readonly contractMode?: "native" | "fenced";
+  /**
    * What a `[judges:N]` step's panel decided — one terminal for the step,
    * however many judges and arbiters ran underneath it. See {@link JudgesRecord}.
    */

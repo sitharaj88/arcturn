@@ -475,6 +475,7 @@ export class DeferredToolset {
     return {
       name: this.#searchToolName,
       description: `${preamble}${body}`,
+      strict: true,
       parameters: {
         type: "object",
         properties: {

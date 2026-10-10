@@ -322,11 +322,30 @@ export function renderToolCallProgress(
   if (!progress || progress.count === 0) return [];
   const mark = progress.count > 1 ? glyphs.toolDefault : toolGlyph(progress.name, glyphs);
   const label = progress.count > 1 ? `${progress.count} tool calls` : progress.name;
-  const detail = `${glyphs.dot} ${formatTokens(progress.chars)} chars`;
+  const path = progress.preview?.path;
+  const detail =
+    `${path === undefined ? "" : `${path} `}${glyphs.dot} ` +
+    `${formatTokens(progress.chars)} chars`;
   const lead = style("muted")(`  ${glyphs.nested} `);
   const line = `${lead}${style("accent")(`${mark} ${label}`)} ${style("muted")(detail)}`;
-  return [truncateToWidth(line, width)];
+  const rows = [truncateToWidth(line, width)];
+  // The file as it is being written: its last few lines, dimmed, under the
+  // progress line. Control characters from the model's text are stripped so a
+  // body cannot move the cursor or recolour the terminal.
+  const body = progress.preview?.body;
+  if (body !== undefined && body.length > 0) {
+    const lines = body.split("\n");
+    for (const text of lines.slice(-PREVIEW_LINES)) {
+      // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping them is the point.
+      const clean = text.replace(/[\u0000-\u001f\u007f]/g, " ");
+      rows.push(truncateToWidth(style("muted")(`      ${clean}`), width));
+    }
+  }
+  return rows;
 }
+
+/** How many trailing lines of a streaming file body the live region shows. */
+const PREVIEW_LINES = 4;
 
 /** Columns below which a sub-agent row drops its right-hand detail column. */
 const SUBAGENT_TASK_MIN_WIDTH = 12;

@@ -36,6 +36,11 @@ export interface ProviderFactoryContext {
    * honoured by the first-party `anthropic` adapter only.
    */
   thinkingBinding?: "error" | "drop_block";
+  /**
+   * Which server-side tool search the first-party `anthropic` adapter sends
+   * beside `defer_loading` tools: `"bm25"` (the default) or `"regex"`.
+   */
+  toolSearch?: "bm25" | "regex";
 }
 
 /** Why a provider cannot be dispatched, reported before any request is sent. */

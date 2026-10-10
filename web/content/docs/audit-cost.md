@@ -46,7 +46,7 @@ arcturn audit [session]
 4 tool calls, 1 denied, 1 hook veto
 ```
 
-Three record kinds, one line each, timestamped in UTC `HH:MM:SS`:
+Five record kinds, one line each, timestamped in UTC `HH:MM:SS`:
 
 - **`tool`** — a completed call: name, best-effort subject (path/command/url, when
   known), and `✓`/`✗` for whether the result was an error.
@@ -58,6 +58,16 @@ Three record kinds, one line each, timestamped in UTC `HH:MM:SS`:
   captured via its `tool` entry either way.
 - **`hook`** — a `preToolUse`/`postToolUse`/`sessionStart`/`runEnd` verdict, with its
   reason when the hook gave one.
+
+- **`elicitation`** — an MCP server asked for input through a form
+  (`14:05:02  elic  tracker  accept  (title, priority)`). The action is `accept`, `decline`,
+  `cancel` or `refused` (a request outside the supported schema, or one nobody could be
+  asked), with the reason where there is one. Only the field **names** are recorded, never
+  what was typed.
+
+- **`sampling`** — an MCP server with `"sampling": true` had your model run a completion
+  (`14:05:09  samp  summarizer  anthropic/claude-sonnet-5-5  1840 tok  $0.0071`): server,
+  model, input plus output tokens, and the dollars billed. Never the prompt or the reply.
 
 The trailing tally (tool calls, denials, hook vetoes) is there so a clean run is obvious
 at a glance without reading every line.
@@ -105,6 +115,16 @@ Session 019c4a2f
 
 The `/ $5.00 limit` suffix only appears once a ceiling is set for the session; with no
 limit configured, the `cost` row is just the dollar figure.
+
+**An advisor's tokens get their own line.** With
+[`route.advisor`](/docs/model-routing#pairing-an-executor-with-an-advisor) set, the advisor
+model's tokens are not in the `input` and `output` rows above; each advisor adds a row —
+`advisor    Claude Opus 5.5 · 4.2k in · 1.1k out · $0.05 (3% of cost)` — and its cost is
+included in `cost`.
+
+**MCP sampling is billed to the session.** When a server with `"sampling": true` asks for a
+completion, its tokens and cost go into the same totals, count toward `--max-cost`, and are
+refused once the limit is reached.
 
 **Unpriced models read as unknown, never $0.** A model with no rate in the catalog — a
 model found by `/model refresh`, or the current Claude generation on Vertex, whose partner

@@ -1032,6 +1032,7 @@ export function createBrainTool(options: CreateBrainToolOptions): Tool {
         "what lives there, its key files, how it connects, its gotchas. `list` shows which " +
         "directories are indexed. Read-only; ask it before exploring a part of the tree you " +
         "have not seen.",
+      strict: true,
       parameters: {
         type: "object",
         properties: {

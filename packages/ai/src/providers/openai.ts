@@ -35,6 +35,8 @@ import {
   deferredEvents,
   type ProviderStreamEvent,
 } from "../internal/stream.js";
+import { isOpenAIStrictSchema } from "../strict-schema.js";
+import { foldedSystemText } from "./anthropic.js";
 
 /**
  * Portable thinking level to OpenAI `reasoning_effort`.
@@ -198,7 +200,7 @@ export function toOpenAIMessages(
       out.push(
         options.systemMessages === true
           ? { role: "system", content: text }
-          : { role: "user", content: `<system-reminder>\n${text}\n</system-reminder>` },
+          : { role: "user", content: foldedSystemText(text, message.nonce) },
       );
       continue;
     }
@@ -224,6 +226,24 @@ export function toOpenAIMessages(
     }
   }
   return out;
+}
+
+/**
+ * Whether this spec gets `response_format: json_schema` and `strict` tools:
+ * a declared `capabilities.structuredOutput` wins; otherwise OpenAI and Azure
+ * say yes and an OpenAI-compatible endpoint says no — many of them reject the
+ * field, and a contract step that loses the native path keeps the fenced one.
+ */
+export function openAIStructuredOutputs(spec: ModelSpec): boolean {
+  const declared = spec.capabilities.structuredOutput;
+  if (declared !== undefined) return declared;
+  return spec.provider === "openai" || spec.provider === "azure";
+}
+
+/** A `json_schema.name` OpenAI accepts: `[a-zA-Z0-9_-]{1,64}`. */
+export function openAISchemaName(name: string): string {
+  const cleaned = name.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
+  return cleaned.length > 0 ? cleaned : "response";
 }
 
 /** OpenAI reasoning models reject an explicit temperature. */
@@ -258,6 +278,7 @@ export function buildOpenAIRequest(
     params.temperature = request.temperature;
   }
 
+  const structured = openAIStructuredOutputs(spec);
   if (request.tools && request.tools.length > 0) {
     params.tools = request.tools.map(
       (tool): ChatCompletionFunctionTool => ({
@@ -266,9 +287,26 @@ export function buildOpenAIRequest(
           name: tool.name,
           description: tool.description,
           parameters: tool.parameters,
+          // OpenAI's strict mode also wants every property required, so a
+          // schema with optional fields goes without it rather than 400s.
+          ...(tool.strict === true && structured && isOpenAIStrictSchema(tool.parameters)
+            ? { strict: true }
+            : {}),
         },
       }),
     );
+  }
+
+  if (request.responseFormat !== undefined && structured) {
+    const format = request.responseFormat;
+    params.response_format = {
+      type: "json_schema",
+      json_schema: {
+        name: openAISchemaName(format.name),
+        schema: format.schema,
+        strict: format.strict !== false && isOpenAIStrictSchema(format.schema),
+      },
+    };
   }
 
   const effort = OPENAI_REASONING_EFFORT[request.thinking ?? "off"];

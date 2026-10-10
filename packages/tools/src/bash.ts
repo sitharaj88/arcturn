@@ -591,6 +591,7 @@ export function createBashTool(
         `timeout (max ${MAX_TIMEOUT_MS / 1000}s). Set background: true to start a long-running command ` +
         "and get back a taskId immediately instead of waiting for it to finish. A command that times " +
         `out ${REPEAT_TIMEOUT_LIMIT} times is refused until it changes, so bound it rather than retrying it unchanged.`,
+      strict: true,
       parameters: {
         type: "object",
         properties: {

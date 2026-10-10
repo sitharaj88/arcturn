@@ -20,6 +20,12 @@ the features behave today, read the user documentation under
 
 ## Later notes
 
+- [`INTEGRATION-structured-outputs.md`](INTEGRATION-structured-outputs.md) — workflow
+  contracts sent as a response schema where the model takes one, strict tool schemas,
+  eager streaming and malformed tool input, and task budgets (2026-10-10).
+- [`INTEGRATION-mcp-elicitation.md`](INTEGRATION-mcp-elicitation.md) — MCP servers asking
+  the user a question (elicitation) or your model a question (opt-in sampling), and what
+  each costs and records (2026-10-10).
 - [`INTEGRATION-append-only.md`](INTEGRATION-append-only.md) — why the outgoing history
   only grows: batched context-edit passes, the simple compaction shape, native tool
   search, and operator messages, so the prompt cache and preserved thinking survive

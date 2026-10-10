@@ -11,6 +11,7 @@ import type {
   LLMClient,
   LLMRequest,
   Message,
+  ModelSpec,
   StopDetails,
   StopReason,
   StreamEvent,
@@ -33,6 +34,7 @@ import {
   deferredEvents,
   type ProviderStreamEvent,
 } from "../internal/stream.js";
+import { withoutAdditionalProperties } from "../strict-schema.js";
 
 /** Loaded lazily so importing this module does not pay the SDK's startup cost. */
 let genaiSdk: Promise<typeof import("@google/genai")> | undefined;
@@ -160,6 +162,11 @@ function assistantParts(message: AssistantMessage, withIds: boolean): Part[] {
  */
 export const GOOGLE_OPERATOR_PREFIX = "[operator] ";
 
+/** The prefix for a message carrying `nonce`: `[operator <nonce>] `. */
+export function googleOperatorPrefix(nonce?: string): string {
+  return nonce === undefined ? GOOGLE_OPERATOR_PREFIX : `[operator ${nonce}] `;
+}
+
 function toolResultPart(message: ToolResultMessage, withIds: boolean): Part {
   const text = message.content
     .filter((part) => part.type === "text")
@@ -209,7 +216,7 @@ export function toGoogleContents(messages: Message[], model: string): Content[] 
     if (message.role === "system") {
       const parts: Part[] = message.content
         .filter((entry) => entry.text.trim() !== "")
-        .map((entry) => ({ text: `${GOOGLE_OPERATOR_PREFIX}${entry.text}` }));
+        .map((entry) => ({ text: `${googleOperatorPrefix(message.nonce)}${entry.text}` }));
       // A turn of its own, like a tool result's hoisted images: never merged
       // into a function-response turn.
       if (parts.length > 0) contents.push({ role: "user", parts });
@@ -253,6 +260,23 @@ function thinkingConfigFor(request: LLMRequest): ThinkingConfig | undefined {
   return { includeThoughts: true, thinkingBudget: GOOGLE_THINKING_BUDGETS[level] };
 }
 
+/** Gemini's version from a model id, scaled by 10 (`gemini-2.5-pro` -> 25). */
+export function geminiVersion(model: string): number | undefined {
+  const match = /gemini-(\d+)(?:\.(\d+))?/i.exec(model);
+  if (!match) return undefined;
+  return Number(match[1]) * 10 + Number(match[2] ?? 0);
+}
+
+/**
+ * Whether this spec gets a response schema: a declared
+ * `capabilities.structuredOutput` wins, else Gemini 2.5 and later.
+ */
+function googleStructuredOutputs(spec: ModelSpec): boolean {
+  const declared = spec.capabilities.structuredOutput;
+  if (declared !== undefined) return declared;
+  return (geminiVersion(spec.model) ?? 0) >= 25;
+}
+
 /** Build the wire payload for a streaming `generateContent` request. */
 export function buildGoogleRequest(request: LLMRequest): GenerateContentParameters {
   const spec = request.model;
@@ -278,6 +302,18 @@ export function buildGoogleRequest(request: LLMRequest): GenerateContentParamete
 
   const thinking = thinkingConfigFor(request);
   if (thinking) config.thinkingConfig = thinking;
+
+  // Native structured output. `responseJsonSchema` rather than
+  // `responseSchema`: it takes standard JSON Schema — what the tool schemas
+  // above already go out as (`parametersJsonSchema`) — where `responseSchema`
+  // wants the OpenAPI `Type` enum dialect. `additionalProperties` is stripped
+  // because Gemini's schema dialect does not take it; the caller's validator
+  // still refuses an undeclared field, so only where that rule is enforced
+  // moves. `strict` and `name` have no Gemini counterpart.
+  if (request.responseFormat !== undefined && googleStructuredOutputs(spec)) {
+    config.responseMimeType = "application/json";
+    config.responseJsonSchema = withoutAdditionalProperties(request.responseFormat.schema);
+  }
 
   return {
     model: spec.model,

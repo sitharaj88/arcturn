@@ -42,6 +42,7 @@ import {
 } from "./router.js";
 import { type ArcturnRuntime, resolveModelSpec } from "./runtime.js";
 import { formatScoutReport, runScouts } from "./scouts.js";
+import { advisorCostLines } from "./server-tools.js";
 import { createSkillCommands } from "./skill-synthesis.js";
 import { createStatsCommands } from "./stats.js";
 import { createTeamCommands } from "./team.js";
@@ -1256,6 +1257,9 @@ export function createBuiltInCommands(): SlashCommand[] {
           `  cache      ${formatTokens(usage.cacheReadTokens)} read · ${formatTokens(usage.cacheWriteTokens)} write`,
           `  total      ${formatTokens(totalTokens(usage))}`,
           `  cost       ${formatCostTotal(costUsd, unpricedTurns === 0)}${limit}`,
+          // `route.advisor`: the advisor's own tokens are not in the counts
+          // above, but its price is in the cost; say which model and how much.
+          ...advisorCostLines(usage, costUsd),
           ...unpricedNotes,
           `  context    ${formatTokens(runtime.agent.estimatedTokens)} / ${formatTokens(runtime.model.contextWindow)}`,
         ]);

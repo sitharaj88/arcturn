@@ -105,6 +105,13 @@ native path; they exist only so the record is true. In the SDK, pass a toolset (
 function returning one) as [`AgentOptions.deferredTools`](/docs/sdk-agent-options#deferred-tools-and-per-model-tool-sets)
 and the agent asks it for `toolsFor(model)` each turn.
 
+`providers.anthropic.toolSearch` chooses the search variant: `"bm25"` (the default) or
+`"regex"`, where the model writes a pattern instead of a description. The regex tool type is
+outside the SDK's generally-available tool union, so arcturn sends it with a cast — not
+verified against the live API. With a fake provider, a deferred tool's description reaches
+the index and a `pause_turn` during a regex search activates the tool and resumes with an
+identical `tools` array.
+
 A `pause_turn` from the server tool is continued: the loop re-sends the conversation
 unchanged — no steering, no nudge between the server tool and its continuation — up to
 eight consecutive pauses, then ends the turn with a warning. Not verified live: that

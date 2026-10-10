@@ -254,6 +254,71 @@ const messages = await manager.getPrompt("linear", "triage-issue", { issueId: "E
 Omit the server name on `listResources` / `listPrompts` to aggregate across every
 connected server.
 
+## Servers that ask back: elicitation and sampling
+
+A server can send two requests the other way. Both are off the tool path, so neither
+needs a permission rule; what governs them is below.
+
+### Elicitation: a server asking you a question
+
+Every server is told arcturn supports form elicitation. When one sends
+`elicitation/create` in the TUI, a form opens with the server's message and one field per
+property: text (with length limits and the `email`, `uri`, `date` and `date-time` formats),
+number or integer (with bounds), yes/no, and single- or multi-select lists. Answer, decline
+or cancel; a declined or cancelled form sends the server no data.
+
+The schema must be a flat object of those primitive fields. Anything else — nesting, an
+array of objects, `$ref` — is refused before you see it, the server gets an
+`InvalidParams` error beginning `Elicitation refused:`, and a warning names the server and
+the reason. Your answer is checked against the same fields before it is sent back.
+
+Where there is nobody to ask — `--print`, `arcturn serve`, and ACP sessions — the request is
+declined with a warning, never accepted with empty content. (ACP does not yet forward
+elicitation to the editor.)
+
+With `audit` on, every request is recorded as
+`{kind: "elicitation", server, action, fields}` — `action` is `accept`, `decline`,
+`cancel` or `refused` (with a `reason`), and `fields` is the field **names** only. What you
+typed is never written down; an elicitation is exactly where someone pastes a token.
+
+### Sampling: a server asking your model
+
+Off by default. A server can ask arcturn to run one completion for it only if its
+`mcp.json` entry says so:
+
+```json
+{
+  "servers": {
+    "summarizer": { "type": "stdio", "command": "summarizer-mcp", "sampling": true }
+  }
+}
+```
+
+Only your own `~/.arcturn/mcp.json` can grant it. A `sampling` key in a project's
+`.arcturn/mcp.json` is ignored, including on a project entry that shadows a user entry of
+the same name: a repository you trusted enough to run its server should not also get to run
+your model. Without `"sampling": true`, arcturn does not advertise the capability and a
+`sampling/createMessage` gets `-32601`. With it:
+
+- The call is **isolated**: the bare model client, no tools, no conversation history. The
+  server's messages become one user message, and the server's `systemPrompt` applies to that
+  call only.
+- A server's `modelPreferences` hints may pick another model, but only one on the session
+  model's own provider and endpoint; nothing moves the call, or your key, to a different
+  host. No match runs the session model.
+- The reply is capped at 4096 output tokens (`DEFAULT_MCP_SAMPLING_MAX_TOKENS`); a server
+  can ask for fewer, never more.
+- It is **billed to the session**. The tokens and cost land in `/cost` and count toward
+  `--max-cost`; once the limit is reached the request is refused with an error to the
+  server.
+- Each call prints an info notice: `MCP server "summarizer" sampled <model>: … (billed to
+  this session).`
+
+With `audit` on, each call is recorded as `{kind: "sampling", server, model, tokens,
+costUsd?}` — counts and names, never the server's prompt or the reply. Only text messages
+are accepted; a request that carries tools or non-text content is refused. There is no
+`--sampling` flag on `arcturn mcp add`; set the key in the file.
+
 ## Tearing down
 
 ```ts

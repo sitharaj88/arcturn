@@ -71,6 +71,7 @@ export function createSubagentTool(options: SubagentToolOptions): BindableTool {
     definition: {
       name,
       description: options.description ?? DEFAULT_DESCRIPTION,
+      strict: true,
       parameters: {
         type: "object",
         properties: {

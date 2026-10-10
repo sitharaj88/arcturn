@@ -18,9 +18,11 @@ import type {
   PermissionMode,
   PermissionPrompt,
   PermissionRule,
+  ResponseFormat,
   SessionEntry,
   SessionStore,
   SystemMessage,
+  TaskBudget,
   ThinkingLevel,
   TodoItem,
   Tool,
@@ -168,6 +170,33 @@ export interface AgentOptions {
   plan?: string;
   /** Session entry that new entries should hang off (branch tip). */
   parentEntryId?: string | null;
+  /**
+   * Ask every request for a reply shaped by this JSON schema (native
+   * structured output). Sent as-is; the adapter drops it for a model that
+   * cannot honour it, so a host that needs to know which path ran checks the
+   * model's capability itself (`supportsStructuredOutput` in `@arcturn/ai`).
+   */
+  responseFormat?: ResponseFormat;
+  /**
+   * A token budget the model paces itself against across this agent's work
+   * (`LLMRequest.taskBudget`). Only `total` is read: after a local compaction
+   * the agent sends `remaining` itself — the budget less what the folded
+   * history spent — because the provider can no longer see that spend.
+   */
+  taskBudget?: TaskBudget;
+}
+
+/**
+ * What one message spent against a task budget, as the provider counts it:
+ * the tokens the model generated, and (estimated at four characters a token)
+ * the tool results it read.
+ */
+function taskBudgetSpend(message: Message): number {
+  if (message.role === "assistant") return message.usage.outputTokens;
+  if (message.role !== "toolResult") return 0;
+  let chars = 0;
+  for (const part of message.content) if (part.type === "text") chars += part.text.length;
+  return Math.ceil(chars / 4);
 }
 
 /** Options for {@link Agent.resume}. */
@@ -249,6 +278,14 @@ export class Agent {
   /** Set when a run ended with a todo still `inProgress`; consumed next turn. */
   #staleTodoReminder: number | undefined;
   #plan: string | undefined;
+  #responseFormat: ResponseFormat | undefined;
+  #taskBudgetTotal: number | undefined;
+  /**
+   * Budget spent by history a local compaction folded away — what the
+   * provider can no longer count. `undefined` until the first such compaction,
+   * which is what keeps `remaining` off every request before it.
+   */
+  #taskBudgetHidden: number | undefined;
   #running = false;
   #abort: AbortController | undefined;
   #lastEntryId: string | null;
@@ -275,6 +312,8 @@ export class Agent {
     this.#compactionOptions = options.compaction ?? {};
     this.#compaction = resolveCompactionOptions(options.compaction);
     this.#contextEdit = resolveContextEditOptions(options.contextEditing);
+    this.#responseFormat = options.responseFormat;
+    this.#taskBudgetTotal = options.taskBudget?.total;
 
     this.#permissions = new PermissionEngine({
       ...options.permissions,
@@ -438,6 +477,42 @@ export class Agent {
    */
   setThinking(thinking: ThinkingLevel): void {
     this.#thinking = thinking;
+  }
+
+  /** The reply schema every request asks for, if any. See {@link AgentOptions.responseFormat}. */
+  get responseFormat(): ResponseFormat | undefined {
+    return this.#responseFormat;
+  }
+
+  /**
+   * Ask every later request for a reply shaped by `format` (or stop asking).
+   *
+   * @param format - The schema, or `undefined` to send none.
+   */
+  setResponseFormat(format: ResponseFormat | undefined): void {
+    this.#responseFormat = format;
+  }
+
+  /**
+   * The task budget the next request carries, `remaining` included once a
+   * local compaction has hidden earlier spend. See {@link AgentOptions.taskBudget}.
+   */
+  get taskBudget(): TaskBudget | undefined {
+    const total = this.#taskBudgetTotal;
+    if (total === undefined) return undefined;
+    const hidden = this.#taskBudgetHidden;
+    return hidden === undefined ? { total } : { total, remaining: Math.max(0, total - hidden) };
+  }
+
+  /**
+   * Set (or clear) the task budget for this agent's later requests. Only
+   * `total` is read; see {@link AgentOptions.taskBudget}.
+   *
+   * @param budget - The budget, or `undefined` to send none.
+   */
+  setTaskBudget(budget: TaskBudget | undefined): void {
+    this.#taskBudgetTotal = budget?.total;
+    this.#taskBudgetHidden = undefined;
   }
 
   /**
@@ -690,6 +765,8 @@ export class Agent {
       },
       prepareMessages: (messages) => this.#prepareMessages(messages),
       contextManagement: () => this.#contextManagement(),
+      responseFormat: () => this.#responseFormat,
+      taskBudget: () => this.taskBudget,
     };
   }
 
@@ -1009,6 +1086,16 @@ export class Agent {
         const replacement = result.messages[offset + 1];
         const id = original === undefined ? undefined : this.#entryIds.get(original);
         if (replacement !== undefined && id !== undefined) this.#entryIds.set(replacement, id);
+      }
+      if (this.#taskBudgetTotal !== undefined) {
+        // What the folded history spent is now invisible to the provider, so
+        // from here on every request says how much of the budget is left.
+        const kept = new Set(result.keptIndices);
+        let folded = 0;
+        for (const [index, message] of messages.entries()) {
+          if (!kept.has(index)) folded += taskBudgetSpend(message);
+        }
+        this.#taskBudgetHidden = (this.#taskBudgetHidden ?? 0) + folded;
       }
       messages.splice(0, messages.length, ...result.messages);
       this.#emit({

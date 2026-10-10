@@ -173,6 +173,7 @@ export function createReadTool(options: CreateReadToolOptions = {}): Tool {
         "lines and skips the outline, regardless of file size. Files above " +
         `${STREAMING_THRESHOLD_BYTES / (1024 * 1024)}MB are paged a window at a time (no outline), ` +
         "so a large log can be read through with offset without loading all of it.",
+      strict: true,
       parameters: {
         type: "object",
         properties: {

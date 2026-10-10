@@ -103,7 +103,7 @@ ignored key.
 
 The bracket prefix is not limited to one model tag. A stage line — or a parallel branch —
 may carry **zero or more bracket groups** before the optional `@role`, in any order. A
-group whose `key:` is one of the three reserved words `contract`, `judges` and `race` is an
+group whose `key:` is one of the four reserved words `contract`, `judges`, `race` and `budget` is an
 **option**; anything else in brackets is the model tag it has always been, so
 `[tier:judgment]` still selects a model and nothing about an existing file changes.
 
@@ -124,6 +124,12 @@ group whose `key:` is one of the three reserved words `contract`, `judges` and `
   and keeps the first that clears the gate. Each entry is an ordinary model tag, they must be
   distinct, and `race` **replaces** the `[tag]` rather than joining it — writing both on one
   line is a parse error.
+- **`[budget:<tokens>]`** gives the step a *task budget*: a token ceiling the model is told
+  about, so it paces a long tool loop and wraps up instead of being cut off at the turn
+  ceiling. A whole number, at least `20000`. It works only on first-party Anthropic models
+  that take one — Opus 4.7 and later, Fable or Mythos 5 and later, Sonnet 5.5 and Haiku
+  5.5 (not Sonnet 5). A role file's `taskBudgetTokens:` is the same thing set once for the
+  role; when both are present the stage wins. See [Task budgets](#task-budgets) below.
 
 #### What a race actually does
 
@@ -172,6 +178,32 @@ Everything above is checked at parse time, naming the line: a duplicate option k
 alongside a model tag, `judges` without a role or without a contract, a contract name in the
 wrong charset, and a contract the file never declares. An option written *after* the `@role`
 is rejected the same way a stray model tag there is — the prefix order is `[…] @role prompt`.
+
+### Task budgets
+
+```markdown
+3. [budget:120000] @migrator Port the remaining modules and report what is left.
+```
+
+The budget covers what the model generates and the tool results it reads during the step,
+not the history it is re-sent each turn. It is checked in three places:
+
+- A malformed value is a parse error naming the line:
+  `line 3: budget must be a whole number of tokens, at least 20000, got "5000"`.
+- A `[tag]` or a race arm that names a Claude model without task budgets is refused at
+  parse time: `line 3: budget needs a model with task budgets, and "anthropic/claude-sonnet-5"
+  names claude-sonnet-5, which has none — use Opus 4.7 or later, Fable 5 or later, Sonnet 5.5
+  or Haiku 5.5, or drop the budget`.
+- A step whose model is only known when the run starts (the session's own model, a role's)
+  is not refused. If that model cannot take a budget you get an info notice —
+  `Task budget of 120000 tokens not sent: <model> does not support pacing, so the turn
+  ceiling is the only limit.` — and the step runs without one.
+
+After a local compaction arcturn tells the API how much is left, estimated as the total
+minus the output tokens and the tool-result characters (÷ 4) of the messages the compaction
+folded. Before a compaction it sends no `remaining`; the server counts down on its own. The
+turn-ceiling warning is a separate mechanism — it counts turns, the budget counts tokens.
+The workflow builder has no budget field yet; type the option into the text.
 
 ### Contracts
 
@@ -222,6 +254,14 @@ error too.
 
 #### What the run does with one
 
+**Native and fenced replies.** When the step's model can take a JSON schema (Claude 4.5 and
+later, every OpenAI and Azure model, Gemini 2.5 and later, and any compatible endpoint whose
+spec declares it), the contract is also sent as a response format and the reply is the JSON
+object itself: the engine parses the whole reply, with no fence to hunt for. Every other model
+keeps the fenced path described below. Either way the same validator judges the reply, there
+is the same single retry, and the instructions below are still appended, so the prompt hash
+does not depend on which model ran the step.
+
 The contract's fields are turned into instructions and **appended to the step's prompt** —
 the shape, each field's type, and the two rules the validator enforces (no extra fields, the
 block goes last). That text is part of the prompt the engine records and hashes, not just the
@@ -262,6 +302,9 @@ becomes `DO-NOT-SHIP`, not `"DO-NOT-SHIP"`); everything else splices as JSON.
   ✓ 1 @reviewer — done  ·  1.2k  ·  38s
       contract: decision=DO-NOT-SHIP confidence=0.8
 ```
+
+A step that went native prints `contract (native): decision=DO-NOT-SHIP confidence=0.8`, and
+the run journal and the insights ledger record how it was asked for.
 
 The insights ledger records only that a step returned a validated typed reply — never what it
 decided. A miss is counted through the ordinary failure-kind table, as `contract`.

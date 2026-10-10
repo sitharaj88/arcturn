@@ -18,6 +18,12 @@ import type {
   ToolResultMessage,
   UserContent,
 } from "@arcturn/types";
+import {
+  describeServerTools,
+  isDescribedServerBlock,
+  type ServerToolRow,
+  serverToolRowText,
+} from "./server-tools.js";
 
 /** Caller-supplied header information; every field is optional. */
 export interface ExportMeta {
@@ -157,7 +163,17 @@ function renderAssistantContentMarkdown(
   showThinking: boolean,
 ): string[] {
   const lines: string[] = [];
+  let serverRowsShown = false;
   for (const block of content) {
+    if (block.type === "serverTool" && isDescribedServerBlock(block.block)) {
+      // A provider-run web search / fetch / advisor call: drawn once per
+      // message, each call beside its result, where the first one stood.
+      if (!serverRowsShown) {
+        serverRowsShown = true;
+        for (const row of describeServerTools(content)) lines.push(...renderServerRowMarkdown(row));
+      }
+      continue;
+    }
     if (block.type === "text") {
       lines.push("", block.text);
     } else if (block.type === "thinking") {
@@ -191,6 +207,33 @@ function renderAssistantContentMarkdown(
     }
   }
   return lines;
+}
+
+/** A provider-run call as a collapsed block: its query or URL, then the results or the error. */
+function renderServerRowMarkdown(row: ServerToolRow): string[] {
+  const body =
+    row.error !== undefined
+      ? [`**Error:** \`${row.error}\``]
+      : (row.results ?? []).map((line) => `- ${line}`);
+  return [
+    "",
+    "<details>",
+    `<summary>🔧 ${serverToolRowText(row)} (server)</summary>`,
+    ...(body.length === 0 ? [] : ["", ...body]),
+    "",
+    "</details>",
+  ];
+}
+
+/** The HTML form of {@link renderServerRowMarkdown}. */
+function renderServerRowHtml(row: ServerToolRow): string {
+  const body =
+    row.error !== undefined
+      ? `<div class="tool-result tool-error"><strong>Error</strong><pre>${escapeHtml(row.error)}</pre></div>`
+      : (row.results ?? []).length === 0
+        ? ""
+        : `<div class="tool-result"><strong>Results</strong><pre>${escapeHtml((row.results ?? []).join("\n"))}</pre></div>`;
+  return `<details class="tool"><summary>🔧 ${escapeHtml(serverToolRowText(row))} (server)</summary>${body}</details>`;
 }
 
 /** A one-word name for a provider's server-tool block, for a transcript line. */
@@ -332,7 +375,15 @@ function renderAssistantContentHtml(
   showThinking: boolean,
 ): string {
   const parts: string[] = [];
+  let serverRowsShown = false;
   for (const block of content) {
+    if (block.type === "serverTool" && isDescribedServerBlock(block.block)) {
+      if (!serverRowsShown) {
+        serverRowsShown = true;
+        for (const row of describeServerTools(content)) parts.push(renderServerRowHtml(row));
+      }
+      continue;
+    }
     if (block.type === "text") {
       parts.push(`<p>${escapeHtmlMultiline(block.text)}</p>`);
     } else if (block.type === "thinking") {

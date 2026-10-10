@@ -327,6 +327,60 @@ verified against a live endpoint:** the streaming shapes of `compaction_delta`,
 `lowEffort` adaptive spelling. Unit tests cover all of it against documented
 shapes, so the ✅ column in the provider table is still unchanged.
 
+**The engine uses the API it has (2026-10-10).** Wave 3. Waves 1 and 2 made the
+engine safe to run on the newest Claude models; this one makes it use what those
+APIs, and the others, already offer. *Typed contracts go native:* a `[contract:…]`
+step on a model with structured-output support (`ModelCapabilities.structuredOutput`,
+inferred) is sent as a response schema (`LLMRequest.responseFormat`: Anthropic
+`output_config.format`, OpenAI Chat `response_format`, Responses `text.format`,
+Gemini `responseJsonSchema`), the whole reply is parsed with no fence hunting,
+`validateContract` is still the one judge and the single retry is unchanged, and the
+hashed prompt still carries the field list so it never depends on the model;
+`contractMode` is journalled and `/workflow status` prints `contract (native)`.
+*Task budgets:* `[budget:<tokens>]` and role `taskBudgetTokens:` (at least 20,000)
+send beta `task-budgets-2026-03-13` on Opus 4.7+, Fable/Mythos 5+, Sonnet 5.5 and
+Haiku 5.5, first-party only; a tag naming a Claude model without them is refused at
+parse, the web mirror repeats the rules, and `remaining` is estimated only after a
+local compaction. *Strict and eager:* sixteen built-in tools are `strict`, held to
+Anthropic's per-request limits; `eager_input_streaming` is **narrowed** to `write`
+and `edit` on first-party (it used to be on every tool, Bedrock included, where older
+deployments 400); a streamed input that is not JSON, or was cut off by `max_tokens`,
+is answered with an error result before any hook or dispatch
+(`ToolCallContent.malformedArguments`). *Native tool search:* `toolSearch:
+"bm25" | "regex"`. *MCP:* elicitation (a flat-schema form in the TUI; declined, never
+accepted empty, in `--print`, `serve` and ACP; audited by field name) and opt-in
+sampling (`"sampling": true`, user config only, one isolated call, capped at 4096
+output tokens, billed to the session and `--max-cost`, audited by counts).
+*Native web tools:* `websearch` / `webfetch` `provider: "anthropic"` swap the client
+tool for the API's own, with domain lists derived from allow/deny permission rules.
+*Advisor:* `route.advisor` sends `advisor_20260301`, prices the advisor's tokens into
+`costUsd` and shows an `advisor` line in `/cost`. *The folded operator channel:*
+`<system-reminder>` and `[operator]` folds now carry a per-message random nonce, so a
+tool result that spells the tag cannot pass for the harness, and the text is never
+rewritten. Notes: `INTEGRATION-structured-outputs.md`, `INTEGRATION-mcp-elicitation.md`,
+and a section in `INTEGRATION-tools.md`.
+
+*Not done:* the workflow builder has no budget field; ACP declines elicitations;
+`mcp add` has no `--sampling` flag; per-search web fees are unpriced; permission
+rules changed mid-session do not update native domain lists; the advisor has no
+`max_uses`; `glob`, `search_code` and `find_symbol` are not strict (nested `oneOf`),
+and `todo` is strict on Anthropic only since its `id` stays optional. The adversarial
+pass (one reviewer, seven defects, each with a test watched to fail first) replaced
+the builder's tool-result scrub with the nonce, bounded MCP sampling to a model no
+dearer than the session's and to what the cost ceiling still buys, audited it,
+stripped `sampling: true` from project-scoped `mcp.json`, rate-limited and scrubbed
+elicitation, made native web tools defer to blanket deny rules and the API's 64-host
+list limit, admitted `strict` tools in name order, and re-derives a contract step's
+mode from the model that actually answered. **Not verified against a
+live endpoint:** `output_config.format` and its 400s including the strict limits;
+`strict` with `defer_loading`; `eager_input_streaming` and its interplay with
+`strict`; `task_budget`, and whether the estimated `remaining` matches the server's
+countdown; the regex tool-search type (sent with a cast); OpenAI Responses
+`text.format`; Gemini `responseJsonSchema`; MCP elicitation and sampling against a
+real server and the TUI form on a real terminal; every part of the native web tools
+and the advisor; and whether models honour the nonce rule. Unit tests cover all of it
+against documented shapes, so the ✅ column in the provider table is unchanged.
+
 ## Remaining follow-ups
 
 **Closed (2026-08-26): the read side of the symlink door.** `loop.ts` no longer

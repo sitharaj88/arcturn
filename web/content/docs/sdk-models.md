@@ -241,6 +241,29 @@ for it separately. `agreement` is `"divergent"` only when the models chose **dif
 tool calls** — the highest-signal axis — `"partial"` for same actions but different
 wording (or no comparable secondary at all), and `"full"` for real agreement.
 
+## Structured output, task budgets and native web tools
+
+Three more optional `ModelCapabilities` fields, each inferred from the model id when absent:
+
+- **`structuredOutput`** — the model takes a JSON schema for its reply (`LLMRequest.responseFormat`).
+  Claude 4.5+ and Opus 4.1 on Anthropic, Bedrock-Claude and Vertex-Claude; every OpenAI,
+  Azure and Responses model; Gemini 2.5+. A compatible endpoint or a Bedrock Converse model
+  has it only when its spec declares it. `supportsStructuredOutput(spec)` asks.
+- **`taskBudget`** — the model paces itself against `LLMRequest.taskBudget` (beta
+  `task-budgets-2026-03-13`). First-party Anthropic only: Opus 4.7+, Fable/Mythos 5+,
+  Sonnet 5.5, Haiku 5.5; not Sonnet 5. `supportsTaskBudget(spec)` asks, and
+  `TASK_BUDGET_MIN_TOKENS` is 20,000.
+- **`webTools`** — which provider-native web tools the model and platform take, used with
+  `LLMRequest.serverTools` (`{ kind: "webSearch" | "webFetch" | "advisor", … }`).
+
+The CLI builds a workflow contract's schema with `contractToJsonSchema` (in its
+`contracts.ts`; it is not a library export). The provider helpers `anthropicStructuredOutputModel`,
+`anthropicTaskBudgetModel`, `geminiVersion`, `isStrictSchema`, `isOpenAIStrictSchema`,
+`strictSchemaCost`, `createStrictBudget`, `withoutAdditionalProperties`,
+`openAIStructuredOutputs` and `openAISchemaName` are exported for hosts that build their own
+requests. When the advisor tool ran, `Usage.advisor` lists each advisor's tokens and
+`costUsd` includes them.
+
 ## Cost accounting
 
 ```ts

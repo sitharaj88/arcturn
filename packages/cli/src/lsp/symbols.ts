@@ -358,6 +358,7 @@ export function createSymbolsTool(manager: SymbolCapableManager): Tool {
         "functions, methods, variables, ...), or a workspace-wide symbol search by name. Provide " +
         "exactly one of `file` or `query`. Read-only; returns null/empty gracefully if no language " +
         "server is available for the relevant language.",
+      strict: true,
       parameters: {
         type: "object",
         properties: {

@@ -9,13 +9,15 @@
  * no header line — every {@link AuditEntry} already carries its own `kind`
  * and `ts`, so the file is self-describing from the first line.
  *
- * Three pieces turn a live run into entries:
+ * Four pieces turn a live run into entries:
  * - {@link auditObserver} maps the `AgentEvent` stream into `"tool"` and
  *   `"permission"` entries (a completed tool call; a decision the user was
  *   actually asked to make).
  * - {@link auditedHookRunner} wraps a `HookRunner` so every hook verdict
  *   (`preToolUse`, `postToolUse`, `sessionStart`, `runEnd`) is recorded as it
  *   is decided, without touching `hooks.ts`.
+ * - `mcp-host.ts` records an `"elicitation"` entry for every MCP server's
+ *   request for user input, answered or refused.
  * - {@link renderAudit} turns a read-back entry list into the lines `arcturn
  *   audit <sessionId>` prints.
  *
@@ -71,8 +73,55 @@ export interface AuditHookEntry {
   reason?: string;
 }
 
+/**
+ * One MCP elicitation: a server asking the user for input through a form.
+ *
+ * The human-in-the-loop sibling of {@link AuditPermissionEntry}. It records
+ * which server asked, what it asked for and how the request ended, and never
+ * the answers: an elicitation is exactly where a user types a token or an
+ * address, and the audit trail must not become a second copy of it.
+ */
+export interface AuditElicitationEntry {
+  kind: "elicitation";
+  ts: number;
+  /** Configured name of the MCP server that asked. */
+  server: string;
+  /**
+   * `accept`/`decline`/`cancel` are the user's (or a headless host's) answer;
+   * `refused` means the request never reached the user (a schema outside the
+   * flat subset the spec allows).
+   */
+  action: "accept" | "decline" | "cancel" | "refused";
+  /** Names of the fields requested, in order. Never their values. */
+  fields: string[];
+  /** Why it ended that way, when it was not the user's choice. */
+  reason?: string;
+}
+
+/**
+ * An MCP server's sampling request run on the user's model. Counts and names
+ * only — never the server's prompt or the model's reply.
+ */
+export interface AuditSamplingEntry {
+  kind: "sampling";
+  ts: number;
+  /** Configured name of the MCP server that asked. */
+  server: string;
+  /** Catalog id of the model that ran it. */
+  model: string;
+  /** Input plus output tokens. */
+  tokens: number;
+  /** Dollars billed to the session; absent when the model has no known price. */
+  costUsd?: number;
+}
+
 /** One line of the audit log. */
-export type AuditEntry = AuditToolEntry | AuditPermissionEntry | AuditHookEntry;
+export type AuditEntry =
+  | AuditToolEntry
+  | AuditPermissionEntry
+  | AuditHookEntry
+  | AuditElicitationEntry
+  | AuditSamplingEntry;
 
 /** An append-only, per-session audit log. */
 export interface AuditLog {
@@ -321,6 +370,15 @@ function renderEntry(entry: AuditEntry): string {
     case "hook": {
       const reason = entry.reason ? `: ${entry.reason}` : "";
       return `${time}  hook  ${entry.event}  ${entry.decision}${reason}`;
+    }
+    case "elicitation": {
+      const reason = entry.reason ? `: ${entry.reason}` : "";
+      const fields = entry.fields.length > 0 ? `  (${entry.fields.join(", ")})` : "";
+      return `${time}  elic  ${entry.server}  ${entry.action}${reason}${fields}`;
+    }
+    case "sampling": {
+      const cost = entry.costUsd === undefined ? "" : `  $${entry.costUsd.toFixed(4)}`;
+      return `${time}  samp  ${entry.server}  ${entry.model}  ${entry.tokens} tok${cost}`;
     }
   }
 }

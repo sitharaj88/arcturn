@@ -109,6 +109,26 @@ export interface RouterConfig {
    * the `subagent` route (with a recorded warning), never a crash.
    */
   tiers?: Record<string, string>;
+  /**
+   * Advisor pairing (Anthropic's advisor tool, beta `advisor-tool-2026-03-01`,
+   * first-party Claude API only): while a request's model is `executor`, it
+   * carries the advisor tool naming `advisor`, a stronger model the executor
+   * consults mid-generation. Both are catalog ids on the `anthropic`
+   * provider; the pair must be one the API accepts (`ANTHROPIC_ADVISOR_PAIRS`
+   * in `@arcturn/ai`), which the config parser checks, warning and dropping
+   * the setting otherwise. The advisor's tokens are billed at its own rate and
+   * shown in `/cost`. Not a route kind: nothing is ever *sent to* the advisor
+   * by arcturn — the provider runs it inside the executor's request.
+   */
+  advisor?: AdvisorRouteConfig;
+}
+
+/** `route.advisor`; see {@link RouterConfig.advisor}. */
+export interface AdvisorRouteConfig {
+  /** The model that runs the session, e.g. `"anthropic/claude-sonnet-5-5"`. */
+  executor: string;
+  /** The model it consults, e.g. `"anthropic/claude-opus-5-5"`. */
+  advisor: string;
 }
 
 /** Resolves a catalog id to a {@link ModelSpec}; may throw on an unknown id. */

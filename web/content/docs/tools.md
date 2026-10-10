@@ -127,6 +127,20 @@ Always requests permission first (`Create file <path>` or `Overwrite file <path>
 a suggested "always allow" rule scoped to the parent directory (`<dir>/**`). On success,
 returns `Created <path> (N bytes).` or `Updated <path> (N bytes).`.
 
+### Streaming, and a model that sends broken JSON
+
+On first-party Anthropic the model's `write` content streams as it is generated
+(`eager_input_streaming`), and the TUI shows the target path and the last four lines under
+the progress line while it does; the same goes for an `edit`'s `newText`. Only `write` and
+`edit` are streamed this way, and not through a custom `baseUrl`, Bedrock or Vertex, where
+older deployments answer 400.
+
+Because the API does not validate a streamed input, it can arrive incomplete or invalid. A
+call whose arguments are not valid JSON never reaches a hook or the tool: the model gets an
+error result explaining so, with the raw text (first 2000 characters) as
+`{"INVALID_JSON": …}`, and tries again. A `write` cut off by the output-token limit is
+refused the same way rather than written half-complete.
+
 ## `edit`
 
 Exact substring replacement in an existing file.
@@ -257,6 +271,30 @@ no extra setup. Output is `title — url` per result with an indented snippet un
 15 second timeout applies. `websearch` never calls `ctx.requestPermission` — it can't
 mutate anything, so it runs in every permission mode without a prompt.
 
+### Native web search
+
+`websearch` can be served by the model provider instead. In `.arcturn/config.json` (or user
+config):
+
+```json
+{ "websearch": { "provider": "anthropic", "maxUses": 5 }, "webfetch": { "provider": "anthropic" } }
+```
+
+Both default to `"builtin"`. With `"anthropic"` the client `websearch` or `fetch` tool is
+left out of the request and the API's own is sent in its place: the dynamic-filtering
+`web_search_20260209` / `web_fetch_20260209` on Opus and Sonnet 4.6 and later, the basic
+`web_search_20250305` / `web_fetch_20250910` on other first-party Claude models, only the
+basic search on Vertex, and nothing on Bedrock or behind a proxy — there the built-in tool
+stays. `webfetch: anthropic` is honoured only when it comes from your **user** config, not
+a project's: fetched URLs are sent to the provider.
+
+Domain restrictions are derived, not configured. Host-shaped `allow` and `deny` permission
+rules for the tool become the API's `allowed_domains` and `blocked_domains`. The API
+refuses both lists on one tool, so when both would apply only the deny list is sent and a
+warning says so. Rules you change mid-session do not update the lists already sent.
+Searches and fetches, and their errors, appear as tool rows in the TUI and in `/export`.
+Per-search fees are not priced; tokens are. None of this has been run against the live API.
+
 ## Background tasks and todos, together
 
 `bash`'s background mode and the `todo` tool (from `@arcturn/core`, described above) are
@@ -292,6 +330,28 @@ output so the gap is visible rather than silent. Background commands are never s
 [Permissions](/docs/permissions); dry-run and taint/canary defenses that also touch tool
 output are covered in [Dry-run mode](/docs/dry-run) and
 [Injection defense](/docs/injection-defense) respectively.
+
+## Which tools are strict
+
+A strict tool asks the model's API to guarantee that the arguments match the schema.
+`read`, `write`, `edit`, `bash`, `grep`, `ls`, `fetch`, `websearch`, `plan`, `subagent`,
+`tool_search`, `brain`, `memory`, `symbols`, `skill`, `find_references` and `todo` declare
+`strict: true`. These do not:
+
+| Tool | Why |
+|---|---|
+| `glob`, `search_code`, `find_symbol` | A nested `oneOf` the strict grammar does not take. |
+| `todo` on OpenAI | Its `id` is optional, which Anthropic's grammar allows and OpenAI's does not. |
+| MCP tools | Their schemas belong to the server; never strict. |
+
+Which tools are strict is decided per request from the whole tool set, in name order
+against the per-request limits below — so the strict set is a function of the tools,
+not of the order they were registered in, and it does not change between turns.
+
+Anthropic gets `strict` only when the model has the grammar, the schema fits, and the
+request is under the per-request limits (20 strict tools, 24 optional properties, 16
+union-typed properties); OpenAI only for a schema whose properties are all required;
+Google ignores it.
 
 ## The `Tool` contract
 

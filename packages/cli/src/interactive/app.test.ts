@@ -383,6 +383,36 @@ describe("InteractiveApp", () => {
     expect(h.app.tui.overlay).toBeNull();
   });
 
+  it("answers an MCP elicitation with a form dialog", async () => {
+    const h = await harness();
+    const prompt = h.runtime.elicitationPrompt;
+    expect(prompt).toBeDefined();
+    const answer = prompt?.({
+      server: "docs",
+      message: "Pick a workspace",
+      fields: [
+        {
+          name: "workspace",
+          kind: "enum",
+          required: true,
+          options: [
+            { value: "a", label: "Alpha" },
+            { value: "b", label: "Beta" },
+          ],
+        },
+      ],
+      signal: new AbortController().signal,
+    });
+    await waitFor(() => h.app.tui.overlay !== null);
+    expect(h.text()).toContain("Pick a workspace");
+    h.terminal.injectInput(ENTER); // "Fill in the form"
+    await waitFor(() => h.text().includes("Beta"));
+    h.terminal.injectInput(DOWN);
+    h.terminal.injectInput(ENTER);
+    await expect(answer).resolves.toEqual({ action: "accept", content: { workspace: "b" } });
+    expect(h.app.tui.overlay).toBeNull();
+  });
+
   it("persists a project rule when the user picks 'allow always'", async () => {
     const h = await harness([
       { toolCalls: [{ id: "t1", name: "bash", arguments: { command: "echo hi" } }] },

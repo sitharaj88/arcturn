@@ -437,6 +437,81 @@ describe("pause_turn from a server tool", () => {
     expect(events).toEqual(["completed"]);
   });
 
+  it("a pause mid-search (regex variant) activates the tool and resumes with the same tool set", async () => {
+    const plain = (name: string) => ({
+      definition: { name, description: `${name} tool`, parameters: { type: "object" } },
+      async execute() {
+        return { content: [{ type: "text" as const, text: `${name} ok` }] };
+      },
+    });
+    const toolset = createDeferredToolset({
+      tools: [plain("read"), plain("deploy"), plain("rollback")],
+      alwaysActive: ["read"],
+    });
+    // The server's regex search found `deploy`, then hit its iteration limit:
+    // the turn pauses with the search result in it and no client call yet.
+    const paused = pausedTurn("srv1");
+    const end = paused.at(-1);
+    if (end?.type === "end") {
+      end.message = {
+        ...end.message,
+        content: [
+          {
+            type: "serverTool",
+            provider: "anthropic",
+            block: {
+              type: "server_tool_use",
+              id: "srv1",
+              name: "tool_search_tool_regex",
+              input: { pattern: "deplo" },
+            },
+          },
+          {
+            type: "serverTool",
+            provider: "anthropic",
+            block: {
+              type: "tool_search_tool_result",
+              tool_use_id: "srv1",
+              content: {
+                type: "tool_search_tool_search_result",
+                tool_references: [{ type: "tool_reference", tool_name: "deploy" }],
+              },
+            },
+          },
+        ],
+      };
+    }
+    const llm = createScriptedLLM([
+      paused,
+      toolCallTurn([{ id: "d1", name: "deploy", arguments: {} }]),
+      textTurn("deployed"),
+    ]);
+    const agent = new Agent({
+      llm,
+      model: OPUS_55,
+      systemPrompt: "sys",
+      deferredTools: toolset,
+      cwd: "/work",
+      permissions: { mode: "yolo" },
+    });
+    await agent.prompt("ship it");
+
+    expect(llm.requests).toHaveLength(3);
+    // Activation is server-side: the tools array never changes, before or
+    // after the pause, and the resend is exactly the history plus the pause.
+    const tools = llm.requests.map((request) => head(request));
+    expect(new Set(tools).size).toBe(1);
+    expect(llm.requests[1]!.messages.at(-1)!.role).toBe("assistant");
+    for (let i = 1; i < llm.requests.length; i++) {
+      expect(diff(llm.requests[i - 1]!, llm.requests[i]!).appendOnly, `request ${i}`).toBe(true);
+    }
+    // The paused message's search result reached the toolset's record, and the
+    // continuation's call to the found tool ran.
+    expect(toolset.snapshot().activated).toEqual(["deploy"]);
+    const result = agent.messages.find((message) => message.role === "toolResult");
+    expect(result).toMatchObject({ toolName: "deploy", isError: false });
+  });
+
   it("gives up after a bounded number of pauses and says so", async () => {
     const llm = createScriptedLLM(Array.from({ length: 40 }, (_, i) => pausedTurn(`s${i}`)));
     const agent = new Agent({

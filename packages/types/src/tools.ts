@@ -19,6 +19,24 @@ export interface ToolDefinition {
    * never receive it.
    */
   deferLoading?: boolean;
+  /**
+   * Ask the provider to guarantee the model's input matches `parameters`
+   * exactly (Anthropic and OpenAI `strict: true`). Only set on a tool whose
+   * schema satisfies the strict grammar: `additionalProperties: false` on every
+   * object, no numeric or string-length constraints, no top-level `oneOf`.
+   * An adapter whose provider has a stricter rule (OpenAI wants every property
+   * required) drops it for a schema that misses it. Never set on a tool whose
+   * schema arcturn does not own (MCP).
+   */
+  strict?: boolean;
+  /**
+   * Stream this tool's input as it is generated instead of having the server
+   * buffer and validate it (Anthropic `eager_input_streaming`). Worth it for a
+   * tool that takes a file body; with it the input can arrive cut off or
+   * malformed, so the runtime validates it before dispatch. Adapters send it
+   * only on streaming requests to the first-party API.
+   */
+  eagerInputStreaming?: boolean;
 }
 
 export interface ToolUpdate {

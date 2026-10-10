@@ -281,19 +281,21 @@ describe("buildAnthropicRequest", () => {
     ).toBe(0.7);
   });
 
-  it("enables eager input streaming on every tool definition", () => {
-    const params = buildAnthropicRequest({
-      model: spec,
-      messages: [userMessage("hi")],
-      tools: [
-        { name: "read", description: "d", parameters: {} },
-        { name: "write", description: "d", parameters: {} },
-      ],
-    });
+  it("enables eager input streaming only on tools that ask for it, first-party only", () => {
+    const tools = [
+      { name: "read", description: "d", parameters: {} },
+      { name: "write", description: "d", parameters: {}, eagerInputStreaming: true },
+    ];
+    const params = buildAnthropicRequest(
+      { model: spec, messages: [userMessage("hi")], tools },
+      { firstParty: true },
+    );
     expect(params.tools).toHaveLength(2);
-    for (const tool of params.tools ?? []) {
-      expect(tool).toMatchObject({ eager_input_streaming: true });
-    }
+    expect(params.tools?.[0]).not.toHaveProperty("eager_input_streaming");
+    expect(params.tools?.[1]).toMatchObject({ eager_input_streaming: true });
+    // Bedrock, Vertex and proxies build without `firstParty`.
+    const elsewhere = buildAnthropicRequest({ model: spec, messages: [userMessage("hi")], tools });
+    expect(elsewhere.tools?.[1]).not.toHaveProperty("eager_input_streaming");
   });
 
   it("clamps the thinking budget to leave room for an answer", () => {

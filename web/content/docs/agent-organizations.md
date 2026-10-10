@@ -33,6 +33,7 @@ description: Audits a diff for injection, unvalidated input reaching a sink, and
 model: anthropic/claude-opus-5
 tools: [read, grep, glob, ls, bash]
 maxTurns: 50
+taskBudgetTokens: 150000
 ---
 
 You audit changes. You do not fix them...
@@ -158,7 +159,11 @@ ceiling — so a loop that keeps paying for the same failure stops on your terms
 buckets) — the ceiling that still fires on a model with no published pricing, where cost is
 unknowable and `budgetUsd` never trips; frontmatter-only for now, not settable over the
 wire. A role's `maxTurns:` is enforced too, clamped to the session's own ceiling: a role
-file can narrow the turn budget, never raise it.
+file can narrow the turn budget, never raise it. A role's `taskBudgetTokens:` (at least
+20,000; a smaller value is warned about and dropped) is a different kind of limit: it tells a
+model that supports task budgets how many tokens it has to work with so it can pace itself,
+and a `[budget:]` on the stage line overrides it. See
+[Workflows](/docs/workflows#task-budgets).
 
 Both run ceilings ask before they kill. A hard stop ends the run `failed` — permanently
 unresumable, every finished stage's spend sunk — so once a run has consumed 80% of a

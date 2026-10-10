@@ -67,6 +67,12 @@ function validateServerConfig(value: unknown, path: string, name: string): McpSe
   if (!isPlainObject(value)) {
     throw new McpConfigError(`Invalid ${where}: expected an object.`);
   }
+  // Spread only when present, so an entry that never mentions it keeps the
+  // exact shape it always had.
+  if (value.sampling !== undefined && typeof value.sampling !== "boolean") {
+    throw new McpConfigError(`Invalid ${where}: "sampling" must be a boolean.`);
+  }
+  const common = value.sampling === undefined ? {} : { sampling: value.sampling };
 
   if (value.type === "stdio") {
     if (typeof value.command !== "string" || value.command.length === 0) {
@@ -82,6 +88,7 @@ function validateServerConfig(value: unknown, path: string, name: string): McpSe
       throw new McpConfigError(`Invalid ${where}: "cwd" must be a string.`);
     }
     return {
+      ...common,
       type: "stdio",
       command: value.command,
       args: value.args as string[] | undefined,
@@ -101,6 +108,7 @@ function validateServerConfig(value: unknown, path: string, name: string): McpSe
       throw new McpConfigError(`Invalid ${where}: "auth" must be "oauth".`);
     }
     return {
+      ...common,
       type: "http",
       url: value.url,
       headers: value.headers as Record<string, string> | undefined,

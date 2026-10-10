@@ -32,6 +32,9 @@
  *   positive integer; anything else (zero, negative, non-numeric) is dropped
  *   with a warning rather than silently coerced. `undefined` means "use the
  *   runtime's default subagent ceiling" (`runtime.ts` `createSubagent`).
+ * - `taskBudgetTokens` — a task budget in tokens (at least 20,000) the role's
+ *   model paces itself against on each workflow assignment; anything else is
+ *   dropped with a warning. A step's `[budget:N]` wins over it.
  *
  * Everything after the frontmatter is the system prompt verbatim (no
  * template substitution, unlike skills — an agent's prompt does not take
@@ -66,11 +69,21 @@ export interface AgentDef {
    * `config.subagentMaxTurns ?? SUBAGENT_MAX_TURNS`).
    */
   maxTurns?: number;
+  /**
+   * A token budget the role's model paces itself against on each assignment,
+   * from `taskBudgetTokens:` frontmatter (Anthropic task budgets; at least
+   * 20,000). A workflow step's own `[budget:N]` wins over it. `undefined`
+   * means no budget.
+   */
+  taskBudgetTokens?: number;
   /** Absolute path of the file the agent was loaded from. */
   source: string;
 }
 
 const NAME_STRIP = /[^a-z0-9-]/g;
+
+/** The smallest task budget the API accepts (`task_budget.total`). */
+const TASK_BUDGET_FLOOR = 20_000;
 
 /**
  * Normalise a raw name into the `[a-z0-9-]` charset the registry expects.
@@ -88,6 +101,7 @@ interface Frontmatter {
   tools?: string;
   model?: string;
   maxTurns?: string;
+  taskBudgetTokens?: string;
 }
 
 /**
@@ -136,6 +150,7 @@ export function parseAgentFrontmatter(raw: string): { frontmatter: Frontmatter; 
     else if (key === "tools") frontmatter.tools = value;
     else if (key === "model") frontmatter.model = value;
     else if (key === "maxTurns") frontmatter.maxTurns = value;
+    else if (key === "taskBudgetTokens") frontmatter.taskBudgetTokens = value;
   }
   const body = lines.slice(end + 1).join("\n");
   return { frontmatter, body };
@@ -279,6 +294,18 @@ async function loadCandidate(
     }
   }
 
+  let taskBudgetTokens: number | undefined;
+  if (frontmatter.taskBudgetTokens !== undefined) {
+    const parsed = Number(frontmatter.taskBudgetTokens);
+    if (Number.isInteger(parsed) && parsed >= TASK_BUDGET_FLOOR) {
+      taskBudgetTokens = parsed;
+    } else {
+      warnings.push(
+        `${file}: "taskBudgetTokens" must be a whole number of at least ${TASK_BUDGET_FLOOR} (dropped)`,
+      );
+    }
+  }
+
   return {
     name,
     description,
@@ -286,6 +313,7 @@ async function loadCandidate(
     ...(tools === undefined ? {} : { tools }),
     ...(model === undefined ? {} : { model }),
     ...(maxTurns === undefined ? {} : { maxTurns }),
+    ...(taskBudgetTokens === undefined ? {} : { taskBudgetTokens }),
     source: file,
   };
 }

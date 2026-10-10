@@ -15,6 +15,8 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import {
+  anthropicAdvisorPairValid,
+  anthropicAdvisorsFor,
   DEFAULT_API_KEY_ENV,
   FALLBACK_API_KEY_ENV,
   listProviderIds,
@@ -43,7 +45,7 @@ import {
   type ResolveArcturnPathsOptions,
   resolveArcturnPaths,
 } from "./paths.js";
-import type { RouteKind, RouterConfig } from "./router.js";
+import type { AdvisorRouteConfig, RouteKind, RouterConfig } from "./router.js";
 import type { VerifyConfig } from "./verify.js";
 
 /** Lower rank wins when rules from different scopes disagree. */
@@ -420,6 +422,40 @@ export interface ArcturnConfig {
    */
   anthropicThinkingBinding?: "error" | "drop_block";
   /**
+   * Which server-side tool search the first-party `anthropic` provider sends
+   * beside deferred tools on Claude 4.5+: `{"providers": {"anthropic":
+   * {"toolSearch": "regex"}}}` sends `tool_search_tool_regex_20251119`, where
+   * the model writes a pattern over tool names and descriptions; the default,
+   * `"bm25"`, sends `tool_search_tool_bm25_20251119` (natural-language
+   * queries). Both activate tools the same way.
+   */
+  anthropicToolSearch?: "bm25" | "regex";
+  /**
+   * Where web search runs: `{"websearch": {"provider": "anthropic", "maxUses":
+   * 5}}` sends Anthropic's server-side web search (`web_search_20260209` with
+   * dynamic filtering on Opus and Sonnet 4.6+, `web_search_20250305` on older
+   * Claude and on Vertex AI; never to Bedrock or a gateway) in place of the
+   * client-side `websearch` tool, which that model is then not offered.
+   * `maxUses` caps searches per request (`max_uses`). Host-shaped `websearch`
+   * allow rules become `allowed_domains`; host-shaped `fetch` / `websearch`
+   * deny rules become `blocked_domains` (the deny list wins when both exist).
+   * Default `{"provider": "builtin"}`: the client tool (Brave / DuckDuckGo)
+   * everywhere.
+   */
+  websearch?: NativeWebToolConfig;
+  /**
+   * Where web fetch runs: `{"webfetch": {"provider": "anthropic"}}` sends
+   * Anthropic's server-side web fetch (`web_fetch_20260209` on Opus and Sonnet
+   * 4.6+, `web_fetch_20250910` on older Claude; first-party API only — Vertex
+   * and Bedrock have none) in place of the client-side `fetch` tool. The
+   * server fetches only URLs already in the conversation, and without the
+   * per-origin permission prompt the client tool raises: host-shaped `fetch`
+   * allow rules become `allowed_domains` and `fetch` / `websearch` deny rules
+   * `blocked_domains`. Because it removes that prompt, `"anthropic"` is
+   * honoured only from `~/.arcturn/config.json`. Default `"builtin"`.
+   */
+  webfetch?: NativeWebToolConfig;
+  /**
    * Directories whose own `.arcturn` code — hooks, `verify`, extensions, stdio
    * MCP servers — runs without a consent prompt. An entry is either an exact
    * directory or one ending in `/*`, which covers everything beneath it.
@@ -434,6 +470,17 @@ export interface ArcturnConfig {
    * comes to contain. Prefer answering the prompt once.
    */
   trustedProjects?: string[];
+}
+
+/**
+ * `websearch` / `webfetch`: which implementation serves the tool.
+ * `"builtin"` is arcturn's own client-side tool; `"anthropic"` the provider's
+ * server-side one where the session model and platform have it (elsewhere
+ * the builtin stays). `maxUses` caps provider-side uses per request.
+ */
+export interface NativeWebToolConfig {
+  provider: "anthropic" | "builtin";
+  maxUses?: number;
 }
 
 /** Result of {@link loadConfig}. */
@@ -520,6 +567,8 @@ const KNOWN_KEYS = new Set([
   "canaries",
   "consensus",
   "trustedProjects",
+  "websearch",
+  "webfetch",
 ]);
 
 /** Narrow an arbitrary string to a {@link PermissionMode}. */
@@ -534,6 +583,91 @@ export function permissionModes(): readonly PermissionMode[] {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Parse `route.advisor`: two model ids on the first-party `anthropic`
+ * provider whose pairing the API accepts. Anything else is warned about —
+ * naming both models and the executor's valid advisors — and dropped, since
+ * the request it would produce is a 400.
+ */
+function parseAdvisorRoute(
+  value: unknown,
+  where: string,
+  warnings: string[],
+): AdvisorRouteConfig | undefined {
+  const executor =
+    isRecord(value) && typeof value.executor === "string" ? value.executor.trim() : "";
+  const advisor = isRecord(value) && typeof value.advisor === "string" ? value.advisor.trim() : "";
+  if (executor === "" || advisor === "") {
+    warnings.push(
+      `${where}: "route.advisor" must be {"executor": "<model id>", "advisor": "<model id>"} (ignored)`,
+    );
+    return undefined;
+  }
+  // `anthropic/<model>` or a bare model name; any other provider prefix is a
+  // platform without the advisor tool.
+  const wire = (id: string): string | undefined =>
+    id.startsWith("anthropic/") ? id.slice("anthropic/".length) : id.includes("/") ? undefined : id;
+  const executorWire = wire(executor);
+  const advisorWire = wire(advisor);
+  if (executorWire === undefined || advisorWire === undefined) {
+    warnings.push(
+      `${where}: "route.advisor" needs two models on the first-party "anthropic" provider — the ` +
+        `advisor tool is not on Bedrock, Vertex or a gateway — got "${executor}" and "${advisor}" (ignored)`,
+    );
+    return undefined;
+  }
+  if (!anthropicAdvisorPairValid(executorWire, advisorWire)) {
+    const valid = anthropicAdvisorsFor(executorWire);
+    warnings.push(
+      `${where}: "route.advisor": ${advisorWire} cannot advise ${executorWire} (the API refuses ` +
+        `that pair with a 400). ${
+          valid.length === 0
+            ? `${executorWire} takes no advisor.`
+            : `Valid advisors for ${executorWire}: ${valid.join(", ")}.`
+        } (ignored)`,
+    );
+    return undefined;
+  }
+  return { executor, advisor };
+}
+
+/** Parse `websearch` / `webfetch`; an invalid value is warned about and dropped. */
+function parseNativeWebTool(
+  value: unknown,
+  key: "websearch" | "webfetch",
+  where: string,
+  warnings: string[],
+): NativeWebToolConfig | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) {
+    warnings.push(`${where}: "${key}" must be an object like {"provider": "anthropic"} (ignored)`);
+    return undefined;
+  }
+  for (const field of Object.keys(value)) {
+    if (field !== "provider" && field !== "maxUses") {
+      warnings.push(`${where}: unknown "${key}" key "${field}" (ignored)`);
+    }
+  }
+  const provider = value.provider;
+  if (provider !== "anthropic" && provider !== "builtin") {
+    warnings.push(`${where}: "${key}.provider" must be "anthropic" or "builtin" (ignored)`);
+    return undefined;
+  }
+  const out: NativeWebToolConfig = { provider };
+  if (value.maxUses !== undefined) {
+    if (
+      typeof value.maxUses === "number" &&
+      Number.isSafeInteger(value.maxUses) &&
+      value.maxUses > 0
+    ) {
+      out.maxUses = value.maxUses;
+    } else {
+      warnings.push(`${where}: "${key}.maxUses" must be a positive whole number (ignored)`);
+    }
+  }
+  return out;
 }
 
 function parseRule(
@@ -1155,6 +1289,20 @@ export function parseConfigFile(
     // to be able to tell a cloned repository's hook from the user's own.
     out.hooks = parseHookConfig(raw.hooks, where, warnings, scope);
   }
+  for (const key of ["websearch", "webfetch"] as const) {
+    const parsed = parseNativeWebTool(raw[key], key, where, warnings);
+    if (parsed === undefined) continue;
+    if (key === "webfetch" && scope === "project" && parsed.provider === "anthropic") {
+      // The server-side fetch runs without the per-origin prompt the client
+      // tool raises, so a cloned repository must not be able to switch it on.
+      warnings.push(
+        `${where}: "webfetch.provider": "anthropic" is ignored outside ~/.arcturn/config.json — ` +
+          "it removes the fetch permission prompt",
+      );
+      continue;
+    }
+    out[key] = parsed;
+  }
   if (raw.route !== undefined) {
     if (isRecord(raw.route)) {
       const route: RouterConfig = {};
@@ -1179,6 +1327,10 @@ export function parseConfigFile(
           warnings.push(`${where}: "route.tiers" must be an object of model ids`);
         }
       }
+      if (raw.route.advisor !== undefined) {
+        const advisor = parseAdvisorRoute(raw.route.advisor, where, warnings);
+        if (advisor !== undefined) route.advisor = advisor;
+      }
       out.route = route;
     } else {
       warnings.push(`${where}: "route" must be an object of model ids`);
@@ -1198,7 +1350,7 @@ export function parseConfigFile(
       declared = rest;
       const settings = anthropic as Record<string, unknown>;
       for (const key of Object.keys(settings)) {
-        if (key !== "fallbacks" && key !== "thinkingBinding") {
+        if (key !== "fallbacks" && key !== "thinkingBinding" && key !== "toolSearch") {
           warnings.push(`${where}: unknown "providers.anthropic" key "${key}" (ignored)`);
         }
       }
@@ -1211,6 +1363,13 @@ export function parseConfigFile(
       } else if ("thinkingBinding" in settings) {
         warnings.push(
           `${where}: "providers.anthropic.thinkingBinding" must be "error" or "drop_block" (ignored)`,
+        );
+      }
+      if (settings.toolSearch === "bm25" || settings.toolSearch === "regex") {
+        out.anthropicToolSearch = settings.toolSearch;
+      } else if ("toolSearch" in settings) {
+        warnings.push(
+          `${where}: "providers.anthropic.toolSearch" must be "bm25" or "regex" (ignored)`,
         );
       }
     }
@@ -1634,10 +1793,16 @@ export function mergeConfig(
   const providers = mergeProviders(base.providers, layer.providers, warnings);
   const anthropicFallbacks = layer.anthropicFallbacks ?? base.anthropicFallbacks;
   const anthropicThinkingBinding = layer.anthropicThinkingBinding ?? base.anthropicThinkingBinding;
+  const anthropicToolSearch = layer.anthropicToolSearch ?? base.anthropicToolSearch;
+  const websearch = layer.websearch ?? base.websearch;
+  const webfetch = layer.webfetch ?? base.webfetch;
   return {
     ...(providers === undefined ? {} : { providers }),
+    ...(websearch === undefined ? {} : { websearch }),
+    ...(webfetch === undefined ? {} : { webfetch }),
     ...(anthropicFallbacks === undefined ? {} : { anthropicFallbacks }),
     ...(anthropicThinkingBinding === undefined ? {} : { anthropicThinkingBinding }),
+    ...(anthropicToolSearch === undefined ? {} : { anthropicToolSearch }),
     ...((layer.compaction ?? base.compaction) === undefined
       ? {}
       : { compaction: { ...base.compaction, ...layer.compaction } }),

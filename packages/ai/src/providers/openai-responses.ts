@@ -48,7 +48,13 @@ import {
   deferredEvents,
   type ProviderStreamEvent,
 } from "../internal/stream.js";
-import { OPENAI_REASONING_EFFORT, supportsTemperature } from "./openai.js";
+import { isOpenAIStrictSchema } from "../strict-schema.js";
+import {
+  OPENAI_REASONING_EFFORT,
+  openAISchemaName,
+  openAIStructuredOutputs,
+  supportsTemperature,
+} from "./openai.js";
 import {
   type ProviderFactoryContext,
   type ProviderPrecheckFailure,
@@ -374,6 +380,9 @@ export function buildOpenAIResponsesRequest(
     params.temperature = request.temperature;
   }
 
+  const structured = openAIStructuredOutputs(
+    spec.provider === OPENAI_RESPONSES_PROVIDER ? { ...spec, provider: "openai" } : spec,
+  );
   if (request.tools && request.tools.length > 0) {
     params.tools = request.tools.map(
       (tool): FunctionTool => ({
@@ -381,11 +390,24 @@ export function buildOpenAIResponsesRequest(
         name: tool.name,
         description: tool.description,
         parameters: tool.parameters,
-        // Arcturn tool schemas are hand-written and not guaranteed to satisfy
-        // OpenAI's structured-output subset.
-        strict: false,
+        // Only a tool that asked for it and whose schema satisfies OpenAI's
+        // strict subset (every property required, no unsupported keyword);
+        // every other hand-written or foreign schema stays non-strict.
+        strict: tool.strict === true && structured && isOpenAIStrictSchema(tool.parameters),
       }),
     );
+  }
+
+  if (request.responseFormat !== undefined && structured) {
+    const format = request.responseFormat;
+    params.text = {
+      format: {
+        type: "json_schema",
+        name: openAISchemaName(format.name),
+        schema: format.schema,
+        strict: format.strict !== false && isOpenAIStrictSchema(format.schema),
+      },
+    };
   }
 
   if (spec.capabilities.thinking) {

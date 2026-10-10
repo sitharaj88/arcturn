@@ -80,6 +80,8 @@ interface ToolSlot {
   args?: Record<string, unknown>;
   /** Provider signature over the call, carried verbatim — see {@link ToolCallContent.signature}. */
   signature?: string;
+  /** The raw text when it was not valid JSON — see {@link ToolCallContent.malformedArguments}. */
+  malformedArguments?: string;
 }
 interface RawSlot {
   kind: "raw";
@@ -179,6 +181,7 @@ export class MessageAssembler {
           slot.name = event.name;
           slot.args = event.arguments;
           slot.signature = event.signature;
+          slot.malformedArguments = event.malformedArguments;
         } else {
           this.put(event.blockIndex, {
             kind: "toolCall",
@@ -187,6 +190,9 @@ export class MessageAssembler {
             raw: "",
             args: event.arguments,
             ...(event.signature === undefined ? {} : { signature: event.signature }),
+            ...(event.malformedArguments === undefined
+              ? {}
+              : { malformedArguments: event.malformedArguments }),
           });
         }
         break;
@@ -234,8 +240,20 @@ export class MessageAssembler {
 
   /** Usage with the cost estimate applied, ready for a `usage` event. */
   pricedUsage(): Usage {
-    const cost = calculateCostUsd(this.spec, this.usage);
-    return cost === undefined ? { ...this.usage } : { ...this.usage, costUsd: cost };
+    const own = calculateCostUsd(this.spec, this.usage);
+    // An advisor's spend is priced by the adapter (it alone knows which
+    // model advised) and added here, so `costUsd` is what the message cost.
+    // An unpriced answering model leaves the total unknown, advisor or not.
+    let advised = 0;
+    for (const entry of this.usage.advisor ?? []) advised += entry.costUsd ?? 0;
+    const cost = own === undefined ? undefined : Math.round((own + advised) * 1e7) / 1e7;
+    const usage: Usage = {
+      ...this.usage,
+      ...(this.usage.advisor === undefined
+        ? {}
+        : { advisor: this.usage.advisor.map((entry) => ({ ...entry })) }),
+    };
+    return cost === undefined ? usage : { ...usage, costUsd: cost };
   }
 
   /** Materialise the content blocks recorded so far. */
@@ -262,6 +280,9 @@ export class MessageAssembler {
           name: slot.name,
           arguments: slot.args ?? {},
           ...(slot.signature === undefined ? {} : { signature: slot.signature }),
+          ...(slot.malformedArguments === undefined
+            ? {}
+            : { malformedArguments: slot.malformedArguments }),
         });
       }
     }

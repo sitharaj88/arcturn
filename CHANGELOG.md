@@ -114,6 +114,43 @@ CLI, the SDK, or the wire protocol.
   `max_tokens`; an uncurated model takes both instead of a 128K default. It is
   still unpriced, so its cost reads as unknown, never $0.
 
+- **`eager_input_streaming` now goes only on `write` and `edit`, and only to
+  first-party Anthropic.** It used to ride on every tool of every
+  Anthropic-family request, Bedrock and Vertex included, where an older
+  deployment answers 400. It is now sent on the two tools whose inputs are
+  large enough to be worth streaming (file content, replacement text), and not
+  at all through a custom `baseUrl`, Bedrock or Vertex. If you relied on the old
+  behaviour for another tool it is gone; `ToolDefinition.eagerInputStreaming`
+  opts a tool in from the SDK.
+
+- **A streamed tool input that is not valid JSON is answered, not guessed.**
+  The provider adapters now carry the raw text on
+  `ToolCallContent.malformedArguments`, and the loop answers the call with an
+  error result before any hook or dispatch runs (the explanation plus
+  `{"INVALID_JSON": <raw, capped at 2000 characters>}`, with
+  `details.malformedArguments: true`). An input cut off by `max_tokens` is
+  refused the same way, never thrown.
+
+- **Folded operator messages carry a per-message nonce.** Where an operator
+  message is folded into the user turn (Sonnet 5, Haiku 5.5, Bedrock,
+  OpenAI-compatible gateways, Gemini), the marker is now
+  `<system-reminder nonce="…">` or `[operator …]` with a random token minted
+  and stored with the message (`SystemMessage.nonce`), and the system prompt
+  says only a marked block is the harness. Text a tool returns that merely
+  spells `<system-reminder>` is left byte for byte as it was and carries no
+  token, so it no longer matches. A transcript from before this change folds
+  unmarked. This closes a forgery hole in the Wave 2 fold; it is a mitigation
+  that depends on the model following the rule, and has been checked on the
+  wire, not against live models.
+
+- **Sixteen built-in tools are `strict`.** `read`, `write`, `edit`, `bash`,
+  `grep`, `ls`, `fetch`, `websearch`, `plan`, `subagent`, `tool_search`,
+  `brain`, `memory`, `symbols`, `skill` and `find_references` declare
+  `strict: true`, so a model whose API has the grammar must produce arguments
+  that match the schema. `glob`, `search_code` and `find_symbol` (nested
+  `oneOf`) and `todo` (its items do not set `additionalProperties: false`) are
+  not strict; MCP tools never are.
+
 ### Added
 
 - **Preserved-thinking controls.** `providers.anthropic.thinkingBinding:
@@ -258,6 +295,103 @@ CLI, the SDK, or the wire protocol.
   it rather than refusing the whole chain. `ModelCapabilities.systemMessages`
   is declarable on a `providers.<name>.models[].capabilities` config entry.
 
+- **Typed workflow contracts go native where the model can take a schema.** A
+  `[contract: …]` step on a model with structured-output support (Claude 4.5
+  and later and Opus 4.1 on Anthropic, Bedrock-Claude and Vertex-Claude; every
+  OpenAI, Azure and Responses model; Gemini 2.5 and later; a compatible
+  endpoint or Bedrock Converse model only when its spec declares
+  `structuredOutput`) is sent with a response format built from the contract
+  (`contractToJsonSchema`: fields in written order, optional fields out of
+  `required`, `additionalProperties: false`). The whole reply is parsed as JSON
+  — no fence hunting — and `validateContract` is still the only judge, with the
+  same single retry. Every other model keeps the fenced path. The hashed prompt
+  still carries the field list on both paths, so a prompt hash never depends on
+  the model. `/workflow status` prints `contract (native): …` when a step went
+  native, and `contractMode` is journalled on the step outcome, the step-end
+  line and the insights record. Wire shapes: Anthropic
+  `output_config.format {type: "json_schema", schema}`, OpenAI Chat
+  `response_format.json_schema`, Responses `text.format`, Gemini
+  `responseMimeType` + `responseJsonSchema` (with `additionalProperties`
+  stripped). OpenAI `strict` is downgraded to false when any property is
+  optional. SDK: `LLMRequest.responseFormat`, `AgentOptions.responseFormat`,
+  `Agent.setResponseFormat()`, `ModelCapabilities.structuredOutput`, and the
+  exports `supportsStructuredOutput`, `contractToJsonSchema`,
+  `checkContractReply`, `ContractMode`.
+
+- **Task budgets: `[budget:<tokens>]` and `taskBudgetTokens:`.** A stage option
+  (whole number, at least 20,000) or a role-file `taskBudgetTokens:` gives the
+  model a token ceiling for the stage's loop, so it paces itself instead of
+  being cut off at the turn ceiling. First-party Anthropic only, on Opus 4.7
+  and later, Fable/Mythos 5 and later, Sonnet 5.5 and Haiku 5.5 (not Sonnet 5);
+  sent as beta `task-budgets-2026-03-13` plus `output_config.task_budget`.
+  A `[tag]` or race arm that names a Claude model without task budgets is
+  refused when the workflow is parsed; a model only known at run time that
+  cannot take one gets an info notice and runs on the turn ceiling alone.
+  After a local compaction `remaining` is sent, estimated as `total` minus the
+  folded messages' output tokens and tool-result characters ÷ 4; before one it
+  is left to the server. The stage option beats the role file. The turn-ceiling
+  warning and the task budget stay separate. `web/lib/workflow-doc.ts` mirrors
+  the rules and error strings; the builder has no budget field yet. SDK:
+  `LLMRequest.taskBudget`, `AgentOptions.taskBudget`, `Agent.setTaskBudget()`.
+
+- **Strict tool schemas and streamed edits.** `ToolDefinition.strict` and
+  `eagerInputStreaming`. Anthropic gets `strict` only when the model has the
+  grammar, the schema fits and the per-request strict budget (20 strict tools,
+  24 optional properties, 16 union-typed properties) has room; OpenAI only for
+  all-required schemas; Google ignores it. In the TUI a `write`'s content and
+  an `edit`'s new text now stream under the progress line (target path plus the
+  last four lines, control characters stripped).
+
+- **`providers.anthropic.toolSearch: "bm25" | "regex"`** picks the native
+  tool-search variant (default `bm25`); `ANTHROPIC_TOOL_SEARCH_REGEX_TOOL` is
+  exported. Exercised end to end against fakes: deferred descriptions reach the
+  index, and a `pause_turn` during a regex search resumes with an identical
+  `tools` array.
+
+- **MCP elicitation.** Every server is told arcturn supports form elicitation.
+  In the TUI a server's request opens a form; `--print`, `serve` and ACP
+  decline with a warning rather than accept empty content. A `requestedSchema`
+  outside the flat-object subset is refused with `Elicitation refused: …`.
+  Every request is audited as `{kind: "elicitation", server, action, fields}` —
+  the field names, never the answers. `validateElicitationSchema` and
+  `checkElicitationContent` are exported; `McpManagerOptions.elicit` and
+  `onElicitationRefused` are the hooks.
+
+- **MCP sampling, opt in per server.** `"sampling": true` on a server's
+  `mcp.json` entry (default off) lets it ask arcturn's model for one
+  completion. Without it the server's `sampling/createMessage` gets `-32601`.
+  The call is isolated — the bare client, no tools, no history; the server's
+  messages become one user message and its `systemPrompt` applies to that call
+  only — and is billed to the session (`runtime.metrics`), so `/cost` and
+  `--max-cost` see it and it is refused at the limit. Only your user
+  `~/.arcturn/mcp.json` can grant it; a project file's `sampling` is ignored.
+  Each call is audited as `{kind: "sampling", server, model, tokens, costUsd?}`,
+  counts and names only. Output is capped at
+  `DEFAULT_MCP_SAMPLING_MAX_TOKENS` (4096); a server can only lower that. An
+  info notice says each time: `MCP server "<n>" sampled <model>: … (billed to
+  this session).`
+
+- **Native web search and fetch.** `websearch: {provider: "anthropic" |
+  "builtin", maxUses?}` and `webfetch` likewise (default `builtin`; `webfetch:
+  anthropic` is honoured only from user config, since fetched URLs leave the
+  machine). With `anthropic` the client tool is dropped from the request and
+  the API's own is sent: `web_search_20260209` / `web_fetch_20260209` on
+  Opus/Sonnet 4.6 and later, the basic `web_search_20250305` /
+  `web_fetch_20250910` on other first-party models, basic search only on
+  Vertex, nothing on Bedrock or behind a proxy (where the built-in tool
+  stays). Domain lists come from host-shaped allow and deny permission rules;
+  if both would apply only the deny list is sent, with a warning, because the
+  API refuses both. Results and errors render as tool rows in the TUI and in
+  `/export`. SDK: `LLMRequest.serverTools`, `ModelCapabilities.webTools`.
+
+- **The advisor tool.** `route.advisor: {executor, advisor}` pairs a cheaper
+  executor with a stronger advisor model, validated against
+  `ANTHROPIC_ADVISOR_PAIRS` and sent as `advisor_20260301` under beta
+  `advisor-tool-2026-03-01`, first-party only. Advisor tokens come back in
+  `usage.iterations`, are priced into `costUsd` and listed on `Usage.advisor`;
+  `/cost` gains an `advisor` line. The tool keeps being sent while the history
+  holds advisor blocks.
+
 ### Fixed
 
 - **The context-edit module claimed cache stability it did not have.** Its doc
@@ -313,6 +447,45 @@ CLI, the SDK, or the wire protocol.
   see that the turn was declined.
 - **A refused turn's tool calls still appear on the streamed `end` event**,
   though the stored message has them stripped and none of them run.
+- **Wave 3 was not verified against a live endpoint.** The tests exercise the
+  documented shapes against fakes. Not run live: `output_config.format` and its
+  400s, including the strict limits (20 / 24 / 16); `strict` together with
+  `defer_loading`; `eager_input_streaming` and how it interacts with `strict`;
+  `task_budget`, and whether the `remaining` arcturn estimates after a local
+  compaction matches the server's countdown; the regex tool-search type
+  (outside the SDK's GA `ToolUnion`, so it is sent with a cast); OpenAI
+  Responses `text.format`; Gemini `responseJsonSchema`; MCP elicitation and
+  sampling against a real server, and the TUI form on a real terminal; and all
+  of the native web tools and the advisor.
+- **The builder UI has no budget field.** `[budget:]` is parsed and validated
+  by the web mirror, but you type it into the text.
+- **ACP declines MCP elicitations**, as `--print` and `serve` do.
+- **`mcp add` has no `--sampling` flag**; edit your user `mcp.json`.
+- **Native web searches are not priced per search.** Token cost is counted; the
+  per-search fee is not. Permission rules changed mid-session do not update the
+  domain lists already sent.
+- **The advisor has no `max_uses` or `max_tokens`**, so one request's advisor
+  spend is bounded only by the cost guard between turns.
+- **The nonce on folded operator messages is untested against live models.** It
+  works only if the model honours the system prompt's rule; a transcript
+  written before it folds unmarked.
+- **`glob`, `search_code` and `find_symbol` are not strict** (nested `oneOf`),
+  and `todo` is strict on Anthropic only: its `id` stays optional, which
+  Anthropic's grammar allows and OpenAI's does not.
+- **The adversarial pass on this wave** (one reviewer, seven defects, each
+  fixed with a test watched to fail first) replaced the builder's content scrub
+  with the nonce described under Changed; bounded MCP sampling to a model no
+  dearer than the session's and to the output the cost ceiling still buys;
+  audited sampling; stripped `sampling: true` from any project-scoped
+  `mcp.json`; scrubbed server-written elicitation text before it reaches a
+  terminal and limited a server to five forms a minute; stopped offering a
+  native web tool where a blanket deny rule refuses the client tool, said so
+  when a deny rule is not a bare host, cut an over-long allow list to the API's
+  64 and fell back to the client tool for an over-long deny list (cutting it
+  would let a refused host through); admitted `strict` tools in name order so
+  the strict set no longer depends on array order; and re-derived a contract
+  step's mode from the model that actually answered, so a mid-step failover
+  across the native and fenced paths validates the reply the right way.
 
 ## [0.6.0] — 2026-09-05
 

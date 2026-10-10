@@ -77,6 +77,10 @@ export function createEditTool(): Tool {
         "This is also how a large file gets written: create it with `write` carrying only its " +
         "headings, then fill one section per call here, keeping each `newText` under about " +
         `${LARGE_CONTENT_CHARS.toLocaleString("en-US")} characters.`,
+      strict: true,
+      // The file body streams as the model writes it (first-party Anthropic),
+      // instead of after the server has buffered all of it.
+      eagerInputStreaming: true,
       parameters: {
         type: "object",
         properties: {

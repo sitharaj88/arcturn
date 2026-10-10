@@ -281,6 +281,84 @@ export function validateContract(
   return errors.length === 0 ? { ok: true, value } : { ok: false, errors };
 }
 
+// ------------------------------------------------------- native structured output
+
+/** One field's type as JSON Schema. */
+function fieldSchema(type: WorkflowContractType): Record<string, unknown> {
+  if (type.kind === "enum") return { enum: [...type.values] };
+  switch (type.kind) {
+    case "string":
+      return { type: "string" };
+    case "number":
+      return { type: "number" };
+    case "integer":
+      return { type: "integer" };
+    case "boolean":
+      return { type: "boolean" };
+    case "string[]":
+      return { type: "array", items: { type: "string" } };
+    case "number[]":
+      return { type: "array", items: { type: "number" } };
+  }
+}
+
+/**
+ * The JSON Schema a contract means, for a provider's native structured output.
+ *
+ * One property per field in written order; an optional field is simply not
+ * `required`; `additionalProperties: false` always — the Anthropic grammar
+ * demands it, and it is what an exact contract says ({@link validateContract}
+ * refuses an undeclared field). Pure, and stable for a given contract, so the
+ * provider's compiled-grammar cache holds across runs.
+ *
+ * The schema guarantees shape only. {@link validateContract} still runs on the
+ * reply: it is the one source of truth, and the check that catches a provider
+ * that did not honour the schema.
+ */
+export function contractToJsonSchema(contract: WorkflowContract): Record<string, unknown> {
+  const properties: Record<string, unknown> = {};
+  const required: string[] = [];
+  for (const field of contract.fields) {
+    properties[field.name] = fieldSchema(field.type);
+    if (!field.optional) required.push(field.name);
+  }
+  return { type: "object", properties, required, additionalProperties: false };
+}
+
+/** How a contract reply was asked for: the provider's schema, or the prompt's fence. */
+export type ContractMode = "native" | "fenced";
+
+/**
+ * Judge a contract step's final reply.
+ *
+ * `fenced` — the reply's last fenced ```json block ({@link extractContractJson}).
+ * `native` — the provider constrained the reply to the contract's schema, so
+ * the WHOLE reply is the JSON: no fence is hunted for, and a reply that is not
+ * a single JSON document fails here like any other shape miss. Either way
+ * {@link validateContract} decides.
+ */
+export function checkContractReply(
+  contract: WorkflowContract,
+  text: string,
+  mode: ContractMode,
+): { ok: true; value: Record<string, unknown> } | { ok: false; errors: string[] } {
+  if (mode === "native") {
+    const body = text.trim();
+    if (body.length === 0) return { ok: false, errors: ["the reply is empty"] };
+    let value: unknown;
+    try {
+      value = JSON.parse(body) as unknown;
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      return { ok: false, errors: [`the reply is not valid json: ${reason}`] };
+    }
+    return validateContract(contract, value);
+  }
+  const extracted = extractContractJson(text);
+  if (!extracted.ok) return { ok: false, errors: [extracted.error] };
+  return validateContract(contract, extracted.value);
+}
+
 // -------------------------------------------------------------- presentation
 
 /** The written type, as an instruction a model can follow without guessing. */

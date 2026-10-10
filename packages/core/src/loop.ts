@@ -16,8 +16,10 @@ import type {
   LLMRequest,
   Message,
   ModelSpec,
+  ResponseFormat,
   StreamEvent,
   SystemMessage,
+  TaskBudget,
   ThinkingLevel,
   Tool,
   ToolCallContent,
@@ -157,6 +159,10 @@ export interface LoopRuntime {
    * tool-result clearing). Omitted or `undefined` sends none.
    */
   contextManagement?(): ContextManagementRequest | undefined;
+  /** Native structured output for every request of the run; see `LLMRequest.responseFormat`. */
+  responseFormat?(): ResponseFormat | undefined;
+  /** The task budget the next request carries; see `LLMRequest.taskBudget`. */
+  taskBudget?(): TaskBudget | undefined;
 }
 
 /** Why the loop stopped. */
@@ -173,6 +179,8 @@ interface PartialBlock {
   args?: Record<string, unknown>;
   /** Provider signature over the call, replayed verbatim on the next request. */
   signature?: string;
+  /** The raw argument text, when it was not valid JSON. */
+  malformedArguments?: string;
   complete?: boolean;
 }
 
@@ -225,6 +233,7 @@ class StreamAccumulator {
         // `400 INVALID_ARGUMENT`), so losing it here breaks the loop one turn
         // later, far from the cause.
         block.signature = event.signature;
+        block.malformedArguments = event.malformedArguments;
         block.complete = true;
         break;
       }
@@ -261,6 +270,9 @@ class StreamAccumulator {
           name: block.name,
           arguments: block.args ?? {},
           ...(block.signature === undefined ? {} : { signature: block.signature }),
+          ...(block.malformedArguments === undefined
+            ? {}
+            : { malformedArguments: block.malformedArguments }),
         });
       }
     }
@@ -360,9 +372,43 @@ async function runHookAfter(
   return replacement ?? result;
 }
 
+/** How much of a malformed input is echoed back to the model in the error. */
+const MALFORMED_ECHO_CHARS = 2_000;
+
+/**
+ * The error a call with malformed arguments is answered with, shaped the way
+ * the provider documents (`{"INVALID_JSON": "<the input received>"}`) and
+ * built with the JSON serializer so quotes in the bad input stay escaped.
+ */
+function malformedArgumentsMessage(call: ToolCallContent, raw: string): string {
+  const echoed = raw.length > MALFORMED_ECHO_CHARS ? `${raw.slice(0, MALFORMED_ECHO_CHARS)}…` : raw;
+  return (
+    `The input for "${call.name}" was not valid JSON — it was cut off or malformed while ` +
+    "streaming — so the call was not run. Reissue it with complete arguments " +
+    "(for a large body, write a skeleton first and fill it with edits).\n" +
+    JSON.stringify({ INVALID_JSON: echoed })
+  );
+}
+
 async function executeToolCall(rt: LoopRuntime, call: ToolCallContent): Promise<ToolResultMessage> {
   const tools = rt.getTools();
   const tool = tools.find((candidate) => candidate.definition.name === call.name);
+
+  // An input the provider could not stream as valid JSON never reaches a hook
+  // or a tool: its repaired `arguments` may be silently truncated (a file body
+  // ending mid-line), and the schema cannot tell a short string from a cut one.
+  if (call.malformedArguments !== undefined) {
+    rt.emit({ type: "toolStart", toolCallId: call.id, toolName: call.name, input: call.arguments });
+    const result = errorToolResult(
+      call.id,
+      call.name,
+      malformedArgumentsMessage(call, call.malformedArguments),
+      { malformedArguments: true },
+    );
+    rt.permissions.clearCallCache(call.id);
+    rt.emit({ type: "toolEnd", toolCallId: call.id, result });
+    return result;
+  }
 
   const hook = await runHookBefore(rt.hooks, {
     toolCallId: call.id,
@@ -749,6 +795,8 @@ export async function runLoop(rt: LoopRuntime): Promise<LoopResult> {
     const thinking = rt.getThinking();
     const tools = rt.getTools();
     const contextManagement = rt.contextManagement?.();
+    const responseFormat = rt.responseFormat?.();
+    const taskBudget = rt.taskBudget?.();
     const request: LLMRequest = {
       model,
       system: rt.getSystemPrompt(),
@@ -757,6 +805,8 @@ export async function runLoop(rt: LoopRuntime): Promise<LoopResult> {
       maxOutputTokens: model.maxOutputTokens,
       ...(thinking === "off" ? {} : { thinking }),
       ...(contextManagement === undefined ? {} : { contextManagement }),
+      ...(responseFormat === undefined ? {} : { responseFormat }),
+      ...(taskBudget === undefined ? {} : { taskBudget }),
       signal: rt.signal,
     };
 

@@ -216,6 +216,12 @@ export interface StepEndRecord extends InsightsEventBase {
    * counted in the same table as every other failure kind.
    */
   readonly contract?: boolean;
+  /**
+   * How that contract was asked for: `"native"` (the provider's structured
+   * output, the contract's JSON schema) or `"fenced"` (the prompt's fenced
+   * block). A fact about the pipeline, like `contract` itself.
+   */
+  readonly contractMode?: "native" | "fenced";
   /** What a `[judges:N]` step's panel concluded — counts only, no verdicts. */
   readonly judges?: InsightsJudges;
 }
@@ -488,6 +494,9 @@ export function stampEvent(input: InsightsEventInput, ts: number): InsightsEvent
         // fact that one was satisfied, and a judged step contributes three
         // numbers and no verdict.
         ...(input.contract === true ? { contract: true } : {}),
+        ...(input.contractMode === "native" || input.contractMode === "fenced"
+          ? { contractMode: input.contractMode }
+          : {}),
         ...(input.judges === undefined ? {} : { judges: insightsJudges(input.judges) }),
       };
     case "park":

@@ -1,6 +1,6 @@
 /** Token cost accounting for model specs that publish pricing. */
 
-import type { ModelSpec, Usage } from "@arcturn/types";
+import type { AdvisorUsage, ModelSpec, Usage } from "@arcturn/types";
 
 const PER_MILLION = 1_000_000;
 
@@ -62,11 +62,41 @@ export function addUsage(a: Usage, b: Usage): Usage {
     a.costUsd === undefined && b.costUsd === undefined
       ? undefined
       : (a.costUsd ?? 0) + (b.costUsd ?? 0);
+  const advisor = addAdvisorUsage(a.advisor, b.advisor);
   return {
     inputTokens: a.inputTokens + b.inputTokens,
     outputTokens: a.outputTokens + b.outputTokens,
     cacheReadTokens: a.cacheReadTokens + b.cacheReadTokens,
     cacheWriteTokens: a.cacheWriteTokens + b.cacheWriteTokens,
     ...(costUsd === undefined ? {} : { costUsd }),
+    ...(advisor === undefined ? {} : { advisor }),
   };
+}
+
+/**
+ * Sum two {@link Usage.advisor} lists, entry by advisor model, cost following
+ * the same "absent stays absent" rule as {@link addUsage}. `undefined` when
+ * neither side has any.
+ */
+export function addAdvisorUsage(
+  a: readonly AdvisorUsage[] | undefined,
+  b: readonly AdvisorUsage[] | undefined,
+): AdvisorUsage[] | undefined {
+  if ((a === undefined || a.length === 0) && (b === undefined || b.length === 0)) return undefined;
+  const out: AdvisorUsage[] = [];
+  for (const entry of [...(a ?? []), ...(b ?? [])]) {
+    const existing = out.find((candidate) => candidate.model === entry.model);
+    if (existing === undefined) {
+      out.push({ ...entry });
+      continue;
+    }
+    existing.inputTokens += entry.inputTokens;
+    existing.outputTokens += entry.outputTokens;
+    existing.cacheReadTokens += entry.cacheReadTokens;
+    existing.cacheWriteTokens += entry.cacheWriteTokens;
+    if (existing.costUsd !== undefined || entry.costUsd !== undefined) {
+      existing.costUsd = (existing.costUsd ?? 0) + (entry.costUsd ?? 0);
+    }
+  }
+  return out;
 }

@@ -128,6 +128,7 @@ export function createFetchTool(): Tool {
         `stripped. Up to ${MAX_REDIRECTS} redirects are followed; a redirect to a different origin ` +
         "asks for permission again, and the URL the content actually came from is reported back. " +
         `Response body is truncated to roughly ${DEFAULT_MAX_BYTES / 1024}KB by default.`,
+      strict: true,
       parameters: {
         type: "object",
         properties: {

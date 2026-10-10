@@ -128,13 +128,19 @@ export function createTodoTool(options: TodoToolOptions = {}): BindableTool {
                   enum: [...TODO_STATUSES],
                 },
               },
+              // The object is closed, which puts the schema inside Anthropic's
+              // strict grammar (optional `id` included). It stays outside
+              // OpenAI's, which wants every property required: making `id`
+              // required would reject the many callers that omit it.
               required: ["text", "status"],
+              additionalProperties: false,
             },
           },
         },
         required: ["todos"],
         additionalProperties: false,
       },
+      strict: true,
     },
     bindAgent(next: AgentStateController): void {
       controller = next;
@@ -170,6 +176,7 @@ export function createPlanTool(options: PlanToolOptions = {}): BindableTool {
     definition: {
       name,
       description: options.description ?? DEFAULT_PLAN_DESCRIPTION,
+      strict: true,
       parameters: {
         type: "object",
         properties: {

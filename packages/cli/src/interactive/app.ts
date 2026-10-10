@@ -94,6 +94,7 @@ import {
   selectDialog,
   suggestRule,
 } from "./dialogs.js";
+import { runElicitationForm } from "./elicitation-form.js";
 import {
   CachedDynamic,
   Dynamic,
@@ -410,6 +411,21 @@ export class InteractiveApp {
 
     this.#unsubscribe = this.#runtime.subscribe((event) => this.#onEvent(event));
     this.#runtime.setPermissionRequester((request) => this.#requestPermission(request));
+    // An MCP server's request for input is a question for the person at this
+    // terminal, asked the way a permission prompt is: as a dialog. One form at
+    // a time — a second request opened over the first would replace its
+    // overlay and leave the first waiting on a dialog nobody can see.
+    let elicitations: Promise<unknown> = Promise.resolve();
+    this.#runtime.elicitationPrompt = (request) => {
+      const next = elicitations.then(() =>
+        runElicitationForm(request, (dialog) => this.#showDialog(dialog), {
+          width: this.#width(),
+          glyphs: this.#glyphs,
+        }),
+      );
+      elicitations = next.catch(() => undefined);
+      return next;
+    };
     // A human is at this runtime, so its sessions may be titled — see the
     // field's doc in runtime.ts for why --print/serve/acp never set this.
     this.#runtime.sessionTitlesEligible = true;
@@ -457,6 +473,8 @@ export class InteractiveApp {
     this.#unsubscribe?.();
     this.#unsubscribeResize?.();
     this.#unsubscribeTheme?.();
+    // Nobody is left to answer: from here an elicitation is declined.
+    this.#runtime.elicitationPrompt = undefined;
     this.#tui.stop();
     if (this.#originalTerminalBg !== undefined) {
       this.#terminal.write(setBackgroundSequence(this.#originalTerminalBg));

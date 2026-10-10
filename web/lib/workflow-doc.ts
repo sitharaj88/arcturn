@@ -31,7 +31,55 @@ const VALID_TAG = /^[A-Za-z0-9._/:-]+$/;
 const ROLE_TAG = /^@(\S*)(?:[ \t]+(.*))?$/;
 const VALID_ROLE = /^[a-z0-9][a-z0-9-]*$/;
 const PLACEHOLDER = /\{\{([^{}]*)\}\}/g;
-const OPTION_KEYS: ReadonlySet<string> = new Set(["contract", "judges", "race"]);
+const OPTION_KEYS: ReadonlySet<string> = new Set(["contract", "judges", "race", "budget"]);
+
+// Copied verbatim from packages/cli/src/task-budget.ts — the `[budget:]` rules.
+const TASK_BUDGET_MIN = 20_000;
+const CLAUDE_MODEL = /claude-(opus|sonnet|haiku|fable|mythos)-(\d+)(?:-(\d)(?!\d))?/i;
+
+function hasTaskBudgets(family: string, generation: number): boolean {
+  switch (family) {
+    case "opus":
+      return generation >= 407;
+    case "fable":
+    case "mythos":
+      return generation >= 500;
+    case "sonnet":
+    case "haiku":
+      return generation >= 505;
+    default:
+      return false;
+  }
+}
+
+/** Mirror of `task-budget.ts`'s `taskBudgetUnsupportedModel`. */
+function taskBudgetUnsupportedModel(tag: string): string | undefined {
+  const match = CLAUDE_MODEL.exec(tag);
+  if (!match) return undefined;
+  const family = (match[1] ?? "").toLowerCase();
+  const generation = Number(match[2]) * 100 + Number(match[3] ?? 0);
+  if (hasTaskBudgets(family, generation)) return undefined;
+  return match[0].toLowerCase();
+}
+
+/** Mirror of `task-budget.ts`'s `parseTaskBudget`, error string included. */
+function parseTaskBudget(value: string): number | { error: string } {
+  if (/^\d+$/.test(value)) {
+    const tokens = Number(value);
+    if (Number.isSafeInteger(tokens) && tokens >= TASK_BUDGET_MIN) return tokens;
+  }
+  return {
+    error: `budget must be a whole number of tokens, at least ${TASK_BUDGET_MIN}, got "${value}"`,
+  };
+}
+
+/** Mirror of `task-budget.ts`'s `taskBudgetModelError`. */
+function taskBudgetModelError(tag: string, model: string): string {
+  return (
+    `budget needs a model with task budgets, and "${tag}" names ${model}, which has none — ` +
+    "use Opus 4.7 or later, Fable 5 or later, Sonnet 5.5 or Haiku 5.5, or drop the budget"
+  );
+}
 const CONTRACT_FENCE = /^```contract(?:[ \t]+(.*))?$/;
 const CONTRACT_FENCE_CLOSE = /^```[ \t]*$/;
 const CONTRACT_PLACEHOLDER_PREFIX = "contract.";
@@ -81,6 +129,8 @@ export interface DocStep {
   judges?: number;
   /** The `[race:a|b]` option: the model tags, in written order. */
   race?: string[];
+  /** The `[budget:<tokens>]` option: a task budget, at least 20000. */
+  budget?: number;
   prompt: string;
 }
 
@@ -427,6 +477,7 @@ interface ParsedStepLine {
   contract?: string;
   judges?: number;
   race?: string[];
+  budget?: number;
   prompt: string;
 }
 
@@ -447,7 +498,8 @@ function classifyBracket(group: string): BracketGroup {
 type OptionValue =
   | { kind: "contract"; value: string }
   | { kind: "judges"; value: number }
-  | { kind: "race"; value: string[] };
+  | { kind: "race"; value: string[] }
+  | { kind: "budget"; value: number };
 
 /** Mirror of the engine's `readOption`, error strings included. */
 function readOption(
@@ -470,6 +522,12 @@ function readOption(
       return { error: `line ${line}: judges must be 2 or 3, got "${value}"` };
     }
     accept({ kind: "judges", value: Number(value) });
+    return undefined;
+  }
+  if (key === "budget") {
+    const parsed = parseTaskBudget(value);
+    if (typeof parsed !== "number") return { error: `line ${line}: ${parsed.error}` };
+    accept({ kind: "budget", value: parsed });
     return undefined;
   }
   const tags = value.split("|").map((tag) => tag.trim());
@@ -499,6 +557,7 @@ function parseStepLine(text: string, line: number): ParsedStepLine | WorkflowDoc
   let contract: string | undefined;
   let judges: number | undefined;
   let race: string[] | undefined;
+  let budget: number | undefined;
   const seenOptions = new Set<string>();
 
   for (;;) {
@@ -529,6 +588,7 @@ function parseStepLine(text: string, line: number): ParsedStepLine | WorkflowDoc
       const bad = readOption(classified.key, classified.value, line, (parsed) => {
         if (parsed.kind === "contract") contract = parsed.value;
         else if (parsed.kind === "judges") judges = parsed.value;
+        else if (parsed.kind === "budget") budget = parsed.value;
         else race = parsed.value;
       });
       if (bad) return bad;
@@ -549,6 +609,14 @@ function parseStepLine(text: string, line: number): ParsedStepLine | WorkflowDoc
   }
   if (race !== undefined && judges !== undefined) {
     return { error: `line ${line}: judges and race cannot be combined` };
+  }
+  if (budget !== undefined) {
+    for (const tag of [...(modelTag === undefined ? [] : [modelTag]), ...(race ?? [])]) {
+      const model = taskBudgetUnsupportedModel(tag);
+      if (model !== undefined) {
+        return { error: `line ${line}: ${taskBudgetModelError(tag, model)}` };
+      }
+    }
   }
 
   const roled = ROLE_TAG.exec(rest);
@@ -603,6 +671,7 @@ function parseStepLine(text: string, line: number): ParsedStepLine | WorkflowDoc
     ...(contract === undefined ? {} : { contract }),
     ...(judges === undefined ? {} : { judges }),
     ...(race === undefined ? {} : { race }),
+    ...(budget === undefined ? {} : { budget }),
     prompt,
   };
 }
@@ -894,6 +963,7 @@ function stepLine(step: DocStep): string {
   const contract = inline(step.contract ?? "");
   if (contract.length > 0) parts.push(`[contract:${contract}]`);
   if (step.judges !== undefined) parts.push(`[judges:${step.judges}]`);
+  if (step.budget !== undefined) parts.push(`[budget:${step.budget}]`);
   const role = inline(step.role ?? "").toLowerCase();
   if (role.length > 0) parts.push(`@${role}`);
   const prompt = inline(step.prompt);
@@ -1020,6 +1090,22 @@ export function stepOptionErrors(step: DocStep, contracts?: DocContract[]): stri
     }
     if (inline(step.role ?? "").length === 0) issues.push("judges requires a role");
     if (contract.length === 0) issues.push("judges requires a contract");
+  }
+
+  if (step.budget !== undefined) {
+    const parsed = parseTaskBudget(String(step.budget));
+    if (typeof parsed !== "number") {
+      issues.push(parsed.error);
+    } else {
+      const tags = [inline(step.modelTag ?? ""), ...race].filter((tag) => tag.length > 0);
+      for (const tag of tags) {
+        const model = taskBudgetUnsupportedModel(tag);
+        if (model !== undefined) {
+          issues.push(taskBudgetModelError(tag, model));
+          break;
+        }
+      }
+    }
   }
   return issues;
 }

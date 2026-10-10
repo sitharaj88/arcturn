@@ -11,6 +11,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import {
+  anthropicAdvisorPairValid,
   type ConsensusVerdict,
   calculateCostUsd,
   createClient,
@@ -52,7 +53,7 @@ import {
   wrapToolsWithOffload,
 } from "@arcturn/core";
 import { createSearchCodeTool } from "@arcturn/index";
-import type { McpManager } from "@arcturn/mcp";
+import type { McpElicitationHandler, McpManager } from "@arcturn/mcp";
 import { type BackgroundTaskManager, createDefaultTools } from "@arcturn/tools";
 import type { Theme as TuiTheme } from "@arcturn/tui";
 import type {
@@ -132,7 +133,13 @@ import {
   enabledConfiguredProvider,
   registerConfiguredProviders,
 } from "./providers.js";
-import { createModelRouter, type ModelRouter } from "./router.js";
+import { type AdvisorRouteConfig, createModelRouter, type ModelRouter } from "./router.js";
+import {
+  type AdvisorPairing,
+  nativeWebServerTools,
+  serverToolPlanner,
+  withServerTools,
+} from "./server-tools.js";
 import {
   createTitleGenerator,
   TITLE_MAX_OUTPUT_TOKENS,
@@ -341,6 +348,39 @@ export function resolveModelSpec(id: string, env: EnvMap = process.env): ModelSp
     );
   }
   return spec;
+}
+
+/**
+ * Resolve a parsed `route.advisor` against the catalog. The parser already
+ * checked the pairing; this catches ids the catalog does not know (or that
+ * name another provider once resolved), with a warning, and the pairing is
+ * then not used. No credential check: the advisor runs inside the executor's
+ * request, on its key.
+ */
+export function resolveAdvisorPairing(
+  route: AdvisorRouteConfig | undefined,
+  warnings: string[],
+): AdvisorPairing | undefined {
+  if (route === undefined) return undefined;
+  const executor = getModel(route.executor);
+  const advisor = getModel(route.advisor);
+  if (executor === undefined || advisor === undefined) {
+    const unknown = executor === undefined ? route.executor : route.advisor;
+    warnings.push(`route.advisor: unknown model "${unknown}"; the advisor is not used.`);
+    return undefined;
+  }
+  if (
+    executor.provider !== "anthropic" ||
+    advisor.provider !== "anthropic" ||
+    !anthropicAdvisorPairValid(executor.model, advisor.model)
+  ) {
+    warnings.push(
+      `route.advisor: ${advisor.displayName} cannot advise ${executor.displayName} on the ` +
+        "first-party Claude API; the advisor is not used.",
+    );
+    return undefined;
+  }
+  return { executor, advisor };
 }
 
 /**
@@ -774,6 +814,21 @@ export class ArcturnRuntime {
    * human later browses in `/sessions`, where a title earns its cost.
    */
   sessionTitlesEligible = false;
+  /**
+   * Who answers an MCP server's elicitation (its request for user input).
+   * Installed by the interactive app, which renders it as a form; `--print`,
+   * serve and acp leave it unset, and an unset prompt answers every
+   * elicitation `decline` (see `mcp-host.ts`, which also audits each one).
+   */
+  elicitationPrompt: McpElicitationHandler | undefined;
+  /**
+   * The dispatching LLM client with no failover chain and no consensus panel
+   * around it, for isolated one-off calls that name their own model (MCP
+   * sampling): a chain would override that model with its own head, and a
+   * panel would bill a second opinion nobody asked for. Set by
+   * `buildRuntime`; unset, callers fall back to {@link ArcturnRuntime.llm}.
+   */
+  directLlm: LLMClient | undefined;
   /** The title generator `buildRuntime` wired up, if it got that far. */
   #titles: TitleGenerator | undefined;
   /** Running token/cost totals for the live session. */
@@ -2587,12 +2642,35 @@ export async function buildRuntime(options: BuildRuntimeOptions = {}): Promise<A
       ...(config.anthropicThinkingBinding === undefined
         ? {}
         : { thinkingBinding: config.anthropicThinkingBinding }),
+      // `providers.anthropic.toolSearch`: which server-side search rides beside deferred tools.
+      ...(config.anthropicToolSearch === undefined
+        ? {}
+        : { toolSearch: config.anthropicToolSearch }),
     });
+  // `websearch` / `webfetch` on the anthropic provider: every request asks for
+  // the server's own web tools, and the adapter swaps them in for the client
+  // ones wherever the model and platform have them. Inside failover, like
+  // `wrapLlm`, so each link asks for — and the adapter decides — its own model.
+  const nativeWeb = nativeWebServerTools(config, config.permissions);
+  warnings.push(...nativeWeb.notices);
+  // `route.advisor` (validated at parse time): the executor's requests carry
+  // the advisor tool, and keep carrying it once the history has its blocks.
+  const advisorPairing = resolveAdvisorPairing(config.route?.advisor, warnings);
+  const serverToolClient =
+    nativeWeb.tools.length === 0 && advisorPairing === undefined
+      ? configuredClient
+      : withServerTools(
+          configuredClient,
+          serverToolPlanner({
+            web: nativeWeb.tools,
+            ...(advisorPairing === undefined ? {} : { advisor: advisorPairing }),
+          }),
+        );
   // `wrapLlm` sits *inside* failover and consensus on purpose: `--record`'s
   // tee has to see whichever link actually answered, because a cassette is a
   // recording of what happened, not of what was attempted.
   const baseClient =
-    options.wrapLlm === undefined ? configuredClient : options.wrapLlm(configuredClient);
+    options.wrapLlm === undefined ? serverToolClient : options.wrapLlm(serverToolClient);
   // One shared client, one link per model: dispatch already routes on the
   // request's model, so the chain only has to override that per attempt.
   const llm =
@@ -2915,6 +2993,7 @@ export async function buildRuntime(options: BuildRuntimeOptions = {}): Promise<A
     ...(options.onPermissionAsk === undefined ? {} : { onPermissionAsk: options.onPermissionAsk }),
   });
   runtimeRef = runtime;
+  runtime.directLlm = baseClient;
 
   if (audit) {
     runtime.setAuditOpener((sessionId) => createAuditLog(auditFilePath(paths, sessionId)));
@@ -3133,7 +3212,8 @@ export async function connectMcp(
   try {
     // Loaded on demand: the MCP SDK is a heavy import that most sessions
     // without configured servers should never pay for.
-    const { loadMcpConfig, McpManager: Manager } = await import("@arcturn/mcp");
+    const [{ loadMcpConfig, McpManager: Manager }, { mcpHostOptions, withoutProjectSampling }] =
+      await Promise.all([import("@arcturn/mcp"), import("./mcp-host.js")]);
     const config = await loadMcpConfig(files);
     // A project-declared MCP server is the fourth surface `project-trust.ts`
     // gates, and `buildRuntime` has already made the decision this reads. Done
@@ -3159,6 +3239,12 @@ export async function connectMcp(
         else delete config.servers[name];
       }
     }
+    // Sampling spends the user's key on a server's say-so: only the user's own
+    // mcp.json may grant it, never a project file (trusted or not).
+    if (existsSync(runtime.paths.projectMcp)) {
+      const projectConfig = await loadMcpConfig([runtime.paths.projectMcp]).catch(() => undefined);
+      if (projectConfig) withoutProjectSampling(config, Object.keys(projectConfig.servers));
+    }
     if (Object.keys(config.servers).length === 0) return undefined;
     const usesOAuth = Object.values(config.servers).some(
       (server) => server.type === "http" && server.auth === "oauth",
@@ -3175,6 +3261,11 @@ export async function connectMcp(
       : undefined;
     manager = new Manager(config, {
       clientInfo: { name: "arcturn", version: version() },
+      // Elicitation goes to `runtime.elicitationPrompt` (the TUI's form, or a
+      // `decline` with nobody to ask) and is audited; sampling runs on the
+      // session's own client, billed to the session, for servers whose config
+      // says `sampling: true` and no others.
+      ...mcpHostOptions(runtime),
       ...(authProviderFactory === undefined ? {} : { authProviderFactory }),
       ...(options.interactive && createMcpAuthorizationHandler
         ? { onAuthorizationRequired: createMcpAuthorizationHandler({ paths: runtime.paths }) }

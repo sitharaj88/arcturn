@@ -44,7 +44,7 @@ export {
   compareMessages,
   createConsensusClient,
 } from "./consensus.js";
-export { addUsage, emptyUsage } from "./cost.js";
+export { addAdvisorUsage, addUsage, emptyUsage } from "./cost.js";
 export {
   AIErrorException,
   createAIError,
@@ -98,12 +98,16 @@ export {
   subscriptionPlanFor,
 } from "./presets.js";
 export {
+  ANTHROPIC_ADVISOR_BETA,
+  ANTHROPIC_ADVISOR_PAIRS,
   ANTHROPIC_COMPACTION_BETA,
   ANTHROPIC_CONTEXT_MANAGEMENT_BETA,
   ANTHROPIC_FALLBACK_BETA,
+  ANTHROPIC_TASK_BUDGET_BETA,
   ANTHROPIC_THINKING_BINDING_BETA,
   ANTHROPIC_THINKING_BUDGETS,
   ANTHROPIC_THINKING_EFFORT,
+  ANTHROPIC_TOOL_SEARCH_REGEX_TOOL,
   ANTHROPIC_TOOL_SEARCH_TOOL,
   type AnthropicBlockBinding,
   type AnthropicBuildOptions,
@@ -111,18 +115,29 @@ export {
   type AnthropicContextEdit,
   type AnthropicEffort,
   type AnthropicMessageOptions,
+  type AnthropicOutputConfig,
+  type AnthropicPlatform,
   type AnthropicProviderOptions,
   type AnthropicRequestParams,
+  type AnthropicServerToolFamily,
   type AnthropicStreamOptions,
+  type AnthropicTaskBudget,
   type AnthropicThinkingBinding,
   type AnthropicThinkingParam,
   type AnthropicThinkingParams,
+  type AnthropicToolSearchVariant,
+  anthropicAdvisorPairValid,
+  anthropicAdvisorsFor,
   anthropicEffort,
   anthropicEventStream,
+  anthropicServerToolFamily,
+  anthropicStructuredOutputModel,
   anthropicSystemMessages,
+  anthropicTaskBudgetModel,
   anthropicThinkingOff,
   anthropicThinkingParams,
   anthropicToolSearch,
+  anthropicWebTools,
   buildAnthropicRequest,
   createAnthropicProvider,
   foldedSystemText,
@@ -146,7 +161,9 @@ export {
   GOOGLE_THINKING_BUDGETS,
   type GoogleClientLike,
   type GoogleProviderOptions,
+  geminiVersion,
   googleEventStream,
+  googleOperatorPrefix,
   mapGoogleFinishReason,
   parseGoogleUsage,
   SYNTHETIC_TOOL_ID_PREFIX,
@@ -188,4 +205,18 @@ export {
   streamWithRetry,
   withRetry,
 } from "./retry.js";
+export {
+  ANTHROPIC_STRICT_LIMITS,
+  createStrictBudget,
+  isOpenAIStrictSchema,
+  isStrictSchema,
+  type StrictSchemaCost,
+  strictSchemaCost,
+  withoutAdditionalProperties,
+} from "./strict-schema.js";
+export {
+  supportsStructuredOutput,
+  supportsTaskBudget,
+  TASK_BUDGET_MIN_TOKENS,
+} from "./structured-output.js";
 export { downgradeImages, hasImageContent } from "./vision.js";

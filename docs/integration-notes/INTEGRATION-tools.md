@@ -156,3 +156,62 @@ npx vitest run packages/tools   # 13 files, 107 tests, all passing
 npx tsc -p packages/tools/tsconfig.json --noEmit   # clean
 npx biome check packages/tools/src   # clean
 ```
+
+## Native web tools and advisor
+
+Added by the 2026-10-10 "the engine uses the API it has" wave. Two Anthropic
+server tools, one config switch each, wired through one request field.
+
+```ts
+// @arcturn/types
+type ServerToolRequest =
+  | { kind: "webSearch"; maxUses?; replaces?; allowedDomains?; blockedDomains? }
+  | { kind: "webFetch";  maxUses?; replaces?; allowedDomains?; blockedDomains? }
+  | { kind: "advisor"; model: string; maxUses? };
+LLMRequest.serverTools?: readonly ServerToolRequest[];
+ModelCapabilities.webTools?: NativeWebTools;
+Usage.advisor?: AdvisorUsage[];
+// @arcturn/ai
+ANTHROPIC_ADVISOR_PAIRS, ANTHROPIC_ADVISOR_BETA ("advisor-tool-2026-03-01")
+// @arcturn/cli — packages/cli/src/server-tools.ts
+serverToolPlanner(options), withServerTools(client, planner),
+nativeWebServerTools(...), advisorCostLines(usage, totalCostUsd),
+describeServerTools(content)      // rows for the TUI and /export
+```
+
+**Web search and fetch.** `websearch: {provider: "anthropic" | "builtin",
+maxUses?}` and `webfetch` likewise; both default to `builtin`. `webfetch:
+anthropic` is read only from the **user** config layer, since a project file
+should not be able to route fetched URLs through the provider. The planner
+(`serverToolPlanner`, applied by `withServerTools` around the `LLMClient`)
+returns `serverTools` per request, and the Anthropic adapter decides what to send:
+
+| Where | Search | Fetch |
+|---|---|---|
+| First-party, Opus or Sonnet 4.6 and later | `web_search_20260209` | `web_fetch_20260209` |
+| First-party, other Claude | `web_search_20250305` | `web_fetch_20250910` |
+| Vertex | `web_search_20250305` | none |
+| Bedrock, any proxy or custom `baseUrl` | none | none |
+
+Where nothing is sent, the built-in client tool stays; where something is sent,
+the client tool named in `replaces` is dropped from that request so the model is
+not offered two of the same thing. Domain lists come from host-shaped `allow` and
+`deny` permission rules for the tool (`hostOfSpecifier`). The API refuses a tool
+carrying both lists, so when both would apply only the deny list is sent and a
+warning says so. Rules changed mid-session do not update the lists already
+planned. Results and errors come back as `ServerToolContent` blocks, replayed
+verbatim, and render as tool rows in the TUI and in `/export`; per-search fees are
+not priced.
+
+**Advisor.** `route.advisor: {executor, advisor}` (under the existing `route`
+key; the config parser validates both against the first-party `anthropic`
+provider and the pair against `ANTHROPIC_ADVISOR_PAIRS`, warning and dropping an
+invalid one). While the session model is the executor, requests carry
+`advisor_20260301` under beta `advisor-tool-2026-03-01`, first-party only. Advisor
+tokens arrive in `usage.iterations`, are priced into `costUsd`, and are listed in
+`Usage.advisor`; `/cost` gains an `advisor` line (`advisorCostLines`). The tool
+keeps being sent while history holds advisor blocks. There is no `max_uses`.
+
+**Not verified live:** every part of this section. The adapter tests
+(`anthropic.web-tools.test.ts`, `anthropic.advisor.test.ts`, `server-tools.test.ts`,
+`advisor.test.ts`) assert the documented request and block shapes against fakes.

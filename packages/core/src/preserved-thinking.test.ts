@@ -423,6 +423,7 @@ describe("the operator channel", () => {
       role: "system",
       content: [{ type: "text", text: "hi" }],
       timestamp: 5,
+      nonce: expect.stringMatching(/^[0-9a-f]{16}$/),
     });
   });
 });

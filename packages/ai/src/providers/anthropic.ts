@@ -17,8 +17,13 @@ import type {
   ThinkingConfigParam,
   ToolResultBlockParam,
   ToolUnion,
+  WebFetchTool20250910,
+  WebFetchTool20260209,
+  WebSearchTool20250305,
+  WebSearchTool20260209,
 } from "@anthropic-ai/sdk/resources/messages";
 import type {
+  AdvisorUsage,
   AssistantMessage,
   CompactionContent,
   InputTransformation,
@@ -26,7 +31,9 @@ import type {
   LLMRequest,
   Message,
   ModelSpec,
+  NativeWebTools,
   ServerToolContent,
+  ServerToolRequest,
   StopDetails,
   StopReason,
   StreamEvent,
@@ -37,16 +44,19 @@ import type {
   ToolResultMessage,
   Usage,
   UserMessage,
+  WebToolDomains,
 } from "@arcturn/types";
 import { getModel } from "../catalog.js";
+import { addAdvisorUsage, calculateCostUsd } from "../cost.js";
 import { AIErrorException } from "../errors.js";
-import { parseToolArguments } from "../internal/json.js";
+import { isCompleteJsonObject, parseToolArguments } from "../internal/json.js";
 import {
   assembleStream,
   completeFromStream,
   deferredEvents,
   type ProviderStreamEvent,
 } from "../internal/stream.js";
+import { createStrictBudget, isStrictSchema } from "../strict-schema.js";
 
 /** Prefix used to smuggle `redacted_thinking` payloads through `ThinkingContent`. */
 export const REDACTED_THINKING_PREFIX = "redacted:";
@@ -124,9 +134,27 @@ export type AnthropicContextEdit =
   | { type: "clear_tool_uses_20250919"; exclude_tools?: string[] }
   | { type: "compact_20260112" };
 
+/**
+ * `output_config.task_budget` (beta `task-budgets-2026-03-13`). Typed on the
+ * SDK's beta surface (`BetaTokenTaskBudget`) but not on the GA
+ * `OutputConfig` this payload is built from, so it is spelled out here.
+ */
+export interface AnthropicTaskBudget {
+  type: "tokens";
+  total: number;
+  remaining?: number;
+}
+
+/** `output_config` with the beta-only `task_budget` beside effort and format. */
+export type AnthropicOutputConfig = OutputConfig & { task_budget?: AnthropicTaskBudget };
+
 /** The streaming Messages payload, with {@link AnthropicThinkingParam} in place. */
-export type AnthropicRequestParams = Omit<MessageCreateParamsStreaming, "thinking"> & {
+export type AnthropicRequestParams = Omit<
+  MessageCreateParamsStreaming,
+  "thinking" | "output_config"
+> & {
   thinking?: AnthropicThinkingParam;
+  output_config?: AnthropicOutputConfig;
   /** Server-side compaction / tool-result clearing; beta surface only. */
   context_management?: { edits: AnthropicContextEdit[] };
 };
@@ -143,11 +171,28 @@ export const ANTHROPIC_COMPACTION_BETA = "compact-2026-01-12";
 /** The beta header that gates server-side tool-result clearing (`clear_tool_uses_20250919`). */
 export const ANTHROPIC_CONTEXT_MANAGEMENT_BETA = "context-management-2025-06-27";
 
-/** The server-side tool search tool sent beside `defer_loading` tools. */
+/** The beta header that gates `output_config.task_budget`. */
+export const ANTHROPIC_TASK_BUDGET_BETA = "task-budgets-2026-03-13";
+
+/** The server-side tool search tool sent beside `defer_loading` tools (BM25, the default). */
 export const ANTHROPIC_TOOL_SEARCH_TOOL = {
   type: "tool_search_tool_bm25_20251119",
   name: "tool_search_tool_bm25",
 } as const;
+
+/** The regex variant of the server-side tool search tool. */
+export const ANTHROPIC_TOOL_SEARCH_REGEX_TOOL = {
+  type: "tool_search_tool_regex_20251119",
+  name: "tool_search_tool_regex",
+} as const;
+
+/**
+ * Which server-side tool search goes out beside `defer_loading` tools:
+ * `"bm25"` (natural-language queries, the default) or `"regex"` (the model
+ * writes a pattern over tool names and descriptions). Both answer with the
+ * same `tool_search_tool_result` block.
+ */
+export type AnthropicToolSearchVariant = "bm25" | "regex";
 
 /**
  * The text a {@link SystemMessage} becomes when it cannot be sent as
@@ -155,8 +200,9 @@ export const ANTHROPIC_TOOL_SEARCH_TOOL = {
  * at a position the API forbids one. The model reads it as harness text inside
  * the user turn; it loses only the operator authority.
  */
-export function foldedSystemText(text: string): string {
-  return `<system-reminder>\n${text}\n</system-reminder>`;
+export function foldedSystemText(text: string, nonce?: string): string {
+  const open = nonce === undefined ? "<system-reminder>" : `<system-reminder nonce="${nonce}">`;
+  return `${open}\n${text}\n</system-reminder>`;
 }
 
 /**
@@ -412,6 +458,42 @@ function withoutThinkingBlocks(messages: Message[]): Message[] {
 }
 
 /**
+ * Whether the Claude a model id names has native structured outputs
+ * (`output_config.format`, `strict: true` tools): 4.5 and later, and Opus 4.1.
+ * Unknown ids say no.
+ */
+export function anthropicStructuredOutputModel(model: string): boolean {
+  const generation = claudeGeneration(model);
+  if (generation === undefined) return false;
+  if (generation >= 405) return true;
+  return claudeFamily(model) === "opus" && generation === 401;
+}
+
+/**
+ * Whether the Claude a model id names offers task budgets: Opus 4.7 and
+ * later, Fable and Mythos 5 and later, Sonnet and Haiku 5.5 and later — so not
+ * Sonnet 5. The model-id half only: the beta is first-party, which the caller
+ * decides. Exported for parse-time checks, which see a model tag long before
+ * a spec exists.
+ */
+export function anthropicTaskBudgetModel(model: string): boolean {
+  const generation = claudeGeneration(model);
+  if (generation === undefined) return false;
+  switch (claudeFamily(model)) {
+    case "opus":
+      return generation >= 407;
+    case "fable":
+    case "mythos":
+      return generation >= 500;
+    case "sonnet":
+    case "haiku":
+      return generation >= 505;
+    default:
+      return false;
+  }
+}
+
+/**
  * Whether a model can take the first-party server-side tool search
  * (`tool_search_tool_bm25_20251119` beside `defer_loading` tools): Claude 4.5
  * and later. Unknown ids say no.
@@ -419,6 +501,198 @@ function withoutThinkingBlocks(messages: Message[]): Message[] {
 export function anthropicToolSearch(spec: ModelSpec): boolean {
   const generation = claudeGeneration(spec.model);
   return generation !== undefined && generation >= 405;
+}
+
+/** Where a request is going, as far as the server tools are concerned. */
+export interface AnthropicPlatform {
+  /** See {@link AnthropicStreamOptions.firstParty}. */
+  firstParty?: boolean;
+}
+
+/**
+ * Which provider-native web tools `spec` takes on this platform; see
+ * {@link NativeWebTools}.
+ *
+ * A declared `capabilities.webTools` wins. Otherwise: on the first-party API,
+ * Opus and Sonnet 4.6 and later get the dynamic-filtering variants
+ * (`web_search_20260209` / `web_fetch_20260209`) and every other Claude 4+
+ * model the basic ones; on Vertex AI only the basic search exists (no fetch,
+ * no dynamic filtering); Bedrock has neither, and a gateway or a proxy at a
+ * custom base URL is not assumed to take them.
+ */
+export function anthropicWebTools(spec: ModelSpec, platform: AnthropicPlatform): NativeWebTools {
+  const declared = spec.capabilities.webTools;
+  if (declared !== undefined) return declared;
+  const generation = claudeGeneration(spec.model);
+  if (generation === undefined || generation < 400) return "none";
+  if (spec.provider === "vertex") return "basicSearch";
+  if (spec.provider !== "anthropic" || platform.firstParty !== true) return "none";
+  const family = claudeFamily(spec.model);
+  return (family === "opus" || family === "sonnet") && generation >= 406 ? "dynamic" : "basic";
+}
+
+/**
+ * The server tool a replayed server block belongs to, which decides whether
+ * a request may carry it: a server tool's history means nothing — and is a
+ * 400 — without the tool that made it.
+ *
+ * `codeExecution` covers the blocks the dynamic-filtering web tools produce by
+ * running code themselves (any block whose `caller` is not `direct`, and the
+ * code-execution calls and results), so they go back only beside a dynamic
+ * variant. `other` is a block this adapter does not recognise.
+ */
+export type AnthropicServerToolFamily =
+  | "toolSearch"
+  | "webSearch"
+  | "webFetch"
+  | "codeExecution"
+  | "advisor"
+  | "other";
+
+const CODE_EXECUTION_NAMES = new Set([
+  "code_execution",
+  "bash_code_execution",
+  "text_editor_code_execution",
+]);
+
+/** The beta header that gates the advisor tool (`advisor_20260301`). */
+export const ANTHROPIC_ADVISOR_BETA = "advisor-tool-2026-03-01";
+
+const ADVISORS_FROM_OPUS_47 = [
+  "claude-mythos-5-1",
+  "claude-fable-5-1",
+  "claude-mythos-5",
+  "claude-fable-5",
+  "claude-opus-5-5",
+  "claude-opus-5",
+  "claude-opus-4-8",
+  "claude-opus-4-7",
+] as const;
+const ADVISORS_TOP = ["claude-mythos-5-1", "claude-fable-5-1"] as const;
+const ADVISORS_FROM_OPUS_5 = [
+  ...ADVISORS_TOP,
+  "claude-mythos-5",
+  "claude-fable-5",
+  "claude-opus-5-5",
+  "claude-opus-5",
+] as const;
+const ADVISORS_FOR_SONNET_5 = [
+  ...ADVISORS_FROM_OPUS_47,
+  "claude-sonnet-5-5",
+  "claude-sonnet-5",
+  "claude-haiku-5-5",
+] as const;
+const ADVISORS_FOR_SONNET_46 = [
+  ...ADVISORS_FROM_OPUS_47,
+  "claude-opus-4-6",
+  "claude-sonnet-5-5",
+  "claude-sonnet-5",
+  "claude-haiku-5-5",
+  "claude-sonnet-4-6",
+] as const;
+
+/**
+ * Which advisor models each executor accepts, keyed by the executor's base
+ * model id: the claude-api skill's pairing table (`shared/tool-use-concepts.md`
+ * § Advisor), copied as data. The advisor must be at least as capable as the
+ * executor; any other pair is a `400 invalid_request_error`. Sonnet 5.5 is
+ * the odd row: it rejects the Opus 4.x, Sonnet 5 and Sonnet 4.6 advisors.
+ */
+export const ANTHROPIC_ADVISOR_PAIRS: Readonly<Record<string, readonly string[]>> = {
+  "claude-haiku-4-5": ADVISORS_FOR_SONNET_46,
+  "claude-sonnet-4-6": ADVISORS_FOR_SONNET_46,
+  "claude-sonnet-5": ADVISORS_FOR_SONNET_5,
+  "claude-haiku-5-5": ADVISORS_FOR_SONNET_5,
+  "claude-opus-4-6": [
+    ...ADVISORS_FROM_OPUS_47,
+    "claude-opus-4-6",
+    "claude-sonnet-5-5",
+    "claude-sonnet-5",
+    "claude-haiku-5-5",
+  ],
+  "claude-opus-4-7": [...ADVISORS_FROM_OPUS_47, "claude-sonnet-5-5"],
+  "claude-opus-4-8": [...ADVISORS_FROM_OPUS_47, "claude-sonnet-5-5"],
+  "claude-opus-5-5": ADVISORS_FROM_OPUS_5,
+  "claude-opus-5": ADVISORS_FROM_OPUS_5,
+  "claude-fable-5": ADVISORS_FROM_OPUS_5,
+  "claude-mythos-5": ADVISORS_FROM_OPUS_5,
+  "claude-fable-5-1": ADVISORS_TOP,
+  "claude-mythos-5-1": ADVISORS_TOP,
+  "claude-sonnet-5-5": [...ADVISORS_FROM_OPUS_5, "claude-sonnet-5-5"],
+};
+
+/**
+ * The base model id the pairing table is keyed by — `claude-<family>-<major>
+ * [-<minor>]` — read out of a wire id with any date, profile prefix or `@`
+ * snapshot around it; `undefined` for an id naming no Claude generation.
+ */
+function claudeBaseId(model: string): string | undefined {
+  return CLAUDE_VERSION_RE.exec(model)?.[0]?.toLowerCase();
+}
+
+/** The advisors `executor` (a wire model id) accepts, per {@link ANTHROPIC_ADVISOR_PAIRS}; `[]` for an unknown one. */
+export function anthropicAdvisorsFor(executor: string): readonly string[] {
+  const base = claudeBaseId(executor);
+  return (base === undefined ? undefined : ANTHROPIC_ADVISOR_PAIRS[base]) ?? [];
+}
+
+/** Whether the API accepts `advisor` advising `executor` (both wire model ids). */
+export function anthropicAdvisorPairValid(executor: string, advisor: string): boolean {
+  const base = claudeBaseId(advisor);
+  return base !== undefined && anthropicAdvisorsFor(executor).includes(base);
+}
+
+/** Classify one stored server block; see {@link AnthropicServerToolFamily}. */
+export function anthropicServerToolFamily(
+  block: Readonly<Record<string, unknown>>,
+): AnthropicServerToolFamily {
+  const caller = block.caller;
+  if (
+    typeof caller === "object" &&
+    caller !== null &&
+    typeof (caller as { type?: unknown }).type === "string" &&
+    (caller as { type: string }).type !== "direct"
+  ) {
+    return "codeExecution";
+  }
+  const type = typeof block.type === "string" ? block.type : "";
+  const key = type === "server_tool_use" && typeof block.name === "string" ? block.name : type;
+  switch (key) {
+    case "web_search":
+    case "web_search_tool_result":
+      return "webSearch";
+    case "web_fetch":
+    case "web_fetch_tool_result":
+      return "webFetch";
+    case "advisor":
+    case "advisor_tool_result":
+      return "advisor";
+    case "tool_search_tool_bm25":
+    case "tool_search_tool_regex":
+    case "tool_search_tool_result":
+      return "toolSearch";
+    default:
+      if (
+        CODE_EXECUTION_NAMES.has(key) ||
+        CODE_EXECUTION_NAMES.has(key.replace(/_tool_result$/, ""))
+      ) {
+        return "codeExecution";
+      }
+      return "other";
+  }
+}
+
+/**
+ * Whether this spec gets `output_config.format` and `strict: true`: a declared
+ * `capabilities.structuredOutput` wins; otherwise the generation decides, and
+ * an `anthropic-compatible` gateway says no, since many of them 400 on fields
+ * they do not know.
+ */
+function anthropicStructuredOutputs(spec: ModelSpec): boolean {
+  const declared = spec.capabilities.structuredOutput;
+  if (declared !== undefined) return declared;
+  if (spec.provider === "anthropic-compatible") return false;
+  return anthropicStructuredOutputModel(spec.model);
 }
 
 /** Loaded on first use: importing the SDK eagerly costs hundreds of ms of CLI startup. */
@@ -485,6 +759,11 @@ export interface AnthropicProviderOptions {
    * only here (the Bedrock and Vertex clients have no beta surface).
    */
   thinkingBinding?: AnthropicThinkingBinding;
+  /**
+   * Which server-side tool search rides beside `defer_loading` tools; see
+   * {@link AnthropicToolSearchVariant}. Defaults to `"bm25"`.
+   */
+  toolSearch?: AnthropicToolSearchVariant;
 }
 
 /** Per-stream options for {@link anthropicEventStream}. */
@@ -493,12 +772,37 @@ export interface AnthropicStreamOptions {
   fallbacks?: "default";
   /** See {@link AnthropicProviderOptions.thinkingBinding}. */
   thinkingBinding?: AnthropicThinkingBinding;
+  /** See {@link AnthropicProviderOptions.toolSearch}. */
+  toolSearch?: AnthropicToolSearchVariant;
+  /**
+   * The client talks to the first-party Claude API itself — not Bedrock, not
+   * Vertex, not a proxy at a custom `baseUrl`. Gates the fields only that API
+   * is known to take: `eager_input_streaming` (older Bedrock deployments and
+   * gateways 400 on it) and the task-budget beta. Default `false`.
+   */
+  firstParty?: boolean;
 }
 
 /** Options for {@link buildAnthropicRequest} beyond the portable request. */
 export interface AnthropicBuildOptions {
   /** See {@link AnthropicProviderOptions.thinkingBinding}. */
   thinkingBinding?: AnthropicThinkingBinding;
+  /** See {@link AnthropicStreamOptions.firstParty}. */
+  firstParty?: boolean;
+  /** See {@link AnthropicProviderOptions.toolSearch}. */
+  toolSearch?: AnthropicToolSearchVariant;
+  /**
+   * Send `request.taskBudget` as `output_config.task_budget`. Only set by a
+   * caller that also sends {@link ANTHROPIC_TASK_BUDGET_BETA}; default `false`.
+   */
+  taskBudget?: boolean;
+  /**
+   * Send a `request.serverTools` advisor entry as the `advisor_20260301` tool
+   * (when its pairing is valid). Only set by a caller that also sends
+   * {@link ANTHROPIC_ADVISOR_BETA} on the beta surface; default `false`, so an
+   * advisor entry — and the advisor blocks in history — are otherwise dropped.
+   */
+  advisor?: boolean;
   /**
    * Send `SystemMessage`s as `role: "system"`. Defaults to
    * {@link anthropicSystemMessages} for the spec; `false` folds every one into
@@ -539,7 +843,23 @@ function userBlocks(message: UserMessage): ContentBlockParam[] {
   return blocks;
 }
 
-function assistantBlocks(message: AssistantMessage, serverTools: boolean): ContentBlockParam[] {
+/** Whether a stored server block goes back on this request. */
+type ServerReplay = (block: Readonly<Record<string, unknown>>) => boolean;
+
+/** The replay rule for {@link AnthropicMessageOptions.serverTools}. */
+function serverReplay(option: AnthropicMessageOptions["serverTools"]): ServerReplay {
+  if (option === undefined || option === true) return () => true;
+  if (option === false) return () => false;
+  const carried = new Set(option);
+  return (block) => {
+    const family = anthropicServerToolFamily(block);
+    // A block nothing here recognises goes back whenever any server tool does,
+    // which is what every server block did before they were told apart.
+    return family === "other" ? carried.size > 0 : carried.has(family);
+  };
+}
+
+function assistantBlocks(message: AssistantMessage, replay: ServerReplay): ContentBlockParam[] {
   const blocks: ContentBlockParam[] = [];
   for (const part of message.content) {
     if (part.type === "thinking") {
@@ -561,15 +881,17 @@ function assistantBlocks(message: AssistantMessage, serverTools: boolean): Conte
       // Replayed verbatim: the server swaps everything before it for its own
       // summary, and the thinking-binding check restarts here.
       blocks.push(compactionBlockParam(part));
-    } else if (part.provider === "anthropic" && serverTools) {
-      // A server tool's own block (native tool search): the model produced it
-      // in this turn, so the turn goes back exactly as it came.
+    } else if (part.provider === "anthropic" && replay(part.block)) {
+      // A server tool's own block (native tool search, web search and fetch,
+      // the advisor): the model produced it in this turn, so the turn goes
+      // back exactly as it came.
       blocks.push(part.block as unknown as ContentBlockParam);
     }
     // Another provider's server-tool block means nothing here and is dropped —
     // and so is this provider's own when the request does not carry the tool
-    // that made it (the conversation moved to a model or endpoint without the
-    // server's search): a server tool's history means nothing without its tool.
+    // that made it (the conversation moved to a model or endpoint without
+    // it): a server tool's history means nothing without its tool. A call and
+    // its result share a family, so they always leave together.
   }
   return blocks;
 }
@@ -591,17 +913,26 @@ function carriesCompaction(messages: readonly Message[]): boolean {
   );
 }
 
+/** The nonce of the system message a staged block came from, by block identity. */
+const blockNonces = new WeakMap<TextBlockParam, string>();
+
 function systemBlocks(message: SystemMessage): TextBlockParam[] {
   const blocks: TextBlockParam[] = [];
   for (const part of message.content) {
-    if (part.text.trim() !== "") blocks.push({ type: "text", text: part.text });
+    if (part.text.trim() === "") continue;
+    const block: TextBlockParam = { type: "text", text: part.text };
+    if (message.nonce !== undefined) blockNonces.set(block, message.nonce);
+    blocks.push(block);
   }
   return blocks;
 }
 
 /** A system message's text, folded into a user turn. */
 function foldedSystemBlocks(blocks: readonly TextBlockParam[]): TextBlockParam[] {
-  return blocks.map((block) => ({ type: "text", text: foldedSystemText(block.text) }));
+  return blocks.map((block) => ({
+    type: "text",
+    text: foldedSystemText(block.text, blockNonces.get(block)),
+  }));
 }
 
 function toolResultBlock(message: ToolResultMessage): ToolResultBlockParam {
@@ -654,11 +985,13 @@ export interface AnthropicMessageOptions {
    */
   systemMessages?: boolean;
   /**
-   * Replay the server tools' own blocks (native tool search) stored in
-   * assistant turns. Defaults to `true`; a request that does not carry the
-   * server tool sets it `false`, and they are dropped.
+   * Replay the server tools' own blocks stored in assistant turns. `true`
+   * (the default) replays every one and `false` none; a list replays only the
+   * blocks of those families (see {@link anthropicServerToolFamily}) — what a
+   * request builds from the server tools it actually carries, so a block whose
+   * tool is gone is dropped together with its partner.
    */
-  serverTools?: boolean;
+  serverTools?: boolean | readonly AnthropicServerToolFamily[];
 }
 
 /**
@@ -687,6 +1020,7 @@ export function toAnthropicMessages(
   options: AnthropicMessageOptions = {},
 ): MessageParam[] {
   const staged: MessageParam[] = [];
+  const replay = serverReplay(options.serverTools);
   for (const message of messages) {
     if (message.role === "user") {
       appendBlocks(staged, "user", userBlocks(message));
@@ -695,7 +1029,7 @@ export function toAnthropicMessages(
       // abandoned attempt, and its thinking belongs to a request that was
       // refused. The loop never leaves tool calls in one, so nothing dangles.
       if (message.stopReason === "refusal") continue;
-      appendBlocks(staged, "assistant", assistantBlocks(message, options.serverTools ?? true));
+      appendBlocks(staged, "assistant", assistantBlocks(message, replay));
     } else if (message.role === "system") {
       appendBlocks(staged, "system", systemBlocks(message));
     } else {
@@ -847,6 +1181,120 @@ function withBlockBinding(
   return thinking;
 }
 
+/** The domain filter of a native web tool: one list, the deny list when both were given. */
+function domainFilter(
+  entry: WebToolDomains,
+): { blocked_domains: string[] } | { allowed_domains: string[] } | Record<string, never> {
+  if (entry.blockedDomains !== undefined && entry.blockedDomains.length > 0) {
+    return { blocked_domains: [...entry.blockedDomains] };
+  }
+  if (entry.allowedDomains !== undefined && entry.allowedDomains.length > 0) {
+    return { allowed_domains: [...entry.allowedDomains] };
+  }
+  return {};
+}
+
+/** `max_uses`, when the entry sets a usable one. */
+function maxUses(value: number | undefined): { max_uses: number } | Record<string, never> {
+  return value !== undefined && Number.isInteger(value) && value > 0 ? { max_uses: value } : {};
+}
+
+/** What the request's {@link LLMRequest.serverTools} become on this request. */
+interface ServerToolPlan {
+  /** Server tool definitions, appended after the client tools. */
+  wire: ToolUnion[];
+  /** Client tool names a native tool replaces, left out of the request. */
+  replaced: Set<string>;
+  /** The families whose stored blocks this request may replay. */
+  families: AnthropicServerToolFamily[];
+}
+
+/**
+ * Map `request.serverTools` onto what this model and platform take, first
+ * entry of each kind winning. Web tools follow {@link anthropicWebTools}; the
+ * dynamic variants run code execution themselves, so `code_execution` is never
+ * declared beside them (a second execution environment confuses the model).
+ */
+function planServerTools(request: LLMRequest, options: AnthropicBuildOptions): ServerToolPlan {
+  const web = anthropicWebTools(request.model, options);
+  const wire: ToolUnion[] = [];
+  const replaced = new Set<string>();
+  const families = new Set<AnthropicServerToolFamily>();
+  if ((request.tools ?? []).some((tool) => tool.deferLoading === true)) families.add("toolSearch");
+  const entries: readonly ServerToolRequest[] = request.serverTools ?? [];
+  for (const entry of entries) {
+    if (entry.kind === "webSearch") {
+      if (web === "none" || families.has("webSearch")) continue;
+      const fields = {
+        name: "web_search" as const,
+        ...maxUses(entry.maxUses),
+        ...domainFilter(entry),
+      };
+      const search: WebSearchTool20260209 | WebSearchTool20250305 =
+        web === "dynamic"
+          ? { type: "web_search_20260209", ...fields }
+          : { type: "web_search_20250305", ...fields };
+      wire.push(search);
+      families.add("webSearch");
+      if (web === "dynamic") families.add("codeExecution");
+      if (entry.replaces !== undefined) replaced.add(entry.replaces);
+    } else if (entry.kind === "webFetch") {
+      if ((web !== "dynamic" && web !== "basic") || families.has("webFetch")) continue;
+      const fields = {
+        name: "web_fetch" as const,
+        ...maxUses(entry.maxUses),
+        ...domainFilter(entry),
+      };
+      const fetchTool: WebFetchTool20260209 | WebFetchTool20250910 =
+        web === "dynamic"
+          ? { type: "web_fetch_20260209", ...fields }
+          : { type: "web_fetch_20250910", ...fields };
+      wire.push(fetchTool);
+      families.add("webFetch");
+      if (web === "dynamic") families.add("codeExecution");
+      if (entry.replaces !== undefined) replaced.add(entry.replaces);
+    } else if (entry.kind === "advisor") {
+      const advisor = advisorTool(request, entry, options);
+      if (advisor === undefined || families.has("advisor")) continue;
+      wire.push(advisor);
+      families.add("advisor");
+    }
+  }
+  return { wire, replaced, families: [...families] };
+}
+
+/**
+ * The advisor tool for an entry, or `undefined` when this request cannot
+ * carry it: the caller did not send the beta ({@link AnthropicBuildOptions.advisor})
+ * or the pairing is one the API refuses.
+ *
+ * The GA `ToolUnion` the payload is typed against has no advisor member (it
+ * is the beta `BetaAdvisorTool20260301`), so the tool is cast; the wire shape
+ * is `{type: "advisor_20260301", name: "advisor", model, max_uses?}`.
+ */
+function advisorTool(
+  request: LLMRequest,
+  entry: Extract<ServerToolRequest, { kind: "advisor" }>,
+  options: AnthropicBuildOptions,
+): ToolUnion | undefined {
+  if (options.advisor !== true) return undefined;
+  if (!anthropicAdvisorPairValid(request.model.model, entry.model)) return undefined;
+  return {
+    type: "advisor_20260301",
+    name: "advisor",
+    model: entry.model,
+    ...maxUses(entry.maxUses),
+  } as unknown as ToolUnion;
+}
+
+/** Whether `request` asks for an advisor this model and endpoint can take, beta aside. */
+function wantsAdvisor(request: LLMRequest): boolean {
+  return (request.serverTools ?? []).some(
+    (entry) =>
+      entry.kind === "advisor" && anthropicAdvisorPairValid(request.model.model, entry.model),
+  );
+}
+
 /**
  * The `tools` array for a request.
  *
@@ -855,28 +1303,76 @@ function withBlockBinding(
  * `defer_loading: true` — plus the server's BM25 search tool, so activating a
  * tool never changes the set. The API refuses a request whose every tool is
  * deferred, so when nothing else is loaded the first tool is.
+ *
+ * The planned server tools ({@link planServerTools}) come last, and a client
+ * tool one of them replaces is left out.
  */
-function anthropicTools(request: LLMRequest, caching: boolean): ToolUnion[] | undefined {
-  const definitions = request.tools ?? [];
-  if (definitions.length === 0) return undefined;
+function anthropicTools(
+  request: LLMRequest,
+  caching: boolean,
+  options: AnthropicBuildOptions,
+  strict: ReturnType<typeof createStrictBudget>,
+  plan: ServerToolPlan,
+): ToolUnion[] | undefined {
+  const definitions = (request.tools ?? []).filter((tool) => !plan.replaced.has(tool.name));
+  if (definitions.length === 0 && plan.wire.length === 0) return undefined;
   const native = definitions.some((tool) => tool.deferLoading === true);
   const keepLoaded = native && definitions.every((tool) => tool.deferLoading === true) ? 0 : -1;
+  const strictOk = anthropicStructuredOutputs(request.model);
+  // Strict is a tool-array bytes decision, so it must not depend on the order
+  // the tools happen to arrive in: a request over the budget demotes by name
+  // (the last names lose), and the set only changes when the tool set does.
+  // Not beside eager streaming: that mode turns off the server's input
+  // validation, and how it composes with strict decoding is not documented,
+  // so an eager tool relies on the runtime's own validation instead.
+  const strictNames = new Set<string>();
+  if (strictOk) {
+    const candidates = definitions
+      .filter(
+        (tool) =>
+          tool.strict === true &&
+          !(tool.eagerInputStreaming === true && options.firstParty === true) &&
+          isStrictSchema(tool.parameters),
+      )
+      .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    for (const tool of candidates) {
+      if (strict.admit(tool.parameters, true)) strictNames.add(tool.name);
+    }
+  }
   const tools: ToolUnion[] = definitions.map((tool, index) => {
     const wire: AnthropicTool = {
       name: tool.name,
       description: tool.description,
       input_schema: { ...tool.parameters, type: "object" } as AnthropicTool["input_schema"],
-      // Fine-grained tool streaming: deliver each argument as it is generated
-      // instead of buffering the whole JSON server-side. A per-tool field on
-      // every model, with no beta header; the accumulated string may be
-      // partial or invalid JSON, which parseToolArguments already tolerates.
-      // https://platform.claude.com/docs/en/agents-and-tools/tool-use/fine-grained-tool-streaming
-      eager_input_streaming: true,
     };
+    // Fine-grained tool streaming, per tool: the input arrives as it is
+    // generated instead of after the server has buffered and validated all of
+    // it. Only for the tools that ask (a file body is a multi-minute silent
+    // gap otherwise), and only to the first-party API — older Bedrock
+    // deployments and gateways reject the field. The server no longer
+    // validates such an input, so the stream below flags one that is not
+    // valid JSON and the runtime validates the rest against the schema.
+    // https://platform.claude.com/docs/en/agents-and-tools/tool-use/fine-grained-tool-streaming
+    const eager = tool.eagerInputStreaming === true && options.firstParty === true;
+    if (eager) wire.eager_input_streaming = true;
+    // Strict only where the model has the grammar, the schema fits it, and
+    // the request's combined strict budget (20 tools, 24 optional and 16
+    // union-typed properties) had room — a request over it is a 400.
+    if (!eager && strictNames.has(tool.name)) wire.strict = true;
     if (tool.deferLoading === true && index !== keepLoaded) wire.defer_loading = true;
     return wire;
   });
-  if (native) tools.push({ ...ANTHROPIC_TOOL_SEARCH_TOOL });
+  if (native) {
+    // The regex variant's wire type is not in the GA `ToolUnion` the payload
+    // is typed against (it is `BetaToolSearchToolRegex20251119`), so it is
+    // cast; the shape is the documented `{type, name}` pair.
+    tools.push(
+      options.toolSearch === "regex"
+        ? ({ ...ANTHROPIC_TOOL_SEARCH_REGEX_TOOL } as unknown as ToolUnion)
+        : { ...ANTHROPIC_TOOL_SEARCH_TOOL },
+    );
+  }
+  tools.push(...plan.wire);
   const last = tools[tools.length - 1];
   // A breakpoint on the final tool caches the whole tool prefix.
   if (caching && last)
@@ -892,11 +1388,13 @@ export function buildAnthropicRequest(
   const spec = request.model;
   const caching = spec.capabilities.caching;
   const maxTokens = Math.min(request.maxOutputTokens ?? spec.maxOutputTokens, spec.maxOutputTokens);
+  const plan = planServerTools(request, options);
   const messages = toAnthropicMessages(request.messages, {
     systemMessages: options.systemMessages ?? anthropicSystemMessages(spec),
-    // The server's search blocks only mean something beside its search tool,
-    // which goes out exactly when a tool is deferred.
-    serverTools: (request.tools ?? []).some((tool) => tool.deferLoading === true),
+    // A server tool's blocks only mean something beside that tool: tool
+    // search's beside a deferred tool, web search's beside the native search,
+    // and so on. The rest are dropped, call and result together.
+    serverTools: plan.families,
   });
   if (caching) applyConversationCacheBreakpoint(messages);
 
@@ -913,7 +1411,17 @@ export function buildAnthropicRequest(
     params.system = [block];
   }
 
-  const tools = anthropicTools(request, caching);
+  // One strict budget for the whole request, the reply schema spent first: a
+  // contract step's reply shape matters more than any one tool's guarantee.
+  const strict = createStrictBudget();
+  const format =
+    request.responseFormat !== undefined &&
+    anthropicStructuredOutputs(spec) &&
+    strict.admit(request.responseFormat.schema, false)
+      ? request.responseFormat
+      : undefined;
+
+  const tools = anthropicTools(request, caching, options, strict, plan);
   if (tools) params.tools = tools;
 
   const level = request.thinking ?? "off";
@@ -923,7 +1431,22 @@ export function buildAnthropicRequest(
       ? thinking?.thinking
       : withBlockBinding(spec, level, thinking?.thinking, options.thinkingBinding);
   if (thinkingParam) params.thinking = thinkingParam;
-  if (thinking?.effort) params.output_config = { effort: thinking.effort };
+  const outputConfig: AnthropicOutputConfig = {};
+  if (thinking?.effort) outputConfig.effort = thinking.effort;
+  // Structured outputs: `output_config.format`, not the deprecated top-level
+  // `output_format`. The SDK's `JSONOutputFormat` has no `name`, so none is
+  // sent. Compatible with tools and with thinking on.
+  if (format !== undefined) outputConfig.format = { type: "json_schema", schema: format.schema };
+  if (options.taskBudget === true && request.taskBudget !== undefined) {
+    outputConfig.task_budget = {
+      type: "tokens",
+      total: request.taskBudget.total,
+      ...(request.taskBudget.remaining === undefined
+        ? {}
+        : { remaining: request.taskBudget.remaining }),
+    };
+  }
+  if (Object.keys(outputConfig).length > 0) params.output_config = outputConfig;
 
   const edits: AnthropicContextEdit[] = [];
   if (request.contextManagement?.clearToolUses) {
@@ -982,7 +1505,53 @@ interface AnthropicUsageLike {
    * `fallback_message` names the model that served the response — the only
    * signal on a sticky-routed turn, which carries no `fallback` block.
    */
-  iterations?: ReadonlyArray<{ type?: string; model?: string }> | null;
+  iterations?: ReadonlyArray<IterationUsageLike> | null;
+}
+
+/**
+ * One `usage.iterations` entry, read defensively. An `advisor_message` entry
+ * (`BetaAdvisorMessageIterationUsage` in the SDK) carries the advisor's own
+ * `model` and token counts, which the top-level counts do not include.
+ */
+interface IterationUsageLike {
+  type?: string;
+  model?: string;
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  cache_read_input_tokens?: number | null;
+  cache_creation_input_tokens?: number | null;
+}
+
+/**
+ * The advisor spend in `iterations`, one entry per advisor model, each priced
+ * at that model's catalog rate (looked up the way {@link answeringSpec} looks
+ * up a fallback). `undefined` when no advisor ran.
+ */
+function advisorUsageOf(
+  requested: ModelSpec,
+  iterations: ReadonlyArray<IterationUsageLike> | null | undefined,
+): AdvisorUsage[] | undefined {
+  if (!Array.isArray(iterations)) return undefined;
+  const out: AdvisorUsage[] = [];
+  for (const entry of iterations) {
+    if (entry?.type !== "advisor_message" || typeof entry.model !== "string") continue;
+    const spec = getModel(`${requested.provider}/${entry.model}`) ?? getModel(entry.model);
+    const usage: Usage = {
+      inputTokens: entry.input_tokens ?? 0,
+      outputTokens: entry.output_tokens ?? 0,
+      cacheReadTokens: entry.cache_read_input_tokens ?? 0,
+      cacheWriteTokens: entry.cache_creation_input_tokens ?? 0,
+    };
+    const cost = spec === undefined ? undefined : calculateCostUsd(spec, usage);
+    const one: AdvisorUsage = {
+      model: spec?.id ?? `${requested.provider}/${entry.model}`,
+      ...usage,
+      ...(cost === undefined ? {} : { costUsd: cost }),
+    };
+    const sum = addAdvisorUsage(out, [one]) ?? [];
+    out.splice(0, out.length, ...sum);
+  }
+  return out.length > 0 ? out : undefined;
 }
 
 /** The `fallback` content block the beta surface emits at each switch point. */
@@ -1037,7 +1606,11 @@ function answeringSpec(requested: ModelSpec, model: string): ModelSpec {
   return { ...rest, id: `${requested.provider}/${model}`, model, displayName: model };
 }
 
-function mergeUsage(current: Usage, incoming: AnthropicUsageLike | undefined): Usage {
+function mergeUsage(
+  current: Usage,
+  incoming: AnthropicUsageLike | undefined,
+  requested: ModelSpec,
+): Usage {
   if (!incoming) return current;
   // Only overwrite fields the provider actually reported; proxies omit some of
   // them in message_delta and would otherwise zero out message_start values.
@@ -1054,6 +1627,9 @@ function mergeUsage(current: Usage, incoming: AnthropicUsageLike | undefined): U
   if (thinkingTokens !== undefined && thinkingTokens !== null) {
     merged.thinkingTokens = thinkingTokens;
   }
+  // `iterations` is cumulative like the rest, so the latest list is the answer.
+  const advisor = advisorUsageOf(requested, incoming.iterations) ?? current.advisor;
+  if (advisor !== undefined) merged.advisor = advisor;
   return merged;
 }
 
@@ -1123,16 +1699,35 @@ export async function* anthropicEventStream(
     client.beta === undefined
       ? undefined
       : (options.thinkingBinding ?? (recovering ? "drop_block" : undefined));
+  // Task budgets are a first-party beta on the models that have them; any
+  // other request simply does not carry one (the engine says so once).
+  const taskBudget =
+    request.taskBudget !== undefined &&
+    options.firstParty === true &&
+    client.beta !== undefined &&
+    (request.model.capabilities.taskBudget ?? anthropicTaskBudgetModel(request.model.model));
+  // The advisor is a first-party beta; anywhere else the entry — and any
+  // advisor blocks in the history — simply do not go out.
+  const advisor = options.firstParty === true && client.beta !== undefined && wantsAdvisor(request);
+  const shared: AnthropicBuildOptions = {
+    ...(options.firstParty === true ? { firstParty: true } : {}),
+    ...(options.toolSearch === undefined ? {} : { toolSearch: options.toolSearch }),
+    ...(taskBudget ? { taskBudget: true } : {}),
+    ...(advisor ? { advisor: true } : {}),
+  };
   const buildParams = (
     systemMessages?: boolean,
     req: LLMRequest = request,
   ): AnthropicRequestParams =>
     buildAnthropicRequest(req, {
+      ...shared,
       ...(thinkingBinding === undefined ? {} : { thinkingBinding }),
       ...(systemMessages === undefined ? {} : { systemMessages }),
     });
   const betas: string[] = [];
   if (fallbacks) betas.push(ANTHROPIC_FALLBACK_BETA);
+  if (taskBudget) betas.push(ANTHROPIC_TASK_BUDGET_BETA);
+  if (advisor) betas.push(ANTHROPIC_ADVISOR_BETA);
   if (thinkingBinding !== undefined) betas.push(ANTHROPIC_THINKING_BINDING_BETA);
   if (request.contextManagement?.compact || carriesCompaction(request.messages)) {
     betas.push(ANTHROPIC_COMPACTION_BETA);
@@ -1196,6 +1791,7 @@ export async function* anthropicEventStream(
         );
       } else {
         const withBinding = buildAnthropicRequest(request, {
+          ...shared,
           thinkingBinding: "drop_block",
           systemMessages: nativeSystem,
         });
@@ -1231,7 +1827,7 @@ export async function* anthropicEventStream(
   for await (const event of stream) {
     switch (event.type) {
       case "message_start": {
-        usage = mergeUsage(usage, event.message.usage as AnthropicUsageLike);
+        usage = mergeUsage(usage, event.message.usage as AnthropicUsageLike, request.model);
         yield { type: "usage", usage };
         const transformations = toInputTransformations(
           (event.message as { input_transformations?: unknown }).input_transformations,
@@ -1344,12 +1940,19 @@ export async function* anthropicEventStream(
         }
         const state = tools.get(index);
         if (state) {
+          // The repaired object is kept for the transcript, but an input that
+          // was not valid JSON as streamed (an eager-streamed input cut off or
+          // mangled, which the server no longer catches) is flagged so the
+          // runtime answers it with an error instead of running a silently
+          // truncated call.
+          const malformed = state.raw.trim() !== "" && !isCompleteJsonObject(state.raw);
           yield {
             type: "toolCallEnd",
             blockIndex: index,
             id: state.id,
             name: state.name,
             arguments: parseToolArguments(state.raw),
+            ...(malformed ? { malformedArguments: state.raw } : {}),
           };
           tools.delete(index);
         }
@@ -1358,7 +1961,7 @@ export async function* anthropicEventStream(
       }
       case "message_delta": {
         yield* serve(servedByIteration(event.usage as AnthropicUsageLike));
-        usage = mergeUsage(usage, event.usage as AnthropicUsageLike);
+        usage = mergeUsage(usage, event.usage as AnthropicUsageLike, request.model);
         stopReason = mapAnthropicStopReason(event.delta.stop_reason);
         if (stopReason === "refusal") {
           stopDetails = toStopDetails(event.delta.stop_details as StopDetailsLike | null);
@@ -1419,6 +2022,10 @@ export function createAnthropicProvider(options: AnthropicProviderOptions = {}):
       return assembleStream(request.model, request.signal, () =>
         deferredEvents(async () =>
           anthropicEventStream(await getClient(), request, {
+            // No custom base URL means the first-party API itself; a proxy or
+            // gateway is not assumed to take its newer fields.
+            ...(options.baseUrl ? {} : { firstParty: true }),
+            ...(options.toolSearch === undefined ? {} : { toolSearch: options.toolSearch }),
             ...(options.fallbacks === undefined ? {} : { fallbacks: options.fallbacks }),
             ...(options.thinkingBinding === undefined
               ? {}

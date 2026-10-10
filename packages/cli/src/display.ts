@@ -29,6 +29,7 @@ import type {
 import { formatDuration, oneLine } from "./format.js";
 import { FANCY_GLYPHS, type GlyphSet, toolGlyph } from "./glyphs.js";
 import { sanitizeForTerminal } from "./project-trust.js";
+import { describeServerTools, type ServerToolRow } from "./server-tools.js";
 
 /**
  * One sentence saying a turn was declined, and under which category.
@@ -338,6 +339,10 @@ export class TranscriptFormatter {
         for (const line of nonEmptyLines(block.thinking)) lines.push(style("muted")(`  ${line}`));
       }
     }
+    // The provider ran these itself (native web search and fetch, the
+    // advisor), so no toolStart/toolEnd ever arrives for them: they are drawn
+    // here, as the same tool rows, ahead of the text that used them.
+    for (const row of describeServerTools(message.content)) lines.push(...this.#serverTool(row));
     const body = message.content
       .filter((block) => block.type === "text")
       .map((block) => (block.type === "text" ? block.text : ""))
@@ -358,6 +363,28 @@ export class TranscriptFormatter {
     }
     if (message.stopReason === "refusal") {
       lines.push(style("warning")(`${this.#glyphs.interrupt} ${refusalLine(message)}`));
+    }
+    return lines;
+  }
+
+  /** A server-run call as a tool row: name, query or URL, then its result. */
+  #serverTool(row: ServerToolRow): string[] {
+    // Every string here came off the web (titles, URLs, the model's query):
+    // scrubbed like any other text the repo prints but did not write.
+    const clean = (value: string): string => oneLine(sanitizeForTerminal(value), 500);
+    const dot = style("accent")(this.#glyphs.statusDot);
+    const glyph = style("accent")(toolGlyph(row.name, this.#glyphs));
+    const subject =
+      row.subject === ""
+        ? ""
+        : `  ${style("muted")(oneLine(clean(row.subject), Math.max(20, this.width - 14)))}`;
+    const lines = [`${dot} ${glyph} ${style("title")(clean(row.name))}${subject}`];
+    if (row.error !== undefined) {
+      lines.push(style("error")(`${this.#result}${clean(row.error)}`));
+    } else if (row.results !== undefined) {
+      const count = row.results.length;
+      lines.push(this.#summary(`${count} ${count === 1 ? "result" : "results"}`));
+      lines.push(...this.#sample(row.results.map(clean).join("\n")));
     }
     return lines;
   }

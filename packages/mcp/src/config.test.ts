@@ -162,6 +162,29 @@ describe("loadMcpConfig", () => {
     await expect(loadMcpConfig([path])).rejects.toThrow(/"auth" must be "oauth"/);
   });
 
+  it("carries an explicit sampling opt-in on both transports, and leaves it absent otherwise", async () => {
+    const path = await writeConfig("sampling.json", {
+      servers: {
+        local: { type: "stdio", command: "mcp-local", sampling: true },
+        remote: { type: "http", url: "https://example.com/mcp", sampling: true },
+        off: { type: "stdio", command: "mcp-off", sampling: false },
+        unset: { type: "stdio", command: "mcp-unset" },
+      },
+    });
+    const config = await loadMcpConfig([path]);
+    expect(config.servers.local?.sampling).toBe(true);
+    expect(config.servers.remote?.sampling).toBe(true);
+    expect(config.servers.off?.sampling).toBe(false);
+    expect(config.servers.unset).not.toHaveProperty("sampling");
+  });
+
+  it("rejects a sampling value that is not a boolean", async () => {
+    const path = await writeConfig("bad-sampling.json", {
+      servers: { api: { type: "stdio", command: "x", sampling: "yes" } },
+    });
+    await expect(loadMcpConfig([path])).rejects.toThrow(/"sampling" must be a boolean/);
+  });
+
   it("throws when a server has an unknown type", async () => {
     const path = await writeConfig("bad-type.json", {
       servers: { broken: { type: "carrier-pigeon" } },

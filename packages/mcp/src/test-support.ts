@@ -12,6 +12,11 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import {
   CallToolRequestSchema,
   type CallToolResult,
+  type ClientCapabilities,
+  type CreateMessageResult,
+  CreateMessageResultSchema,
+  type ElicitResult,
+  ElicitResultSchema,
   GetPromptRequestSchema,
   type GetPromptResult,
   ListPromptsRequestSchema,
@@ -49,6 +54,16 @@ export interface TestServerHandle {
   subscribedUris: Set<string>;
   /** Sends a `notifications/resources/updated` for `uri`, as if it changed. */
   announceResourceUpdated(uri: string): Promise<void>;
+  /** The capabilities the connected client declared during `initialize`. */
+  clientCapabilities(): ClientCapabilities | undefined;
+  /**
+   * Sends a raw `elicitation/create` to the client, bypassing the SDK's
+   * server-side capability and shape checks — so a test can send what a
+   * hostile or buggy server would (a nested schema, say).
+   */
+  elicit(params: Record<string, unknown>): Promise<ElicitResult>;
+  /** Sends a raw `sampling/createMessage` to the client, bypassing server-side checks. */
+  sample(params: Record<string, unknown>): Promise<CreateMessageResult>;
 }
 
 export const ECHO_TOOL: McpToolDescriptor = {
@@ -313,6 +328,21 @@ export function createTestServer(options: CreateTestServerOptions = {}): TestSer
     subscribedUris,
     async announceResourceUpdated(uri: string) {
       await server.sendResourceUpdated({ uri });
+    },
+    clientCapabilities() {
+      return server.getClientCapabilities();
+    },
+    elicit(params: Record<string, unknown>) {
+      return server.request(
+        { method: "elicitation/create", params } as never,
+        ElicitResultSchema,
+      ) as Promise<ElicitResult>;
+    },
+    sample(params: Record<string, unknown>) {
+      return server.request(
+        { method: "sampling/createMessage", params } as never,
+        CreateMessageResultSchema,
+      ) as Promise<CreateMessageResult>;
     },
   };
 }

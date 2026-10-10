@@ -39,6 +39,10 @@ export function createWriteTool(): Tool {
         `Content over about ${LARGE_CONTENT_CHARS.toLocaleString("en-US")} characters should be ` +
         "written in parts: one call carrying the file's headings or skeleton, then one `edit` " +
         "call per section.",
+      strict: true,
+      // The file body streams as the model writes it (first-party Anthropic),
+      // instead of after the server has buffered all of it.
+      eagerInputStreaming: true,
       parameters: {
         type: "object",
         properties: {

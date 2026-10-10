@@ -1060,6 +1060,7 @@ export function createFindReferencesTool(options: StructuralToolOptions = {}): T
     definition: {
       name: "find_references",
       description: FIND_REFERENCES_DESCRIPTION,
+      strict: true,
       parameters: {
         type: "object",
         properties: {

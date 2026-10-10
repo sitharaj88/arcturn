@@ -8,6 +8,24 @@ export {
 } from "./bridge.js";
 export { loadMcpConfig, McpConfigError } from "./config.js";
 export {
+  checkElicitationContent,
+  MAX_ELICITATION_FIELDS,
+  type McpElicitationBooleanField,
+  type McpElicitationEnumField,
+  type McpElicitationField,
+  type McpElicitationHandler,
+  type McpElicitationMultiEnumField,
+  type McpElicitationNumberField,
+  type McpElicitationOption,
+  type McpElicitationRefusedEvent,
+  type McpElicitationRequest,
+  type McpElicitationResult,
+  type McpElicitationSchemaCheck,
+  type McpElicitationStringField,
+  type McpElicitationValue,
+  validateElicitationSchema,
+} from "./elicitation.js";
+export {
   DEFAULT_MCP_CONNECT_TIMEOUT_MS,
   type McpAuthorizationHandler,
   type McpAuthProviderFactory,
@@ -46,6 +64,14 @@ export {
   type McpResourceTemplateInfo,
   readResource,
 } from "./resources.js";
+export {
+  DEFAULT_MCP_SAMPLING_MAX_TOKENS,
+  type McpSamplingHandler,
+  type McpSamplingMessage,
+  type McpSamplingRequest,
+  type McpSamplingResult,
+  narrowSamplingRequest,
+} from "./sampling.js";
 export {
   isSensitivePath,
   SENSITIVE_PATH_PATTERNS,

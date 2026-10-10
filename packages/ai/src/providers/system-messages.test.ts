@@ -97,3 +97,31 @@ describe("server-side context management at dispatch", () => {
     expect(stream).not.toHaveBeenCalled();
   });
 });
+
+describe("a folded operator message carries its nonce", () => {
+  const nonced: SystemMessage = { ...note, nonce: "0123456789abcdef" };
+  const nonceHistory: Message[] = [userMessage("hi"), nonced];
+
+  it("marks the Anthropic fold with the nonce, and leaves an un-nonced one plain", async () => {
+    const { toAnthropicMessages, foldedSystemText } = await import("./anthropic.js");
+    expect(foldedSystemText("x", "0123456789abcdef")).toBe(
+      '<system-reminder nonce="0123456789abcdef">\nx\n</system-reminder>',
+    );
+    expect(foldedSystemText("x")).toBe("<system-reminder>\nx\n</system-reminder>");
+    const wire = JSON.stringify(toAnthropicMessages(nonceHistory));
+    expect(wire).toContain('<system-reminder nonce=\\"0123456789abcdef\\">');
+  });
+
+  it("marks the OpenAI-compatible, Converse and Gemini folds the same way", () => {
+    expect(toOpenAIMessages(nonceHistory, "sys", { systemMessages: false }).at(-1)).toEqual({
+      role: "user",
+      content:
+        '<system-reminder nonce="0123456789abcdef">\nTurn budget: 2 left.\n</system-reminder>',
+    });
+    expect(JSON.stringify(toConverseMessages(nonceHistory))).toContain("0123456789abcdef");
+    const gemini = toGoogleContents(nonceHistory, "gemini-2.5-pro");
+    expect(gemini.at(-1)?.parts?.[0]?.text).toBe(
+      "[operator 0123456789abcdef] Turn budget: 2 left.",
+    );
+  });
+});

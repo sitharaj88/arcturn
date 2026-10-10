@@ -77,7 +77,10 @@ Every key `.arcturn/config.json` accepts, in both user and project files:
 | `provenance` | `boolean` | `false` | Record reasoning-level provenance so `arcturn blame <file>` can explain a line. See [Provenance](/docs/provenance). |
 | `dryRun` | `boolean` | `false` | Route file mutations to a shadow copy for review instead of the real tree. Same as `--dry-run`. See [Dry-run mode](/docs/dry-run). |
 | `speculation` | `boolean` | `false` | Keep editing speculatively while a permission prompt is open. |
-| `route` | `RouterConfig` | `{}` | Per-role model overrides (`main`, `subagent`, `compaction`, `title`). See below. |
+| `route` | `RouterConfig` | `{}` | Per-role model overrides (`main`, `subagent`, `compaction`, `title`), plus `tiers` and `advisor: { executor, advisor }` (an executor model consults a stronger advisor model; first-party Anthropic only). See below and [Model routing](/docs/model-routing#pairing-an-executor-with-an-advisor). |
+| `providers.anthropic.toolSearch` | `"bm25" \| "regex"` | `"bm25"` | Which native tool-search variant deferred tools use on first-party Anthropic. See [Deferred tools](/docs/deferred-tools#native-tool-search). |
+| `websearch` | `{ provider: "anthropic" \| "builtin", maxUses?: integer }` | `{ provider: "builtin" }` | Serve `websearch` with the provider's own web search where the model and platform have one; otherwise the built-in tool stays. See [Tools](/docs/tools#native-web-search). |
+| `webfetch` | `{ provider: "anthropic" \| "builtin", maxUses?: integer }` | `{ provider: "builtin" }` | The same for `fetch`. `"anthropic"` is honoured only from your **user** config. |
 | `skills.synthesisModel` | `string` | *(unset)* | Catalog id or `tier:<name>` the `arcturn skill synthesize` / `/skills synthesize` drafting sub-agent uses. Unset uses the `fast` tier when `route.tiers.fast` is configured, else the `subagent` route. See [Synthesizing a skill from a run](/docs/skills#synthesizing-a-skill-from-a-run). |
 | `providers` | `Record<string, ProviderEntry>` | `{}` | Extra provider endpoints — a gateway, a vLLM cluster, Ollama elsewhere — reachable as `<name>/<model>`. Merged key-wise with the **user** layer winning, unlike `route`. A project-declared entry is inert until approved. See below and [Providers](/docs/providers#from-configuration). |
 | `sessionTitles` | `boolean` | `true` | Generate a session title with one small LLM call (on the `title` route) after an interactive session's first completed run. `false` turns the call off. See [Sessions](/docs/sessions#session-titles). |
@@ -309,6 +312,10 @@ everything after a literal `--`.
 | `BRAVE_API_KEY` | Used by the `websearch` tool when present; falls back to scraping DuckDuckGo otherwise. |
 
 ## MCP config
+
+A server's entry also takes `"sampling": true` (default off) to let that server ask the
+session's model for a completion, billed to the session; see
+[MCP: servers that ask back](/docs/mcp#servers-that-ask-back-elicitation-and-sampling).
 
 MCP servers are declared in a JSON file shaped `{ "servers": { ... } }`, read from
 `~/.arcturn/mcp.json` merged with `<cwd>/.arcturn/mcp.json` — see [MCP](/docs/mcp) for the

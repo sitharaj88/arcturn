@@ -1,6 +1,8 @@
 /** Small helpers for building and reading message content blocks. */
 
+import { randomBytes } from "node:crypto";
 import type {
+  AdvisorUsage,
   AssistantContent,
   AssistantMessage,
   Message,
@@ -74,7 +76,12 @@ export function userMessage(input: string | UserContent[], timestamp = Date.now(
  * @param timestamp - Creation time, defaults to now.
  */
 export function operatorMessage(value: string, timestamp = Date.now()): SystemMessage {
-  return { role: "system", content: [text(value)], timestamp };
+  return {
+    role: "system",
+    content: [text(value)],
+    timestamp,
+    nonce: randomBytes(8).toString("hex"),
+  };
 }
 
 /**
@@ -96,7 +103,8 @@ export function emptyUsage(): Usage {
 }
 
 /**
- * Add two usage records together.
+ * Add two usage records together, advisor entries summed per advisor model.
+ * Matches `@arcturn/ai`'s `addUsage` exactly.
  *
  * @param a - Left operand.
  * @param b - Right operand.
@@ -106,13 +114,38 @@ export function addUsage(a: Usage, b: Usage): Usage {
     a.costUsd === undefined && b.costUsd === undefined
       ? undefined
       : (a.costUsd ?? 0) + (b.costUsd ?? 0);
+  const advisor = addAdvisors(a.advisor, b.advisor);
   return {
     inputTokens: a.inputTokens + b.inputTokens,
     outputTokens: a.outputTokens + b.outputTokens,
     cacheReadTokens: a.cacheReadTokens + b.cacheReadTokens,
     cacheWriteTokens: a.cacheWriteTokens + b.cacheWriteTokens,
     ...(cost === undefined ? {} : { costUsd: cost }),
+    ...(advisor === undefined ? {} : { advisor }),
   };
+}
+
+function addAdvisors(
+  a: readonly AdvisorUsage[] | undefined,
+  b: readonly AdvisorUsage[] | undefined,
+): AdvisorUsage[] | undefined {
+  if ((a === undefined || a.length === 0) && (b === undefined || b.length === 0)) return undefined;
+  const out: AdvisorUsage[] = [];
+  for (const entry of [...(a ?? []), ...(b ?? [])]) {
+    const existing = out.find((candidate) => candidate.model === entry.model);
+    if (existing === undefined) {
+      out.push({ ...entry });
+      continue;
+    }
+    existing.inputTokens += entry.inputTokens;
+    existing.outputTokens += entry.outputTokens;
+    existing.cacheReadTokens += entry.cacheReadTokens;
+    existing.cacheWriteTokens += entry.cacheWriteTokens;
+    if (existing.costUsd !== undefined || entry.costUsd !== undefined) {
+      existing.costUsd = (existing.costUsd ?? 0) + (entry.costUsd ?? 0);
+    }
+  }
+  return out;
 }
 
 /**

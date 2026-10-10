@@ -260,6 +260,7 @@ export function createSkillTool(options: CreateSkillToolOptions): Tool {
           "this turn. Pass `args` to fill in the skill's arguments the same way typing them after " +
           "`/name` would.\n\nAvailable skills:\n" +
           renderIndex(skills, isTrusted),
+        strict: true,
         parameters: {
           type: "object",
           properties: {

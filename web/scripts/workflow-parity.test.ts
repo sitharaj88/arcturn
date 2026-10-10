@@ -62,6 +62,7 @@ interface EngineStep {
   readonly contract?: string;
   readonly judges?: number;
   readonly race?: readonly string[];
+  readonly budget?: number;
   readonly prompt: string;
 }
 
@@ -162,6 +163,7 @@ function expectBothAcceptAlike(raw: string, name: string): Workflow {
       expect(mirroredStep?.contract).toBe(step.contract);
       expect(mirroredStep?.judges).toBe(step.judges);
       expect(mirroredStep?.race).toEqual(step.race);
+      expect(mirroredStep?.budget).toBe(step.budget);
     });
   });
 
@@ -213,7 +215,7 @@ const SYNTHETIC = [
   "   - @qa cross-check {{prev}} against {{journal}}",
   "   - measure {{input}} again",
   "3. [contract:release-verdict] [judges:3] @lead assemble {{prev}}",
-  "4. [race:tier:cheap|tier:fast] act on {{contract.decision}} given {{contract}}",
+  "4. [race:tier:cheap|tier:fast] [budget:60000] act on {{contract.decision}} given {{contract}}",
   "",
   "```contract release-verdict",
   "decision: SHIP | SHIP-WITH-FIXES | DO-NOT-SHIP",
@@ -264,6 +266,7 @@ describe("accepted documents parse identically", () => {
       agent: "lead",
     });
     expect(engine.stages[3]?.steps[0]?.race).toEqual(["tier:cheap", "tier:fast"]);
+    expect(engine.stages[3]?.steps[0]?.budget).toBe(60000);
     expect(engine.stages[3]?.steps[0]?.modelTag).toBeUndefined();
     // …and the contract, with every field type the grammar has.
     const declared = engine.contracts.get("release-verdict");
@@ -360,6 +363,17 @@ const ERROR_CORPUS: ErrorCase[] = [
   { case: "race with a bad tag", raw: "---\nname: x\n---\n1. [race:a|b c] go" },
   { case: "race repeating a tag", raw: "---\nname: x\n---\n1. [race:a|a] go" },
   { case: "undeclared contract", raw: "---\nname: x\n---\n1. [contract:missing] @qa go" },
+  { case: "budget below the minimum", raw: "---\nname: x\n---\n1. [budget:19999] go" },
+  { case: "budget not a number", raw: "---\nname: x\n---\n1. [budget:lots] go" },
+  {
+    case: "budget on Sonnet 5",
+    raw: "---\nname: x\n---\n1. [budget:50000] [anthropic/claude-sonnet-5] go",
+  },
+  {
+    case: "budget on a Sonnet 5 race arm",
+    raw: "---\nname: x\n---\n1. [budget:50000] [race:claude-opus-5-5|claude-sonnet-5] go",
+  },
+  { case: "budget twice", raw: "---\nname: x\n---\n1. [budget:50000] [budget:60000] go" },
 
   // --- contract declarations ------------------------------------------------
   { case: "nameless contract", raw: "---\nname: x\n---\n```contract\na: string\n```\n1. go" },

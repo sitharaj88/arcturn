@@ -41,6 +41,14 @@ export interface ToolCallContent {
    * it is the provider's token, and this layer only carries it back.
    */
   signature?: string;
+  /**
+   * The argument text exactly as the provider streamed it, set only when it
+   * was not valid JSON — a tool whose input streamed eagerly (unvalidated by
+   * the server) and came out cut off or malformed. `arguments` then holds the
+   * best-effort repair, which may be silently truncated; the runtime answers
+   * such a call with an error result and never runs it.
+   */
+  malformedArguments?: string;
 }
 
 /**
@@ -101,7 +109,30 @@ export interface Usage {
    * provider reports no breakdown.
    */
   thinkingTokens?: number;
-  /** Estimated cost in USD, when the model's pricing is known. */
+  /**
+   * Estimated cost in USD, when the model's pricing is known. Includes every
+   * {@link advisor} entry's cost: this is what the message cost in total.
+   */
+  costUsd?: number;
+  /**
+   * Tokens a server-side advisor model spent inside this message (Anthropic's
+   * advisor tool), one entry per advisor model. Not part of the top-level
+   * token counts above, which stay the answering model's own; each entry is
+   * priced at the advisor's rate, and that price is already in
+   * {@link costUsd}. Absent when no advisor ran.
+   */
+  advisor?: AdvisorUsage[];
+}
+
+/** What an advisor model spent inside one message (or, summed, a session); see {@link Usage.advisor}. */
+export interface AdvisorUsage {
+  /** Catalog id of the advisor, e.g. `"anthropic/claude-opus-5-5"`. */
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  /** At the advisor's rate; absent when its pricing is unknown. */
   costUsd?: number;
 }
 
@@ -227,6 +258,15 @@ export interface SystemMessage {
   role: "system";
   content: TextContent[];
   timestamp: number;
+  /**
+   * A random token minted with the message and stored with it. A fold renders
+   * it into its marker (`<system-reminder nonce="…">`, `[operator …]`) so text
+   * that merely spells the marker — a file, a fetched page, an MCP result —
+   * cannot match the real one, with no rewriting of that text. Stored, so a
+   * resumed session re-renders the same bytes. Absent on older transcripts,
+   * which fold unmarked.
+   */
+  nonce?: string;
   /**
    * Reserved for turn-scoped reminders (Anthropic's beta `clear_at:
    * "next_user_message"`). No adapter sends it yet; the no-beta form —

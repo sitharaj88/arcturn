@@ -167,6 +167,35 @@ identically on every link in the chain, so burning through it would be pointless
 on an unknown id or a missing API key); a model list is handled by mapping this function
 over every entry, not by a separate list-aware resolver.
 
+## Pairing an executor with an advisor
+
+`route.advisor` is not a route kind — nothing is sent *to* the advisor by arcturn. It names
+a pair, and while the session's model is the `executor`, each request carries Anthropic's
+advisor tool so the executor can consult the stronger `advisor` model mid-generation:
+
+```json
+{
+  "route": {
+    "advisor": {
+      "executor": "anthropic/claude-sonnet-5-5",
+      "advisor": "anthropic/claude-opus-5-5"
+    }
+  }
+}
+```
+
+Both ids must be on the first-party `anthropic` provider — the tool is not on Bedrock,
+Vertex or a gateway — and the pair must be one the API accepts (`ANTHROPIC_ADVISOR_PAIRS`
+in `@arcturn/ai`; the advisor has to be at least as capable as the executor, and Sonnet 5.5
+accepts a narrower list than most). An invalid pair is warned about and ignored at load
+time rather than sent to be refused. The request carries `advisor_20260301` under beta
+`advisor-tool-2026-03-01`, and keeps carrying it for as long as the history holds advisor
+blocks, since the API refuses a transcript with advisor blocks and no tool.
+
+The advisor's own tokens come back in `usage.iterations`, are priced at its rate into the
+turn's cost, and show as an `advisor` line in `/cost`. There is no `max_uses` yet. This path
+has not been run against the live API.
+
 ## Cost rationale, and `/model route --auto`
 
 Per-role routing exists so a long session doesn't have to downgrade the main loop just to

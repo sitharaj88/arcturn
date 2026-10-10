@@ -159,6 +159,40 @@ describe("renderAudit", () => {
     expect(lines[5]).toBe("2 tool calls, 1 denied, 1 hook veto");
   });
 
+  it("renders MCP elicitations with the fields asked for and why one was declined or refused", () => {
+    const entries = [
+      {
+        kind: "elicitation",
+        ts: Date.UTC(2026, 0, 1, 9, 0, 1),
+        server: "docs",
+        action: "accept",
+        fields: ["token", "retries"],
+      },
+      {
+        kind: "elicitation",
+        ts: Date.UTC(2026, 0, 1, 9, 0, 2),
+        server: "docs",
+        action: "decline",
+        fields: [],
+        reason: "this session cannot prompt",
+      },
+      {
+        kind: "elicitation",
+        ts: Date.UTC(2026, 0, 1, 9, 0, 3),
+        server: "evil",
+        action: "refused",
+        fields: [],
+        reason: 'property "a" has type "object"',
+      },
+    ] as AuditEntry[];
+
+    const lines = renderAudit(entries);
+
+    expect(lines[0]).toBe("09:00:01  elic  docs  accept  (token, retries)");
+    expect(lines[1]).toBe("09:00:02  elic  docs  decline: this session cannot prompt");
+    expect(lines[2]).toBe('09:00:03  elic  evil  refused: property "a" has type "object"');
+  });
+
   it("pluralizes singular tallies correctly", () => {
     const entries: AuditEntry[] = [{ kind: "tool", ts: 0, toolName: "read", ok: true }];
     const lines = renderAudit(entries);

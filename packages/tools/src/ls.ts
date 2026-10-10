@@ -36,6 +36,7 @@ export function createLsTool(): Tool {
       description:
         `List the contents of a directory. Directories are suffixed with "/"; files show their size. ` +
         `Sorted with directories first, then alphabetically. Capped at ${MAX_ENTRIES} entries.`,
+      strict: true,
       parameters: {
         type: "object",
         properties: {

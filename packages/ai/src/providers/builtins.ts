@@ -85,6 +85,7 @@ export function registerBuiltinProviders(): void {
         ...shared(ctx),
         ...(ctx.fallbacks === undefined ? {} : { fallbacks: ctx.fallbacks }),
         ...(ctx.thinkingBinding === undefined ? {} : { thinkingBinding: ctx.thinkingBinding }),
+        ...(ctx.toolSearch === undefined ? {} : { toolSearch: ctx.toolSearch }),
       }),
     checkCredentials: requireApiKey,
   });

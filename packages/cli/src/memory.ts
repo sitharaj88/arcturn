@@ -442,6 +442,7 @@ export function createMemoryTool(options: CreateMemoryToolOptions): Tool {
         "future self; `list` to see what is already stored so you don't duplicate it; `delete` to " +
         "remove a note that is no longer true. Keep each note short: it is summarized into the next " +
         "session's system prompt, not this one.",
+      strict: true,
       parameters: {
         type: "object",
         properties: {

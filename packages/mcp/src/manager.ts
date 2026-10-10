@@ -11,6 +11,14 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import {
+  type ClientCapabilities,
+  CreateMessageRequestSchema,
+  type CreateMessageResult,
+  type ElicitRequest,
+  ElicitRequestSchema,
+  type ElicitResult,
+  ErrorCode,
+  McpError,
   type Prompt as McpPromptDescriptor,
   type Resource as McpResourceDescriptor,
   type Tool as McpToolDescriptor,
@@ -18,6 +26,12 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 
 import { McpToolBridge } from "./bridge.js";
+import {
+  checkElicitationContent,
+  type McpElicitationHandler,
+  type McpElicitationRefusedEvent,
+  validateElicitationSchema,
+} from "./elicitation.js";
 import { isMcpAuthRequiredError } from "./oauth.js";
 import {
   getPrompt as getPromptImpl,
@@ -31,6 +45,27 @@ import {
   type McpResourceTemplateInfo,
   readResource as readResourceImpl,
 } from "./resources.js";
+import {
+  DEFAULT_MCP_SAMPLING_MAX_TOKENS,
+  type McpSamplingHandler,
+  narrowSamplingRequest,
+} from "./sampling.js";
+
+export type {
+  McpElicitationField,
+  McpElicitationHandler,
+  McpElicitationRefusedEvent,
+  McpElicitationRequest,
+  McpElicitationResult,
+  McpElicitationValue,
+} from "./elicitation.js";
+export {
+  DEFAULT_MCP_SAMPLING_MAX_TOKENS,
+  type McpSamplingHandler,
+  type McpSamplingMessage,
+  type McpSamplingRequest,
+  type McpSamplingResult,
+} from "./sampling.js";
 
 /** Connection state for a single configured MCP server. */
 export type McpServerConnectionState = "disconnected" | "connecting" | "connected" | "failed";
@@ -134,12 +169,44 @@ export interface McpManagerOptions {
   authProviderFactory?: McpAuthProviderFactory;
   /** Runs an interactive authorization after a 401, then retries once. */
   onAuthorizationRequired?: McpAuthorizationHandler;
+  /**
+   * Answers a server's `elicitation/create` by putting the (already
+   * validated, flat) form in front of the user. Form-mode elicitation is
+   * advertised to every server either way; without this handler every
+   * request is answered `decline`, the honest answer from a host with nobody
+   * to ask.
+   */
+  elicit?: McpElicitationHandler;
+  /**
+   * Told about each elicitation refused before the user saw it (a schema
+   * outside the flat subset), so a host can keep a record. Never awaited; a
+   * throw is swallowed.
+   */
+  onElicitationRefused?: (event: McpElicitationRefusedEvent) => void;
+  /**
+   * Runs a server's `sampling/createMessage` on the host's model. The
+   * `sampling` capability is advertised, and this is called, only for a
+   * server whose config says `sampling: true`; every other server's request
+   * gets the protocol's MethodNotFound, exactly as from a client that never
+   * heard of sampling.
+   */
+  sample?: McpSamplingHandler;
+  /**
+   * Output ceiling for one sampling request, in tokens. A server's
+   * `maxTokens` can lower it, never raise it. Defaults to
+   * {@link DEFAULT_MCP_SAMPLING_MAX_TOKENS}.
+   */
+  samplingMaxTokens?: number;
 }
 
 interface ConnectedServer {
   client: Client;
   bridge: McpToolBridge;
 }
+
+/** How many forms one server may put in front of the user per {@link ELICITATION_WINDOW_MS}. */
+const MAX_ELICITATIONS_PER_WINDOW = 5;
+const ELICITATION_WINDOW_MS = 60_000;
 
 const DEFAULT_CLIENT_INFO = { name: "arcturn-mcp", version: "0.1.0" };
 
@@ -161,6 +228,11 @@ export class McpManager {
   private readonly authProviderFactory: McpAuthProviderFactory | undefined;
   private readonly onAuthorizationRequired: McpAuthorizationHandler | undefined;
   private readonly connectTimeoutMs: number;
+  private readonly elicit: McpElicitationHandler | undefined;
+  private readonly onElicitationRefused: ((event: McpElicitationRefusedEvent) => void) | undefined;
+  private readonly sample: McpSamplingHandler | undefined;
+  private readonly samplingMaxTokens: number;
+  private readonly elicitationTimes = new Map<string, number[]>();
 
   constructor(
     private readonly config: McpConfig,
@@ -169,6 +241,14 @@ export class McpManager {
     this.authProviderFactory = options.authProviderFactory;
     this.onAuthorizationRequired = options.onAuthorizationRequired;
     this.connectTimeoutMs = options.connectTimeoutMs ?? DEFAULT_MCP_CONNECT_TIMEOUT_MS;
+    this.elicit = options.elicit;
+    this.onElicitationRefused = options.onElicitationRefused;
+    this.sample = options.sample;
+    const ceiling = options.samplingMaxTokens ?? DEFAULT_MCP_SAMPLING_MAX_TOKENS;
+    this.samplingMaxTokens =
+      Number.isFinite(ceiling) && ceiling >= 1
+        ? Math.floor(ceiling)
+        : DEFAULT_MCP_SAMPLING_MAX_TOKENS;
     this.transportFactory =
       options.transportFactory ??
       ((name, serverConfig) =>
@@ -421,10 +501,16 @@ export class McpManager {
   }
 
   private createClient(name: string): Client {
+    // Sampling is per server and opt-in: a server that was never granted it in
+    // config is never told the client could, so it cannot even try.
+    const sample = this.config.servers[name]?.sampling === true ? this.sample : undefined;
+    const capabilities: ClientCapabilities = {
+      // Form mode only: URL mode would send the user to a server-chosen page.
+      elicitation: { form: {} },
+      ...(sample === undefined ? {} : { sampling: {} }),
+    };
     const client = new Client(this.clientInfo, {
-      // Elicitation (server-initiated user prompts) is deliberately not
-      // declared here yet: relaying it to the user needs UI design first.
-      capabilities: {},
+      capabilities,
       listChanged: {
         tools: {
           debounceMs: 0,
@@ -452,7 +538,85 @@ export class McpManager {
     client.setNotificationHandler(ResourceUpdatedNotificationSchema, (notification) => {
       this.handleResourceUpdated(name, notification.params.uri);
     });
+    client.setRequestHandler(ElicitRequestSchema, (request, extra) =>
+      this.handleElicitation(name, request.params, extra.signal),
+    );
+    if (sample !== undefined) {
+      client.setRequestHandler(CreateMessageRequestSchema, async (request, extra) => {
+        const narrowed = narrowSamplingRequest(request.params, this.samplingMaxTokens);
+        if (!narrowed.ok) {
+          throw new McpError(ErrorCode.InvalidParams, `Sampling refused: ${narrowed.reason}.`);
+        }
+        const result = await sample({ ...narrowed.request, server: name, signal: extra.signal });
+        const answer: CreateMessageResult = {
+          role: "assistant",
+          content: { type: "text", text: result.text },
+          model: result.model,
+          ...(result.stopReason === undefined ? {} : { stopReason: result.stopReason }),
+        };
+        return answer;
+      });
+    }
     return client;
+  }
+
+  /**
+   * Validate an elicitation, ask the host, and check the answer fits the form.
+   *
+   * The SDK has already parsed the request against its own schema; this is
+   * the explicit flat-subset gate (see `elicitation.ts`), and the only place
+   * a request is refused with a reason the host gets to record.
+   */
+  private async handleElicitation(
+    name: string,
+    params: ElicitRequest["params"],
+    signal: AbortSignal,
+  ): Promise<ElicitResult> {
+    if (params.mode === "url") {
+      throw new McpError(ErrorCode.InvalidParams, "URL-mode elicitation is not supported.");
+    }
+    const check = validateElicitationSchema(params.requestedSchema);
+    if (!check.ok) {
+      try {
+        this.onElicitationRefused?.({ server: name, reason: check.reason });
+      } catch {
+        // A host's bookkeeping must never change what the server is told.
+      }
+      throw new McpError(ErrorCode.InvalidParams, `Elicitation refused: ${check.reason}.`);
+    }
+    if (this.elicit === undefined) return { action: "decline" };
+    // A person answers these one at a time; a server that re-asks in a loop
+    // would hold the terminal hostage, so each server gets a few per minute.
+    const now = Date.now();
+    const recent = (this.elicitationTimes.get(name) ?? []).filter(
+      (at) => now - at < ELICITATION_WINDOW_MS,
+    );
+    if (recent.length >= MAX_ELICITATIONS_PER_WINDOW) {
+      const reason = `too many requests (more than ${MAX_ELICITATIONS_PER_WINDOW} a minute)`;
+      try {
+        this.onElicitationRefused?.({ server: name, reason });
+      } catch {
+        // Bookkeeping never changes what the server is told.
+      }
+      throw new McpError(ErrorCode.InvalidRequest, `Elicitation refused: ${reason}.`);
+    }
+    recent.push(now);
+    this.elicitationTimes.set(name, recent);
+    const answer = await this.elicit({
+      server: name,
+      message: params.message,
+      fields: check.fields,
+      signal,
+    });
+    if (answer.action !== "accept") return { action: answer.action };
+    const problem = checkElicitationContent(check.fields, answer.content);
+    if (problem !== undefined) {
+      throw new McpError(
+        ErrorCode.InternalError,
+        `The answer does not fit the requested form: ${problem}.`,
+      );
+    }
+    return { action: "accept", content: answer.content };
   }
 
   private async finishConnect(name: string, client: Client): Promise<void> {

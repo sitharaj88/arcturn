@@ -407,7 +407,7 @@ export function toConverseMessages(messages: Message[]): ConverseMessage[] {
         "user",
         message.content
           .filter((part) => part.text.trim() !== "")
-          .map((part) => ({ text: foldedSystemText(part.text) })),
+          .map((part) => ({ text: foldedSystemText(part.text, message.nonce) })),
       );
     } else {
       appendBlocks(

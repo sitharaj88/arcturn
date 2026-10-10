@@ -64,6 +64,8 @@ const agent = createAgent({ ...base, sessionStore: store, sessionId: "release-no
 | `thinking` | `ThinkingLevel` (`"off" \| "low" \| "medium" \| "high"`) | `"off"` | Extended-thinking level, changeable at runtime with `agent.setThinking(level)`. |
 | `compaction` | `CompactionOptions` | see below | Automatic-compaction tuning, including `shape` (`"simple"`, `"keep-tail"`, `"server"`) — full table in [Sessions & persistence](/docs/sdk-sessions#forcing-compaction). |
 | `contextEditing` | `ContextEditOptions` | on | Tool-result clearing: `mode` (`"local"`, `"server"`, `"auto"`), `minCharsPerPass`, `keepRecentTurns` and the rest — see [Context management](/docs/context-management#layer-2-context-editing). `agent.contextEditPasses` counts the local passes made. |
+| `responseFormat` | `ResponseFormat` | none | Ask the provider to constrain the reply text to a JSON schema (`{ name, schema, strict? }`). A model that cannot honour it (`ModelCapabilities.structuredOutput`) has it dropped, so validate the reply either way. `agent.responseFormat` reads it; `agent.setResponseFormat(format \| undefined)` changes it. |
+| `taskBudget` | `TaskBudget` | none | A token budget (`{ total, remaining? }`, `total` at least 20,000) the model paces itself against — first-party Anthropic on Opus 4.7+, Fable/Mythos 5+, Sonnet 5.5 and Haiku 5.5. Advisory; `maxTurns` remains the hard stop. `agent.setTaskBudget(budget \| undefined)` changes it. |
 | `signal` | `AbortSignal` | none | An external signal; aborting it aborts the agent's current run the same way `agent.abort()` does. Useful when the host already has one abort controller per request. |
 
 ```ts
@@ -117,6 +119,8 @@ file or another agent produced; that channel carries the host's authority.
 ### Deferred tools and per-model tool sets
 
 ```ts
+import { createDeferredToolset } from "@arcturn/core";
+
 const toolset = createDeferredToolset({ tools, alwaysActive: ["read", "bash"] });
 const agent = createAgent({ ...base, tools, deferredTools: toolset });
 ```
@@ -128,6 +132,23 @@ provider's own search results reach the toolset's record, and `Agent.resume` rep
 transcript into it so a resumed session sends the tool set it ended with. The function form
 is re-read each time, for a host that swaps the toolset (an MCP reconnect rebuilds it). See
 [Deferred tools](/docs/deferred-tools#native-tool-search).
+
+```ts
+const agent2 = createAgent({
+  ...base,
+  responseFormat: {
+    name: "verdict",
+    schema: {
+      type: "object",
+      properties: { decision: { type: "string", enum: ["SHIP", "HOLD"] } },
+      required: ["decision"],
+      additionalProperties: false,
+    },
+  },
+  taskBudget: { total: 120_000 },
+});
+agent2.setTaskBudget(undefined);
+```
 
 ## What isn't here
 

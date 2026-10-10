@@ -66,6 +66,8 @@ export interface JournalStep {
   endedAt?: number;
   /** The validated object a `[contract:<name>]` step replied with. */
   contract?: Record<string, unknown>;
+  /** Which path the contract was asked for on; see `StepEndLine.contractMode`. */
+  contractMode?: "native" | "fenced";
   /** What a `[judges:N]` step's panel decided. */
   judges?: JudgesRecord;
   /**
@@ -342,6 +344,7 @@ export function foldJournal(
           endedAt: line.endedAt,
           ...(line.record?.status === undefined ? {} : { recordStatus: line.record.status }),
           ...(line.contract === undefined ? {} : { contract: line.contract }),
+          ...(line.contractMode === undefined ? {} : { contractMode: line.contractMode }),
           ...(line.judges === undefined ? {} : { judges: line.judges }),
           ...(raceSummaryFacts(line.race) === undefined
             ? {}
@@ -364,6 +367,7 @@ export function foldJournal(
             endedAt: line.endedAt,
             ...(line.record?.status === undefined ? {} : { recordStatus: line.record.status }),
             ...(line.contract === undefined ? {} : { contract: line.contract }),
+            ...(line.contractMode === undefined ? {} : { contractMode: line.contractMode }),
             ...(line.judges === undefined ? {} : { judges: line.judges }),
             ...(raceSummaryFacts(line.race) === undefined
               ? {}
@@ -696,7 +700,10 @@ export function formatRunDetail(
         lines.push(`      ${describeJudges(step.judges, glyphs.dot)}`);
       }
       if (step.contract !== undefined) {
-        lines.push(`      contract: ${contractSummary(step.contract)}`);
+        // A native contract was constrained by the provider's schema; the
+        // fenced path is the default and reads as it always has.
+        const via = step.contractMode === "native" ? " (native)" : "";
+        lines.push(`      contract${via}: ${contractSummary(step.contract)}`);
       }
       // REFUSED CALLS, and only refused calls. The whole activity line on
       // every step would double the height of this view for a number that is
