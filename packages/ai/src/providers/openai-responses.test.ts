@@ -443,7 +443,7 @@ describe("mapResponsesStop", () => {
     ).toEqual({ stopReason: "maxTokens" });
     expect(
       mapResponsesStop({ status: "incomplete", incomplete_details: { reason: "content_filter" } }),
-    ).toMatchObject({ stopReason: "error" });
+    ).toEqual({ stopReason: "refusal", stopDetails: { category: "content_filter" } });
     expect(mapResponsesStop({ status: "cancelled" })).toEqual({ stopReason: "aborted" });
     expect(mapResponsesStop({ status: "failed" })).toMatchObject({ stopReason: "error" });
     expect(mapResponsesStop({ status: "in_progress" })).toEqual({ stopReason: "endTurn" });
@@ -732,8 +732,9 @@ describe("openai-responses streaming", () => {
     ]);
     expect(terminalCount(events)).toBe(1);
     const end = terminal(events);
-    expect(end.message.stopReason).toBe("error");
-    expect(end.message.errorMessage).toBe("Response incomplete: content_filter");
+    expect(end.message.stopReason).toBe("refusal");
+    expect(end.message.stopDetails).toEqual({ category: "content_filter" });
+    expect(end.message.errorMessage).toBeUndefined();
   });
 
   it("emits exactly one error event for a failed response, keeping partial content", async () => {

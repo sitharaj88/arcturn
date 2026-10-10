@@ -43,12 +43,12 @@ Three functions, all from the shared catalog in `@arcturn/ai`:
 ```ts
 import { getModel, presetModel, requireModel } from "@arcturn/ai";
 
-requireModel("anthropic/claude-sonnet-4-5"); // throws on an unknown id
-getModel("claude-sonnet-4-5"); // also matches by bare wire model name; undefined if unknown
+requireModel("anthropic/claude-sonnet-5-5"); // throws on an unknown id
+getModel("claude-sonnet-5-5"); // also matches by bare wire model name; undefined if unknown
 presetModel("groq", "llama-3.3-70b-versatile"); // ad-hoc ModelSpec for a known preset, no registration needed
 ```
 
-`getModel`/`requireModel` accept either a full catalog id (`"anthropic/claude-sonnet-4-5"`)
+`getModel`/`requireModel` accept either a full catalog id (`"anthropic/claude-sonnet-5-5"`)
 or a bare wire model name when it's unambiguous across the registry. Every well-known
 preset — Groq, Cerebras, DeepSeek, Z.AI, Moonshot, MiniMax, OpenRouter, and more — is
 reachable through `presetModel`/`getModel`/`requireModel` **with no registration step**:
@@ -74,6 +74,73 @@ registerModel({
   apiKeyEnv: "INTERNAL_MODEL_API_KEY",
 });
 ```
+
+## Thinking levels and per-model capabilities
+
+`ThinkingLevel` is `"off" | "low" | "medium" | "high" | "xhigh" | "max"`, lowest first, and
+`THINKING_LEVELS` is the same list at runtime for validators and pickers. Three optional
+`ModelCapabilities` fields say what a model does with it; each is inferred from the model id
+when absent, so a spec you register by hand keeps working:
+
+```ts
+import { requireModel } from "@arcturn/ai";
+import { THINKING_LEVELS } from "@arcturn/types";
+
+const model = requireModel("anthropic/claude-sonnet-4-6");
+model.capabilities.thinkingLevels; // ["low", "medium", "high", "max"] — no "xhigh"
+model.capabilities.thinkingOff; // "omit"
+model.capabilities.refusalFallback; // undefined — no server-side fallback offered
+THINKING_LEVELS.includes("xhigh"); // true
+```
+
+- **`thinkingLevels`** — the levels above `"off"` the model accepts. A requested level it
+  lacks is clamped *down* to the nearest one it has (`xhigh` on Sonnet 4.6 is sent as
+  `high`), not sent and refused. OpenAI adapters clamp `xhigh`/`max` to `high`; Gemini to
+  `HIGH` (a 32K thinking budget).
+- **`thinkingOff`** — a `ThinkingOffStyle`: how `"off"` is spelled on the wire. `"omit"`
+  (leave `thinking` out; Claude 4.6–4.8 and budget-era models), `"disabled"` (Sonnet 5,
+  Haiku 5.5), `"betweenTools"` (Sonnet 5.5, `{type: "between_tools"}`), or `"lowEffort"`
+  (Fable 5 / 5.1, Opus 5, Opus 5.5: thinking cannot be disabled, so `thinking` is left out
+  and `effort: "low"` is sent).
+- **`refusalFallback`** — the provider can re-run a declined request on another model
+  server-side. Only consulted when the host opts in with
+  `AnthropicProviderOptions.fallbacks: "default"`; see
+  [Providers](/docs/providers#refusals-and-server-side-fallbacks).
+
+The Anthropic adapter also exports the helpers it builds requests with, for hosts that
+assemble their own: `anthropicThinkingParams(spec, level, maxTokens)`,
+`anthropicThinkingOff(spec)`, `anthropicEffort(spec, level)`, the constants
+`ANTHROPIC_THINKING_EFFORT` and `ANTHROPIC_FALLBACK_BETA`, and the types `AnthropicEffort`,
+`AnthropicThinkingParam`, `AnthropicThinkingParams`, `AnthropicRequestParams` and
+`AnthropicStreamOptions`. `ANTHROPIC_THINKING_BUDGETS` gained `xhigh` (49,152) and `max`
+(65,536) for the budget-era models.
+
+## Refusals and `StopDetails`
+
+A provider's decline is a finished turn with its own stop reason, not an `error`:
+
+```ts
+import type { AssistantMessage, StopDetails } from "@arcturn/types";
+
+function describe(message: AssistantMessage): string | undefined {
+  if (message.stopReason !== "refusal") return undefined;
+  const details: StopDetails | undefined = message.stopDetails;
+  return details?.category ?? "declined"; // category is provider-defined, and may be null
+}
+```
+
+`StopReason` is `"endTurn" | "toolCalls" | "maxTokens" | "refusal" | "aborted" | "error"`.
+`stopDetails` is `{ category: string | null; explanation?: string }` and is present only
+when the stop reason is `refusal`, and only when the provider said anything. Branch on
+`stopReason`; treat `category` as informational — it is an open set (`cyber`, `bio`, … on
+Claude; the filter's own name elsewhere) and `null` is a valid value. Anthropic's
+`stop_reason: "refusal"`, OpenAI's `content_filter` (both APIs), Gemini's safety-class
+finish reasons and Bedrock Converse's `content_filtered` / `guardrail_intervened` all arrive
+this way.
+
+If you call `llm.complete()` yourself rather than going through the agent loop, check
+`stopReason` on the result: the agent loop ends the turn on a refusal and strips any tool
+calls from it, but a bare `complete()` hands you the message as the provider sent it.
 
 ## Any OpenAI-compatible endpoint, without a preset name
 
@@ -121,7 +188,7 @@ import { createClient, createFailoverClient, requireModel } from "@arcturn/ai";
 const client = createClient();
 const failover = createFailoverClient(
   [
-    { client, model: requireModel("anthropic/claude-sonnet-4-5") },
+    { client, model: requireModel("anthropic/claude-sonnet-5-5") },
     { client, model: requireModel("openai/gpt-4o") },
   ],
   { onFailover: (from, to, error) => log(`failing over: ${error.kind}`) },
@@ -147,7 +214,7 @@ import { createClient, createConsensusClient, requireModel } from "@arcturn/ai";
 const client = createClient();
 const panel = createConsensusClient(
   [
-    { client, model: requireModel("anthropic/claude-sonnet-4-5") },
+    { client, model: requireModel("anthropic/claude-sonnet-5-5") },
     { client, model: requireModel("openai/gpt-4o") },
   ],
   {
@@ -181,3 +248,8 @@ const dollars = calculateCostUsd(model, usage); // undefined when the spec has n
 
 See [Advanced: cost and usage accounting](/docs/sdk-advanced#cost-and-usage-accounting)
 for where `usage` and `costUsd` show up on events and messages.
+
+A model with no `cost` table is never priced as $0 — `costUsd` is simply absent. That
+includes models found by `/model refresh` and the current Claude generation on Vertex. On a
+refusal-fallback turn the message is priced at the model that answered, and the figure is a
+floor: tokens a declined attempt spent are not added.

@@ -24,6 +24,13 @@ export interface ProviderFactoryContext {
    * expired. Absent when the host configured no OAuth store.
    */
   getAccessToken?: (provider: ProviderId) => Promise<string>;
+  /**
+   * Opt-in to Anthropic's server-side refusal fallbacks. Honoured by the
+   * first-party `anthropic` adapter only: every other adapter, the
+   * `anthropic-compatible` one included, ignores it, because the beta is a
+   * Claude API feature a third-party endpoint cannot be assumed to implement.
+   */
+  fallbacks?: "default";
 }
 
 /** Why a provider cannot be dispatched, reported before any request is sent. */

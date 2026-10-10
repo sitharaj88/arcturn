@@ -1,6 +1,7 @@
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { getModel } from "@arcturn/ai";
 import type { PermissionRule } from "@arcturn/types";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -229,6 +230,56 @@ describe("parseConfigFile: providers", () => {
     });
   });
 
+  // A gateway serving Sonnet 5.5 under its own model string has no catalog id
+  // for the adapter to infer the thinking rules from, so the config entry is
+  // the only place it can say how "off" is sent and which effort levels exist.
+  // Each field is validated on its own; a bad one is dropped by name.
+  it("accepts the per-model thinking and refusal capability fields", () => {
+    const { parsed, warnings } = providers({
+      gw: {
+        baseUrl: "https://gw.example/v1",
+        apiKeyEnv: "GW_KEY",
+        protocol: "anthropic",
+        models: [
+          {
+            model: "sonnet-latest",
+            contextWindow: 1_000_000,
+            maxOutputTokens: 128_000,
+            capabilities: {
+              thinking: true,
+              thinkingStyle: "adaptive",
+              thinkingOff: "betweenTools",
+              thinkingLevels: ["low", "medium", "high", "xhigh", "max"],
+              refusalFallback: true,
+            },
+          },
+          {
+            model: "odd",
+            contextWindow: 1,
+            maxOutputTokens: 1,
+            capabilities: {
+              thinkingOff: "never",
+              thinkingLevels: ["low", "ultra", 3],
+              refusalFallback: "yes",
+            },
+          },
+        ],
+      },
+    });
+    expect(parsed?.gw?.models?.[0]?.capabilities).toEqual({
+      thinking: true,
+      thinkingStyle: "adaptive",
+      thinkingOff: "betweenTools",
+      thinkingLevels: ["low", "medium", "high", "xhigh", "max"],
+      refusalFallback: true,
+    });
+    expect(parsed?.gw?.models?.[1]?.capabilities).toEqual({});
+    expect(warnings).toContain('capabilities.thinkingOff" must be one of');
+    expect(warnings).toContain('capabilities.thinkingLevels" must be a list of');
+    expect(warnings).toContain('capabilities.refusalFallback" must be true or false');
+    expect(warnings).not.toContain("unknown");
+  });
+
   it("defaults protocol to openai and label to the name", () => {
     const { parsed } = providers({
       mycorp: { baseUrl: "https://x.example/v1", apiKeyEnv: "K" },
@@ -343,6 +394,49 @@ describe("parseConfigFile: providers", () => {
     const { parsed, warnings } = providers(["mycorp"]);
     expect(parsed).toBeUndefined();
     expect(warnings).toContain('"providers" must be an object');
+  });
+});
+
+describe("parseConfigFile: providers.anthropic.fallbacks", () => {
+  function parse(raw: unknown, scope: "user" | "project" = "user") {
+    const warnings: string[] = [];
+    const parsed = parseConfigFile({ providers: raw }, scope, "cfg", warnings);
+    return { parsed, warnings: warnings.join("\n") };
+  }
+
+  it('reads "default" without treating the built-in name as a colliding endpoint', () => {
+    for (const scope of ["user", "project"] as const) {
+      const { parsed, warnings } = parse({ anthropic: { fallbacks: "default" } }, scope);
+      expect(parsed.anthropicFallbacks).toBe("default");
+      expect(parsed.providers).toBeUndefined();
+      expect(warnings).toBe("");
+    }
+  });
+
+  it("refuses any other value, naming the only accepted one", () => {
+    for (const value of ["opus", ["claude-opus-4-8"], true, null]) {
+      const { parsed, warnings } = parse({ anthropic: { fallbacks: value } });
+      expect(parsed.anthropicFallbacks).toBeUndefined();
+      expect(warnings).toContain('"providers.anthropic.fallbacks" must be "default"');
+    }
+  });
+
+  it("still refuses to let a baseUrl entry shadow the built-in provider", () => {
+    const { parsed, warnings } = parse({ anthropic: { baseUrl: "https://x.example/v1" } });
+    expect(parsed.providers).toEqual({});
+    expect(warnings).toContain("collides with a built-in");
+  });
+
+  it("merges: a higher layer wins, an absent one keeps the base", () => {
+    const on = parseConfigFile(
+      { providers: { anthropic: { fallbacks: "default" } } },
+      "user",
+      "u",
+      [],
+    );
+    const none = parseConfigFile({}, "project", "p", []);
+    expect(mergeConfig(mergeConfig(DEFAULT_CONFIG, on), none).anthropicFallbacks).toBe("default");
+    expect(mergeConfig(DEFAULT_CONFIG, none).anthropicFallbacks).toBeUndefined();
   });
 });
 
@@ -520,6 +614,15 @@ describe("mergeConfig", () => {
   });
 });
 
+describe("DEFAULT_MODEL", () => {
+  it("is the current Sonnet, and the catalog can resolve it", () => {
+    expect(DEFAULT_MODEL).toBe("anthropic/claude-sonnet-5-5");
+    const spec = getModel(DEFAULT_MODEL);
+    expect(spec?.id).toBe(DEFAULT_MODEL);
+    expect(spec?.cost).toBeDefined();
+  });
+});
+
 describe("loadConfig", () => {
   it("returns defaults when nothing is on disk", async () => {
     const { home, cwd } = await scratch();
@@ -592,6 +695,28 @@ describe("loadConfig", () => {
     await writeJson(paths.userConfig, { thinking: "medium" });
     const loaded = await loadConfig({ cwd, env: { ARCTURN_HOME: home } });
     expect(loaded.config.thinking).toBe("medium");
+  });
+
+  it("accepts the xhigh and max thinking levels from a config file", async () => {
+    // The level set grew past high; a config that names one must not be
+    // warned at and silently reset to "off".
+    for (const thinking of ["xhigh", "max"] as const) {
+      const { home, cwd } = await scratch();
+      const paths = resolveArcturnPaths({ home, cwd, env: {} });
+      await writeJson(paths.projectConfig, { thinking });
+      const loaded = await loadConfig({ home, cwd, env: {} });
+      expect(loaded.config.thinking, thinking).toBe(thinking);
+      expect(loaded.warnings, thinking).toEqual([]);
+    }
+  });
+
+  it("still rejects a thinking level that does not exist, naming the real ones", async () => {
+    const { home, cwd } = await scratch();
+    const paths = resolveArcturnPaths({ home, cwd, env: {} });
+    await writeJson(paths.projectConfig, { thinking: "ultra" });
+    const loaded = await loadConfig({ home, cwd, env: {} });
+    expect(loaded.config.thinking).toBe("off");
+    expect(loaded.warnings.join("\n")).toContain("off, low, medium, high, xhigh, max");
   });
 
   it("surfaces route.tiers from a project config file end to end", async () => {

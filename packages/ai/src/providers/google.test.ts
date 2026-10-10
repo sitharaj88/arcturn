@@ -211,6 +211,18 @@ describe("buildGoogleRequest", () => {
     ).toEqual({ thinkingLevel: "MINIMAL" });
   });
 
+  it("caps xhigh and max at Gemini's highest setting", () => {
+    const three = modelSpec({ provider: "google", model: "gemini-3-pro-preview" });
+    for (const thinking of ["xhigh", "max"] as const) {
+      expect(
+        buildGoogleRequest({ model: three, messages: [], thinking }).config?.thinkingConfig,
+      ).toEqual({ thinkingLevel: "HIGH", includeThoughts: true });
+      expect(
+        buildGoogleRequest({ model: spec, messages: [], thinking }).config?.thinkingConfig,
+      ).toEqual({ includeThoughts: true, thinkingBudget: 32_768 });
+    }
+  });
+
   it("passes the abort signal through config and merges providerOptions", () => {
     const controller = new AbortController();
     const params = buildGoogleRequest({
@@ -250,7 +262,10 @@ describe("mapGoogleFinishReason", () => {
   it("treats anything but STOP and MAX_TOKENS as an error", () => {
     expect(mapGoogleFinishReason("STOP")).toBe("endTurn");
     expect(mapGoogleFinishReason("MAX_TOKENS")).toBe("maxTokens");
-    expect(mapGoogleFinishReason("SAFETY")).toBe("error");
+    expect(mapGoogleFinishReason("SAFETY")).toBe("refusal");
+    expect(mapGoogleFinishReason("PROHIBITED_CONTENT")).toBe("refusal");
+    expect(mapGoogleFinishReason("BLOCKLIST")).toBe("refusal");
+    expect(mapGoogleFinishReason("SPII")).toBe("refusal");
     expect(mapGoogleFinishReason("MALFORMED_FUNCTION_CALL")).toBe("error");
     expect(mapGoogleFinishReason(undefined)).toBeUndefined();
   });
@@ -369,11 +384,21 @@ describe("google streaming", () => {
     expect(order[1]).toBe("toolCallStart");
   });
 
-  it("surfaces a safety stop as stopReason error", async () => {
+  it("surfaces a safety stop as a refusal, naming the filter", async () => {
     const events = await streamOf([chunk([{ text: "x" }], { finishReason: "SAFETY" })]);
     const end = terminal(events);
+    expect(end.message.stopReason).toBe("refusal");
+    expect(end.message.stopDetails).toEqual({ category: "safety" });
+    expect(end.message.errorMessage).toBeUndefined();
+  });
+
+  it("still files a malformed function call as an error", async () => {
+    const events = await streamOf([
+      chunk([{ text: "x" }], { finishReason: "MALFORMED_FUNCTION_CALL" }),
+    ]);
+    const end = terminal(events);
     expect(end.message.stopReason).toBe("error");
-    expect(end.message.errorMessage).toBe("Provider stopped with: SAFETY");
+    expect(end.message.errorMessage).toBe("Provider stopped with: MALFORMED_FUNCTION_CALL");
   });
 
   it("maps SDK failures onto AIError kinds", async () => {

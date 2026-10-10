@@ -384,7 +384,12 @@ export function reduceChat(state: ChatState, event: AgentEvent): ChatState {
       // A streamed message is already in the transcript; re-appending its
       // content would show every answer twice.
       const next = state.streamed ? state : appendMessage(state, event.message);
-      return { ...next, streamed: false, openBlocks: {} };
+      const settled = { ...next, streamed: false, openBlocks: {} };
+      // A decline finishes the run with no error and often no text; without a
+      // line of its own the sidebar would just stop.
+      return event.message.stopReason === "refusal"
+        ? notice(settled, "warn", refusalText(event.message))
+        : settled;
     }
     case "toolStart":
       return ensureTool(
@@ -510,6 +515,31 @@ export function reduceChat(state: ChatState, event: AgentEvent): ChatState {
     case "progressWarning":
       return state;
   }
+}
+
+/**
+ * One flat sentence for a declined turn, worded like the terminal's
+ * `refusalLine`. The category and explanation come off the wire, so control
+ * characters are flattened to spaces and the length is bounded.
+ */
+function refusalText(message: AssistantMessage): string {
+  const flat = (value: unknown): string => {
+    if (typeof value !== "string") return "";
+    let out = "";
+    for (const ch of value) {
+      const code = ch.charCodeAt(0);
+      out += code < 0x20 || (code >= 0x7f && code <= 0x9f) ? " " : ch;
+    }
+    out = out.replace(/\s+/g, " ").trim();
+    return out.length > 500 ? `${out.slice(0, 499)}…` : out;
+  };
+  const category = flat(message.stopDetails?.category);
+  const head =
+    category === ""
+      ? "The model declined this request"
+      : `The model declined this request (${category})`;
+  const detail = flat(message.stopDetails?.explanation);
+  return detail === "" ? `${head}.` : `${head}: ${detail}`;
 }
 
 function notice(state: ChatState, level: NoticeBlock["level"], text: string): ChatState {

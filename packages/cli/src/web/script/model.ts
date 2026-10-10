@@ -565,6 +565,19 @@ export const MODEL_SCRIPT = `
         if (message.stopReason === "error" && message.errorMessage) {
           noticeBlock(state, "error", message.errorMessage);
         }
+        // Worded exactly as the terminal's refusalLine (display.ts).
+        if (message.stopReason === "refusal") {
+          var details = isRecord(message.stopDetails) ? message.stopDetails : {};
+          var category = typeof details.category === "string" && details.category !== ""
+            ? details.category
+            : "";
+          var declined = "The model declined this request" +
+            (category === "" ? "" : " (" + category + ")");
+          noticeBlock(state, "warn", typeof details.explanation === "string" &&
+            details.explanation !== ""
+            ? declined + ": " + details.explanation
+            : declined + ".");
+        }
         break;
       }
       case "toolStart": {

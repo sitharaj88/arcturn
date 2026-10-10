@@ -11,6 +11,7 @@ import type {
   LLMClient,
   LLMRequest,
   Message,
+  StopDetails,
   StopReason,
   StreamEvent,
   ThinkingLevel,
@@ -43,21 +44,41 @@ function loadGenai() {
 /** Prefix marking a tool-call id Arcturn invented because Gemini supplied none. */
 export const SYNTHETIC_TOOL_ID_PREFIX = "arcturn-";
 
-/** Thinking budgets in tokens, used by the Gemini 2.5 family. */
+/**
+ * Thinking budgets in tokens, used by the Gemini 2.5 family. 32K is the
+ * family's ceiling, so `xhigh` and `max` ask for exactly what `high` does.
+ */
 export const GOOGLE_THINKING_BUDGETS: Readonly<Record<ThinkingLevel, number>> = {
   off: 0,
   low: 4_096,
   medium: 16_384,
   high: 32_768,
+  xhigh: 32_768,
+  max: 32_768,
 };
 
-/** Thinking levels, used by Gemini 3 and later. */
+/** Thinking levels, used by Gemini 3 and later; `HIGH` is the top of the scale. */
 const GOOGLE_THINKING_LEVELS: Readonly<Record<ThinkingLevel, string>> = {
   off: "MINIMAL",
   low: "LOW",
   medium: "MEDIUM",
   high: "HIGH",
+  xhigh: "HIGH",
+  max: "HIGH",
 };
+
+/**
+ * Finish reasons that mean a safety or policy filter declined the turn — a
+ * refusal, not a failure. `RECITATION` stays an error: it is a copyright
+ * filter on the output, not a judgement on the request.
+ */
+const GOOGLE_REFUSAL_REASONS: ReadonlySet<string> = new Set([
+  "SAFETY",
+  "PROHIBITED_CONTENT",
+  "BLOCKLIST",
+  "SPII",
+  "IMAGE_SAFETY",
+]);
 
 /** Minimal structural view of the genai SDK, so tests can inject fakes. */
 export interface GoogleClientLike {
@@ -253,6 +274,7 @@ export function mapGoogleFinishReason(reason: string | undefined): StopReason | 
   if (!reason) return undefined;
   if (reason === "STOP") return "endTurn";
   if (reason === "MAX_TOKENS") return "maxTokens";
+  if (GOOGLE_REFUSAL_REASONS.has(reason)) return "refusal";
   return "error";
 }
 
@@ -295,6 +317,7 @@ export async function* googleEventStream(
   let usage: Usage | undefined;
   let stopReason: StopReason | undefined;
   let errorMessage: string | undefined;
+  let stopDetails: StopDetails | undefined;
   let toolCounter = 0;
   const seenIds = new Set<string>();
 
@@ -370,14 +393,20 @@ export async function* googleEventStream(
     if (finish) {
       stopReason = finish;
       if (finish === "error") errorMessage = `Provider stopped with: ${candidate?.finishReason}`;
+      if (finish === "refusal" && candidate?.finishReason) {
+        stopDetails = { category: candidate.finishReason.toLowerCase() };
+      }
     }
   }
 
   yield* closeOpen();
   if (usage) yield { type: "usage", usage };
-  yield errorMessage === undefined
-    ? { type: "stop", stopReason: stopReason ?? "endTurn" }
-    : { type: "stop", stopReason: stopReason ?? "endTurn", errorMessage };
+  yield {
+    type: "stop",
+    stopReason: stopReason ?? "endTurn",
+    ...(errorMessage === undefined ? {} : { errorMessage }),
+    ...(stopDetails === undefined ? {} : { stopDetails }),
+  };
 }
 
 /** Create an {@link LLMClient} backed by the Gemini API. */

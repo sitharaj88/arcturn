@@ -106,6 +106,108 @@ describe("built-in catalog", () => {
     }
   });
 
+  it("ships the 5.5 generation and the 4.6–4.8 Opus line at their documented limits and prices", () => {
+    // Source: the claude-api skill's shared/models.md and model-migration.md
+    // (cached 2026-10-06). Cache writes are the 5-minute rate, 1.25x input.
+    const expected = [
+      ["anthropic/claude-fable-5-1", { input: 10, output: 50, cacheRead: 0.25, cacheWrite: 12.5 }],
+      ["anthropic/claude-opus-5-5", { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5 }],
+      ["anthropic/claude-sonnet-5-5", { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 }],
+      // The ≤100K-token rate card; longer prompts bill at $0.50/$2.50.
+      [
+        "anthropic/claude-haiku-5-5",
+        { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 },
+      ],
+      ["anthropic/claude-opus-4-8", { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 }],
+      ["anthropic/claude-opus-4-7", { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 }],
+      ["anthropic/claude-opus-4-6", { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 }],
+      ["anthropic/claude-sonnet-4-6", { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 }],
+    ] as const;
+    for (const [id, cost] of expected) {
+      const model = getModel(id);
+      expect(model, id).toBeDefined();
+      expect(model?.contextWindow, id).toBe(1_000_000);
+      expect(model?.maxOutputTokens, id).toBe(128_000);
+      expect(model?.cost, id).toEqual(cost);
+      expect(model?.capabilities.thinkingStyle, id).toBe("adaptive");
+    }
+  });
+
+  it("records how each new model turns thinking off and which effort levels it takes", () => {
+    const caps = (id: string) => getModel(id)?.capabilities;
+    expect(caps("anthropic/claude-fable-5-1")?.thinkingOff).toBe("lowEffort");
+    expect(caps("anthropic/claude-fable-5")?.thinkingOff).toBe("lowEffort");
+    expect(caps("anthropic/claude-opus-5-5")?.thinkingOff).toBe("lowEffort");
+    expect(caps("anthropic/claude-sonnet-5-5")?.thinkingOff).toBe("betweenTools");
+    expect(caps("anthropic/claude-haiku-5-5")?.thinkingOff).toBe("disabled");
+    expect(caps("anthropic/claude-opus-4-8")?.thinkingOff).toBe("omit");
+    expect(caps("anthropic/claude-sonnet-4-6")?.thinkingLevels).toEqual([
+      "low",
+      "medium",
+      "high",
+      "max",
+    ]);
+    expect(caps("anthropic/claude-opus-4-6")?.thinkingLevels).not.toContain("xhigh");
+    expect(caps("anthropic/claude-opus-4-7")?.thinkingLevels).toContain("xhigh");
+    expect(caps("anthropic/claude-haiku-5-5")?.refusalFallback).toBeFalsy();
+    for (const id of [
+      "anthropic/claude-fable-5-1",
+      "anthropic/claude-opus-5-5",
+      "anthropic/claude-opus-5",
+      "anthropic/claude-sonnet-5-5",
+    ]) {
+      expect(caps(id)?.refusalFallback, id).toBe(true);
+    }
+  });
+
+  it("lists each Anthropic family newest first", () => {
+    const order = listModelsByProvider("anthropic").map((model) => model.model);
+    const before = (a: string, b: string) =>
+      expect(order.indexOf(a)).toBeLessThan(order.indexOf(b));
+    before("claude-fable-5-1", "claude-fable-5");
+    before("claude-opus-5-5", "claude-opus-5");
+    before("claude-opus-5", "claude-opus-4-8");
+    before("claude-opus-4-8", "claude-opus-4-7");
+    before("claude-opus-4-7", "claude-opus-4-6");
+    before("claude-opus-4-6", "claude-opus-4-5");
+    before("claude-sonnet-5-5", "claude-sonnet-5");
+    before("claude-sonnet-5", "claude-sonnet-4-6");
+    before("claude-sonnet-4-6", "claude-sonnet-4-5");
+    before("claude-haiku-5-5", "claude-haiku-4-5");
+  });
+
+  it("resolves the new bare wire names without a prefix collision", () => {
+    // `claude-opus-5-5` starts with `claude-opus-5`: lookups must be exact.
+    expect(getModel("claude-opus-5")?.id).toBe("anthropic/claude-opus-5");
+    expect(getModel("claude-opus-5-5")?.id).toBe("anthropic/claude-opus-5-5");
+    expect(getModel("claude-sonnet-5")?.id).toBe("anthropic/claude-sonnet-5");
+    expect(getModel("claude-sonnet-5-5")?.id).toBe("anthropic/claude-sonnet-5-5");
+  });
+
+  it("ships the new generation on Vertex under its bare id, priced as unknown", () => {
+    for (const model of [
+      "claude-fable-5-1",
+      "claude-opus-5-5",
+      "claude-sonnet-5-5",
+      "claude-haiku-5-5",
+      "claude-opus-4-8",
+      "claude-opus-4-7",
+      "claude-opus-4-6",
+      "claude-sonnet-4-6",
+    ]) {
+      const spec = getModel(`vertex/${model}`);
+      expect(spec, model).toBeDefined();
+      expect(spec?.model, model).toBe(model);
+      expect(spec?.contextWindow, model).toBe(1_000_000);
+      expect(spec?.maxOutputTokens, model).toBe(128_000);
+      // Google Cloud bills on its own rate card; borrowing the first-party
+      // price would mis-budget every request, and $0 would be a fiction.
+      expect(spec?.cost, model).toBeUndefined();
+    }
+    // A bare wire name still resolves to the first-party entry.
+    expect(getModel("claude-opus-5-5")?.provider).toBe("anthropic");
+  });
+
   it("makes every registered provider reachable from the catalog", () => {
     // `openai-responses` shipped as a registered provider, documented beside
     // `openai`, with zero catalog entries — and `--model` resolves against the

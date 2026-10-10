@@ -28,7 +28,7 @@ an inherited stdin open that never closes; waiting for EOF there would hang fore
 | Flag | What it does |
 |---|---|
 | `-p`, `--print` | Non-interactive: run to completion, print the final message, exit. A prompt that starts with `/` runs that slash command instead — `arcturn -p "/workflow rag-setup …"` runs a pipeline from CI — and exits `0` when it finished, `1` on an error, `2` for an unknown command, and `3` when a workflow stopped for a person (a budget checkpoint, a role's question, or a parked step); the command to run next is printed on stderr |
-| `--output-format <fmt>` | With `--print`: `text` (default) or `json` (NDJSON of every agent event) |
+| `--output-format <fmt>` | With `--print`: `text` (default) or `json` (NDJSON of every agent event; a refused turn's `messageEnd` carries `stopReason: "refusal"` and `stopDetails`) |
 | `-m`, `--model <id>` | Model to use — see `--list-models` and [Model providers](/docs/providers) |
 | `-c`, `--continue` | Resume the most recent session in this directory |
 | `-r`, `--resume <id>` | Resume a specific session — see [Sessions](/docs/sessions) |
@@ -66,7 +66,7 @@ runs with `--max-turns` instead.
 | Code | Meaning |
 |---|---|
 | `0` | Success — the run completed, or `--help`/`--version`/a listing printed. A tool the model asked for may still have been *refused*: a non-interactive run cannot ask, so it denies, tells the model, and says so on stderr. |
-| `1` | The run started but did not complete — a provider error, an interrupted run, or a ceiling (`--max-turns`, `--max-cost`) stopping it early. |
+| `1` | The run started but did not complete — a provider error, an interrupted run, a ceiling (`--max-turns`, `--max-cost`) stopping it early, or the model declining the request (a refusal produces no work; `--print` also writes `arcturn: the model declined this request (cyber).` to stderr, category as the provider reported it). |
 | `2` | Nothing ran — a bad flag, an unknown model, a `--cwd` that is not there, a session that could not be read, a port already in use, or a command that needs a terminal and did not get one. |
 | `3` | Stopped for a person: a parked workflow, a budget checkpoint, or a command that needs `--yes` to proceed headless. |
 

@@ -272,7 +272,7 @@ describe("vertex Gemini streaming", () => {
     const blocked = terminal(
       await geminiStream([geminiChunk([{ text: "x" }], { finishReason: "SAFETY" })]),
     );
-    expect(blocked.message.stopReason).toBe("error");
+    expect(blocked.message.stopReason).toBe("refusal");
   });
 
   it("sends the model name Vertex expects", async () => {

@@ -3,7 +3,7 @@ import { pathToFileURL } from "node:url";
 import { ColorLevel, setColorLevel } from "@arcturn/tui";
 import type { AgentEvent, ToolResultMessage } from "@arcturn/types";
 import { beforeEach, describe, expect, it } from "vitest";
-import { TranscriptFormatter } from "./display.js";
+import { refusalLine, TranscriptFormatter } from "./display.js";
 import { ASCII_GLYPHS, FANCY_GLYPHS } from "./glyphs.js";
 
 beforeEach(() => {
@@ -111,6 +111,61 @@ describe("TranscriptFormatter", () => {
     expect(text).toContain("Title");
     expect(text).toContain("Some text.");
     expect(text).not.toContain("# Title");
+  });
+
+  it("says a turn was declined, and under which category", () => {
+    const refused = (stopDetails?: { category: string | null; explanation?: string }) =>
+      lines(new TranscriptFormatter(), [
+        {
+          type: "messageEnd",
+          message: {
+            role: "assistant",
+            content: [],
+            model: "m",
+            usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+            stopReason: "refusal",
+            ...(stopDetails === undefined ? {} : { stopDetails }),
+            timestamp: 0,
+          },
+        },
+      ]).join("\n");
+    expect(refused({ category: "cyber" })).toContain("The model declined this request (cyber)");
+    expect(refused({ category: "bio", explanation: "Dual-use virology" })).toContain(
+      "Dual-use virology",
+    );
+    // A null category is a valid state — say "declined" without inventing one.
+    expect(refused({ category: null })).toContain("The model declined this request.");
+    expect(refused()).toContain("The model declined this request.");
+  });
+
+  it("never lets a provider-supplied refusal string carry a terminal escape or a line break", () => {
+    // The category and explanation come off the wire. A hostile or compromised
+    // endpoint could repaint the screen (CSI 2J), set the title (OSC) or forge
+    // extra transcript lines; the repo scrubs every such string it prints.
+    const hostile = {
+      category: "cyber\u001b[2J",
+      explanation: "ok\u001b]0;pwned\u0007\nforged line\r\u009b31m",
+    };
+    const message = {
+      role: "assistant" as const,
+      content: [],
+      model: "m",
+      usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      stopReason: "refusal" as const,
+      stopDetails: hostile,
+      timestamp: 0,
+    };
+    const line = refusalLine(message);
+    expect(
+      [...line].some(
+        (ch) => ch.charCodeAt(0) < 0x20 || (ch.charCodeAt(0) >= 0x7f && ch.charCodeAt(0) <= 0x9f),
+      ),
+    ).toBe(false);
+    expect(line).toContain("The model declined this request (cyber)");
+    const rendered = lines(new TranscriptFormatter(), [{ type: "messageEnd", message }]);
+    // glyph + one warning line, no forged extras
+    expect(rendered.filter((l) => l.includes("forged line"))).toHaveLength(1);
+    expect(rendered.join("\n")).not.toContain("\u001b]0;");
   });
 
   it("hides thinking unless asked", () => {

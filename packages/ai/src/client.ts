@@ -51,6 +51,12 @@ export interface CreateClientOptions {
    * API key, refreshing them as needed. Wire this to an OAuth token store.
    */
   getAccessToken?: (provider: ProviderId) => Promise<string>;
+  /**
+   * Opt in to Anthropic's server-side refusal fallbacks (`"default"`) for the
+   * first-party `anthropic` provider, on the models that offer them. Off by
+   * default; see {@link AnthropicProviderOptions.fallbacks}.
+   */
+  fallbacks?: "default";
 }
 
 function processEnv(): EnvSource {
@@ -142,6 +148,7 @@ export function createClient(options: CreateClientOptions = {}): LLMClient {
       baseUrl,
       headers: options.headers,
       ...(options.getAccessToken ? { getAccessToken: options.getAccessToken } : {}),
+      ...(options.fallbacks === undefined ? {} : { fallbacks: options.fallbacks }),
     });
     cache.set(cacheKey, created);
     return created;

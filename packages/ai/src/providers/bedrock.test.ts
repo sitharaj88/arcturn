@@ -394,10 +394,29 @@ describe("buildConverseRequest", () => {
       thinking: "high",
     });
     expect(input.additionalModelRequestFields).toEqual({
-      thinking: { type: "adaptive" },
+      thinking: { type: "adaptive", display: "summarized" },
       output_config: { effort: "high" },
     });
     expect(input.additionalModelRequestFields).not.toHaveProperty("reasoning_config");
+  });
+
+  it("applies the same per-model rules as the Messages path on Converse", () => {
+    // One rule set, not two: a pinned-to-Converse Claude must clamp, summarise
+    // and turn thinking off exactly the way buildAnthropicRequest does.
+    const on = (model: string, thinking: "off" | "xhigh") =>
+      buildConverseRequest({
+        model: modelSpec({ provider: "bedrock", model, id: `bedrock/${model}` }),
+        messages: [userMessage("hi")],
+        thinking,
+      }).additionalModelRequestFields;
+    expect(on("anthropic.claude-sonnet-4-6", "xhigh")).toEqual({
+      thinking: { type: "adaptive" },
+      output_config: { effort: "high" },
+    });
+    expect(on("anthropic.claude-opus-5-5", "off")).toEqual({ output_config: { effort: "low" } });
+    expect(on("anthropic.claude-sonnet-5-5", "off")).toEqual({
+      thinking: { type: "between_tools" },
+    });
   });
 
   it("keeps the reasoning budget for 4.5-generation Claude and non-Claude models", () => {
@@ -431,8 +450,8 @@ describe("mapConverseStopReason", () => {
     expect(mapConverseStopReason("tool_use")).toBe("toolCalls");
     expect(mapConverseStopReason("max_tokens")).toBe("maxTokens");
     expect(mapConverseStopReason("model_context_window_exceeded")).toBe("maxTokens");
-    expect(mapConverseStopReason("content_filtered")).toBe("error");
-    expect(mapConverseStopReason("guardrail_intervened")).toBe("error");
+    expect(mapConverseStopReason("content_filtered")).toBe("refusal");
+    expect(mapConverseStopReason("guardrail_intervened")).toBe("refusal");
     expect(mapConverseStopReason("malformed_tool_use")).toBe("error");
     expect(mapConverseStopReason(undefined)).toBe("endTurn");
   });
@@ -547,12 +566,13 @@ describe("converse streaming", () => {
     ]);
   });
 
-  it("surfaces a filtered response as stopReason error", async () => {
+  it("surfaces a filtered response as a refusal, naming the filter", async () => {
     const events = await streamOf([MESSAGE_START, messageStop("content_filtered")]);
     const end = terminal(events);
     expect(end.type).toBe("end");
-    expect(end.message.stopReason).toBe("error");
-    expect(end.message.errorMessage).toContain("content_filtered");
+    expect(end.message.stopReason).toBe("refusal");
+    expect(end.message.stopDetails).toEqual({ category: "content_filtered" });
+    expect(end.message.errorMessage).toBeUndefined();
   });
 
   it("classifies an in-band throttling event as a rate limit", async () => {

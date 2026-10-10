@@ -77,11 +77,11 @@ Example `.arcturn/config.json`:
 
 ```json
 {
-  "model": "anthropic/claude-sonnet-4-5",
+  "model": "anthropic/claude-sonnet-5-5",
   "route": {
-    "subagent": "anthropic/claude-haiku-4-5",
-    "compaction": "anthropic/claude-haiku-4-5",
-    "title": "anthropic/claude-haiku-4-5"
+    "subagent": "anthropic/claude-haiku-5-5",
+    "compaction": "anthropic/claude-haiku-5-5",
+    "title": "anthropic/claude-haiku-5-5"
   }
 }
 ```

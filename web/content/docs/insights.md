@@ -49,7 +49,7 @@ Progress warnings (2)
 Silent turns (7)
   model                       silences  nudged  recovered
   zai/glm-5.3                 5         3       1/3 (33.3%)
-  anthropic/claude-sonnet-4-5 2         1       1/1 (100.0%)
+  anthropic/claude-sonnet-5-5 2         1       1/1 (100.0%)
 
 Step failures
   turn-ceiling 4 · agent-error 2

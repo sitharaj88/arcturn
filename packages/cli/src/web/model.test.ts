@@ -45,6 +45,27 @@ describe("web client model: reducer", () => {
     expect(state.blocks[0]).toMatchObject({ kind: "user", text: "ship it" });
   });
 
+  it("says a refused turn was declined, and under which category", () => {
+    const state = model.createState();
+    model.applyEvent(state, {
+      type: "messageEnd",
+      message: {
+        role: "assistant",
+        content: [],
+        model: "m",
+        usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+        stopReason: "refusal",
+        stopDetails: { category: "cyber" },
+        timestamp: 0,
+      },
+    });
+    expect(state.blocks.at(-1)).toMatchObject({
+      kind: "notice",
+      level: "warn",
+      text: "The model declined this request (cyber).",
+    });
+  });
+
   it("accumulates streaming text and clears it on messageEnd", () => {
     const state = model.createState();
     model.applyEvent(state, { type: "messageStream", event: { type: "textStart", blockIndex: 0 } });

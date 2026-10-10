@@ -303,8 +303,10 @@ describe("azure streaming", () => {
       "maxTokens",
     );
     const filtered = terminal(await streamOf([chunk({ content: "x" }, "content_filter")]));
-    expect(filtered.message.stopReason).toBe("error");
-    expect(filtered.message.errorMessage).toBe("Provider finish_reason: content_filter");
+    // A content filter declining is a refusal, not a failed request.
+    expect(filtered.message.stopReason).toBe("refusal");
+    expect(filtered.message.stopDetails).toEqual({ category: "content_filter" });
+    expect(filtered.message.errorMessage).toBeUndefined();
   });
 
   it("sends the OpenAI-proper token field", async () => {

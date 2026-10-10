@@ -93,18 +93,31 @@ all read from the same live `runtime.metrics`, updated after every turn.
 
 ```text
 Session 019c4a2f
-  model      Claude Sonnet 4.5 (anthropic/claude-sonnet-4-5)
+  model      Claude Sonnet 5.5 (anthropic/claude-sonnet-5-5)
   turns      14
   input      182.4k
   output     11.3k
   cache      96.0k read · 12.1k write
   total      301.8k
   cost       $1.84 / $5.00 limit
-  context    48.2k / 200.0k
+  context    48.2k / 1000.0k
 ```
 
 The `/ $5.00 limit` suffix only appears once a ceiling is set for the session; with no
 limit configured, the `cost` row is just the dollar figure.
+
+**Unpriced models read as unknown, never $0.** A model with no rate in the catalog — a
+model found by `/model refresh`, or the current Claude generation on Vertex, whose partner
+rate card is not carried — reports its cost as unknown. The spend ceiling cannot count what
+it cannot price, so pair `--max-cost` with a priced model.
+
+**A refusal fallback is billed at the model that answered.** With
+[`providers.anthropic.fallbacks`](/docs/providers#refusals-and-server-side-fallbacks)
+on, a turn the first model declines can be re-run on a fallback model. That turn is priced
+at the model that produced the answer, and a fallback to a model not in the catalog reads
+as cost unknown. The figure is a floor: tokens a declined attempt spent are reported by
+the API per iteration, and Arcturn does not add them, because whether a decline is billed
+depends on its category.
 
 ### `--max-cost` and `/cost limit` — the ceiling
 

@@ -25,6 +25,27 @@ export interface ModelCost {
  */
 export type ThinkingStyle = "budget" | "adaptive";
 
+/**
+ * What a request must say for thinking level `"off"` to mean off on a model.
+ *
+ * "Leave `thinking` out" stopped being a safe answer once models started
+ * thinking by default: on Haiku 5.5 or Sonnet 5 omitting it *runs* adaptive
+ * thinking, and on Fable 5.1 or Opus 5.5 thinking cannot be turned off at all.
+ *
+ * - `"omit"` — leave `thinking` out; the model then runs without it (Claude
+ *   4.6–4.8, and every budget-era model).
+ * - `"disabled"` — send `thinking: {type: "disabled"}`, because omitting it
+ *   would think (Sonnet 5, Haiku 5.5).
+ * - `"betweenTools"` — send `thinking: {type: "between_tools"}`, the lowest
+ *   setting on a model that rejects `disabled` (Sonnet 5.5).
+ * - `"lowEffort"` — thinking cannot be switched off: leave `thinking` out and
+ *   send the lowest effort instead (Fable 5/5.1, Opus 5.5, and Opus 5, whose
+ *   `disabled` carries documented failure modes).
+ *
+ * Optional: adapters infer it from the model id when absent.
+ */
+export type ThinkingOffStyle = "omit" | "disabled" | "betweenTools" | "lowEffort";
+
 export interface ModelCapabilities {
   tools: boolean;
   vision: boolean;
@@ -37,6 +58,22 @@ export interface ModelCapabilities {
    * catalog entries and ad-hoc specs alike.
    */
   thinkingStyle?: ThinkingStyle;
+  /** How thinking level `"off"` is spelled on this model; see {@link ThinkingOffStyle}. */
+  thinkingOff?: ThinkingOffStyle;
+  /**
+   * The thinking levels above `"off"` this model accepts, lowest first. A
+   * requested level the model lacks is clamped down to the nearest one it has
+   * (`xhigh` on Sonnet 4.6 is sent as `high`) rather than sent and refused.
+   * Absent means "infer from the model id"; only adaptive (effort-steered)
+   * models are clamped, since budget models map every level to a token count.
+   */
+  thinkingLevels?: readonly Exclude<ThinkingLevel, "off">[];
+  /**
+   * The provider can re-run a request its safety classifiers declined on
+   * another model, server-side (Anthropic's `fallbacks: "default"`). Only
+   * consulted when the host opted in; absent means no.
+   */
+  refusalFallback?: boolean;
 }
 
 export interface ModelSpec {
@@ -98,4 +135,21 @@ export interface ModelSpec {
   providerOptions?: Record<string, unknown>;
 }
 
-export type ThinkingLevel = "off" | "low" | "medium" | "high";
+/**
+ * Portable thinking depth, lowest to highest.
+ *
+ * `xhigh` and `max` exist on the current Claude generation (Opus 4.7+, every
+ * 5.x model); an adapter whose model lacks a level clamps it to the nearest
+ * one below rather than sending a value the provider rejects.
+ */
+export type ThinkingLevel = "off" | "low" | "medium" | "high" | "xhigh" | "max";
+
+/** Every {@link ThinkingLevel}, lowest first — for validators and pickers. */
+export const THINKING_LEVELS: readonly ThinkingLevel[] = [
+  "off",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+];

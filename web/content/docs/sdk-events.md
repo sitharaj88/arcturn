@@ -60,6 +60,22 @@ run. Both forms return the same kind of unsubscribe function.
 | `runEnd` | `reason` (`"completed" \| "aborted" \| "error"`), `errorMessage?` | Exactly once per `prompt()` call, always — see below. |
 | `notice` | `level` (`"info" \| "warn" \| "error"`), `text` | Non-fatal diagnostics: a stale todo reminder, "nothing to compact", a compaction failure. |
 
+## Refusals
+
+A model declining a request is not an error. The turn's `messageEnd` carries an
+`AssistantMessage` with `stopReason: "refusal"` and, when the provider said why,
+`stopDetails: { category, explanation? }`; the run then ends with `runEnd` reason
+`"completed"`. The loop ends the turn cleanly instead of nudging the model to try again,
+and strips any tool calls from the refused message, so no `toolStart` follows it.
+
+```ts
+agent.on("messageEnd", (event) => {
+  if (event.message.stopReason === "refusal") {
+    console.warn("declined:", event.message.stopDetails?.category ?? "unspecified");
+  }
+});
+```
+
 ## `runEnd` and the never-rejects guarantee
 
 `agent.prompt()` resolves when the model stops calling tools, the run is aborted, or a

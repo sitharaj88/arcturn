@@ -189,6 +189,14 @@ describe("buildOpenAIRequest", () => {
     expect(
       buildOpenAIRequest({ model: spec, messages: [], thinking: "high" }).reasoning_effort,
     ).toBe("high");
+    // The catalog does not record which OpenAI models take `xhigh`, so the two
+    // levels above `high` clamp to it rather than risk a 400.
+    expect(
+      buildOpenAIRequest({ model: spec, messages: [], thinking: "xhigh" }).reasoning_effort,
+    ).toBe("high");
+    expect(
+      buildOpenAIRequest({ model: spec, messages: [], thinking: "max" }).reasoning_effort,
+    ).toBe("high");
     const noThink = modelSpec({
       provider: "openai",
       model: "gpt-4.1",
@@ -260,7 +268,7 @@ describe("mapOpenAIFinishReason", () => {
     expect(mapOpenAIFinishReason("length")).toBe("maxTokens");
     expect(mapOpenAIFinishReason("tool_calls")).toBe("toolCalls");
     expect(mapOpenAIFinishReason("function_call")).toBe("toolCalls");
-    expect(mapOpenAIFinishReason("content_filter")).toBe("error");
+    expect(mapOpenAIFinishReason("content_filter")).toBe("refusal");
     expect(mapOpenAIFinishReason("something-new")).toBe("endTurn");
     expect(mapOpenAIFinishReason(null)).toBe("endTurn");
   });
@@ -399,11 +407,13 @@ describe("openai streaming", () => {
     expect(terminal(events).message.stopReason).toBe("toolCalls");
   });
 
-  it("maps content_filter to a stopReason of error", async () => {
+  it("maps content_filter to a refusal, keeping the partial output", async () => {
     const events = await streamOf([chunk({ content: "part" }), chunk({}, "content_filter")]);
     const end = terminal(events);
-    expect(end.message.stopReason).toBe("error");
-    expect(end.message.errorMessage).toBe("Provider finish_reason: content_filter");
+    expect(end.message.stopReason).toBe("refusal");
+    expect(end.message.stopDetails).toEqual({ category: "content_filter" });
+    expect(end.message.errorMessage).toBeUndefined();
+    expect(end.message.content).toEqual([{ type: "text", text: "part" }]);
   });
 
   it("maps length to maxTokens", async () => {

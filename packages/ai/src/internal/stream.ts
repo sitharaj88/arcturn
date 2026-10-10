@@ -12,6 +12,7 @@ import type {
   AssistantContent,
   AssistantMessage,
   ModelSpec,
+  StopDetails,
   StopReason,
   StreamEvent,
   Usage,
@@ -28,15 +29,28 @@ export type EmittedStreamEvent = Exclude<
 /**
  * Events exchanged between a provider adapter and {@link assembleStream}.
  *
- * Two internal variants exist because the frozen `StreamEvent` union has no
- * way to carry a thinking signature or a stop reason (see NOTES.md).
+ * The internal variants exist because the frozen `StreamEvent` union has no
+ * way to carry a thinking signature, a stop reason, or which model actually
+ * answered (see NOTES.md).
  */
 export type ProviderStreamEvent =
   | EmittedStreamEvent
   /** Round-trips the opaque reasoning signature; never surfaced to consumers. */
   | { type: "thinkingSignature"; blockIndex: number; signature: string; replace?: boolean }
   /** Declares how the turn ended; folded into the terminal message. */
-  | { type: "stop"; stopReason: StopReason; errorMessage?: string };
+  | { type: "stop"; stopReason: StopReason; errorMessage?: string; stopDetails?: StopDetails }
+  /**
+   * A different model produced this message than the one requested — a
+   * provider-side refusal fallback. The terminal message is stamped with and
+   * priced at `spec`: a turn is billed at the model that answered.
+   */
+  | { type: "servedBy"; spec: ModelSpec }
+  /**
+   * The model that declined handed over to a fallback at this point. Its
+   * reasoning and its unfinished tool calls stay out of the terminal message:
+   * they belong to an attempt that was abandoned, and are not replayed.
+   */
+  | { type: "fallbackBoundary" };
 
 interface TextSlot {
   kind: "text";
@@ -70,8 +84,13 @@ export class MessageAssembler {
   private usage: Usage = emptyUsage();
   private stopReason: StopReason = "endTurn";
   private errorMessage: string | undefined;
+  private stopDetails: StopDetails | undefined;
+  /** The model that answered; differs from the requested one after a fallback. */
+  private spec: ModelSpec;
 
-  constructor(private readonly spec: ModelSpec) {}
+  constructor(spec: ModelSpec) {
+    this.spec = spec;
+  }
 
   /** True once any content block has been opened. */
   get hasContent(): boolean {
@@ -159,6 +178,19 @@ export class MessageAssembler {
       case "stop":
         this.stopReason = event.stopReason;
         this.errorMessage = event.errorMessage;
+        this.stopDetails = event.stopDetails;
+        break;
+      case "servedBy":
+        this.spec = event.spec;
+        break;
+      case "fallbackBoundary":
+        for (const index of [...this.order]) {
+          const kind = this.slots.get(index)?.kind;
+          if (kind === "thinking" || kind === "toolCall") {
+            this.slots.delete(index);
+            this.order.splice(this.order.indexOf(index), 1);
+          }
+        }
         break;
     }
   }
@@ -225,6 +257,9 @@ export class MessageAssembler {
     };
     const detail = errorMessage ?? this.errorMessage;
     if (detail !== undefined && stopReason === "error") message.errorMessage = detail;
+    if (this.stopDetails !== undefined && stopReason === "refusal") {
+      message.stopDetails = { ...this.stopDetails };
+    }
     return message;
   }
 }
@@ -257,7 +292,14 @@ export async function* assembleStream(
   try {
     for await (const event of source()) {
       assembler.apply(event);
-      if (event.type === "stop" || event.type === "thinkingSignature") continue;
+      if (
+        event.type === "stop" ||
+        event.type === "thinkingSignature" ||
+        event.type === "servedBy" ||
+        event.type === "fallbackBoundary"
+      ) {
+        continue;
+      }
       if (event.type === "usage") {
         yield { type: "usage", usage: assembler.pricedUsage() };
         continue;

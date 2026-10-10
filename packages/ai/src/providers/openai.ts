@@ -12,6 +12,7 @@ import type {
   LLMRequest,
   Message,
   ModelSpec,
+  StopDetails,
   StopReason,
   StreamEvent,
   ThinkingLevel,
@@ -35,12 +36,19 @@ import {
   type ProviderStreamEvent,
 } from "../internal/stream.js";
 
-/** Portable thinking level to OpenAI `reasoning_effort`. */
+/**
+ * Portable thinking level to OpenAI `reasoning_effort`.
+ *
+ * `xhigh` and `max` clamp to `high`: the catalog does not record which OpenAI
+ * models accept an effort above it, and an unsupported value is a 400.
+ */
 export const OPENAI_REASONING_EFFORT: Readonly<Record<ThinkingLevel, string | undefined>> = {
   off: undefined,
   low: "low",
   medium: "medium",
   high: "high",
+  xhigh: "high",
+  max: "high",
 };
 
 /** Non-standard delta keys used by compatible providers to stream reasoning. */
@@ -244,8 +252,9 @@ export function mapOpenAIFinishReason(reason: string | null | undefined): StopRe
     case "tool_calls":
     case "function_call":
       return "toolCalls";
+    // The filter declined: a finished turn, not a failed request.
     case "content_filter":
-      return "error";
+      return "refusal";
     default:
       return "endTurn";
   }
@@ -320,6 +329,7 @@ export async function* openaiEventStream(
   let usage: Usage | undefined;
   let stopReason: StopReason | undefined;
   let errorMessage: string | undefined;
+  let stopDetails: StopDetails | undefined;
 
   const events: ProviderStreamEvent[] = [];
   const closeText = (): void => {
@@ -436,6 +446,7 @@ export async function* openaiEventStream(
       if (stopReason === "error") {
         errorMessage = `Provider finish_reason: ${choice.finish_reason}`;
       }
+      if (stopReason === "refusal") stopDetails = { category: choice.finish_reason };
     }
 
     yield* flush();
@@ -478,9 +489,12 @@ export async function* openaiEventStream(
   if (usage) yield { type: "usage", usage };
 
   const resolved = stopReason ?? (toolOrder.length > 0 ? "toolCalls" : "endTurn");
-  yield errorMessage === undefined
-    ? { type: "stop", stopReason: resolved }
-    : { type: "stop", stopReason: resolved, errorMessage };
+  yield {
+    type: "stop",
+    stopReason: resolved,
+    ...(errorMessage === undefined ? {} : { errorMessage }),
+    ...(stopDetails === undefined ? {} : { stopDetails }),
+  };
 }
 
 /** Create an {@link LLMClient} backed by the Chat Completions API. */

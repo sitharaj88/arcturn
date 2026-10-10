@@ -20,7 +20,7 @@ const subagentTool = createSubagentTool({
   factory: (task) =>
     createAgent({
       llm,
-      model: requireModel("anthropic/claude-haiku-4-5"), // cheaper model for delegated work
+      model: requireModel("anthropic/claude-haiku-5-5"), // cheaper model for delegated work
       systemPrompt: "You are a focused research sub-agent. Be thorough but concise.",
       tools: readOnlyTools, // give children a narrower tool set than the parent
       cwd: agent.cwd,
@@ -63,7 +63,7 @@ agent (reported as a warning naming both files).
 name: doc-reviewer
 description: Reviews documentation for accuracy against source code
 tools: read, grep, glob
-model: anthropic/claude-haiku-4-5
+model: anthropic/claude-haiku-5-5
 ---
 You are a documentation accuracy reviewer. For every claim in the document, find the
 corresponding source location and confirm it. Flag anything unverifiable or stale.

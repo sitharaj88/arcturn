@@ -660,7 +660,16 @@ export async function runLoop(rt: LoopRuntime): Promise<LoopResult> {
     };
 
     const outcome = await streamTurn(rt, request);
-    const assistant = outcome.message;
+    // A declined turn keeps its partial text on the record but never its tool
+    // calls: they will not run, and a tool_use with no tool_result would make
+    // every later request invalid.
+    const assistant =
+      outcome.message.stopReason === "refusal"
+        ? {
+            ...outcome.message,
+            content: outcome.message.content.filter((block) => block.type !== "toolCall"),
+          }
+        : outcome.message;
     const hasContent = assistant.content.length > 0;
     if (hasContent) await rt.appendMessage(assistant);
     rt.emit({ type: "messageEnd", message: assistant });
@@ -733,10 +742,20 @@ export async function runLoop(rt: LoopRuntime): Promise<LoopResult> {
     // the run returns `completed`, every consumer reads silence as an answer,
     // and whatever depended on the output builds on a void.
     //
-    // Not gated on `stopReason`: `aborted` and `error` returned above, so what
-    // reaches here is `endTurn` (the model thinks it is done) or `maxTokens`
-    // (reasoning consumed the whole budget). Both leave the caller empty
-    // handed, and both are worth exactly one more turn.
+    // A refusal is the provider's answer, not a delivery glitch: a classifier
+    // declined this request, so asking again — which is all the nudge below
+    // would do — re-sends exactly what was refused. The turn is over, the run
+    // completed (it did not fail), and the message's `stopReason` and
+    // `stopDetails` say why to every consumer.
+    if (assistant.stopReason === "refusal") {
+      endTurn();
+      return { reason: "completed" };
+    }
+
+    // `aborted` and transport failures returned above and refusals just did,
+    // so what reaches here is `endTurn` (the model thinks it is done) or
+    // `maxTokens` (reasoning consumed the whole budget). Both leave the
+    // caller empty handed, and both are worth exactly one more turn.
     // `turnIndex + 1 < rt.maxTurns`: a nudge spends a turn, and spending the
     // last one on it would end the run as "turn ceiling" — steering the
     // operator to raise `maxTurns` against a model that emits nothing.

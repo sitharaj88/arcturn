@@ -18,6 +18,8 @@ export interface ScriptedTurn {
   usage?: Partial<Usage>;
   /** Terminate the stream with an error instead of `end`. */
   error?: string;
+  /** End the turn as a classifier refusal, with these details. */
+  refusal?: AssistantMessage["stopDetails"];
   /** Delay before the terminal event, so tests can act mid-run. */
   delayMs?: number;
 }
@@ -103,10 +105,13 @@ function fakeClient(next: (request: LLMRequest) => ScriptedTurn): FakeLLM {
       usage,
       stopReason: turn.error
         ? "error"
-        : (turn.toolCalls?.length ?? 0) > 0
-          ? "toolCalls"
-          : "endTurn",
+        : turn.refusal !== undefined
+          ? "refusal"
+          : (turn.toolCalls?.length ?? 0) > 0
+            ? "toolCalls"
+            : "endTurn",
       ...(turn.error === undefined ? {} : { errorMessage: turn.error }),
+      ...(turn.refusal === undefined ? {} : { stopDetails: turn.refusal }),
       timestamp: Date.now(),
     };
 

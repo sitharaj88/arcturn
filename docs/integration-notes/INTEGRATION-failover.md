@@ -159,14 +159,14 @@ runtime warnings (e.g. line 891). `from`/`to` are indices into `specs`, so
 {
   // primary first, then fallbacks in order
   "model": [
-    "anthropic/claude-sonnet-4-5",
+    "anthropic/claude-sonnet-5-5",
     "openai/gpt-4o",
     "google/gemini-2.0-flash"
   ]
 }
 ```
 
-CLI equivalent: `arcturn --model anthropic/claude-sonnet-4-5 --model openai/gpt-4o`.
+CLI equivalent: `arcturn --model anthropic/claude-sonnet-5-5 --model openai/gpt-4o`.
 
 ## Test coverage
 

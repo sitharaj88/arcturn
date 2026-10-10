@@ -256,6 +256,52 @@ describe("refreshCatalog", () => {
     });
   });
 
+  it("sizes an uncurated model from the Models API's max_input_tokens and max_tokens", async () => {
+    // The Anthropic Models API reports the context window as `max_input_tokens`
+    // and the output cap as `max_tokens` (there is no `context_window` field).
+    // Defaulting a 1M-token model to 128K made compaction fire at an eighth of
+    // the real window.
+    const cacheFile = join(tempDir, "cache.json");
+    const fetchFn = fakeFetch(() =>
+      jsonResponse({
+        data: [
+          { id: "claude-next", max_input_tokens: 1_000_000, max_tokens: 128_000 },
+          { id: "claude-bare" },
+          { id: "claude-junk", max_input_tokens: "lots", max_tokens: -1 },
+        ],
+      }),
+    );
+
+    await refreshCatalog(["vercel-gateway"], {
+      cacheFile,
+      fetchFn,
+      env: { AI_GATEWAY_API_KEY: "k" },
+    });
+
+    const sized = getModel("vercel-gateway/claude-next");
+    expect(sized?.contextWindow).toBe(1_000_000);
+    expect(sized?.maxOutputTokens).toBe(128_000);
+    // Limits are not a price: an unpriced model stays unpriced, never $0.
+    expect(sized?.cost).toBeUndefined();
+
+    expect(getModel("vercel-gateway/claude-bare")?.contextWindow).toBe(128_000);
+    expect(getModel("vercel-gateway/claude-bare")?.maxOutputTokens).toBe(8_192);
+    // Values that are not positive integers are ignored, not trusted.
+    expect(getModel("vercel-gateway/claude-junk")?.contextWindow).toBe(128_000);
+    expect(getModel("vercel-gateway/claude-junk")?.maxOutputTokens).toBe(8_192);
+
+    // The limits survive the on-disk cache, so a fresh-cache run sizes it too.
+    resetCatalog();
+    await refreshCatalog(["vercel-gateway"], {
+      cacheFile,
+      fetchFn: fakeFetch(() => {
+        throw new Error("must not be called");
+      }),
+      env: { AI_GATEWAY_API_KEY: "k" },
+    });
+    expect(getModel("vercel-gateway/claude-next")?.contextWindow).toBe(1_000_000);
+  });
+
   it("writes the cache atomically as valid, well-shaped JSON", async () => {
     const cacheFile = join(tempDir, "nested", "dir", "cache.json");
     const fetchFn = fakeFetch(() => jsonResponse({ data: [{ id: "some-model" }] }));

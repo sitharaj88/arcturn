@@ -25,6 +25,7 @@ import type {
   LLMRequest,
   Message,
   ModelSpec,
+  StopDetails,
   StopReason,
   StreamEvent,
   ToolDefinition,
@@ -59,8 +60,8 @@ import {
 import type { AnthropicClientLike } from "./anthropic.js";
 import {
   ANTHROPIC_THINKING_BUDGETS,
-  ANTHROPIC_THINKING_EFFORT,
   anthropicEventStream,
+  anthropicThinkingParams,
   anthropicThinkingStyle,
   REDACTED_THINKING_PREFIX,
 } from "./anthropic.js";
@@ -458,14 +459,19 @@ function reasoningConfig(
   maxTokens: number,
 ): ConverseStreamCommandInput["additionalModelRequestFields"] | undefined {
   const level = request.thinking ?? "off";
-  if (!request.model.capabilities.thinking || level === "off") return undefined;
+  if (!request.model.capabilities.thinking) return undefined;
 
+  // Adaptive Claude — and any Claude whose "off" must be spelled out — gets
+  // exactly the fields the Messages path would send, from the same rules.
   if (anthropicThinkingStyle(request.model) === "adaptive") {
+    const params = anthropicThinkingParams(request.model, level, maxTokens);
+    if (!params) return undefined;
     return {
-      thinking: { type: "adaptive" },
-      output_config: { effort: ANTHROPIC_THINKING_EFFORT[level] },
+      ...(params.thinking === undefined ? {} : { thinking: params.thinking }),
+      ...(params.effort === undefined ? {} : { output_config: { effort: params.effort } }),
     } as ConverseStreamCommandInput["additionalModelRequestFields"];
   }
+  if (level === "off") return undefined;
 
   const budget = Math.min(ANTHROPIC_THINKING_BUDGETS[level], maxTokens - MIN_REASONING_BUDGET);
   if (budget < MIN_REASONING_BUDGET) return undefined;
@@ -515,8 +521,11 @@ export function mapConverseStopReason(reason: string | null | undefined): StopRe
       return "maxTokens";
     case "tool_use":
       return "toolCalls";
+    // A filter or guardrail declining is a refusal: the call succeeded and
+    // said no. Not retryable as-is, and not a failure of the request.
     case "content_filtered":
     case "guardrail_intervened":
+      return "refusal";
     case "malformed_model_output":
     case "malformed_tool_use":
       return "error";
@@ -582,6 +591,7 @@ export async function* converseEventStream(
   const blocks = new Map<number, BlockState>();
   let stopReason: StopReason = "endTurn";
   let errorMessage: string | undefined;
+  let stopDetails: StopDetails | undefined;
   let sawStop = false;
 
   try {
@@ -681,6 +691,7 @@ export async function* converseEventStream(
         const reason = event.messageStop.stopReason;
         stopReason = mapConverseStopReason(reason);
         if (stopReason === "error") errorMessage = `Provider stopped with: ${reason}`;
+        if (stopReason === "refusal" && reason) stopDetails = { category: reason };
         continue;
       }
 
@@ -699,9 +710,12 @@ export async function* converseEventStream(
       message: "Bedrock stream ended before messageStop",
     });
   }
-  yield errorMessage === undefined
-    ? { type: "stop", stopReason }
-    : { type: "stop", stopReason, errorMessage };
+  yield {
+    type: "stop",
+    stopReason,
+    ...(errorMessage === undefined ? {} : { errorMessage }),
+    ...(stopDetails === undefined ? {} : { stopDetails }),
+  };
 }
 
 // --------------------------------------------------------------------------

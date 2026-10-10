@@ -145,7 +145,7 @@ anything else → `other`.
 
 ### Stop reasons
 
-ACP defines five `stopReason` values. Arcturn returns four of them, and only where its own
+ACP defines five `stopReason` values. Arcturn returns all five, and only where its own
 runtime genuinely makes the distinction:
 
 | ACP `stopReason` | When Arcturn returns it |
@@ -154,7 +154,7 @@ runtime genuinely makes the distinction:
 | `max_turn_requests` | The agent loop hit its turn ceiling (`--max-turns`). The loop reports this as a `runEnd` *error*, so the adapter recognises the message it composes; the session is intact and another prompt continues it, which is exactly what this stop reason means |
 | `max_tokens` | The turn's final assistant message stopped on the model's output limit |
 | `end_turn` | Everything else, including a normally completed run |
-| `refusal` | **Never.** Nothing in Arcturn's runtime models a refusal — the assistant stop reasons are `endTurn`, `toolCalls`, `maxTokens`, `aborted`, `error` — so a refusal arrives as ordinary `end_turn` text rather than a claim the adapter cannot back up |
+| `refusal` | The turn's final assistant message ended with the provider's own refusal (`stopReason: "refusal"` — a safety classifier or content filter declined it) and the run was not aborted. A refusal is the provider's verdict carried on the message; the adapter does not guess at one |
 
 A `runEnd` error that is *not* the turn ceiling is not a stop reason at all: it becomes a
 JSON-RPC error response on `session/prompt`, because it really is a failure.

@@ -41,7 +41,7 @@ budgetTokens: 60000000
 ---
 Optional prose here is documentation only and is ignored by the parser.
 
-1. [anthropic/claude-haiku-4-5] Reproduce this bug and quote the failing output: {{input}}
+1. [anthropic/claude-haiku-5-5] Reproduce this bug and quote the failing output: {{input}}
 2. Given the repro below, do both halves:
    - Write the minimal patch. Repro: {{prev}}
    - Write a regression test that fails before the patch. Repro: {{prev}}
@@ -109,7 +109,7 @@ group whose `key:` is one of the three reserved words `contract`, `judges` and `
 
 ```markdown
 1. [tier:judgment] [contract:release-verdict] [judges:3] @reviewer Judge this release: {{input}}
-2. [race:tier:cheap|anthropic/claude-haiku-4-5] Write the release note for {{contract.decision}}
+2. [race:tier:cheap|anthropic/claude-haiku-5-5] Write the release note for {{contract.decision}}
 ```
 
 - **`[contract:<name>]`** names a reply shape, declared elsewhere in the same file (see
@@ -479,7 +479,7 @@ each stage starts:
 Either way every step comes back `skipped` and total usage is zero — a workflow whose
 *last* step names a dead model must not spend two paid steps first and fail on the third.
 The CLI resolves tags through the same model catalog `/model` uses, so both a catalog id
-(`anthropic/claude-haiku-4-5`) and a configured symbolic alias work as `[tag]`.
+(`anthropic/claude-haiku-5-5`) and a configured symbolic alias work as `[tag]`.
 
 ## Named roles
 
@@ -892,7 +892,7 @@ B 20260904-2b71e0a1 — ship-fix [done] (forked from 20260904-91c4d0f2 at 4)
                           done 4t 6c 1w 41s $0.02
   ! 4     @reviewer       failed 2a 80t 12c 3m20s $0.31
                           done 31t 9c 1m02s $0.08
-      model anthropic/claude-haiku-4-5 → zai/glm-5.3-flash
+      model anthropic/claude-haiku-5-5 → zai/glm-5.3-flash
       A: —
       B: The retry path is covered; the flake was the fake clock.
 
@@ -979,7 +979,7 @@ description: Triage a PR description into a structured review
 continueOnError: false
 ---
 
-1. [anthropic/claude-haiku-4-5] Summarize what this PR changes and why, in three
+1. [anthropic/claude-haiku-5-5] Summarize what this PR changes and why, in three
    sentences or fewer: {{input}}
 2. Given that summary, do all three checks in parallel:
    - Does the summary above mention any tests being added or changed? Answer yes/no

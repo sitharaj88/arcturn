@@ -949,6 +949,24 @@ describe("stop reason fidelity", () => {
     ).resolves.toEqual({ stopReason: "max_tokens" });
   });
 
+  it("maps a refused final message onto ACP's own refusal stop reason", async () => {
+    // ACP has had `refusal` all along; Arcturn had no way to say it until the
+    // assistant StopReason union learned the word.
+    const { agent, client } = createPeers();
+    createAcpAgent(
+      stubDeps({
+        prompt: async (_r, onEvent) => {
+          onEvent(messageEnd("refusal"));
+          onEvent({ type: "runEnd", reason: "completed" });
+        },
+      }),
+    ).attach(agent);
+    const { sessionId } = await handshake(client);
+    await expect(
+      client.sendRequest("session/prompt", { sessionId, prompt: [{ type: "text", text: "x" }] }),
+    ).resolves.toEqual({ stopReason: "refusal" });
+  });
+
   it("keeps end_turn when the last message ended normally", async () => {
     const { agent, client } = createPeers();
     createAcpAgent(

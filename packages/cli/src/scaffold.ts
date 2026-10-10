@@ -131,7 +131,7 @@ tools: read, grep, glob, ls
 # A role with NO "tools:" line is refused by a workflow rather than guessed at,
 # because an undeclared tool set is whatever the session has, not nothing.
 # Optional, uncomment to use:
-# model: anthropic/claude-opus-5
+# model: anthropic/claude-opus-5-5
 # maxTurns: 20
 ---
 

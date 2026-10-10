@@ -80,7 +80,11 @@ export function registerBuiltinProviders(): void {
 
   registerProviderFactory({
     id: "anthropic",
-    factory: (ctx) => createAnthropicProvider(shared(ctx)),
+    factory: (ctx) =>
+      createAnthropicProvider({
+        ...shared(ctx),
+        ...(ctx.fallbacks === undefined ? {} : { fallbacks: ctx.fallbacks }),
+      }),
     checkCredentials: requireApiKey,
   });
 

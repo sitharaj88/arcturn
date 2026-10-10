@@ -126,7 +126,7 @@ Every message is one of two shapes:
 ```json
 // Client → server (a request)
 { "id": "1", "method": "listSessions" }
-{ "id": "2", "method": "createSession", "params": { "cwd": "/repo", "model": "anthropic/claude-sonnet-4-5" } }
+{ "id": "2", "method": "createSession", "params": { "cwd": "/repo", "model": "anthropic/claude-sonnet-5-5" } }
 { "id": "3", "method": "openSession", "params": { "sessionId": "sess_abc" } }
 { "id": "4", "method": "prompt", "params": { "sessionId": "sess_abc", "text": "add a test" } }
 { "id": "5", "method": "steer", "params": { "sessionId": "sess_abc", "text": "also update the changelog" } }
@@ -1378,7 +1378,7 @@ transcripts**:
       "id": "bg-a1b2c3d4",
       "sessionId": "sess_child",
       "task": "fix the flaky retry test",
-      "modelId": "anthropic/claude-sonnet-4-5",
+      "modelId": "anthropic/claude-sonnet-5-5",
       "status": "done",
       "createdAt": 1787000000000,
       "startedAt": 1787000000120,

@@ -41,6 +41,14 @@ const UNCURATED_DEFAULTS = {
 export interface DiscoveredModel {
   /** Wire model id exactly as the provider returned it. */
   readonly id: string;
+  /**
+   * Context window, when the listing reports one — the Anthropic Models API's
+   * `max_input_tokens`. Absent means "unknown", and the conservative default
+   * applies.
+   */
+  readonly maxInputTokens?: number;
+  /** Output-token cap, when reported — the Anthropic Models API's `max_tokens`. */
+  readonly maxOutputTokens?: number;
 }
 
 /** A read-only environment map, defaulting to `process.env`. */
@@ -114,7 +122,19 @@ function anthropicModelsUrl(baseUrl: string): string | undefined {
   return `${stripTrailingSlash(baseUrl)}/v1/models`;
 }
 
-/** Parse the common `{ data: [{ id, ... }, ...] }` shape both protocols use. */
+/** A token limit worth trusting: a positive whole number, or nothing. */
+function tokenLimit(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : undefined;
+}
+
+/**
+ * Parse the common `{ data: [{ id, ... }, ...] }` shape both protocols use.
+ *
+ * Anthropic-protocol listings also carry `max_input_tokens` (the context
+ * window — there is no `context_window` field) and `max_tokens` (the output
+ * cap); both are kept when they are sane, so an uncurated model is sized from
+ * what the provider says rather than from a guess.
+ */
 function parseModelList(body: unknown): DiscoveredModel[] {
   if (!body || typeof body !== "object") return [];
   const data = (body as { data?: unknown }).data;
@@ -122,8 +142,15 @@ function parseModelList(body: unknown): DiscoveredModel[] {
   const out: DiscoveredModel[] = [];
   for (const entry of data) {
     if (!entry || typeof entry !== "object") continue;
-    const id = (entry as { id?: unknown }).id;
-    if (typeof id === "string" && id.length > 0) out.push({ id });
+    const raw = entry as { id?: unknown; max_input_tokens?: unknown; max_tokens?: unknown };
+    if (typeof raw.id !== "string" || raw.id.length === 0) continue;
+    const maxInputTokens = tokenLimit(raw.max_input_tokens);
+    const maxOutputTokens = tokenLimit(raw.max_tokens);
+    out.push({
+      id: raw.id,
+      ...(maxInputTokens === undefined ? {} : { maxInputTokens }),
+      ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }),
+    });
   }
   return out;
 }
@@ -267,16 +294,27 @@ export interface RefreshResult {
   readonly warnings: string[];
 }
 
-/** Register one discovered model, unless a curated spec already owns its id. */
+/**
+ * Register one discovered model, unless a curated spec already owns its id.
+ *
+ * Limits the listing reported win over the defaults; a price is never
+ * inferred from them — an uncurated model stays unpriced, which reads as
+ * "cost unknown", never as $0.
+ */
 function registerDiscovered(presetId: string, discovered: DiscoveredModel): ModelSpec | undefined {
   const id = `${presetId}/${discovered.id}`;
   const existing = getModel(id);
   if (existing) return existing;
   if (!PROVIDER_PRESETS[presetId]) return undefined;
+  const contextWindow = tokenLimit(discovered.maxInputTokens) ?? UNCURATED_DEFAULTS.contextWindow;
+  const maxOutputTokens = Math.min(
+    tokenLimit(discovered.maxOutputTokens) ?? UNCURATED_DEFAULTS.maxOutputTokens,
+    contextWindow,
+  );
   return presetSpec(presetId, discovered.id, {
     displayName: discovered.id,
-    contextWindow: UNCURATED_DEFAULTS.contextWindow,
-    maxOutputTokens: UNCURATED_DEFAULTS.maxOutputTokens,
+    contextWindow,
+    maxOutputTokens,
     capabilities: UNCURATED_DEFAULTS.capabilities,
     register: true,
   });

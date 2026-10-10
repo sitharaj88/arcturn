@@ -297,13 +297,16 @@ function withProfiles(models: readonly BedrockModelSpec[]): BedrockModelSpec[] {
  * offers one) and `us.`/`eu.`/`apac.` inference-profile variants for the
  * Claude and Nova families.
  *
- * Claude Opus 5, Sonnet 5, Fable 5, Opus 4.8 and Opus 4.7 are deliberately
- * absent. Anthropic's Bedrock docs state they have no ARN-versioned model ids
- * and are served by the Messages-API Bedrock endpoint rather than the
- * `bedrock-runtime` integration this adapter speaks, and the docs table
- * renders their ids with footnote markers attached, so no id string could be
- * read cleanly. Register them explicitly with `bedrockModel()` once the exact
- * ids and Bedrock rate card are confirmed.
+ * The current generation is deliberately absent: Claude Fable 5.1, Opus 5.5,
+ * Sonnet 5.5 and Haiku 5.5, and before them Opus 5, Sonnet 5, Fable 5, Opus
+ * 4.8 and Opus 4.7. Anthropic's Bedrock docs state they have no ARN-versioned
+ * model ids and are served by the Messages-API Bedrock endpoint (the "Mantle"
+ * client) rather than the `bedrock-runtime` integration this adapter speaks.
+ * Their ids there are the first-party id behind an `anthropic.` prefix —
+ * `anthropic.claude-opus-5-5`, `anthropic.claude-sonnet-5-5`,
+ * `anthropic.claude-haiku-5-5`, `anthropic.claude-fable-5-1` — with no
+ * version suffix. Listing them here would advertise ids this adapter cannot
+ * serve; they arrive with the move to the Mantle client (see NOTES.md).
  */
 export const BEDROCK_MODELS: readonly BedrockModelSpec[] = [
   ...withProfiles(CLAUDE_MODELS),

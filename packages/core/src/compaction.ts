@@ -289,6 +289,12 @@ export async function compactMessages(
   if (response.stopReason === "error") {
     throw new Error(response.errorMessage ?? "Summarization failed");
   }
+  // A declined summary is not a short one: whatever streamed before the
+  // refusal is a fragment, and installing it would replace real history.
+  if (response.stopReason === "refusal") {
+    const category = response.stopDetails?.category;
+    throw new Error(`Summarization was declined by the model${category ? ` (${category})` : ""}`);
+  }
   const summary = contentText(response.content).trim();
   if (summary.length === 0) throw new Error("Summarization produced no text");
 

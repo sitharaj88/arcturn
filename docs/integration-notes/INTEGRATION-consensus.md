@@ -166,11 +166,11 @@ every turn. Mitigations built in:
 
 ```jsonc
 {
-  "model": ["anthropic/claude-sonnet-4-5", "openai/gpt-4o"],  // failover chain (unchanged)
+  "model": ["anthropic/claude-sonnet-5-5", "openai/gpt-4o"],  // failover chain (unchanged)
   "consensus": {
     // Cross-check models, primary first. The primary should normally be the
     // head of "model"; if omitted it is prepended automatically.
-    "models": ["anthropic/claude-sonnet-4-5", "openai/gpt-4o", "google/gemini-2.0-flash"],
+    "models": ["anthropic/claude-sonnet-5-5", "openai/gpt-4o", "google/gemini-2.0-flash"],
     "sampleRate": 0.2,          // optional, default 1 — 1 in 5 turns at 3x cost
     "similarityThreshold": 0.6  // optional
   }

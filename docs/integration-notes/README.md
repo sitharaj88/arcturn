@@ -17,3 +17,12 @@ integrated; the wiring recipes have been applied and in places superseded by
 what the adversarial review pass changed afterwards (see `PLAN.md`). For how
 the features behave today, read the user documentation under
 `website/src/content/docs/` and the TSDoc on the modules themselves.
+
+## Later notes
+
+- [`INTEGRATION-refusals.md`](INTEGRATION-refusals.md) — the `refusal` stop reason,
+  how each provider maps onto it, why the loop ends the turn, and the opt-in
+  server-side fallback (2026-10-10).
+- [`INTEGRATION-live-catalog.md`](INTEGRATION-live-catalog.md) — the live catalog;
+  the 2026-10-10 section covers the context window and output cap now read from the
+  Anthropic Models API.

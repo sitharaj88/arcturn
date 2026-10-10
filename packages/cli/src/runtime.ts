@@ -2566,6 +2566,8 @@ export async function buildRuntime(options: BuildRuntimeOptions = {}): Promise<A
       ...(config.requestStallTimeoutMs === undefined
         ? {}
         : { requestStallTimeoutMs: config.requestStallTimeoutMs }),
+      // `providers.anthropic.fallbacks`: opt-in, first-party Anthropic only.
+      ...(config.anthropicFallbacks === undefined ? {} : { fallbacks: config.anthropicFallbacks }),
     });
   // `wrapLlm` sits *inside* failover and consensus on purpose: `--record`'s
   // tee has to see whichever link actually answered, because a cassette is a

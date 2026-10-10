@@ -434,7 +434,7 @@ describe("runDoctorCommand: default scan", () => {
     expect(code).toBe(1);
     // No config file: the built-in default model is what a session would use,
     // and with no key it is a broken setup, not an empty report.
-    expect(out).toContain("anthropic/claude-sonnet-4-5");
+    expect(out).toContain("anthropic/claude-sonnet-5-5");
     expect(out).toContain("no key");
     expect(out).toContain("ANTHROPIC_API_KEY");
     expect(requests).toHaveLength(0);

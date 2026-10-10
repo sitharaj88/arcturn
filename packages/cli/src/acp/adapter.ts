@@ -977,13 +977,12 @@ class TurnMapper {
    * | `runEnd` reason `aborted` (or `session/cancel`, handled by the caller) | `cancelled` |
    * | `runEnd` reason `error` matching {@link MAX_TURNS_RUN_END} | `max_turn_requests` |
    * | last `messageEnd`'s `stopReason` is `maxTokens`, run not aborted | `max_tokens` |
+   * | last `messageEnd`'s `stopReason` is `refusal`, run not aborted | `refusal` |
    * | everything else, including `runEnd` reason `completed` | `end_turn` |
    *
-   * `refusal` is never returned: nothing in `@arcturn/core` or
-   * `@arcturn/types` models a refusal — the assistant `StopReason` union is
-   * `endTurn | toolCalls | maxTokens | aborted | error` — so claiming to
-   * detect one would be an invention. A refusal surfaces as ordinary
-   * `end_turn` text, which is what the runtime genuinely knows.
+   * `refusal` is the provider's own verdict — a safety classifier or content
+   * filter declined the turn — carried on the assistant message since the
+   * `StopReason` union learned the word; nothing here guesses at one.
    *
    * Any other `runEnd` error is *not* a stop reason at all: it becomes a
    * JSON-RPC error response on `session/prompt` (see `handlePrompt`).
@@ -992,6 +991,7 @@ class TurnMapper {
     if (this.runEndReason === "aborted") return "cancelled";
     if (this.maxTurnsReached) return "max_turn_requests";
     if (this.#lastMessageStopReason === "maxTokens") return "max_tokens";
+    if (this.#lastMessageStopReason === "refusal") return "refusal";
     return "end_turn";
   }
 

@@ -40,7 +40,7 @@ import { createClient, requireModel } from "@arcturn/ai";
 
 const client = createClient();
 for await (const event of client.stream({
-  model: requireModel("anthropic/claude-sonnet-4-5"),
+  model: requireModel("anthropic/claude-sonnet-5-5"),
   messages: [{ role: "user", content: [{ type: "text", text: "hi" }], timestamp: Date.now() }],
 })) {
   if (event.type === "textDelta") process.stdout.write(event.delta);

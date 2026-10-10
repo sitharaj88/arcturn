@@ -59,6 +59,32 @@ describe("reduceChat — run lifecycle", () => {
     });
   });
 
+  it("says when the model declined, instead of ending the run silently", () => {
+    // A refusal is a completed run with no text: without a notice the sidebar
+    // just stops, and the user cannot tell a decline from a dropped connection.
+    const state = run([
+      userPrompt,
+      {
+        type: "messageEnd",
+        message: {
+          role: "assistant",
+          content: [],
+          model: "anthropic/claude-sonnet-5-5",
+          usage: { inputTokens: 1, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+          stopReason: "refusal",
+          stopDetails: { category: "cyber", explanation: "line one\nline two" },
+          timestamp: 2,
+        },
+      },
+      { type: "runEnd", reason: "completed" },
+    ]);
+    const last = state.blocks.at(-1);
+    expect(last).toMatchObject({ kind: "notice", level: "warn" });
+    expect(last && "text" in last ? last.text : "").toBe(
+      "The model declined this request (cyber): line one line two",
+    );
+  });
+
   it("returns the same state object for an event that changes nothing", () => {
     const state = run([userPrompt]);
     expect(reduceChat(state, { type: "turnStart", turnIndex: 0 })).toBe(state);

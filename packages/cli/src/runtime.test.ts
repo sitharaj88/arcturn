@@ -398,7 +398,7 @@ describe("session titles (runtime wiring)", () => {
     const llm = runtime.llm as FakeLLM;
     expect(llm.requests).toHaveLength(2);
     // The main turn ran on the session model; the title call on the route.
-    expect(llm.requests[0]?.model.id).toBe("anthropic/claude-sonnet-4-5");
+    expect(llm.requests[0]?.model.id).toBe("anthropic/claude-sonnet-5-5");
     expect(llm.requests[1]?.model.id).toBe("anthropic/claude-haiku-4-5");
     // The title request carried the exchange, not the whole transcript shape.
     expect(JSON.stringify(llm.requests[1]?.messages)).toContain("please fix the login bug");

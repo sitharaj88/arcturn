@@ -135,7 +135,7 @@ arcturn-evals compare <a.json> <b.json>
 
 | `run` option | Description |
 | --- | --- |
-| `--model <id>` | Model id to drive the agent with (default: `anthropic/claude-sonnet-4-5`). |
+| `--model <id>` | Model id to drive the agent with (default: `anthropic/claude-sonnet-5-5`). |
 | `--tasks <glob>` | Only run tasks whose id matches this glob, e.g. `--tasks "fix-*"`. |
 | `--concurrency <n>` | Maximum tasks run at once (default `4`). |
 | `--json <path>` | Also write the full JSON report to this path. |
@@ -167,10 +167,10 @@ import { ALL_TASKS, runSuite, renderTable, writeReport } from "@arcturn/evals";
 import { buildRuntime } from "arcturn";
 
 const suite = await runSuite(ALL_TASKS, {
-  model: "anthropic/claude-sonnet-4-5",
+  model: "anthropic/claude-sonnet-5-5",
   concurrency: 4,
   agentFactory: async (cwd) => {
-    const runtime = await buildRuntime({ cwd, model: "anthropic/claude-sonnet-4-5", permissionMode: "yolo" });
+    const runtime = await buildRuntime({ cwd, model: "anthropic/claude-sonnet-5-5", permissionMode: "yolo" });
     return { agent: runtime.agent, dispose: () => runtime.dispose() };
   },
 });

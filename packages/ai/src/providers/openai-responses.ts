@@ -23,6 +23,7 @@ import type {
   Message,
   ModelCapabilities,
   ModelSpec,
+  StopDetails,
   StopReason,
   StreamEvent,
   ToolResultMessage,
@@ -433,15 +434,17 @@ export function parseResponsesUsage(raw: unknown): Usage | undefined {
 export interface ResponsesStop {
   stopReason: StopReason;
   errorMessage?: string;
+  /** Set for a refusal: the filter that declined. */
+  stopDetails?: StopDetails;
 }
 
 /**
  * Map a terminal `Response` onto a Arcturn stop reason.
  *
  * `incomplete` splits by reason: a token ceiling is the ordinary `maxTokens`
- * outcome, while a content filter is reported as a stopped-in-error turn, in
- * line with how the Chat Completions adapter treats `finish_reason:
- * "content_filter"`.
+ * outcome, while a content filter is a refusal — the turn finished and the
+ * filter said no — in line with how the Chat Completions adapter treats
+ * `finish_reason: "content_filter"`.
  */
 export function mapResponsesStop(
   response: Pick<OpenAIResponse, "status"> & {
@@ -452,7 +455,7 @@ export function mapResponsesStop(
     case "incomplete": {
       const reason = response.incomplete_details?.reason;
       if (reason === "content_filter") {
-        return { stopReason: "error", errorMessage: "Response incomplete: content_filter" };
+        return { stopReason: "refusal", stopDetails: { category: "content_filter" } };
       }
       return { stopReason: "maxTokens" };
     }
@@ -801,9 +804,12 @@ export async function* openaiResponsesEventStream(
     (order.some((state) => state.kind === "functionCall")
       ? { stopReason: "toolCalls" as StopReason }
       : { stopReason: "endTurn" as StopReason });
-  yield resolved.errorMessage === undefined
-    ? { type: "stop", stopReason: resolved.stopReason }
-    : { type: "stop", stopReason: resolved.stopReason, errorMessage: resolved.errorMessage };
+  yield {
+    type: "stop",
+    stopReason: resolved.stopReason,
+    ...(resolved.errorMessage === undefined ? {} : { errorMessage: resolved.errorMessage }),
+    ...(resolved.stopDetails === undefined ? {} : { stopDetails: resolved.stopDetails }),
+  };
 }
 
 /** Create an {@link LLMClient} backed by the OpenAI Responses API. */

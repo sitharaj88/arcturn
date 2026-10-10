@@ -215,7 +215,7 @@ const { tools } = createDefaultTools({ cwd: process.cwd() });
 
 const agent = createAgent({
   llm,
-  model: requireModel("anthropic/claude-sonnet-4-5"),
+  model: requireModel("anthropic/claude-sonnet-5-5"),
   systemPrompt: "You are a focused, careful coding agent.",
   tools,
   cwd: process.cwd(),

@@ -110,7 +110,7 @@ call — reading a file, editing one, running a shell command — is scoped to t
 directory. Type a prompt and press enter:
 
 ```text
-✦ arcturn · claude-sonnet-4-5 · ~/projects/api
+✦ arcturn · claude-sonnet-5-5 · ~/projects/api
 › add input validation to the /signup handler
 ```
 
@@ -177,7 +177,7 @@ stderr, so piping stdout stays clean data either way.
 ## Choosing a model
 
 ```bash
-arcturn --model anthropic/claude-sonnet-4-5
+arcturn --model anthropic/claude-sonnet-5-5
 arcturn --model openai/gpt-5.1
 arcturn --model google/gemini-3-pro-preview
 ```

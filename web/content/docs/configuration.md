@@ -44,10 +44,11 @@ Every key `.arcturn/config.json` accepts, in both user and project files:
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `model` | `string \| string[]` | `"anthropic/claude-sonnet-4-5"` | An array is a failover chain: first entry primary, later ones tried on overload/rate-limit/unreachable. |
+| `model` | `string \| string[]` | `"anthropic/claude-sonnet-5-5"` | An array is a failover chain: first entry primary, later ones tried on overload/rate-limit/unreachable. |
 | `permissionMode` | `"default" \| "acceptEdits" \| "plan" \| "yolo"` | `"default"` | Starting permission mode. A project layer may only narrow it (see above). See [Permissions](/docs/permissions). |
 | `permissions` | `PermissionRule[]` | `[]` | Accumulates across layers. See [Permissions](/docs/permissions). |
-| `thinking` | `"off" \| "low" \| "medium" \| "high"` | `"off"` | Extended-thinking level for `thinking`-capable models. |
+| `thinking` | `"off" \| "low" \| "medium" \| "high" \| "xhigh" \| "max"` | `"off"` | Extended-thinking level for `thinking`-capable models. A level the model does not accept is clamped down to the nearest one it does. See [Extended thinking](#extended-thinking). |
+| `providers.anthropic.fallbacks` | `"default"` | *(unset)* | Opt in to Anthropic's server-side refusal fallback for models that support it. See [Refusals and server-side fallbacks](/docs/providers#refusals-and-server-side-fallbacks). |
 | `theme` | `string` | `"dark"` | `"dark"`, `"light"`, or a custom theme file name under `~/.arcturn/themes` / `<cwd>/.arcturn/themes`. |
 | `ui` | `"screen" \| "inline"` | `"screen"` | `"screen"` is the full-screen, alternate-screen TUI; `"inline"` is the classic bottom-of-scrollback block. |
 | `systemPromptAppend` | `string` | *(none)* | Extra text appended verbatim to the system prompt. |
@@ -135,9 +136,9 @@ Route a cheaper model to work that doesn't need the flagship:
 ```json
 {
   "route": {
-    "subagent": "anthropic/claude-haiku-4-5",
-    "compaction": "anthropic/claude-haiku-4-5",
-    "title": "anthropic/claude-haiku-4-5"
+    "subagent": "anthropic/claude-haiku-5-5",
+    "compaction": "anthropic/claude-haiku-5-5",
+    "title": "anthropic/claude-haiku-5-5"
   }
 }
 ```
@@ -195,16 +196,19 @@ per million tokens, and capability flags (`tools`, `vision`, `thinking`, `cachin
 every model it supports out of the box, keyed as `<provider>/<model>`:
 
 ```text
-anthropic/claude-opus-4-5
-anthropic/claude-sonnet-4-5
-anthropic/claude-haiku-4-5
+anthropic/claude-fable-5-1
+anthropic/claude-opus-5-5
+anthropic/claude-sonnet-5-5
+anthropic/claude-haiku-5-5
+anthropic/claude-opus-4-8
+anthropic/claude-sonnet-4-6
 openai/gpt-5.1
 openai/gpt-5.1-codex
 google/gemini-3-pro-preview
 google/gemini-2.5-flash
 ```
 
-Pick one on the command line (`arcturn --model anthropic/claude-sonnet-4-5`), in-session
+Pick one on the command line (`arcturn --model anthropic/claude-sonnet-5-5`), in-session
 (`/model openai/gpt-5.1`), or in code via `requireModel(id)` from `@arcturn/ai`.
 Switching models mid-session is recorded as a `state` entry in the session tree, so
 resuming later restores the model you were using. `arcturn --list-models` prints the full
@@ -307,10 +311,28 @@ full schema and `${ENV_VAR}` expansion rules.
 ## Extended thinking
 
 `thinking` (config key) or `--thinking <level>` is not currently a CLI flag — set it via
-`.arcturn/config.json`'s `thinking` key (`off`, `low`, `medium`, `high`) to control how
-much extended reasoning a `thinking`-capable model does before it answers or calls a tool.
-This maps to the `ThinkingLevel` type shared by every provider adapter, so the same
-setting works regardless of which model you're running.
+`.arcturn/config.json`'s `thinking` key (`off`, `low`, `medium`, `high`, `xhigh`, `max`) to
+control how much extended reasoning a `thinking`-capable model does before it answers or
+calls a tool. This maps to the `ThinkingLevel` type shared by every provider adapter, so the
+same setting works regardless of which model you're running.
+
+Each model declares the levels it accepts, and a level it lacks is clamped *down* to the
+nearest one it has: Claude Opus 4.6 and Sonnet 4.6 have no `xhigh`, so `xhigh` runs as
+`high` there; OpenAI models stop at `high`, and Gemini tops out at `HIGH` (a 32K budget).
+
+**What `off` means is per model, and three of them changed.** Some Claude models think
+unless told not to, so `off` has to be sent as something:
+
+| Model | `off` is sent as |
+|---|---|
+| Claude 4.6 – 4.8, and the budget-era models | `thinking` omitted — these do not think by default |
+| Claude Sonnet 5, Haiku 5.5 | `thinking: {type: "disabled"}` (Sonnet 5 used to run adaptive thinking under `off`) |
+| Claude Sonnet 5.5 | `thinking: {type: "between_tools"}` |
+| Claude Fable 5 / 5.1, Opus 5, Opus 5.5 | no `thinking` key and `effort: "low"` — thinking cannot be disabled on these (Opus 5 used to run at its default effort under `off`) |
+
+Adaptive requests to Opus 4.7 and later ask for `display: "summarized"`, because the API's
+default became `omitted` and the thinking pane would otherwise be blank. Opus 5.5 always
+carries an explicit effort — its API default is `medium`, not `high`.
 
 ## Compaction
 

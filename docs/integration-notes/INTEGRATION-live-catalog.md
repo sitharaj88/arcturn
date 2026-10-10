@@ -125,3 +125,19 @@ invocations skip the network entirely and just read the on-disk cache.
   today's presets currently resolves to a real request there.
 - `RefreshResult.warnings` are plain strings meant for a CLI log line or the `/model refresh`
   output, not structured errors — the background path above is expected to just drop them.
+
+## Limits from the Models API (2026-10-10)
+
+The Anthropic Models API reports a window and an output cap per model:
+`max_input_tokens` (there is no `context_window` field) and `max_tokens`.
+`parseModelList` now keeps both on `DiscoveredModel` as `maxInputTokens?` and
+`maxOutputTokens?`, but only when the value is a positive whole number — anything
+else is dropped, and a model with no usable limit falls back to the old 128K
+default.
+
+`registerDiscovered` uses them in place of `UNCURATED_DEFAULTS`, and clamps
+the output cap to the window so a nonsense pairing cannot be registered. Two
+things did not change: a curated spec still wins its id outright, and a discovered
+model stays **unpriced** — limits are read from the listing, a price never is, so
+spend on it reads as cost unknown rather than $0. Before this, a newly released
+Claude found by `/model refresh` was sized at 128K whatever its real window.

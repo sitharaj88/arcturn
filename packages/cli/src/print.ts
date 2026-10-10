@@ -26,6 +26,7 @@ import {
   createCommandRegistry,
   parseCommandLine,
 } from "./commands.js";
+import { refusalLine } from "./display.js";
 import { expandMentions } from "./mentions.js";
 import type { ArcturnRuntime } from "./runtime.js";
 import { isWorkflowHumanStop } from "./workflow.js";
@@ -53,7 +54,8 @@ export interface RunPrintOptions {
 /** Result of a `--print` run. */
 export interface PrintResult {
   /**
-   * Process exit code. For a prompt: `0` on success, `1` on error or abort.
+   * Process exit code. For a prompt: `0` on success, `1` on error, abort or a
+   * refusal (the model declined, so no work was produced).
    * For a slash command: `0` when it ran clean, `1` when it reported an
    * error, `2` when no such command exists, and `3` when a workflow stopped
    * for a human — a budget checkpoint, an `ORG-ASK`, or a parked step — so a
@@ -66,6 +68,12 @@ export interface PrintResult {
   reason: "completed" | "aborted" | "error";
   /** Populated when `reason` is `"error"`. */
   errorMessage?: string;
+  /**
+   * Populated when the run's last turn was declined by the model's safety
+   * classifier or content filter. `reason` is still `"completed"` (the provider
+   * answered), but the exit code is `1`: the caller asked for work and got none.
+   */
+  refusal?: string;
 }
 
 /** The exit code a slash command run under `--print` ends with. */
@@ -140,7 +148,7 @@ export async function runPrint(options: RunPrintOptions): Promise<PrintResult> {
 
   // Held in an object rather than `let` bindings: assignments happen inside a
   // callback, which control-flow analysis cannot see.
-  const outcome: { reason: PrintResult["reason"]; errorMessage?: string } = {
+  const outcome: { reason: PrintResult["reason"]; errorMessage?: string; refusal?: string } = {
     reason: "completed",
   };
 
@@ -152,6 +160,12 @@ export async function runPrint(options: RunPrintOptions): Promise<PrintResult> {
     if (event.type === "runEnd") {
       outcome.reason = event.reason;
       outcome.errorMessage = event.errorMessage;
+    }
+    // A refusal before any output leaves no text to print, so stdout alone
+    // would be silent. Remember the last one and say so on stderr below.
+    if (event.type === "messageEnd") {
+      outcome.refusal =
+        event.message.stopReason === "refusal" ? refusalLine(event.message) : undefined;
     }
   });
 
@@ -187,12 +201,17 @@ export async function runPrint(options: RunPrintOptions): Promise<PrintResult> {
       err(`arcturn: ${outcome.errorMessage}\n`);
     }
     if (outcome.reason === "aborted") err("arcturn: interrupted\n");
+    if (outcome.refusal !== undefined) {
+      const line = outcome.refusal;
+      err(`arcturn: ${line.charAt(0).toLowerCase()}${line.slice(1)}\n`);
+    }
   }
 
   return {
-    exitCode: outcome.reason === "completed" ? 0 : 1,
+    exitCode: outcome.reason === "completed" && outcome.refusal === undefined ? 0 : 1,
     text,
     reason: outcome.reason,
+    ...(outcome.refusal === undefined ? {} : { refusal: outcome.refusal }),
     ...(outcome.errorMessage === undefined ? {} : { errorMessage: outcome.errorMessage }),
   };
 }

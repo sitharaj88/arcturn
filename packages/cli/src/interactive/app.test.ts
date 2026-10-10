@@ -140,7 +140,7 @@ describe("InteractiveApp", () => {
     expect(text).toContain("█");
     expect(text).toContain("▀"); // pixel wordmark rows
     expect(text).toContain("every turn counts");
-    expect(text).toContain("Claude Sonnet 4.5");
+    expect(text).toContain("Claude Sonnet 5.5");
     expect(text).toContain("default"); // the mode row
     // The working directory is shown (its head survives any width clipping).
     expect(text).toContain(h.runtime.cwd.slice(0, 12));
@@ -491,7 +491,7 @@ describe("InteractiveApp", () => {
     await waitFor(() => h.text().includes("hi"));
     const frame = stripAnsi(h.app.tui.buildFrame(80, 24).lines.join("\n"));
     expect(frame).toContain("arcturn");
-    expect(frame).toContain("Claude Sonnet 4.5");
+    expect(frame).toContain("Claude Sonnet 5.5");
     expect(frame).toMatch(/ctx \d+%/);
   });
 

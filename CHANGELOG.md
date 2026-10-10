@@ -10,6 +10,124 @@ CLI, the SDK, or the wire protocol.
 
 ## [Unreleased]
 
+### Changed
+
+- **The default model is now `anthropic/claude-sonnet-5-5`** (was
+  `claude-sonnet-4-5`). Nothing is migrated: a config, a `--model` flag or a
+  session that names a model keeps it. Only an install that never chose one
+  moves, and the price moves with it — $2 / $10 per million tokens, against
+  $3 / $15. The scaffolded `.arcturn/config.json` comment now names
+  `anthropic/claude-opus-5-5`, and `/model route --auto` now picks Claude
+  Haiku 5.5 as the cheap tier for an Anthropic main model.
+
+- **`thinking: "off"` now actually turns thinking off on Opus 5 and Sonnet 5.**
+  On both, leaving the `thinking` field out does not mean "off" — it runs
+  adaptive thinking. So `off` on Opus 5 used to run at the model's default
+  effort, and `off` on Sonnet 5 used to run adaptive. Each model now gets the
+  spelling it takes: Sonnet 5 and Haiku 5.5 send `thinking: {type:
+  "disabled"}`; Sonnet 5.5 sends `{type: "between_tools"}`; Fable 5 / 5.1 and
+  Opus 5 / 5.5, where thinking cannot be disabled, send no `thinking` and
+  `effort: "low"` (`disabled` on Opus 5 makes it write its tool calls into the
+  visible text). Claude 4.6 – 4.8 and the budget-era models still omit the
+  field.
+
+- **Opus 5.5 always carries an explicit effort**, because its API default is
+  `medium`, not `high`.
+
+- **The thinking pane is no longer blank on Opus 4.7 and later.** The API's
+  default thinking display became `omitted`; adaptive requests to those models
+  now ask for `display: "summarized"`.
+
+- **`thinking` takes `xhigh` and `max`**, in `.arcturn/config.json` and from
+  code. A model that lacks a level gets the nearest one below it rather than a
+  400: `xhigh` runs as `high` on Opus 4.6 and Sonnet 4.6, and OpenAI and Gemini
+  top out at `high` (Gemini at `HIGH`, a 32K budget). The budget-era mapping
+  gained `xhigh` (49,152) and `max` (65,536) tokens.
+
+- **A newly released model found by `/model refresh` is sized by what the
+  provider says.** Anthropic's Models API reports `max_input_tokens` and
+  `max_tokens`; an uncurated model takes both instead of a 128K default. It is
+  still unpriced, so its cost reads as unknown, never $0.
+
+### Added
+
+- **The 5.5 generation and the 4.6 – 4.8 Opus/Sonnet line are in the catalog.**
+  `claude-fable-5-1` ($10 / $50, cache read $0.25), `claude-opus-5-5` ($4 /
+  $20, cache read $0.20), `claude-sonnet-5-5` ($2 / $10), `claude-haiku-5-5`
+  ($0.10 / $0.50), `claude-opus-4-8`, `-4-7`, `-4-6` ($5 / $25) and
+  `claude-sonnet-4-6` ($3 / $15) — each with a 1M-token window and 128K
+  output, listed newest first within its family. Haiku 5.5's rate is the one for
+  prompts up to 100K tokens; longer prompts bill $0.50 / $2.50, which the
+  catalog does not model, so a long-prompt estimate is a floor. Vertex lists the
+  same ids **unpriced** (Google bills on its own rate card, which was not
+  verified) — selectable, sized, and reported as cost unknown.
+
+- **A refusal is its own outcome, not an empty reply.** `StopReason` gains
+  `"refusal"` and `AssistantMessage` gains `stopDetails: { category,
+  explanation? }`. Anthropic's `stop_reason: "refusal"`, OpenAI's
+  `content_filter` (both APIs), Gemini's `SAFETY`, `PROHIBITED_CONTENT`,
+  `BLOCKLIST`, `SPII` and `IMAGE_SAFETY`, and Bedrock Converse's
+  `content_filtered` and `guardrail_intervened` all land there, with the
+  provider's own word as the category. The loop ends the turn cleanly: no
+  "turn returned nothing" nudge re-sending the request that was just declined,
+  any tool calls in the refused message are stripped and never run, a refused
+  message is skipped when history is replayed to the provider, and a compaction
+  whose summary is refused throws instead of installing a fragment as the
+  summary. You see "The model declined this request (cyber): <explanation>" in
+  the TUI, the transcript and the web UI; `-p` writes `arcturn: the model
+  declined this request (cyber).` to stderr and exits `1`; NDJSON
+  `messageEnd` carries `stopReason: "refusal"` and `stopDetails`; ACP returns
+  `stopReason: "refusal"`; the VS Code sidebar shows the same notice rather
+  than ending the run in silence. The category and explanation come off the
+  wire, so both are scrubbed of control characters and held to one line before
+  they reach a terminal.
+
+- **Opt-in server-side refusal fallback.** `providers.anthropic.fallbacks:
+  "default"` in `.arcturn/config.json` (`AnthropicProviderOptions.fallbacks`
+  from code) sends requests to Fable 5.1, Opus 5.5, Opus 5 and Sonnet 5.5
+  through the beta surface with the `server-side-fallback-2026-07-01` beta, so a
+  declined request is re-run on a fallback model in the same call. Off by
+  default; never sent to Haiku 5.5, which has none. The message is stamped with,
+  and billed at, the model that answered — and an answering model not in the
+  catalog reads as cost unknown.
+
+- **New `@arcturn/types` exports:** `ThinkingLevel` extended, `THINKING_LEVELS`,
+  `ThinkingOffStyle`, `StopDetails`, and `ModelCapabilities.thinkingOff` /
+  `.thinkingLevels` / `.refusalFallback` (each inferred from the model id when
+  absent, and each declarable on a `providers.<name>.models[].capabilities`
+  config entry — the only way a gateway serving Sonnet 5.5 under its own model
+  string can say that "off" is `between_tools`). **`@arcturn/ai`:** `anthropicThinkingParams()`,
+  `anthropicThinkingOff()`, `anthropicEffort()`, `ANTHROPIC_FALLBACK_BETA`,
+  `ANTHROPIC_THINKING_EFFORT`, the `AnthropicEffort`, `AnthropicThinkingParam`,
+  `AnthropicThinkingParams`, `AnthropicRequestParams` and
+  `AnthropicStreamOptions` types, and `DiscoveredModel.maxInputTokens?` /
+  `.maxOutputTokens?`.
+
+### Fixed
+
+- **A model that declined used to be nudged to answer anyway.** An `endTurn`
+  with no text read as a delivery glitch, so the loop sent the declined request
+  again. A refusal now ends the turn.
+
+### Known gaps
+
+- **Bedrock has no catalog entries for this generation.** The 5.x and Opus 4.7+
+  models are served by Bedrock's Mantle endpoint; the adapter still speaks
+  `bedrock-runtime`, and listing a model it cannot serve would advertise a path
+  that 400s.
+- **A fallback turn's cost is a floor.** Tokens a declined attempt spent are
+  reported in `usage.iterations` and are not added.
+- **Other `complete()` callers ignore `stopReason`:** git-message generation,
+  session titles and the team planner read a refusal as ordinary text.
+- **OpenAI refusal text deltas are not surfaced**; only the `content_filter`
+  finish reason is mapped.
+- **A refusal before any output leaves no message in the session.** The
+  assistant message is empty, so nothing is appended; the live event stream and
+  the exit code report it, but `replay`, `bisect`, `blame` and `/export` never
+  see that the turn was declined.
+- **A refused turn's tool calls still appear on the streamed `end` event**,
+  though the stored message has them stripped and none of them run.
+
 ## [0.6.0] — 2026-09-05
 
 ### Added

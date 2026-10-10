@@ -172,6 +172,17 @@ agent.subscribe((event) => {
 const compacted = await agent.compact(); // force it now, regardless of the threshold
 ```
 
+### A refused turn
+
+If the model declines a request (`stopReason: "refusal"`, see
+[Providers](/docs/providers#refusals-and-server-side-fallbacks)), the assistant message is
+recorded in the session like any other, with its `stopDetails`, and the turn ends — no
+retry nudge, and any tool calls in it are stripped and never run. When the branch is next
+sent to a provider that refused message is skipped rather than replayed, so a declined
+request does not poison the conversation that follows it. A compaction whose summary the
+model refuses fails with an error instead of installing the partial text as the summary;
+the history it would have folded is left as it was.
+
 ## Related
 
 - [Checkpoints & /rewind](/docs/checkpoints) — the file-restore side of branching: what

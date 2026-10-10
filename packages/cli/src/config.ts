@@ -20,13 +20,14 @@ import {
   listProviderIds,
   PROVIDER_PRESETS,
 } from "@arcturn/ai";
-import type {
-  ModelCapabilities,
-  ModelCost,
-  PermissionMode,
-  PermissionRule,
-  PermissionScope,
-  ThinkingLevel,
+import {
+  type ModelCapabilities,
+  type ModelCost,
+  type PermissionMode,
+  type PermissionRule,
+  type PermissionScope,
+  THINKING_LEVELS,
+  type ThinkingLevel,
 } from "@arcturn/types";
 import { EMPTY_HOOK_CONFIG, type HookConfig, parseHookConfig } from "./hooks.js";
 import {
@@ -365,6 +366,17 @@ export interface ArcturnConfig {
    */
   providers?: Record<string, ConfiguredProvider>;
   /**
+   * Opt in to Anthropic's server-side refusal fallbacks (`"default"`): on the
+   * first-party `anthropic` provider, a request a safety classifier declines is
+   * re-run server-side on the model Anthropic recommends, in the same call, and
+   * billed at the model that answered. Written
+   * `{"providers": {"anthropic": {"fallbacks": "default"}}}` — the built-in
+   * provider's settings live beside the custom endpoints, but are not one: the
+   * name is reserved, so this key never declares an endpoint. Claude API only;
+   * the compatible, Bedrock and Vertex adapters ignore it. Off by default.
+   */
+  anthropicFallbacks?: "default";
+  /**
    * Directories whose own `.arcturn` code — hooks, `verify`, extensions, stdio
    * MCP servers — runs without a consent prompt. An entry is either an exact
    * directory or one ending in `/*`, which covers everything beneath it.
@@ -399,8 +411,8 @@ export interface LoadConfigOptions extends ResolveArcturnPathsOptions {
   skipProject?: boolean;
 }
 
-/** The model used when nothing else is configured. */
-export const DEFAULT_MODEL = "anthropic/claude-sonnet-4-5";
+/** The model used when nothing else is configured: the current Sonnet. */
+export const DEFAULT_MODEL = "anthropic/claude-sonnet-5-5";
 
 /** Configuration used when no file sets anything. */
 export const DEFAULT_CONFIG: Readonly<ArcturnConfig> = Object.freeze({
@@ -426,7 +438,6 @@ export const DEFAULT_CONFIG: Readonly<ArcturnConfig> = Object.freeze({
 });
 
 const PERMISSION_MODES: readonly PermissionMode[] = ["default", "acceptEdits", "plan", "yolo"];
-const THINKING_LEVELS: readonly ThinkingLevel[] = ["off", "low", "medium", "high"];
 const KNOWN_KEYS = new Set([
   "model",
   "permissionMode",
@@ -642,8 +653,11 @@ function parseModelCost(raw: unknown): ModelCost | undefined {
 }
 
 /** Boolean capability flags, and the one enumerated field. */
-const CAPABILITY_FLAGS = ["tools", "vision", "thinking", "caching"] as const;
+const CAPABILITY_FLAGS = ["tools", "vision", "thinking", "caching", "refusalFallback"] as const;
 const THINKING_STYLES = ["budget", "adaptive"] as const;
+const THINKING_OFF_STYLES = ["omit", "disabled", "betweenTools", "lowEffort"] as const;
+/** The levels a `thinkingLevels` list may name: every level but `off`. */
+const THINKING_ON_LEVELS = THINKING_LEVELS.filter((level) => level !== "off");
 
 /**
  * Validate a declared model's `capabilities` field by field.
@@ -679,6 +693,37 @@ function parseModelCapabilities(
         warnings.push(
           `${where}: "providers.${name}.models[].capabilities.thinkingStyle" must be ` +
             `"budget" or "adaptive" (ignored)`,
+        );
+      }
+      continue;
+    }
+    // The two fields an adapter otherwise infers from the catalog id. A
+    // gateway model has no catalog id, so a config entry is the only way to
+    // say that "off" is `between_tools` on this model, or that it lacks
+    // `xhigh` — and a wrong value here is a 400 from the provider, not a
+    // silently worse answer, so each is checked against the closed set.
+    if (key === "thinkingOff") {
+      if ((THINKING_OFF_STYLES as readonly string[]).includes(value as string)) {
+        out.thinkingOff = value as ModelCapabilities["thinkingOff"];
+      } else {
+        warnings.push(
+          `${where}: "providers.${name}.models[].capabilities.thinkingOff" must be one of ` +
+            `${THINKING_OFF_STYLES.map((style) => `"${style}"`).join(", ")} (ignored)`,
+        );
+      }
+      continue;
+    }
+    if (key === "thinkingLevels") {
+      const valid =
+        Array.isArray(value) &&
+        value.length > 0 &&
+        value.every((level) => (THINKING_ON_LEVELS as readonly unknown[]).includes(level));
+      if (valid) {
+        out.thinkingLevels = [...(value as Exclude<ThinkingLevel, "off">[])];
+      } else {
+        warnings.push(
+          `${where}: "providers.${name}.models[].capabilities.thinkingLevels" must be a list of ` +
+            `${THINKING_ON_LEVELS.map((level) => `"${level}"`).join(", ")} (ignored)`,
         );
       }
       continue;
@@ -1070,7 +1115,33 @@ export function parseConfigFile(
     }
   }
   if (raw.providers !== undefined) {
-    const providers = parseProviders(raw.providers, scope, where, warnings);
+    let declared: unknown = raw.providers;
+    // `providers.anthropic` with no `baseUrl` configures the built-in provider
+    // rather than declaring an endpoint. With a `baseUrl` it is still the
+    // reserved-name collision `parseProviders` reports.
+    if (
+      isRecord(declared) &&
+      isRecord(declared.anthropic) &&
+      declared.anthropic.baseUrl === undefined
+    ) {
+      const { anthropic, ...rest } = declared;
+      declared = rest;
+      const settings = anthropic as Record<string, unknown>;
+      for (const key of Object.keys(settings)) {
+        if (key !== "fallbacks") {
+          warnings.push(`${where}: unknown "providers.anthropic" key "${key}" (ignored)`);
+        }
+      }
+      if (settings.fallbacks === "default") out.anthropicFallbacks = "default";
+      else if ("fallbacks" in settings) {
+        warnings.push(`${where}: "providers.anthropic.fallbacks" must be "default" (ignored)`);
+      }
+    }
+    const onlyBuiltinSettings =
+      isRecord(declared) && Object.keys(declared).length === 0 && declared !== raw.providers;
+    const providers = onlyBuiltinSettings
+      ? undefined
+      : parseProviders(declared, scope, where, warnings);
     if (providers !== undefined) out.providers = providers;
   }
   if (raw.audit !== undefined) {
@@ -1453,8 +1524,10 @@ export function mergeConfig(
   warnings: string[] = [],
 ): ArcturnConfig {
   const providers = mergeProviders(base.providers, layer.providers, warnings);
+  const anthropicFallbacks = layer.anthropicFallbacks ?? base.anthropicFallbacks;
   return {
     ...(providers === undefined ? {} : { providers }),
+    ...(anthropicFallbacks === undefined ? {} : { anthropicFallbacks }),
     model: layer.model ?? base.model,
     permissionMode: layer.permissionMode ?? base.permissionMode,
     permissions: [...base.permissions, ...(layer.permissions ?? [])],

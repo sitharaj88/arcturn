@@ -66,7 +66,29 @@ export interface Usage {
   costUsd?: number;
 }
 
-export type StopReason = "endTurn" | "toolCalls" | "maxTokens" | "aborted" | "error";
+/**
+ * Why an assistant turn ended.
+ *
+ * `refusal` is a finished turn, not a failed one: the provider answered — a
+ * safety classifier or content filter declined the request (Anthropic's
+ * `stop_reason: "refusal"`, OpenAI's `content_filter`, Gemini's `SAFETY`).
+ * Nothing about it is retryable as-is, and it is not an `error`.
+ */
+export type StopReason = "endTurn" | "toolCalls" | "maxTokens" | "refusal" | "aborted" | "error";
+
+/**
+ * What the provider said about a refusal.
+ *
+ * Informational only — branch on `stopReason`, never on this. The category is
+ * an open set (`"cyber"`, `"bio"`, `"reasoning_extraction"`, `"frontier_llm"`,
+ * `"general_harms"` on Claude; the filter's own name elsewhere, e.g.
+ * `"content_filter"`, `"safety"`), and `null` is a valid, permanent value.
+ */
+export interface StopDetails {
+  category: string | null;
+  /** Provider-supplied explanation, when one was given. */
+  explanation?: string;
+}
 
 export interface UserMessage {
   role: "user";
@@ -83,6 +105,11 @@ export interface AssistantMessage {
   stopReason: StopReason;
   /** Populated when stopReason === "error". */
   errorMessage?: string;
+  /**
+   * Populated, when the provider said anything, only for stopReason ===
+   * "refusal". Any content beside it is the partial output of a declined turn.
+   */
+  stopDetails?: StopDetails;
   timestamp: number;
 }
 

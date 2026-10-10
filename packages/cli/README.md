@@ -36,9 +36,9 @@ arcturn --model openai/gpt-5.1 --permission-mode acceptEdits
 
 | Flag | Description |
 | --- | --- |
-| `-p`, `--print` | Non-interactive: run to completion, print the final assistant message to stdout, exit `0`/`1`. |
+| `-p`, `--print` | Non-interactive: run to completion, print the final assistant message to stdout, exit `0`/`1` (`1` also when the model declines the request; the reason goes to stderr). |
 | `--output-format <fmt>` | With `--print`: `text` (default) or `json` — every `AgentEvent` as NDJSON on stdout. |
-| `-m`, `--model <id>` | Model to use. See `--list-models`. Accepts a catalog id (`anthropic/claude-opus-4-5`) or an unambiguous wire name (`claude-opus-4-5`). |
+| `-m`, `--model <id>` | Model to use. See `--list-models`. Accepts a catalog id (`anthropic/claude-opus-5-5`) or an unambiguous wire name (`claude-opus-5-5`). |
 | `-c`, `--continue` | Resume the most recent session started in this directory. |
 | `-r`, `--resume <sessionId>` | Resume a specific session. |
 | `--permission-mode <mode>` | `default` · `acceptEdits` · `plan` · `yolo`. |
@@ -166,7 +166,7 @@ through a run.
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
-arcturn --model anthropic/claude-sonnet-4-5
+arcturn --model anthropic/claude-sonnet-5-5
 ```
 
 `bedrock` and `vertex` are the exceptions: they authenticate from ambient cloud credentials (an AWS
@@ -187,7 +187,7 @@ and has been removed rather than left in the help text. Use an API key.
 
 ```
 ✦ arcturn 0.1.0
-  Claude Sonnet 4.5 · default · /work/repo
+  Claude Sonnet 5.5 · default · /work/repo
   /help for commands · Ctrl+D to exit
 
 › refactor the parser
@@ -204,7 +204,7 @@ Done — `parse()` now uses the shared tokenizer.
   ☑ read the parser      ◐ swap in tokenize()      ☐ update the tests
 ⠋ working · 12s · 1.4k tokens · esc to interrupt
 › ▏
-arcturn  Claude Sonnet 4.5  default                             $0.04  ctx 8%
+arcturn  Claude Sonnet 5.5  default                             $0.04  ctx 8%
 ```
 
 Finished transcript lines are printed straight to the terminal, so they land in real scrollback and
@@ -260,9 +260,9 @@ Two JSON files, merged in this order over the built-in defaults:
 
 ```jsonc
 {
-  "model": "anthropic/claude-sonnet-4-5",
+  "model": "anthropic/claude-sonnet-5-5",
   "permissionMode": "default",          // default | acceptEdits | plan | yolo
-  "thinking": "off",                    // off | low | medium | high
+  "thinking": "off",                    // off | low | medium | high | xhigh | max
   "theme": "dark",                      // dark | light
   "systemPromptAppend": "Always run pnpm check before saying you are done.",
   "permissions": [
@@ -403,7 +403,7 @@ import { buildRuntime, connectMcp, runPrint } from "arcturn";
 
 const runtime = await buildRuntime({
   cwd: process.cwd(),
-  model: "anthropic/claude-sonnet-4-5",
+  model: "anthropic/claude-sonnet-5-5",
   permissionMode: "acceptEdits",
 });
 await connectMcp(runtime);

@@ -30,10 +30,10 @@ type RouteKind = "main" | "subagent" | "compaction" | "title";
 
 ```json
 {
-  "model": "anthropic/claude-sonnet-4-5",
+  "model": "anthropic/claude-sonnet-5-5",
   "route": {
-    "subagent": "anthropic/claude-haiku-4-5",
-    "compaction": "anthropic/claude-haiku-4-5"
+    "subagent": "anthropic/claude-haiku-5-5",
+    "compaction": "anthropic/claude-haiku-5-5"
   }
 }
 ```
@@ -150,7 +150,7 @@ Separately from per-role routing, `config.model` (and `--model`) accepts either 
 id or an array:
 
 ```json
-{ "model": ["anthropic/claude-sonnet-4-5", "openai/gpt-4o"] }
+{ "model": ["anthropic/claude-sonnet-5-5", "openai/gpt-4o"] }
 ```
 
 A list is a **failover chain**, not a round-robin or a preference order applied per turn.
@@ -185,7 +185,10 @@ swap needs a human decision, not a heuristic — and the command routes `subagen
 user config (`persistRoutePatch`). A candidate that isn't strictly cheaper than a priced
 main model is never suggested — the heuristic refuses rather than "optimises" the bill
 upward — and the command says so plainly when your model publishes no pricing to compare
-against. `/model route <kind> <id>` sets one route
+against. For an Anthropic main model that is currently Claude Haiku 5.5
+(`anthropic/claude-haiku-5-5`, $0.10 / $0.50 per million tokens for prompts up to 100K;
+the catalog carries that rate, so an estimate for a very long Haiku prompt is a floor).
+`/model route <kind> <id>` sets one route
 by hand (`subagent`, `compaction` or `title` — `main` belongs to the `/model` pick), and
 `/model route clear [kind]` withdraws overrides. Nothing is ever applied without one of
 these explicit commands: a heuristic must not silently change what a sub-agent run costs.

@@ -190,7 +190,7 @@ continueOnError: false
 ---
 Optional prose here is documentation and is ignored.
 
-1. [anthropic/claude-haiku-4-5] Reproduce this bug and quote the failing output: {{input}}
+1. [anthropic/claude-haiku-5-5] Reproduce this bug and quote the failing output: {{input}}
 2. Given the repro below, do both halves:
    - Write the minimal patch. Repro: {{prev}}
    - Write a regression test that fails before the patch. Repro: {{prev}}

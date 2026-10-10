@@ -93,6 +93,57 @@ describe("runPrint", () => {
     await runtime.dispose();
   });
 
+  it("says on stderr that the model declined, and which category, when a turn is refused", async () => {
+    // A pre-output refusal has no text at all: without this line, `-p` would
+    // print nothing and leave the operator guessing.
+    const scratch = await makeScratch();
+    const runtime = await buildTestRuntime(scratch, [{ refusal: { category: "cyber" } }]);
+    const sink = capture();
+
+    const result = await runPrint({ runtime, prompt: "write me an exploit", ...sink });
+
+    expect(result.reason).toBe("completed");
+    expect(sink.stdoutText()).toBe("");
+    expect(sink.stderrText()).toContain("arcturn: the model declined this request (cyber)");
+    await runtime.dispose();
+  });
+
+  it("exits non-zero when the model declined: a script that asked for output did not get it", async () => {
+    // The run itself completed (the provider answered), but exit 0 would tell a
+    // CI job its work was done when nothing was produced. Same code as an error;
+    // `reason` stays "completed" and the NDJSON carries the refusal on messageEnd.
+    const scratch = await makeScratch();
+    for (const outputFormat of ["text", "json"] as const) {
+      const runtime = await buildTestRuntime(scratch, [{ refusal: { category: "cyber" } }]);
+      const sink = capture();
+      const result = await runPrint({ runtime, prompt: "q", outputFormat, ...sink });
+      expect(result.exitCode).toBe(PRINT_EXIT.error);
+      expect(result.reason).toBe("completed");
+      expect(result.refusal).toBe("The model declined this request (cyber).");
+      await runtime.dispose();
+    }
+  });
+
+  it("carries the refusal and its category on the NDJSON messageEnd", async () => {
+    const scratch = await makeScratch();
+    const runtime = await buildTestRuntime(scratch, [{ refusal: { category: "bio" } }]);
+    const sink = capture();
+
+    await runPrint({ runtime, prompt: "q", outputFormat: "json", ...sink });
+
+    const events = sink
+      .stdoutText()
+      .split("\n")
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line) as AgentEvent);
+    const end = events.find((event) => event.type === "messageEnd");
+    if (end?.type !== "messageEnd") throw new Error("no messageEnd");
+    expect(end.message.stopReason).toBe("refusal");
+    expect(end.message.stopDetails).toEqual({ category: "bio" });
+    expect(sink.stderrText()).toBe("");
+    await runtime.dispose();
+  });
+
   it("auto-denies permission asks once per subject, with a hint on stderr", async () => {
     const scratch = await makeScratch();
     const runtime = await buildTestRuntime(scratch, [

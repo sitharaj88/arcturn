@@ -28,6 +28,29 @@ import type {
 } from "@arcturn/types";
 import { formatDuration, oneLine } from "./format.js";
 import { FANCY_GLYPHS, type GlyphSet, toolGlyph } from "./glyphs.js";
+import { sanitizeForTerminal } from "./project-trust.js";
+
+/**
+ * One sentence saying a turn was declined, and under which category.
+ *
+ * Shared by the transcript and `--print`'s stderr so a refusal reads the same
+ * everywhere. The category is the provider's word for it (`cyber`, `bio`,
+ * `content_filter`, …); a `null` one is a valid state, so none is invented.
+ */
+export function refusalLine(message: AssistantMessage): string {
+  // Both strings come off the wire. A compromised or hostile endpoint must not
+  // be able to repaint the screen or forge transcript lines through them, so
+  // they take the same scrub as every other string the repo prints that it did
+  // not write (`sanitizeForTerminal`), flattened to one bounded line.
+  const clean = (value: string): string => oneLine(sanitizeForTerminal(value), 500);
+  const category = message.stopDetails?.category;
+  const label = typeof category === "string" ? clean(category) : "";
+  const head =
+    label === "" ? "The model declined this request" : `The model declined this request (${label})`;
+  const explanation = message.stopDetails?.explanation;
+  const detail = typeof explanation === "string" ? clean(explanation) : "";
+  return detail === "" ? `${head}.` : `${head}: ${detail}`;
+}
 
 /** Options for {@link TranscriptFormatter}. */
 export interface TranscriptOptions {
@@ -332,6 +355,9 @@ export class TranscriptFormatter {
     }
     if (message.stopReason === "error" && message.errorMessage) {
       lines.push(style("error")(`✗ ${message.errorMessage}`));
+    }
+    if (message.stopReason === "refusal") {
+      lines.push(style("warning")(`${this.#glyphs.interrupt} ${refusalLine(message)}`));
     }
     return lines;
   }

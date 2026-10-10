@@ -19,6 +19,36 @@ const ADAPTIVE: ModelCapabilities = { ...FULL, thinkingStyle: "adaptive" };
 /** Claude 4.5 and earlier: extended thinking with an explicit token budget. */
 const BUDGET_THINKING: ModelCapabilities = { ...FULL, thinkingStyle: "budget" };
 
+/** Every effort level, for Opus 4.7+ and the whole 5.x line. */
+const ALL_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
+/** The 4.6 generation's effort levels: `xhigh` arrived with Opus 4.7. */
+const NO_XHIGH = ["low", "medium", "high", "max"] as const;
+
+/**
+ * Claude 4.6–4.8: omitting `thinking` runs without it, so "off" stays omitted.
+ * The levels are the generation's effort set.
+ */
+function adaptive4x(levels: ModelCapabilities["thinkingLevels"]): ModelCapabilities {
+  return { ...ADAPTIVE, thinkingOff: "omit", thinkingLevels: levels };
+}
+
+/**
+ * Claude 5.x: thinking runs when `thinking` is omitted, so "off" needs saying
+ * — how depends on the model (see `ThinkingOffStyle`). `refusalFallback`
+ * marks the models the Claude API can re-run on a fallback after a decline.
+ */
+function adaptive5x(
+  thinkingOff: NonNullable<ModelCapabilities["thinkingOff"]>,
+  refusalFallback: boolean,
+): ModelCapabilities {
+  return {
+    ...ADAPTIVE,
+    thinkingOff,
+    thinkingLevels: ALL_LEVELS,
+    ...(refusalFallback ? { refusalFallback: true } : {}),
+  };
+}
+
 /** Environment variables consulted when a spec does not name one. */
 export const DEFAULT_API_KEY_ENV: Readonly<Record<string, string>> = {
   anthropic: "ANTHROPIC_API_KEY",
@@ -64,26 +94,19 @@ function spec(
 // Context limits and max output: docs.../about-claude/models/overview
 // Pricing (base input / 5m cache write / cache hit / output):
 // docs.../about-claude/pricing#model-pricing
+// The 5.5 generation and Opus 4.6–4.8 / Sonnet 4.6 were checked against the
+// claude-api skill's shared/models.md and model-migration.md (cached
+// 2026-10-06). Newest first within each family.
 const ANTHROPIC_MODELS: readonly ModelSpec[] = [
   spec(
     "anthropic",
-    "claude-opus-5",
-    "Claude Opus 5",
+    "claude-fable-5-1",
+    "Claude Fable 5.1",
     1_000_000,
     128_000,
-    { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
-    ADAPTIVE,
-  ),
-  spec(
-    "anthropic",
-    "claude-sonnet-5",
-    "Claude Sonnet 5",
-    1_000_000,
-    128_000,
-    // $2/$10 was introductory at launch and is now the standard price; the
-    // scheduled rise to $3/$15 was cancelled. (pricing page, Sonnet 5 note)
-    { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
-    ADAPTIVE,
+    // Cache reads are 0.025x input, a quarter of Fable 5's rate.
+    { input: 10, output: 50, cacheRead: 0.25, cacheWrite: 12.5 },
+    adaptive5x("lowEffort", true),
   ),
   spec(
     "anthropic",
@@ -92,7 +115,54 @@ const ANTHROPIC_MODELS: readonly ModelSpec[] = [
     1_000_000,
     128_000,
     { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 },
-    ADAPTIVE,
+    adaptive5x("lowEffort", false),
+  ),
+  spec(
+    "anthropic",
+    "claude-opus-5-5",
+    "Claude Opus 5.5",
+    1_000_000,
+    128_000,
+    // Cache reads are 0.05x input. Effort defaults to medium here, not high,
+    // so the adapter always sends one.
+    { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5 },
+    adaptive5x("lowEffort", true),
+  ),
+  spec(
+    "anthropic",
+    "claude-opus-5",
+    "Claude Opus 5",
+    1_000_000,
+    128_000,
+    { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+    adaptive5x("lowEffort", true),
+  ),
+  spec(
+    "anthropic",
+    "claude-opus-4-8",
+    "Claude Opus 4.8",
+    1_000_000,
+    128_000,
+    { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+    adaptive4x(ALL_LEVELS),
+  ),
+  spec(
+    "anthropic",
+    "claude-opus-4-7",
+    "Claude Opus 4.7",
+    1_000_000,
+    128_000,
+    { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+    adaptive4x(ALL_LEVELS),
+  ),
+  spec(
+    "anthropic",
+    "claude-opus-4-6",
+    "Claude Opus 4.6",
+    1_000_000,
+    128_000,
+    { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+    adaptive4x(NO_XHIGH),
   ),
   spec(
     "anthropic",
@@ -101,24 +171,6 @@ const ANTHROPIC_MODELS: readonly ModelSpec[] = [
     200_000,
     64_000,
     { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
-    BUDGET_THINKING,
-  ),
-  spec(
-    "anthropic",
-    "claude-sonnet-4-5",
-    "Claude Sonnet 4.5",
-    200_000,
-    64_000,
-    { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
-    BUDGET_THINKING,
-  ),
-  spec(
-    "anthropic",
-    "claude-haiku-4-5",
-    "Claude Haiku 4.5",
-    200_000,
-    64_000,
-    { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 },
     BUDGET_THINKING,
   ),
   spec(
@@ -132,12 +184,72 @@ const ANTHROPIC_MODELS: readonly ModelSpec[] = [
   ),
   spec(
     "anthropic",
+    "claude-sonnet-5-5",
+    "Claude Sonnet 5.5",
+    1_000_000,
+    128_000,
+    { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
+    adaptive5x("betweenTools", true),
+  ),
+  spec(
+    "anthropic",
+    "claude-sonnet-5",
+    "Claude Sonnet 5",
+    1_000_000,
+    128_000,
+    // $2/$10 was introductory at launch and is now the standard price; the
+    // scheduled rise to $3/$15 was cancelled. (pricing page, Sonnet 5 note)
+    { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
+    adaptive5x("disabled", false),
+  ),
+  spec(
+    "anthropic",
+    "claude-sonnet-4-6",
+    "Claude Sonnet 4.6",
+    1_000_000,
+    128_000,
+    { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+    adaptive4x(NO_XHIGH),
+  ),
+  spec(
+    "anthropic",
+    "claude-sonnet-4-5",
+    "Claude Sonnet 4.5",
+    200_000,
+    64_000,
+    { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+    BUDGET_THINKING,
+  ),
+  spec(
+    "anthropic",
     "claude-sonnet-4",
     "Claude Sonnet 4",
     200_000,
     64_000,
     { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
     FULL,
+  ),
+  spec(
+    "anthropic",
+    "claude-haiku-5-5",
+    "Claude Haiku 5.5",
+    1_000_000,
+    128_000,
+    // The rate card for prompts of 100K tokens or fewer. Longer prompts bill
+    // at $0.50/$2.50 (cache multipliers unchanged); the catalog carries one
+    // rate per model, so estimates for very long Haiku prompts are a floor.
+    // No server-side refusal fallback exists for this model.
+    { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 },
+    adaptive5x("disabled", false),
+  ),
+  spec(
+    "anthropic",
+    "claude-haiku-4-5",
+    "Claude Haiku 4.5",
+    200_000,
+    64_000,
+    { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 },
+    BUDGET_THINKING,
   ),
   spec(
     "anthropic",
@@ -386,18 +498,22 @@ const GOOGLE_MODELS: readonly ModelSpec[] = [
 // names are per-tenant, so use `azureModel()` from providers/azure.ts. Prices
 // track the first-party lists; `registerModel` overrides any of them.
 //
-// No Claude 5 or Gemini 3.x entries here: Google Cloud is partner-operated
-// with its own rate card (cloud.google.com/vertex-ai/generative-ai/pricing),
-// and that page could not be read to confirm the numbers. Carrying first-party
-// prices for a partner-billed model would silently mis-budget every request,
-// so those variants are left to `registerModel` until the rates are verified.
+// Google Cloud is partner-operated with its own rate card
+// (cloud.google.com/vertex-ai/generative-ai/pricing), and that page could not
+// be read to confirm the numbers. Carrying first-party prices for a
+// partner-billed model would silently mis-budget every request, so the
+// current Claude generation ships here *unpriced* — selectable, sized, and
+// reported as "cost unknown" rather than a borrowed rate or $0 — and the
+// rates are left to `registerModel`. Current-generation Claude on Vertex uses
+// the bare first-party id; only dated snapshots take an `@` version. No
+// Gemini 3.x entries yet, for the same pricing reason.
 
 function vertexSpec(
   model: string,
   displayName: string,
   contextWindow: number,
   maxOutputTokens: number,
-  cost: ModelSpec["cost"],
+  cost: ModelSpec["cost"] | undefined,
 ): ModelSpec {
   const entry: ModelSpec = {
     id: `vertex/${model}`,
@@ -414,6 +530,14 @@ function vertexSpec(
 }
 
 const VERTEX_MODELS: readonly ModelSpec[] = [
+  vertexSpec("claude-fable-5-1", "Claude Fable 5.1 (Vertex)", 1_000_000, 128_000, undefined),
+  vertexSpec("claude-opus-5-5", "Claude Opus 5.5 (Vertex)", 1_000_000, 128_000, undefined),
+  vertexSpec("claude-opus-4-8", "Claude Opus 4.8 (Vertex)", 1_000_000, 128_000, undefined),
+  vertexSpec("claude-opus-4-7", "Claude Opus 4.7 (Vertex)", 1_000_000, 128_000, undefined),
+  vertexSpec("claude-opus-4-6", "Claude Opus 4.6 (Vertex)", 1_000_000, 128_000, undefined),
+  vertexSpec("claude-sonnet-5-5", "Claude Sonnet 5.5 (Vertex)", 1_000_000, 128_000, undefined),
+  vertexSpec("claude-sonnet-4-6", "Claude Sonnet 4.6 (Vertex)", 1_000_000, 128_000, undefined),
+  vertexSpec("claude-haiku-5-5", "Claude Haiku 5.5 (Vertex)", 1_000_000, 128_000, undefined),
   vertexSpec("gemini-2.5-pro", "Gemini 2.5 Pro (Vertex)", 1_048_576, 65_536, {
     input: 1.25,
     output: 10,

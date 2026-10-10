@@ -23,14 +23,17 @@ import type {
   LLMRequest,
   Message,
   ModelSpec,
+  StopDetails,
   StopReason,
   StreamEvent,
   ThinkingLevel,
+  ThinkingOffStyle,
   ThinkingStyle,
   ToolResultMessage,
   Usage,
   UserMessage,
 } from "@arcturn/types";
+import { getModel } from "../catalog.js";
 import { AIErrorException } from "../errors.js";
 import { parseToolArguments } from "../internal/json.js";
 import {
@@ -43,31 +46,64 @@ import {
 /** Prefix used to smuggle `redacted_thinking` payloads through `ThinkingContent`. */
 export const REDACTED_THINKING_PREFIX = "redacted:";
 
-/** Thinking budgets in tokens for each portable thinking level. */
+/**
+ * Thinking budgets in tokens for each portable thinking level, on the budget
+ * generation (Claude 4.5 and earlier). Always clamped to leave room for an
+ * answer, so `xhigh`/`max` simply ask for as much as the output cap allows.
+ */
 export const ANTHROPIC_THINKING_BUDGETS: Readonly<Record<ThinkingLevel, number>> = {
   off: 0,
   low: 4_096,
   medium: 16_384,
   high: 32_768,
+  xhigh: 49_152,
+  max: 65_536,
 };
+
+/** An `output_config.effort` value. */
+export type AnthropicEffort = NonNullable<OutputConfig["effort"]>;
+
+/** A thinking level above `"off"`. */
+type OnLevel = Exclude<ThinkingLevel, "off">;
 
 /**
  * `output_config.effort` level for each portable thinking level.
  *
  * Effort replaces `budget_tokens` as the depth control under adaptive
- * thinking. The API's own default is `high`, and the level set is
- * `low | medium | high | xhigh | max`; the portable levels map onto the first
- * three, leaving `xhigh`/`max` reachable through `providerOptions`.
+ * thinking, and the portable levels are the API's levels one for one. A model
+ * that lacks one gets it clamped first — see {@link anthropicEffort}.
  *
  * https://platform.claude.com/docs/en/build-with-claude/effort
  */
-export const ANTHROPIC_THINKING_EFFORT: Readonly<
-  Record<Exclude<ThinkingLevel, "off">, NonNullable<OutputConfig["effort"]>>
-> = {
+export const ANTHROPIC_THINKING_EFFORT: Readonly<Record<OnLevel, AnthropicEffort>> = {
   low: "low",
   medium: "medium",
   high: "high",
+  xhigh: "xhigh",
+  max: "max",
 };
+
+/** Every level above "off", lowest first: the order clamping walks. */
+const ON_LEVELS: readonly OnLevel[] = ["low", "medium", "high", "xhigh", "max"];
+
+/** The 4.6 generation's effort set: `xhigh` arrived with Opus 4.7. */
+const LEVELS_WITHOUT_XHIGH: readonly OnLevel[] = ["low", "medium", "high", "max"];
+
+/**
+ * A `thinking` value as sent on the wire.
+ *
+ * `between_tools` — Sonnet 5.5's "thinking off" — postdates the pinned SDK's
+ * `ThinkingConfigParam` (see NOTES.md), so it is spelled out here.
+ */
+export type AnthropicThinkingParam = ThinkingConfigParam | { type: "between_tools" };
+
+/** The streaming Messages payload, with {@link AnthropicThinkingParam} in place. */
+export type AnthropicRequestParams = Omit<MessageCreateParamsStreaming, "thinking"> & {
+  thinking?: AnthropicThinkingParam;
+};
+
+/** The beta header that gates `fallbacks: "default"`. */
+export const ANTHROPIC_FALLBACK_BETA = "server-side-fallback-2026-07-01";
 
 /**
  * Version at or above which Claude uses adaptive thinking, scaled by 100 so
@@ -94,6 +130,15 @@ const ADAPTIVE_THINKING_FROM = 406;
 const SAMPLING_REMOVED_FROM = 407;
 
 /**
+ * Version at or above which adaptive thinking streams empty text unless the
+ * request asks for `display: "summarized"`. The field is new on Opus 4.7; on
+ * 4.6 summarized was the default and the field is not sent.
+ *
+ * https://platform.claude.com/docs/en/build-with-claude/extended-thinking
+ */
+const THINKING_DISPLAY_FROM = 407;
+
+/**
  * Claude family versions are written `claude-<family>-<major>[-<minor>]`, with
  * an optional dated snapshot, profile prefix or Vertex `@` suffix around it —
  * `claude-opus-5`, `claude-sonnet-4-6`,
@@ -104,7 +149,7 @@ const SAMPLING_REMOVED_FROM = 407;
  * Pre-4 ids use the older `claude-<major>-<minor>-<family>` layout, which this
  * deliberately does not match: everything there predates adaptive thinking.
  */
-const CLAUDE_VERSION_RE = /claude-(?:opus|sonnet|haiku|fable|mythos)-(\d+)(?:-(\d)(?!\d))?/i;
+const CLAUDE_VERSION_RE = /claude-(opus|sonnet|haiku|fable|mythos)-(\d+)(?:-(\d)(?!\d))?/i;
 
 /**
  * Extract a Claude generation from a model id, scaled by 100 (4.6 -> 406).
@@ -116,9 +161,14 @@ const CLAUDE_VERSION_RE = /claude-(?:opus|sonnet|haiku|fable|mythos)-(\d+)(?:-(\
 export function claudeGeneration(model: string): number | undefined {
   const match = CLAUDE_VERSION_RE.exec(model);
   if (!match) return undefined;
-  const major = Number(match[1]);
+  const major = Number(match[2]);
   if (!Number.isFinite(major)) return undefined;
-  return major * 100 + Number(match[2] ?? 0);
+  return major * 100 + Number(match[3] ?? 0);
+}
+
+/** The Claude family named in a model id, lower-cased, or `undefined`. */
+function claudeFamily(model: string): string | undefined {
+  return CLAUDE_VERSION_RE.exec(model)?.[1]?.toLowerCase();
 }
 
 /**
@@ -134,6 +184,64 @@ export function anthropicThinkingStyle(spec: ModelSpec): ThinkingStyle {
   if (declared) return declared;
   const generation = claudeGeneration(spec.model);
   return generation !== undefined && generation >= ADAPTIVE_THINKING_FROM ? "adaptive" : "budget";
+}
+
+/**
+ * Decide how thinking level `"off"` is spelled for a spec.
+ *
+ * An explicit `capabilities.thinkingOff` wins; otherwise the family and
+ * generation in the model id decide, so a Bedrock or proxy id behaves like the
+ * catalog entry it names. Unknown ids get `"omit"`, the pre-5 behaviour.
+ */
+export function anthropicThinkingOff(spec: ModelSpec): ThinkingOffStyle {
+  const declared = spec.capabilities.thinkingOff;
+  if (declared) return declared;
+  const generation = claudeGeneration(spec.model);
+  if (generation === undefined || generation < 500) return "omit";
+  switch (claudeFamily(spec.model)) {
+    case "fable":
+    case "mythos":
+    case "opus":
+      // Fable and Opus 5.5 reject `disabled` outright; Opus 5 accepts it only
+      // at effort high or below and then can write tool calls into its text.
+      return "lowEffort";
+    case "sonnet":
+      return generation >= 505 ? "betweenTools" : "disabled";
+    default:
+      return "disabled";
+  }
+}
+
+/** The effort levels an adaptive spec accepts, lowest first. */
+function effortLevels(spec: ModelSpec): readonly OnLevel[] {
+  const declared = spec.capabilities.thinkingLevels;
+  if (declared && declared.length > 0) return declared;
+  const generation = claudeGeneration(spec.model);
+  return generation !== undefined && generation < THINKING_DISPLAY_FROM
+    ? LEVELS_WITHOUT_XHIGH
+    : ON_LEVELS;
+}
+
+/**
+ * The effort to send for `level` on `spec`: the level itself when the model
+ * has it, else the nearest level below it, else the lowest it has.
+ */
+export function anthropicEffort(spec: ModelSpec, level: OnLevel): AnthropicEffort {
+  const accepted = effortLevels(spec);
+  const wanted = ON_LEVELS.indexOf(level);
+  for (let index = wanted; index >= 0; index--) {
+    const candidate = ON_LEVELS[index];
+    if (candidate !== undefined && accepted.includes(candidate)) {
+      return ANTHROPIC_THINKING_EFFORT[candidate];
+    }
+  }
+  return ANTHROPIC_THINKING_EFFORT[accepted[0] ?? "low"];
+}
+
+/** True when an adaptive request must ask for summarized thinking to see any. */
+function wantsSummarizedDisplay(spec: ModelSpec): boolean {
+  const generation = claudeGeneration(spec.model);
+  return generation !== undefined && generation >= THINKING_DISPLAY_FROM;
 }
 
 /** True when the model rejects `temperature` / `top_p` / `top_k` outright. */
@@ -159,9 +267,22 @@ const SUPPORTED_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "
 export interface AnthropicClientLike {
   messages: {
     create(
-      params: MessageCreateParamsStreaming,
+      params: AnthropicRequestParams,
       options?: { signal?: AbortSignal },
     ): Promise<AsyncIterable<RawMessageStreamEvent>>;
+  };
+  /**
+   * The beta Messages surface, used only for opted-in refusal fallbacks. Its
+   * stream is a superset of the GA one (`fallback` content blocks,
+   * `usage.iterations`), read defensively. Bedrock and Vertex clients omit it.
+   */
+  beta?: {
+    messages: {
+      create(
+        params: AnthropicRequestParams & { betas: string[]; fallbacks: "default" },
+        options?: { signal?: AbortSignal },
+      ): Promise<AsyncIterable<RawMessageStreamEvent>>;
+    };
   };
 }
 
@@ -173,6 +294,22 @@ export interface AnthropicProviderOptions {
   headers?: Record<string, string>;
   /** Pre-built client; primarily an injection seam for tests. */
   client?: AnthropicClientLike;
+  /**
+   * Opt in to server-side refusal fallbacks. With `"default"`, a request to a
+   * model that offers them (`capabilities.refusalFallback`) goes through the
+   * beta Messages surface with `fallbacks: "default"`: when a safety
+   * classifier declines, the API re-runs the request on the model Anthropic
+   * recommends for that refusal category, in the same call. The turn is then
+   * stamped with, and billed at, the model that answered. Claude API only —
+   * Bedrock and Vertex have no server-side fallback. Off by default.
+   */
+  fallbacks?: "default";
+}
+
+/** Per-stream options for {@link anthropicEventStream}. */
+export interface AnthropicStreamOptions {
+  /** See {@link AnthropicProviderOptions.fallbacks}. */
+  fallbacks?: "default";
 }
 
 function normalizeMediaType(mimeType: string): string | undefined {
@@ -285,6 +422,10 @@ export function toAnthropicMessages(messages: Message[]): MessageParam[] {
     if (message.role === "user") {
       appendBlocks(out, "user", userBlocks(message));
     } else if (message.role === "assistant") {
+      // A declined turn's partial output is discarded, not replayed: it is an
+      // abandoned attempt, and its thinking belongs to a request that was
+      // refused. The loop never leaves tool calls in one, so nothing dangles.
+      if (message.stopReason === "refusal") continue;
       appendBlocks(out, "assistant", assistantBlocks(message));
     } else {
       appendBlocks(out, "user", [toolResultBlock(message)], true);
@@ -308,40 +449,65 @@ function applyConversationCacheBreakpoint(messages: MessageParam[]): void {
   }
 }
 
-/** The `thinking` block plus, under adaptive thinking, its effort control. */
-interface ThinkingParams {
-  thinking: ThinkingConfigParam;
-  outputConfig?: OutputConfig;
+/** The `thinking` value and the effort that ride on one request. Either may be absent. */
+export interface AnthropicThinkingParams {
+  thinking?: AnthropicThinkingParam;
+  effort?: AnthropicEffort;
 }
 
 /**
- * Build the thinking configuration for a request.
+ * Build the thinking configuration for a request — the one place the
+ * per-model rules live, shared by the Messages path and Bedrock's Converse.
  *
- * Two mutually exclusive shapes, chosen by {@link anthropicThinkingStyle}:
+ * Two mutually exclusive "on" shapes, chosen by {@link anthropicThinkingStyle}:
  *
- * - **adaptive** (Claude 4.6+, incl. Opus 5 / Sonnet 5 / Fable 5) —
- *   `thinking: {type: "adaptive"}` with depth steered by
- *   `output_config: {effort}`. `budget_tokens` is deprecated on 4.6 and 400s
- *   on 4.7+.
+ * - **adaptive** (Claude 4.6+) — `thinking: {type: "adaptive"}` with depth
+ *   steered by `output_config: {effort}`, the effort clamped to the levels the
+ *   model has. From Opus 4.7 on, thinking text streams empty by default, so
+ *   the request asks for `display: "summarized"` — Arcturn renders it.
  * - **budget** (Claude 4.5 and earlier) — `thinking: {type: "enabled",
  *   budget_tokens: N}`, clamped to leave room for an answer. `adaptive` 400s
  *   on these models.
  *
- * `off` returns `undefined` in both cases: omitting `thinking` is accepted
- * everywhere, whereas `{type: "disabled"}` is rejected on Fable 5 and (above
- * effort `high`) on Opus 5.
+ * `off` follows {@link anthropicThinkingOff}: omitted on 4.x, `disabled` where
+ * omitting would think, `between_tools` on Sonnet 5.5, and — where thinking
+ * cannot be turned off at all (Fable 5/5.1, Opus 5.5) — no `thinking` key and
+ * the lowest effort. Opus 5.5 therefore always carries an explicit effort,
+ * which matters because its default is `medium`, not `high`.
+ *
+ * @returns `undefined` when nothing needs sending.
  *
  * https://platform.claude.com/docs/en/build-with-claude/extended-thinking#migrating-to-adaptive-thinking
  * https://platform.claude.com/docs/en/build-with-claude/thinking-troubleshooting#rejected-configurations
  */
-function thinkingConfig(request: LLMRequest, maxTokens: number): ThinkingParams | undefined {
-  const level = request.thinking ?? "off";
-  if (!request.model.capabilities.thinking || level === "off") return undefined;
+export function anthropicThinkingParams(
+  spec: ModelSpec,
+  level: ThinkingLevel,
+  maxTokens: number,
+): AnthropicThinkingParams | undefined {
+  if (!spec.capabilities.thinking) return undefined;
 
-  if (anthropicThinkingStyle(request.model) === "adaptive") {
+  if (level === "off") {
+    switch (anthropicThinkingOff(spec)) {
+      case "omit":
+        return undefined;
+      case "disabled":
+        return { thinking: { type: "disabled" } };
+      case "betweenTools":
+        // Takes no other field, and only at effort high or below — so no
+        // effort rides along and the model's default (high) applies.
+        return { thinking: { type: "between_tools" } };
+      case "lowEffort":
+        return { effort: anthropicEffort(spec, "low") };
+    }
+  }
+
+  if (anthropicThinkingStyle(spec) === "adaptive") {
     return {
-      thinking: { type: "adaptive" },
-      outputConfig: { effort: ANTHROPIC_THINKING_EFFORT[level] },
+      thinking: wantsSummarizedDisplay(spec)
+        ? { type: "adaptive", display: "summarized" }
+        : { type: "adaptive" },
+      effort: anthropicEffort(spec, level),
     };
   }
 
@@ -352,14 +518,14 @@ function thinkingConfig(request: LLMRequest, maxTokens: number): ThinkingParams 
 }
 
 /** Build the wire payload for a streaming Messages request. */
-export function buildAnthropicRequest(request: LLMRequest): MessageCreateParamsStreaming {
+export function buildAnthropicRequest(request: LLMRequest): AnthropicRequestParams {
   const spec = request.model;
   const caching = spec.capabilities.caching;
   const maxTokens = Math.min(request.maxOutputTokens ?? spec.maxOutputTokens, spec.maxOutputTokens);
   const messages = toAnthropicMessages(request.messages);
   if (caching) applyConversationCacheBreakpoint(messages);
 
-  const params: MessageCreateParamsStreaming = {
+  const params: AnthropicRequestParams = {
     model: spec.model,
     max_tokens: maxTokens,
     messages,
@@ -390,11 +556,14 @@ export function buildAnthropicRequest(request: LLMRequest): MessageCreateParamsS
     params.tools = tools;
   }
 
-  const thinking = thinkingConfig(request, maxTokens);
-  if (thinking) {
-    params.thinking = thinking.thinking;
-    if (thinking.outputConfig) params.output_config = thinking.outputConfig;
-  } else if (request.temperature !== undefined && !rejectsSampling(spec)) {
+  const thinking = anthropicThinkingParams(spec, request.thinking ?? "off", maxTokens);
+  if (thinking?.thinking) params.thinking = thinking.thinking;
+  if (thinking?.effort) params.output_config = { effort: thinking.effort };
+  if (
+    thinking?.thinking === undefined &&
+    request.temperature !== undefined &&
+    !rejectsSampling(spec)
+  ) {
     // Thinking forbids an explicit temperature, and Claude 4.7+ rejects the
     // sampling parameters outright whether or not thinking is on.
     params.temperature = request.temperature;
@@ -412,7 +581,7 @@ export function mapAnthropicStopReason(reason: string | null | undefined): StopR
     case "tool_use":
       return "toolCalls";
     case "refusal":
-      return "error";
+      return "refusal";
     default:
       return "endTurn";
   }
@@ -430,6 +599,64 @@ interface AnthropicUsageLike {
    * https://platform.claude.com/docs/en/build-with-claude/extended-thinking#budget-rules-and-tuning
    */
   output_tokens_details?: { thinking_tokens?: number | null } | null;
+  /**
+   * Per-attempt breakdown (beta). With refusal fallbacks, the entry of type
+   * `fallback_message` names the model that served the response — the only
+   * signal on a sticky-routed turn, which carries no `fallback` block.
+   */
+  iterations?: ReadonlyArray<{ type?: string; model?: string }> | null;
+}
+
+/** The `fallback` content block the beta surface emits at each switch point. */
+interface FallbackBlockLike {
+  type: "fallback";
+  to?: { model?: string };
+}
+
+/** The `stop_details` object a refusal carries. */
+interface StopDetailsLike {
+  type?: string;
+  category?: string | null;
+  explanation?: string | null;
+}
+
+/** Portable {@link StopDetails} from the wire object, or `undefined`. */
+function toStopDetails(raw: StopDetailsLike | null | undefined): StopDetails | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const details: StopDetails = {
+    category: typeof raw.category === "string" ? raw.category : null,
+  };
+  if (typeof raw.explanation === "string" && raw.explanation !== "") {
+    details.explanation = raw.explanation;
+  }
+  return details;
+}
+
+/** The model a fallback iteration says served the response, if any. */
+function servedByIteration(usage: AnthropicUsageLike | undefined): string | undefined {
+  const entries = usage?.iterations;
+  if (!Array.isArray(entries)) return undefined;
+  for (let index = entries.length - 1; index >= 0; index--) {
+    const entry = entries[index];
+    if (entry?.type === "fallback_message" && typeof entry.model === "string") return entry.model;
+  }
+  return undefined;
+}
+
+/**
+ * The spec to stamp on, and price, a message the API says `model` answered.
+ *
+ * Looked up under the requested spec's own provider first, so a proxy's
+ * registrations win, then by bare wire name. A model the catalog has never
+ * heard of keeps the requested spec's shape but loses its price: unknown cost
+ * reads as unknown, never as a borrowed rate or $0.
+ */
+function answeringSpec(requested: ModelSpec, model: string): ModelSpec {
+  if (model === requested.model) return requested;
+  const known = getModel(`${requested.provider}/${model}`) ?? getModel(model);
+  if (known) return known;
+  const { cost: _unpriced, ...rest } = requested;
+  return { ...rest, id: `${requested.provider}/${model}`, model, displayName: model };
 }
 
 function mergeUsage(current: Usage, incoming: AnthropicUsageLike | undefined): Usage {
@@ -458,14 +685,30 @@ interface ToolState {
   raw: string;
 }
 
-/** Translate raw Anthropic SSE events into provider stream events. */
+/**
+ * Translate raw Anthropic SSE events into provider stream events.
+ *
+ * @param options - `fallbacks: "default"` sends the request through the beta
+ *   surface with server-side refusal fallbacks, when the client has one and
+ *   the model offers them.
+ */
 export async function* anthropicEventStream(
   client: AnthropicClientLike,
   request: LLMRequest,
+  options: AnthropicStreamOptions = {},
 ): AsyncIterable<ProviderStreamEvent> {
   const params = buildAnthropicRequest(request);
-  const options = request.signal ? { signal: request.signal } : undefined;
-  const stream = await client.messages.create(params, options);
+  const requestOptions = request.signal ? { signal: request.signal } : undefined;
+  const beta =
+    options.fallbacks === "default" && request.model.capabilities.refusalFallback === true
+      ? client.beta
+      : undefined;
+  const stream = beta
+    ? await beta.messages.create(
+        { ...params, betas: [ANTHROPIC_FALLBACK_BETA], fallbacks: "default" },
+        requestOptions,
+      )
+    : await client.messages.create(params, requestOptions);
 
   const tools = new Map<number, ToolState>();
   let usage: Usage = {
@@ -476,7 +719,15 @@ export async function* anthropicEventStream(
   };
   let stopReason: StopReason = "endTurn";
   let errorMessage: string | undefined;
+  let stopDetails: StopDetails | undefined;
   let sawStop = false;
+  // The model that produced the content, once a fallback has switched it.
+  let servedBy: string | undefined;
+  function* serve(model: string | undefined): Generator<ProviderStreamEvent> {
+    if (beta === undefined || model === undefined || model === servedBy) return;
+    servedBy = model;
+    yield { type: "servedBy", spec: answeringSpec(request.model, model) };
+  }
 
   for await (const event of stream) {
     switch (event.type) {
@@ -488,6 +739,14 @@ export async function* anthropicEventStream(
       case "content_block_start": {
         const index = event.index;
         const block = event.content_block;
+        if ((block as { type: string }).type === "fallback") {
+          // A switch point: the model before it declined, the one after it
+          // answers. Its reasoning and unfinished calls are not part of this
+          // message, and the price is the new model's.
+          yield { type: "fallbackBoundary" };
+          yield* serve((block as unknown as FallbackBlockLike).to?.model);
+          break;
+        }
         if (block.type === "text") {
           yield { type: "textStart", blockIndex: index };
           if (block.text) yield { type: "textDelta", blockIndex: index, delta: block.text };
@@ -546,14 +805,11 @@ export async function* anthropicEventStream(
         break;
       }
       case "message_delta": {
+        yield* serve(servedByIteration(event.usage as AnthropicUsageLike));
         usage = mergeUsage(usage, event.usage as AnthropicUsageLike);
-        const reason = event.delta.stop_reason;
-        stopReason = mapAnthropicStopReason(reason);
-        if (stopReason === "error") {
-          errorMessage =
-            event.delta.stop_details?.type === "refusal"
-              ? "The model refused to respond"
-              : `Provider stopped with: ${reason}`;
+        stopReason = mapAnthropicStopReason(event.delta.stop_reason);
+        if (stopReason === "refusal") {
+          stopDetails = toStopDetails(event.delta.stop_details as StopDetailsLike | null);
         }
         yield { type: "usage", usage };
         break;
@@ -571,9 +827,12 @@ export async function* anthropicEventStream(
       message: "Anthropic stream ended before message_stop",
     });
   }
-  yield errorMessage === undefined
-    ? { type: "stop", stopReason }
-    : { type: "stop", stopReason, errorMessage };
+  yield {
+    type: "stop",
+    stopReason,
+    ...(errorMessage === undefined ? {} : { errorMessage }),
+    ...(stopDetails === undefined ? {} : { stopDetails }),
+  };
 }
 
 /** Create an {@link LLMClient} backed by the Anthropic Messages API. */
@@ -598,7 +857,13 @@ export function createAnthropicProvider(options: AnthropicProviderOptions = {}):
   return {
     stream(request: LLMRequest): AsyncIterable<StreamEvent> {
       return assembleStream(request.model, request.signal, () =>
-        deferredEvents(async () => anthropicEventStream(await getClient(), request)),
+        deferredEvents(async () =>
+          anthropicEventStream(
+            await getClient(),
+            request,
+            options.fallbacks === undefined ? {} : { fallbacks: options.fallbacks },
+          ),
+        ),
       );
     },
     complete(request: LLMRequest) {

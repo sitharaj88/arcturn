@@ -283,7 +283,13 @@ never takes its siblings with it.
 - **Declared `models[]` entries are validated, not trusted.** `cost.input`/`cost.output`
   must be finite and non-negative — `--max-cost` sums them, and a negative rate would earn
   budget on every turn — and each `capabilities` field is checked by name and type, with a
-  bad or unknown one dropped and warned about rather than cast through.
+  bad or unknown one dropped and warned about rather than cast through. Besides the four
+  booleans and `thinkingStyle`, an entry may declare `thinkingOff` (`"omit"`, `"disabled"`,
+  `"betweenTools"` or `"lowEffort"` — how "off" is sent), `thinkingLevels` (the effort levels
+  the model accepts; a requested level it lacks is clamped down) and `refusalFallback`. A
+  gateway has no catalog id for the adapter to infer these from, so a gateway serving
+  Sonnet 5.5 under its own name needs `"thinkingOff": "betweenTools"` or it will think by
+  default.
 
 A declaration in `~/.arcturn/config.json` is your own file and is trusted. **A declaration
 in a project's `.arcturn/config.json` is inert until you approve it** — see
@@ -312,7 +318,7 @@ override an entry a config file declared. Data never overrides code.
 ## Resolving a model id
 
 `getModel(id)` (from `packages/ai/src/catalog.ts`) accepts two shapes: a full catalog id
-(`"anthropic/claude-opus-4-5"`) or a bare wire model name (`"claude-opus-4-5"`) when that
+(`"anthropic/claude-opus-5-5"`) or a bare wire model name (`"claude-opus-5-5"`) when that
 name is unambiguous across every registered spec. A miss triggers the extended-preset
 world to register itself once (lazily, so a fresh process never pays for the whole preset
 table unless something actually needs it), then retries the lookup. `requireModel(id)` is
@@ -324,7 +330,7 @@ available to embedders who want to register a private endpoint.
 
 ## Failover chains
 
-A model string can be an array instead of a single id — `["anthropic/claude-sonnet-4-5",
+A model string can be an array instead of a single id — `["anthropic/claude-sonnet-5-5",
 "openai/gpt-4o"]` — which builds a fallback chain via `createFailoverClient` in
 `packages/ai/src/failover.ts`. Each link is tried in order; an attempt that fails
 *before any content has streamed* hands off to the next link, so the caller sees one
@@ -349,7 +355,7 @@ import { createFailoverClient, requireModel } from "@arcturn/ai";
 
 const failover = createFailoverClient(
   [
-    { client, model: requireModel("anthropic/claude-sonnet-4-5") },
+    { client, model: requireModel("anthropic/claude-sonnet-5-5") },
     { client, model: requireModel("openai/gpt-4o") },
   ],
   { onFailover: (from, to, error) => console.warn(`failing over: ${error.kind}`) },
@@ -376,7 +382,7 @@ import { createConsensusClient, requireModel } from "@arcturn/ai";
 
 const panel = createConsensusClient(
   [
-    { client, model: requireModel("anthropic/claude-sonnet-4-5") },
+    { client, model: requireModel("anthropic/claude-sonnet-5-5") },
     { client, model: requireModel("openai/gpt-4o") },
   ],
   {
@@ -457,7 +463,11 @@ Results are cached at `~/.arcturn/live-models.json` for 24 hours, so this doesn'
 network on every invocation — a fresh cache entry is reused as-is. A model discovered
 this way that isn't in the curated table gets conservative defaults (128k context
 window, 8,192 max output tokens, `tools: true`, `vision`/`thinking`/`caching: false`)
-until a curated entry supersedes it.
+until a curated entry supersedes it — except that the Anthropic Models API reports
+`max_input_tokens` (the context window) and `max_tokens` (the output cap) for every model,
+and when it does, those replace the defaults, so a brand-new Claude is sized by what
+Anthropic says rather than a 128K guess. A model found this way is still unpriced: limits
+are read from the listing, a price never is, and cost reads as unknown rather than $0.
 
 Discovery speaks whichever protocol the preset uses: OpenAI-protocol presets are queried
 at `<baseUrl>/models` with a bearer token; Anthropic-protocol presets are queried at
@@ -467,6 +477,74 @@ end in something like `/anthropic` or `/coding` for the Messages endpoint, and g
 model-listing path onto that would be just that — a guess. A preset whose refresh fails
 falls back to its last cached result (with a warning) rather than dropping its models
 for that round.
+
+## Claude models and what changed with the 5.5 generation
+
+The curated Anthropic entries, newest first within each family (every one a 1M-token
+context window and 128K output; prices are per million tokens):
+
+| Model | Input / output | Cache read | Notes |
+|---|---|---|---|
+| `anthropic/claude-fable-5-1` | $10 / $50 | $0.25 | Server-side refusal fallback available. |
+| `anthropic/claude-fable-5` | $10 / $50 | $1 | |
+| `anthropic/claude-opus-5-5` | $4 / $20 | $0.20 | Server-side refusal fallback available. |
+| `anthropic/claude-opus-5` | $5 / $25 | $0.50 | Server-side refusal fallback available. |
+| `anthropic/claude-opus-4-8`, `-4-7`, `-4-6` | $5 / $25 | $0.50 | Opus 4.6 has no `xhigh` thinking level. |
+| `anthropic/claude-sonnet-5-5` | $2 / $10 | $0.20 | The default model. Server-side refusal fallback available. |
+| `anthropic/claude-sonnet-5` | $2 / $10 | $0.20 | |
+| `anthropic/claude-sonnet-4-6` | $3 / $15 | $0.30 | No `xhigh`. |
+| `anthropic/claude-haiku-5-5` | $0.10 / $0.50 | $0.01 | |
+
+Claude Haiku 5.5's rate is the one for prompts of 100K tokens or fewer; longer prompts bill
+at $0.50 / $2.50. The catalog carries a single rate per model, so a cost estimate for a very
+long Haiku prompt is a floor. `arcturn --list-models` prints the full catalog, including
+older generations that remain selectable.
+
+**Bedrock has not caught up.** The Claude 5.x and Opus 4.7+ models on AWS are served by
+Bedrock's Messages-API (Mantle) endpoint, and Arcturn's Bedrock adapter still speaks the
+older `bedrock-runtime` API, so no catalog entries exist for them — shipping ones that
+would answer with a 400 seemed worse than shipping none. Moving the adapter is a planned
+follow-up. **Vertex** lists the same Claude ids under their bare first-party names, but
+unpriced: Google Cloud bills on its own rate card, which Arcturn has not verified, so spend
+on those models reads as cost unknown rather than borrowing Anthropic's price.
+
+## Refusals and server-side fallbacks
+
+A model can decline a request outright. Arcturn treats that as its own outcome rather than
+an error or an empty reply: the assistant message ends with `stopReason: "refusal"` and a
+`stopDetails` of `{ category, explanation? }`. The turn ends cleanly — there is no "turn
+returned nothing" nudge that would re-send the declined request, any tool calls in the
+refused message are stripped and never run, a refused message is skipped when history is
+replayed to the provider, and a compaction whose summary is refused throws instead of
+installing a fragment as the summary.
+
+Each provider's own wording maps onto it, and `category` carries the provider's word for why:
+
+| Provider | Becomes a refusal | `category` |
+|---|---|---|
+| Anthropic | `stop_reason: "refusal"` | the `stop_details` category (`cyber`, …), or `null` |
+| OpenAI (Chat Completions and Responses) | `content_filter` | `content_filter` |
+| Google | `SAFETY`, `PROHIBITED_CONTENT`, `BLOCKLIST`, `SPII`, `IMAGE_SAFETY` | the filter name |
+| Bedrock Converse | `content_filtered`, `guardrail_intervened` | the filter name |
+
+You see it as "The model declined this request (cyber): <explanation>" in the TUI, the
+transcript and the web UI. See [Programmatic events](/docs/sdk-events#refusals) for the
+event shape and [CLI reference](/docs/cli-reference) for what `--print` does.
+
+For models the Claude API can re-run on a fallback after a decline, there is an opt-in:
+
+```json
+{ "providers": { "anthropic": { "fallbacks": "default" } } }
+```
+
+It is **off by default**. With it on, requests to a model that supports it (today Fable 5.1,
+Opus 5.5, Opus 5 and Sonnet 5.5) go through the Anthropic beta surface with the
+`server-side-fallback-2026-07-01` beta and `fallbacks: "default"`; when the first model
+declines, the API answers the turn with a fallback model and the message is stamped with
+the model that actually answered. It is never sent to Claude Haiku 5.5, which has no
+server-side fallback. Billing follows the answering model — see
+[Audit trail & cost accounting](/docs/audit-cost). From code, the same switch is
+`AnthropicProviderOptions.fallbacks`.
 
 ## Subscription sign-in is not supported
 
@@ -490,7 +568,7 @@ import { createClient, getModel, presetSpec, bedrockModel } from "@arcturn/ai";
 
 const llm = createClient();
 
-const direct = getModel("anthropic/claude-sonnet-4-5");
+const direct = getModel("anthropic/claude-sonnet-5-5");
 const viaPreset = presetSpec("groq", "llama-3.3-70b-versatile");
 const onAws = bedrockModel("us.anthropic.claude-sonnet-4-5-20250929-v1:0", {
   providerOptions: { region: "us-east-1" },

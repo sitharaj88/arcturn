@@ -234,6 +234,40 @@ end. Full light/dark theming landed in the CLI at the same time, including the
 terminal canvas itself via OSC 11 — the background is owned by the theme rather
 than inherited from whatever the emulator happened to be set to.
 
+**The catalog catches up (2026-10-10).** Wave 1 of keeping pace with the Claude
+generation, in two halves that had to land together. *Models:* `fable-5-1`,
+`opus-5-5`, `sonnet-5-5`, `haiku-5-5` and `opus-4-8` / `-4-7` / `-4-6` /
+`sonnet-4-6` joined the catalog (1M window, 128K output, newest first per
+family), checked against the claude-api reference's `models.md` and
+`model-migration.md` as cached 2026-10-06; Vertex carries the same ids unpriced
+rather than borrowing first-party rates. `DEFAULT_MODEL` moved to
+`claude-sonnet-5-5`, and `suggestCheapModel` now lands on Haiku 5.5. *Thinking:*
+`ThinkingLevel` grew `xhigh` and `max`, models declare the levels they accept
+(a missing one is clamped down), and "off" is now spelled per model — Opus 5 had
+been running at default effort and Sonnet 5 running adaptive under `off`; both
+were silently wrong before. *Refusals:* `stopReason: "refusal"` plus
+`stopDetails` end a turn cleanly across all providers (no nudge re-sending the
+declined request, tool calls stripped, replay skips it, compaction throws on a
+refused summary), surfaced in the TUI, web, `-p` stderr, NDJSON and ACP, with an
+opt-in `providers.anthropic.fallbacks: "default"` for server-side fallback. The
+live catalog also takes `max_input_tokens` / `max_tokens` from the Models API.
+SDK stays on `@anthropic-ai/sdk` 0.117.1; `between_tools` is typed locally until
+the bump. Notes: `docs/integration-notes/INTEGRATION-refusals.md`,
+`packages/ai/NOTES.md`.
+
+*Not done, on purpose or for lack of a way to verify:* **Bedrock Mantle** — the
+5.x / 4.7+ models live behind an endpoint the adapter does not speak, so no
+Bedrock entries were added (moving to `AnthropicBedrockMantle` unlocks them);
+**Vertex pricing** — Google's partner rate card could not be read, so those
+models report cost unknown; **fallback cost is a floor** — tokens a declined
+attempt spent sit in `usage.iterations` and are not added, because whether a
+decline is billed depends on its category; **other `complete()` callers**
+(`git.ts`, session titles, the team planner) still ignore `stopReason` and read
+a refusal as text; **OpenAI refusal text deltas** are not surfaced, only the
+`content_filter` finish reason; **Haiku 5.5's long-prompt tier** ($0.50 / $2.50
+above 100K tokens) is not modelled, so such estimates are a floor. No live-endpoint run of
+this wave is recorded here, so the ✅ column in the provider table is unchanged.
+
 ## Remaining follow-ups
 
 **Closed (2026-08-26): the read side of the symlink door.** `loop.ts` no longer

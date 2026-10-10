@@ -146,3 +146,47 @@ includes reasoning tokens.
 drift. `registerModel()` overrides any entry, and `calculateCostUsd` returns
 `undefined` when a spec has no `cost`, so a stale price can always be corrected
 by the host without touching this package.
+
+## 2026-10-10 — the catalog catches up (5.5 generation)
+
+Worked around rather than fixed, each with the reason and the way out:
+
+- **`between_tools` is missing from the pinned SDK.** `@anthropic-ai/sdk`
+  0.117.1 types `ThinkingConfigParam` as `enabled | disabled | adaptive`, but
+  Sonnet 5.5 turns thinking off only with `{type: "between_tools"}`.
+  `AnthropicThinkingParam` / `AnthropicRequestParams` (providers/anthropic.ts)
+  add it locally. 0.133.0 ships `ThinkingConfigBetweenTools`; on that bump the
+  local union can go. Everything else this wave needed — `stop_details`,
+  `display`, the `xhigh`/`max` effort literals, beta `fallbacks: "default"` —
+  is already in 0.117.1, so the SDK was not bumped.
+- **Refusal fallbacks stream beta-only shapes.** `fallback` content blocks and
+  `usage.iterations` are read through small structural types rather than the
+  beta SDK types, because `AnthropicClientLike` streams the GA event type. The
+  adapter turns them into two internal provider events: `fallbackBoundary`
+  (the assembler drops the declining model's thinking and unfinished tool
+  calls, which the docs say to omit when echoing the turn back — so the
+  `fallback` block itself never needs echoing) and `servedBy` (the message is
+  stamped with, and priced at, the model that answered).
+- **A fallback turn's `costUsd` is a floor.** Top-level `usage` covers only
+  the attempt that produced the message, and is priced at the answering
+  model. Tokens a declined attempt spent appear only in `usage.iterations`,
+  and whether a decline is billed depends on its refusal category, which the
+  client cannot settle — so they are not added.
+- **Bedrock does not get the new generation yet.** The adapter speaks
+  `bedrock-runtime` through `AnthropicBedrock`; the 5.x / 4.7+ models are
+  served by the Messages-API (Mantle) endpoint under ids
+  `anthropic.claude-fable-5-1`, `anthropic.claude-opus-5-5`,
+  `anthropic.claude-sonnet-5-5`, `anthropic.claude-haiku-5-5` (and
+  `anthropic.claude-opus-5`, `-sonnet-5`, `-fable-5`, `-opus-4-8`,
+  `-opus-4-7`). Shipping catalog entries the adapter cannot serve would
+  advertise a path that 400s; moving to `AnthropicBedrockMantle` is the
+  follow-up that unlocks them.
+- **Vertex entries are unpriced.** Google Cloud bills on its own rate card,
+  which could not be read; the current Claude generation ships under its bare
+  id with no `cost`, so spend reads "unknown" rather than a borrowed rate.
+- **OpenAI `xhigh`/`max` clamp to `high`.** The catalog does not record which
+  OpenAI models accept an effort above `high`. Gemini clamps the same way
+  (its scale tops out at `HIGH` / a 32K budget).
+- **A refused turn's partial output is not replayed.** `toAnthropicMessages`
+  skips assistant messages whose `stopReason` is `refusal`; the core loop
+  already strips their tool calls, so no `tool_result` is left dangling.
