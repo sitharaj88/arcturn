@@ -451,7 +451,7 @@ describe("mapAnthropicStopReason", () => {
   it("maps every documented value", () => {
     expect(mapAnthropicStopReason("end_turn")).toBe("endTurn");
     expect(mapAnthropicStopReason("stop_sequence")).toBe("endTurn");
-    expect(mapAnthropicStopReason("pause_turn")).toBe("endTurn");
+    expect(mapAnthropicStopReason("pause_turn")).toBe("pauseTurn");
     expect(mapAnthropicStopReason("max_tokens")).toBe("maxTokens");
     expect(mapAnthropicStopReason("model_context_window_exceeded")).toBe("maxTokens");
     expect(mapAnthropicStopReason("tool_use")).toBe("toolCalls");

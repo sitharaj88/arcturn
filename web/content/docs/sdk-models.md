@@ -129,7 +129,10 @@ function describe(message: AssistantMessage): string | undefined {
 }
 ```
 
-`StopReason` is `"endTurn" | "toolCalls" | "maxTokens" | "refusal" | "aborted" | "error"`.
+`StopReason` is `"endTurn" | "toolCalls" | "maxTokens" | "pauseTurn" | "refusal" | "aborted" | "error"`.
+`pauseTurn` is a provider pausing mid-turn after a server-side tool (native tool search);
+the loop continues it by re-sending the conversation unchanged, so an SDK consumer only
+sees it on the `messageEnd` event, never as a run's final state.
 `stopDetails` is `{ category: string | null; explanation?: string }` and is present only
 when the stop reason is `refusal`, and only when the provider said anything. Branch on
 `stopReason`; treat `category` as informational — it is an open set (`cyber`, `bio`, … on

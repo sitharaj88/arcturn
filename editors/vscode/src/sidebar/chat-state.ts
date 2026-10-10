@@ -230,9 +230,11 @@ function appendMessage(state: ChatState, message: AssistantMessage): ChatState {
         collapsed: true,
       });
       next = { ...next, seq: next.seq + 1 };
-    } else {
+    } else if (part.type === "toolCall") {
       next = ensureTool(next, part.id, part.name, JSON.stringify(part.arguments), true);
     }
+    // Server-side compaction and server-tool blocks are the provider's own
+    // bookkeeping; the sidebar shows nothing for them.
   }
   return next;
 }

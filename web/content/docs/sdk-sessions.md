@@ -92,16 +92,40 @@ conversation with no completed turn yet has nothing safe to compact.
 | `model` | agent's current model | Model used for the summarization call itself — can be a cheaper model than the one driving turns. |
 | `maxOutputTokens` | `4096` | Output budget for the summary. |
 | `buildPrompt` | built-in | Replace the summarization prompt entirely. |
+| `shape` | per model | `"simple"` (one summary replaces everything — the default on Claude 4.6+ through `anthropic`, `anthropic-compatible`, `bedrock`, `vertex`), `"keep-tail"` (summary plus the recent turns — the default elsewhere; thinking is stripped from the tail on adaptive Claude) or `"server"` (the provider compacts; `agent.compact()` then reports nothing to summarize locally). |
+
+`resolveCompactionShape(options, model)` returns the shape that applies, and
+`explainCompactionShape` the shape with the reason `arcturn doctor` prints. `findCompactionCut`,
+`findSimpleCutPoint` and `hasPendingToolRound` expose the cut logic; no shape folds an open tool
+round. `agent.compact()` returns `false` with a notice, not an error, when one is waiting.
+Why the default differs by model: [Context management](/docs/context-management#layer-3-compaction).
 
 The summary is recorded as its own `compaction` session entry (`summary`, `upToId`,
-`tokensBefore`, `tokensAfter`), so a later resume reconstructs the exact folded state —
-compaction is a tree node like any other, not a destructive rewrite.
+`tokensBefore`, `tokensAfter`, and `stripTailThinking` when a kept tail was replayed without
+its thinking), so a later resume reconstructs the exact folded state — compaction is a tree
+node like any other, not a destructive rewrite. `compact()`'s result also reports `shape`,
+`stripTailThinking` and `keptIndices` (each kept message's index in the input, since a
+stripped one is a new object).
 
 ```ts
 agent.on("compactionEnd", (event) => {
   log(`Compacted ${event.tokensBefore} → ${event.tokensAfter} tokens`);
 });
 ```
+
+## Context-edit passes in the session
+
+Local tool-result elision is recorded: each pass appends a `state` entry whose `contextEdit`
+is a `ContextEditRecord` — `{ elided: string[]; withholdThinking?: "afterFirstElided" | "all" }`,
+the tool-call ids now sent as stubs and, on adaptive Claude, how much earlier thinking stops
+being replayed. `materializeBranch` returns the replayed ledger as
+`MaterializedBranch.contextEdit` (`{ elided, withheldThinking }` — the stubbed tool-call ids
+and the indices of assistant messages whose thinking is withheld), and `Agent.resume` applies it, so a resumed agent sends the
+request the live one would have. If you write your own store or branch tooling, keep these
+entries and their order: dropping one makes a resume send full results where the original sent
+stubs, which misses the prompt cache and, on models that bind thinking to the prefix, the
+thinking too. `agent.contextEditPasses` lists the passes made in this process (`requestIndex`, `elided`, `charsSaved`). See
+[Context management](/docs/context-management#passes-and-the-ledger).
 
 ## Estimating context usage
 

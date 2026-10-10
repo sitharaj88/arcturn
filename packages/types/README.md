@@ -11,7 +11,7 @@ package (and any SDK consumer) imports these types instead of redefining them.
 - `ai.js` — provider-facing message/content types used by the LLM client.
 - `events.js` — the `AgentEvent` union the agent loop streams.
 - `mcp.js` — Model Context Protocol wire types.
-- `messages.js` — `Message`, tool call/result content, and related shapes.
+- `messages.js` — `Message` (user, assistant, tool-result and `system` operator messages), tool call/result content, and the `compaction` / `serverTool` assistant blocks.
 - `models.js` — `ModelSpec`, `ModelCapabilities`, `ProviderId`.
 - `permissions.js` — permission rule and decision types.
 - `protocol.js` — types shared with `@arcturn/protocol`'s wire format, including

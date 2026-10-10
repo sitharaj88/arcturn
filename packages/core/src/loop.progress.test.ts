@@ -66,10 +66,10 @@ function harness(script: StreamEvent[][], options: Partial<AgentOptions> = {}): 
   return { agent, llm, events };
 }
 
-/** Every user-message text in a request, in order. */
+/** Every user- or operator-message text in a request, in order. */
 function userTexts(messages: readonly Message[]): string[] {
   return messages
-    .filter((message) => message.role === "user")
+    .filter((message) => message.role === "user" || message.role === "system")
     .map((message) => contentText(message.content));
 }
 
@@ -108,7 +108,7 @@ describe("progressCheck", () => {
       NUDGE,
     ]);
     expect(
-      agent.messages.filter((m) => m.role === "user" && contentText(m.content) === NUDGE),
+      agent.messages.filter((m) => m.role === "system" && contentText(m.content) === NUDGE),
     ).toHaveLength(1);
 
     // Once as a warn notice, once as the structured event a host can report on.

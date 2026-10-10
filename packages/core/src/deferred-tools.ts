@@ -16,11 +16,38 @@
  * {@link DeferredToolset.restore}.
  *
  * The loop needs no special support: it already calls `LoopRuntime.getTools()`
- * once per turn, so pointing that at {@link DeferredToolset.activeTools} is the
+ * once per turn, so pointing that at {@link DeferredToolset.toolsFor} is the
  * whole integration.
+ *
+ * ## Two paths, one record
+ *
+ * On first-party Anthropic with Claude 4.5 or later, {@link DeferredToolset.toolsFor}
+ * takes the **native** path: every tool goes out from the first request, the
+ * deferred ones flagged `deferLoading` (`defer_loading: true` on the wire),
+ * beside the server's own BM25 search tool, and arcturn's `tool_search` is
+ * not sent at all. Activation then happens server-side and never changes the
+ * request's tool set — which is what keeps the prompt cache, and every
+ * replayed thinking block, valid. {@link DeferredToolset.observe} reads the
+ * server's `tool_search_tool_result` blocks back into this instance, so the
+ * activation record stays true for a snapshot, a resume, or a later switch to
+ * a model on the other path.
+ *
+ * Everywhere else the original mechanism runs: activation grows the next
+ * request's tool set and rewrites the search tool's index. That resets the
+ * prompt cache from the top of the conversation; the agent says so the first
+ * time it happens on an adaptive Claude model, and stops replaying the
+ * thinking the change invalidated.
  */
 
-import type { Tool, ToolExecutionContext, ToolResult } from "@arcturn/types";
+import type {
+  AssistantMessage,
+  Message,
+  ModelSpec,
+  Tool,
+  ToolExecutionContext,
+  ToolResult,
+} from "@arcturn/types";
+import { hasNativeToolSearch } from "./model-traits.js";
 import { text } from "./util/content.js";
 
 /**
@@ -74,6 +101,34 @@ export interface ActivationReport {
 export interface DeferredToolsetSnapshot {
   /** Names activated beyond the always-active core, sorted. */
   activated: string[];
+  /**
+   * The subset of `activated` found only by the provider's native tool search,
+   * sorted. They stay `deferLoading` on the native path, so the tool set it
+   * sends is the same before and after the restore. Absent on older snapshots,
+   * which read as "every activation came from arcturn's `tool_search`".
+   */
+  native?: string[];
+}
+
+/**
+ * Tool names the provider's native search surfaced in an assistant message —
+ * the `tool_reference`s inside its `tool_search_tool_result` blocks.
+ *
+ * @param message - An assistant message.
+ */
+export function nativeToolSearchMatches(message: AssistantMessage): string[] {
+  const names: string[] = [];
+  for (const block of message.content) {
+    if (block.type !== "serverTool" || block.block.type !== "tool_search_tool_result") continue;
+    const content = block.block.content as { tool_references?: unknown } | undefined;
+    const references = content?.tool_references;
+    if (!Array.isArray(references)) continue;
+    for (const reference of references) {
+      const name = (reference as { tool_name?: unknown } | null)?.tool_name;
+      if (typeof name === "string" && name.length > 0) names.push(name);
+    }
+  }
+  return names;
 }
 
 const MAX_INDEX_DESCRIPTION_CHARS = 160;
@@ -137,6 +192,10 @@ export class DeferredToolset {
   readonly #byName = new Map<string, Tool>();
   readonly #alwaysActive = new Set<string>();
   readonly #activated = new Set<string>();
+  /** Activations only the provider's native search made; stay deferred there. */
+  readonly #nativeOnly = new Set<string>();
+  /** Stable `deferLoading` wrappers, one per tool, so requests stay byte-identical. */
+  readonly #deferredViews = new Map<string, Tool>();
   readonly #onActivate: ((names: string[]) => void) | undefined;
   readonly #searchToolName: string;
   readonly #maxResults: number;
@@ -189,6 +248,102 @@ export class DeferredToolset {
     return active;
   }
 
+  /**
+   * The tools to send to `model`, and to execute its calls against.
+   *
+   * With native tool search ({@link hasNativeToolSearch}) that is every tool,
+   * in registration order: the always-active core and anything arcturn's own
+   * search activated as ordinary tools, the rest flagged `deferLoading` — and
+   * no `tool_search`, since the server's search tool replaces it. Nothing in
+   * that list moves when the server activates a tool, so the request's tool
+   * set is the same on every turn. Every other model gets
+   * {@link DeferredToolset.activeTools}.
+   *
+   * @param model - The model the next request goes to.
+   */
+  toolsFor(model: ModelSpec): Tool[] {
+    if (!hasNativeToolSearch(model)) return this.activeTools();
+    return this.#tools.map((tool) => {
+      const name = tool.definition.name;
+      const loaded =
+        this.#alwaysActive.has(name) || (this.#activated.has(name) && !this.#nativeOnly.has(name));
+      return loaded ? tool : this.#deferredView(tool);
+    });
+  }
+
+  /**
+   * Record the activations a provider's native tool search made in `message`
+   * (its `tool_search_tool_result` blocks), so snapshots, resumes and a later
+   * switch to a model on arcturn's own path know about them. Fires
+   * `onActivate` for names that are new. Other messages are ignored.
+   *
+   * @param message - Any message; typically each `messageEnd`'s.
+   * @returns The names newly activated.
+   */
+  observe(message: Message): string[] {
+    if (message.role !== "assistant") return [];
+    const fresh = this.#activateNative(nativeToolSearchMatches(message));
+    if (fresh.length > 0) this.#onActivate?.([...fresh]);
+    return fresh;
+  }
+
+  /**
+   * Rebuild the activation record from a transcript — arcturn's own
+   * `tool_search` results and the provider's native search results alike —
+   * so a resumed session sends the tool set it ended with. Like
+   * {@link DeferredToolset.restore}, it does not fire `onActivate`.
+   *
+   * @param messages - The resumed conversation, oldest first.
+   */
+  replay(messages: readonly Message[]): void {
+    for (const message of messages) {
+      if (message.role === "assistant") {
+        this.#activateNative(nativeToolSearchMatches(message));
+        continue;
+      }
+      if (message.role !== "toolResult" || message.toolName !== this.#searchToolName) continue;
+      const activated = message.details?.activated;
+      if (!Array.isArray(activated)) continue;
+      for (const name of activated) {
+        if (typeof name !== "string" || !this.#byName.has(name)) continue;
+        if (this.#alwaysActive.has(name)) continue;
+        this.#activated.add(name);
+        this.#nativeOnly.delete(name);
+      }
+    }
+    this.#version++;
+  }
+
+  #activateNative(names: readonly string[]): string[] {
+    const fresh: string[] = [];
+    for (const name of names) {
+      if (!this.#byName.has(name) || this.#alwaysActive.has(name) || this.#activated.has(name)) {
+        continue;
+      }
+      this.#activated.add(name);
+      this.#nativeOnly.add(name);
+      fresh.push(name);
+    }
+    if (fresh.length > 0) this.#version++;
+    return fresh;
+  }
+
+  #deferredView(tool: Tool): Tool {
+    const name = tool.definition.name;
+    let view = this.#deferredViews.get(name);
+    if (!view) {
+      view = {
+        get definition(): Tool["definition"] {
+          return { ...tool.definition, deferLoading: true };
+        },
+        ...(tool.annotations === undefined ? {} : { annotations: tool.annotations }),
+        execute: (input, ctx) => tool.execute(input, ctx),
+      };
+      this.#deferredViews.set(name, view);
+    }
+    return view;
+  }
+
   /** Tools currently withheld from the request, in registration order. */
   deferredTools(): Tool[] {
     return this.#tools.filter((tool) => !this.isActive(tool.definition.name));
@@ -225,6 +380,9 @@ export class DeferredToolset {
         this.#activated.add(name);
         report.activated.push(name);
       }
+      // Activated through arcturn's own search: an ordinary tool from now on,
+      // on every path.
+      if (this.#byName.has(name)) this.#nativeOnly.delete(name);
     }
     if (report.activated.length > 0) {
       this.#version++;
@@ -275,7 +433,11 @@ export class DeferredToolset {
 
   /** Serializable activation state; safe to persist alongside a session. */
   snapshot(): DeferredToolsetSnapshot {
-    return { activated: [...this.#activated].sort() };
+    const native = [...this.#nativeOnly].sort();
+    return {
+      activated: [...this.#activated].sort(),
+      ...(native.length > 0 ? { native } : {}),
+    };
   }
 
   /**
@@ -287,8 +449,13 @@ export class DeferredToolset {
    */
   restore(snapshot: DeferredToolsetSnapshot): void {
     this.#activated.clear();
+    this.#nativeOnly.clear();
+    const native = new Set(snapshot.native ?? []);
     for (const name of snapshot.activated) {
-      if (this.#byName.has(name) && !this.#alwaysActive.has(name)) this.#activated.add(name);
+      if (this.#byName.has(name) && !this.#alwaysActive.has(name)) {
+        this.#activated.add(name);
+        if (native.has(name)) this.#nativeOnly.add(name);
+      }
     }
     this.#version++;
   }

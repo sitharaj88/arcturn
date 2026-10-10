@@ -6,43 +6,58 @@
  * permission and compaction wiring.
  */
 
-export type { AgentOptions, AgentResumeOptions } from "./agent.js";
+export type { AgentOptions, AgentResumeOptions, ContextEditPass, SteerOptions } from "./agent.js";
 export { Agent, createAgent } from "./agent.js";
 export type {
   CompactionOptions,
   CompactionResult,
+  CompactionShape,
   CompactMessagesInput,
   ResolvedCompactionOptions,
 } from "./compaction.js";
 export {
   buildSummaryPrompt,
+  COMPACTION_SHAPES,
   compactMessages,
   DEFAULT_KEEP_RECENT_TOKENS,
   DEFAULT_RESERVE_TOKENS,
   estimateMessageTokens,
   estimateTokens,
+  explainCompactionShape,
+  findCompactionCut,
   findCutPoint,
+  findSimpleCutPoint,
+  hasPendingToolRound,
   resolveCompactionOptions,
+  resolveCompactionShape,
   SUMMARY_SYSTEM_PROMPT,
   serializeConversation,
   shouldCompact,
 } from "./compaction.js";
 export type {
+  ContextEditMode,
   ContextEditOptions,
+  ContextEditPassPlan,
   ContextEditResult,
   ElisionInfo,
   ResolvedContextEditOptions,
 } from "./context-edit.js";
 export {
+  CONTEXT_EDIT_MODES,
+  ContextEditLedger,
   DEFAULT_KEEP_RECENT_TURNS,
   DEFAULT_MAX_TOTAL_TOOL_RESULT_CHARS,
+  DEFAULT_MIN_CHARS_PER_PASS,
   DEFAULT_MIN_CHARS_TO_ELIDE,
   DEFAULT_PROTECTED_TOOL_NAMES,
   ELIDED_DETAIL_KEY,
   editContext,
+  explainContextEditMode,
   findElisionBoundary,
   isElided,
+  planContextEditPass,
   renderElisionStub,
+  resolveContextEditMode,
   resolveContextEditOptions,
   shouldEditContext,
   toolResultChars,
@@ -58,6 +73,7 @@ export {
   DEFAULT_ALWAYS_ACTIVE_TOOLS,
   DEFAULT_SEARCH_TOOL_NAME,
   DeferredToolset,
+  nativeToolSearchMatches,
 } from "./deferred-tools.js";
 export type { AgentHooks, BeforeToolCallResult, ToolCallInfo } from "./hooks.js";
 export {
@@ -67,12 +83,14 @@ export {
 } from "./large-content.js";
 export type { LoopResult, LoopRuntime, TurnProgress } from "./loop.js";
 export {
+  inputTransformationNotices,
   isTurnCeilingError,
   producedNothingVisible,
   runLoop,
   SILENT_TURN_NUDGE,
   turnWarningThreshold,
 } from "./loop.js";
+export { hasNativeToolSearch, isAdaptiveAnthropic } from "./model-traits.js";
 export type { OffloadDetails, OffloadFileSystem, OffloadOptions } from "./offload.js";
 export {
   buildOffloadStub,
@@ -137,7 +155,6 @@ export type {
   TelemetryTracer,
 } from "./telemetry.js";
 export { createConsoleTelemetry, createTelemetryListener, otelTracer } from "./telemetry.js";
-
 export {
   addUsage,
   contentText,
@@ -145,10 +162,12 @@ export {
   errorText,
   errorToolResult,
   lastAssistantText,
+  operatorMessage,
   text,
   toolCallsOf,
   toolResultMessage,
   toUserContent,
   userMessage,
+  withoutThinking,
 } from "./util/content.js";
 export { createId, createSessionId } from "./util/ids.js";

@@ -15,6 +15,10 @@ Vertex, and any OpenAI- or Anthropic-Messages-compatible endpoint via presets.
   catalog; well-known presets (Groq, DeepSeek, Cerebras, Z.AI, ...) resolve on demand.
 - `createFailoverClient`, `streamFailover` — chain models/providers with failover.
 - `createConsensusClient`, `compareMessages` — run a prompt across several models.
+- Preserved thinking: `AnthropicProviderOptions.thinkingBinding` / `CreateClientOptions.thinkingBinding`
+  (`"error"` or `"drop_block"`), `toInputTransformations`, and mid-conversation `role: "system"`
+  rendering per provider (`anthropicSystemMessages`, `openAISystemMessages`, `foldedSystemText`).
+  Server-side `context_management` is Claude API only; Bedrock and Vertex refuse it.
 - `calculateCostUsd`, `addUsage`, `emptyUsage` — token/cost accounting.
 - `discoverModels`, `refreshCatalog` — live catalog discovery for OpenAI-compatible
   endpoints; `oauth` (namespace) — PKCE and the loopback redirect listener, used by

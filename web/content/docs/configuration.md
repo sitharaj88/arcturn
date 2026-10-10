@@ -49,6 +49,12 @@ Every key `.arcturn/config.json` accepts, in both user and project files:
 | `permissions` | `PermissionRule[]` | `[]` | Accumulates across layers. See [Permissions](/docs/permissions). |
 | `thinking` | `"off" \| "low" \| "medium" \| "high" \| "xhigh" \| "max"` | `"off"` | Extended-thinking level for `thinking`-capable models. A level the model does not accept is clamped down to the nearest one it does. See [Extended thinking](#extended-thinking). |
 | `providers.anthropic.fallbacks` | `"default"` | *(unset)* | Opt in to Anthropic's server-side refusal fallback for models that support it. See [Refusals and server-side fallbacks](/docs/providers#refusals-and-server-side-fallbacks). |
+| `providers.anthropic.thinkingBinding` | `"error" \| "drop_block"` | *(unset)* | First-party `anthropic` only. Sends `thinking.block_binding.prefix_mismatch_behavior` (beta `thinking-binding-controls-2026-08-01`): `"error"` fails a request whose history was edited after a thinking block was produced (useful in CI), `"drop_block"` lets the API drop the unusable block and carry on. What it reports surfaces as a notice. Setting it also makes `contextEditing.mode` default to `"auto"`. Ignored by the compatible, Bedrock and Vertex adapters. See [Preserved thinking](/docs/providers#preserved-thinking). |
+| `compaction.shape` | `"simple" \| "keep-tail" \| "server"` | per model | How compaction rewrites history. Default is `simple` (one summary replaces everything) on Claude 4.6+ through `anthropic`, `anthropic-compatible`, `bedrock` and `vertex`, `keep-tail` elsewhere. `server` lets the provider compact (Claude API only). See [Context management](/docs/context-management#layer-3-compaction). |
+| `contextEditing.enabled` | `boolean` | `true` | Clear stale tool results from the outgoing request. `false` turns it off. |
+| `contextEditing.mode` | `"local" \| "server" \| "auto"` | `"local"` (`"auto"` if `providers.anthropic.thinkingBinding` is set) | Who clears old tool results: arcturn in recorded passes, the provider (`clear_tool_uses_20250919`, Claude API only), or whichever fits the model. `arcturn doctor` shows the choice and why. See [Context management](/docs/context-management#modes). |
+| `contextEditing.minCharsPerPass` | `integer ≥ 0` | `50000` | Characters a local elision pass must save before it runs. Each pass rewrites already-sent history once, so passes are batched. |
+| `contextEditing.keepRecentTurns` / `.minCharsToElide` / `.maxTotalToolResultChars` / `.protectToolNames` | `integer` / `integer` / `integer` / `string[]` | `3` / `1000` / `100000` / `["todo", "plan"]` | Which results are eligible: trailing turns kept verbatim, smallest result worth stubbing, history size before editing starts, tools never elided (replaces the default list). |
 | `theme` | `string` | `"dark"` | `"dark"`, `"light"`, or a custom theme file name under `~/.arcturn/themes` / `<cwd>/.arcturn/themes`. |
 | `ui` | `"screen" \| "inline"` | `"screen"` | `"screen"` is the full-screen, alternate-screen TUI; `"inline"` is the classic bottom-of-scrollback block. |
 | `systemPromptAppend` | `string` | *(none)* | Extra text appended verbatim to the system prompt. |
@@ -337,10 +343,13 @@ carries an explicit effort — its API default is `medium`, not `high`.
 ## Compaction
 
 Arcturn automatically compacts the conversation before it would overflow the model's
-context window — by default it keeps roughly the most recent 20,000 tokens verbatim and
-folds everything older into a structured markdown summary, reserving 16,384 tokens of
-headroom. All of it is tunable; see [Sessions](/docs/sessions#compaction) for the knobs
-and how a compaction is recorded in the session tree.
+context window, reserving 16,384 tokens of headroom. What it keeps depends on
+`compaction.shape`: on Claude with adaptive thinking (4.6 and later) one summary replaces
+the whole history, because the thinking on those models is bound to the history a summary
+replaces; elsewhere it keeps roughly the most recent 20,000 tokens verbatim beside the
+summary. All of it is tunable; see [Sessions](/docs/sessions#compaction) for the knobs and
+how a compaction is recorded in the session tree, and
+[Context management](/docs/context-management) for the reasoning.
 
 ## Writing a permission rule or setting from code
 

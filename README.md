@@ -187,7 +187,8 @@ by meaning. Nothing leaves your machine.
 
 Automatic compaction, context editing, tool-output offloading, and deferred tool schemas
 loaded on demand via `tool_search` — a long session stays inside the window without
-silently dropping what mattered.
+silently dropping what mattered, and the history only ever grows at the end, so the prompt
+cache and the thinking Claude's newest models bind to it survive.
 
 ### 🧰 And the rest of a working day
 

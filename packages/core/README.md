@@ -14,7 +14,15 @@ CLI is built on, just without a terminal in front of it.
   plus the path-comparison policy they use (`defaultCaseInsensitivePaths`, `isPathLike`)
   — path specifiers are matched with either separator and folded to the filesystem's own
   case rules, commands and URLs verbatim.
-- `compactMessages`, `shouldCompact`, `estimateTokens` — compaction helpers.
+- `compactMessages`, `shouldCompact`, `estimateTokens` — compaction helpers;
+  `CompactionOptions.shape` (`"simple"`, `"keep-tail"`, `"server"`) and `resolveCompactionShape`
+  choose how history is rewritten — `simple` by default on Claude with adaptive thinking.
+- `ContextEditLedger`, `planContextEditPass`, `resolveContextEditMode` — tool-result context
+  editing in recorded, batched passes (or server-side), so the outgoing history only grows at
+  the end. `operatorMessage` builds the `system`-role messages the loop speaks with;
+  `agent.steer(text, { from: "operator" })` is the opt-in for a host.
+- `DeferredToolset` (`toolsFor`, `observe`, `replay`) — progressive tool disclosure, with the
+  provider's native tool search on first-party Anthropic 4.5+; pass it as `AgentOptions.deferredTools`.
 - `JsonlSessionStore`, `MemorySessionStore`, and session-tree helpers (`buildTree`,
   `materializeBranch`, `pathToLeaf`, ...).
 - `createPlanTool`, `createTodoTool`, `createSubagentTool` — built-in state/delegation

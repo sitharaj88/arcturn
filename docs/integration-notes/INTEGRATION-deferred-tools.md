@@ -5,6 +5,17 @@ in the tree with `deferred-tools.test.ts`). Per the task's rules no existing
 file was edited — everything below is an exact instruction for whoever wires it
 into `index.ts`, `agent.ts`, the runtime and the session layer.
 
+> **Updated (2026-10-10).** Two statements below describe the original
+> mechanism and are no longer the whole story. On first-party Anthropic with
+> Claude 4.5+ the toolset takes a **native** path (`toolsFor(model)`: every tool
+> sent from the first request, deferred ones `defer_loading`, the provider's BM25
+> search instead of `tool_search`), so activation no longer changes the `tools`
+> array — section 8's prompt-caching risk applies to every other model only. And
+> section 4's persistence recipe was not the route taken: a resume rebuilds the
+> activation set from the transcript (`DeferredToolset.replay`), including the
+> provider's own search results (`observe`), instead of a new `activatedTools`
+> field on `state` entries. See [`INTEGRATION-append-only.md`](INTEGRATION-append-only.md).
+
 The idea in one line: most tool schemas never go into the request. The model
 sees a small always-active core (read/write/edit/bash/glob/grep/ls/todo/plan)
 plus one built-in `tool_search` tool whose *description* carries a compact
@@ -192,7 +203,9 @@ described to users as a sandbox.
 ## 4. Session persistence
 
 Activation is per-instance (per run/session). To make `--resume` keep the tools
-the model already found, persist `snapshot()` and `restore()` it.
+the model already found, persist `snapshot()` and `restore()` it. (As built,
+resume replays the transcript instead — see the banner. The recipe below remains
+a valid alternative for a host that cannot replay.)
 
 Cheapest route with no new session entry kind: reuse `state` entries. In
 `packages/types/src/session.ts`, extend the `state` variant with one optional
@@ -287,8 +300,11 @@ Suggested TUI line: `⚒ tool_search → +web_search, +web_fetch (18 still defer
 
 ## 8. Risks worth stating out loud
 
-1. **Prompt caching.** The tool list is part of the cached prefix; every
-   activation invalidates it and the next request re-reads the full prefix. With
+1. **Prompt caching.** (Native tool search avoids this; the rest applies where
+   arcturn's own `tool_search` runs.) The tool list is part of the cached
+   prefix; every activation invalidates it and the next request re-reads the
+   full prefix — and on adaptive Claude, the thinking produced under the old
+   tool set stops being replayable. With
    Anthropic caching on, a chatty search pattern can cost more than it saves.
    Mitigate by keeping `alwaysActive` generous and `maxResults` >= 5 so one
    search covers a whole task.

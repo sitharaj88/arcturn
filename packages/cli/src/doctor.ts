@@ -29,10 +29,12 @@ import {
   presetSpec,
   resolveApiKey,
   subscriptionPlanFor,
+  supportsServerContextManagement,
 } from "@arcturn/ai";
+import { explainCompactionShape, explainContextEditMode } from "@arcturn/core";
 import type { AIError, LLMClient, ModelSpec } from "@arcturn/types";
 import type { DoctorCommand } from "./args.js";
-import { type ArcturnConfig, isLocalEndpoint, loadConfig } from "./config.js";
+import { type ArcturnConfig, contextEditingFor, isLocalEndpoint, loadConfig } from "./config.js";
 import type { EnvMap } from "./paths.js";
 import {
   configuredProviderSpec,
@@ -327,6 +329,9 @@ function configLines(config: ArcturnConfig, sources: string[], env: EnvMap): str
   if (config.consensus !== undefined) {
     entries.push(["consensus", config.consensus.models.join(", ")]);
   }
+  const sessionModel = config.route?.main ?? head;
+  const sessionSpec = sessionModel === undefined ? undefined : resolveConfigSpec(sessionModel);
+  if (sessionSpec !== undefined) entries.push(...historyShapeEntries(config, sessionSpec));
   // Declared endpoints, with their state. A provider nobody has enabled is
   // invisible in the probe table unless some id references it, and "I added
   // it and nothing happened" is exactly the question doctor exists to answer.
@@ -351,6 +356,51 @@ function configLines(config: ArcturnConfig, sources: string[], env: EnvMap): str
   }
   lines.push("");
   return lines;
+}
+
+/**
+ * How a session on `spec` would keep its history append-only, and why: the
+ * compaction shape, where old tool results are cleared, and the
+ * thinking-binding setting — each with the reason it was chosen, and a
+ * warning where a configured server-side shape cannot run on this model.
+ *
+ * @param config - The merged config.
+ * @param spec - The session model.
+ * @returns `[key, value]` rows for the config section.
+ */
+export function historyShapeEntries(
+  config: Pick<ArcturnConfig, "compaction" | "contextEditing" | "anthropicThinkingBinding">,
+  spec: ModelSpec,
+): [string, string][] {
+  const rows: [string, string][] = [];
+  const server = supportsServerContextManagement(spec);
+  const compaction = explainCompactionShape(config.compaction ?? {}, spec);
+  rows.push([
+    "compaction",
+    `${compaction.shape} — ${compaction.reason}` +
+      (compaction.shape === "server" && !server
+        ? `   (warning: ${spec.id} has no server-side compaction; requests will be refused)`
+        : ""),
+  ]);
+  const editing = contextEditingFor(config).contextEditing ?? {};
+  const mode = explainContextEditMode(editing, spec);
+  rows.push([
+    "context editing",
+    `${mode.mode} — ${mode.reason}` +
+      (mode.mode === "server" && !server
+        ? `   (warning: ${spec.id} has no server-side tool-result clearing; requests will be refused)`
+        : ""),
+  ]);
+  if (config.anthropicThinkingBinding !== undefined) {
+    rows.push([
+      "thinking binding",
+      `${config.anthropicThinkingBinding} — providers.anthropic.thinkingBinding` +
+        (spec.provider === "anthropic"
+          ? ""
+          : `   (ignored: ${spec.id} is not first-party Anthropic)`),
+    ]);
+  }
+  return rows;
 }
 
 /** Every model id the config references, mapped to the keys that name it. */

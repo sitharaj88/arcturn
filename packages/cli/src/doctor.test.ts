@@ -438,5 +438,8 @@ describe("runDoctorCommand: default scan", () => {
     expect(out).toContain("no key");
     expect(out).toContain("ANTHROPIC_API_KEY");
     expect(requests).toHaveLength(0);
+    // And how that session would keep its history append-only, with why.
+    expect(out).toMatch(/compaction\s+simple — default for Claude with adaptive thinking/);
+    expect(out).toMatch(/context editing\s+local — default/);
   });
 });

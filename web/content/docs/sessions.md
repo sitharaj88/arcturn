@@ -15,14 +15,19 @@ approach" a normal operation instead of something that destroys history.
 ```ts
 type SessionEntry =
   | { kind: "message"; id; parentId; timestamp; message }
-  | { kind: "compaction"; id; parentId; timestamp; summary; upToId; tokensBefore; tokensAfter }
+  | { kind: "compaction"; id; parentId; timestamp; summary; upToId; tokensBefore; tokensAfter; stripTailThinking? }
   | { kind: "label"; id; parentId; timestamp; label }
-  | { kind: "state"; id; parentId; timestamp; todos?; plan?; model? };
+  | { kind: "state"; id; parentId; timestamp; todos?; plan?; model?; contextEdit? };
 ```
 
 Four kinds of entry: a conversation `message`, a `compaction` (a summary that folds
 everything up to `upToId` into itself), a `label` (a bookmark), and `state` (todos, plan,
-or model changes — anything that isn't a message but needs to survive a resume).
+or model changes — anything that isn't a message but needs to survive a resume). Two
+fields exist so a resume sends the *same request* the live agent sent: a compaction entry's
+`stripTailThinking` records that the kept tail was replayed without its thinking, and a
+state entry's `contextEdit` (`{ elided, withholdThinking? }`) records one local
+[context-editing pass](/docs/context-management#passes-and-the-ledger). Both matter on
+models whose thinking is bound to the exact prefix that produced it.
 
 Every entry an `Agent` appends gets a fresh id and a `parentId` set to whatever the
 previous append's id was — so the tree isn't something a caller has to construct, it falls
@@ -104,7 +109,32 @@ const agent = await Agent.resume({
 `materializeBranch` replays a root-first entry list back into the conversation and state
 an `Agent` needs to resume: messages (with compactions folded into a single synthetic
 summary message), the current todos, the current plan, and the model in effect at that
-point.
+point, plus the local context-editing ledger when passes were recorded
+(`MaterializedBranch.contextEdit`), so the resumed agent sends the stubs the live one did.
+
+## Message shapes you will meet in a stored session
+
+Three shapes are newer than the user / assistant / tool-result trio:
+
+- **`role: "system"`** — an operator message: text the harness, not you, said to the model.
+  The turn-budget warning, a progress check, the silent-turn nudge and the stale-todo
+  reminder are stored this way (`{ role: "system", content: TextContent[], timestamp }`).
+  It is stored model-neutral and rendered at send time — natively where the model takes a
+  mid-conversation `system` role, folded into the neighbouring user turn elsewhere; see
+  [Providers](/docs/providers#mid-conversation-system-messages). `/export` renders each as
+  an **Operator** section, and `arcturn serve` replays it as an info notice. Before this
+  they were stored as `user` messages the user never typed.
+- **`compaction` content** in an assistant message — `{ type: "compaction"; summary: string
+  | null; encryptedContent: string | null }`: the provider compacted the conversation
+  (`shape: "server"`), and the block is replayed to it verbatim. Exports show "The provider
+  compacted the conversation here" with the summary folded away.
+- **`serverTool` content** — `{ type: "serverTool"; provider; block }`: a block the
+  provider ran itself, such as native tool search, kept as it arrived and replayed
+  verbatim. Exports show a one-line "Server tool: …" note.
+
+An assistant message may also carry `inputTransformations` when the provider reported
+changing the request before running it (for example, setting aside a thinking block whose
+prefix changed). Only a non-empty list is recorded.
 
 ## Resuming from the CLI
 
@@ -137,13 +167,31 @@ blocks are included only when `--thinking` is passed.
 ## Compaction
 
 Long sessions eventually threaten to overflow the model's context window. Before that
-happens, Arcturn folds the oldest part of the conversation into a structured markdown
+happens, Arcturn replaces the older part of the conversation with a structured markdown
 summary and keeps going — automatically, or on demand via `agent.compact()`.
 
 The summarizer is prompted to preserve **everything a fresh agent would need to
 continue**: file paths, identifiers, decisions made and why, outstanding problems — in
-five fixed sections (`Goal`, `Progress`, `Key decisions`, `Next steps`, `Critical
-context`), not a vague paraphrase.
+fixed sections (`Goal`, `Progress`, `Key decisions`, `Next steps`, `Critical context`, and
+`Reasoning to carry forward`), not a vague paraphrase. The last one exists because the
+transcript the summarizer reads omits the assistant's thinking: it records the hypotheses
+being tested, what was ruled out and what was about to be tried.
+
+### Shapes
+
+`CompactionOptions.shape` (config key `compaction.shape`) chooses what is kept:
+
+| `shape` | Result | Default for |
+|---|---|---|
+| `simple` | One summary replaces everything. Only a trailing run of user and operator messages — the new request — is kept. | Claude 4.6 and later on `anthropic`, `anthropic-compatible`, `bedrock`, `vertex`. |
+| `keep-tail` | A summary plus roughly the most recent `keepRecentTokens` of turns, cut at a user-message boundary. On adaptive Claude the kept tail is replayed without its thinking. | Every other model. |
+| `server` | The provider compacts (`compact_20260112`); arcturn replays the returned `compaction` block verbatim. `agent.compact()` says there is nothing to summarize locally. | Opt in; Claude API only. |
+
+The reason for the split is [preserved thinking](/docs/providers#preserved-thinking): on
+the newest Claude models a thinking block only validates against the exact prefix that
+produced it, and a summary replaces that prefix. See
+[Context management](/docs/context-management#layer-3-compaction) for the full argument.
+`arcturn doctor` prints the shape in effect and why.
 
 Tuning knobs (`AgentOptions.compaction`, or `CompactionOptions` directly):
 
@@ -155,12 +203,15 @@ Tuning knobs (`AgentOptions.compaction`, or `CompactionOptions` directly):
 | `model` | agent's current model | Model used for the summarization call itself. |
 | `maxOutputTokens` | `4096` | Output budget for the summary. |
 | `buildPrompt` | built-in | Replace the summarization prompt entirely. |
+| `shape` | per model | `"simple"`, `"keep-tail"` or `"server"` — see above. |
 
-The cut point always lands on a user-message boundary — never between an assistant's
-tool call and its result — so a compaction can never produce a conversation the model
+Under `keep-tail` the cut point lands on a user-message boundary — never between an
+assistant's tool call and its result — and no shape folds an open tool round (a tool call
+still waiting on its result), so a compaction can never produce a conversation the model
 would see as malformed. Compaction is recorded as its own `compaction` entry in the
-session tree (with `tokensBefore` / `tokensAfter` for observability), so replaying the
-branch later reconstructs the exact same folded state.
+session tree (with `tokensBefore` / `tokensAfter` for observability, and `stripTailThinking`
+when a kept tail lost its thinking), so replaying the branch later reconstructs the exact
+same folded state.
 
 ```ts
 agent.subscribe((event) => {

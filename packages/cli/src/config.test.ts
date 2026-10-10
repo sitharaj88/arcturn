@@ -251,6 +251,7 @@ describe("parseConfigFile: providers", () => {
               thinkingOff: "betweenTools",
               thinkingLevels: ["low", "medium", "high", "xhigh", "max"],
               refusalFallback: true,
+              systemMessages: true,
             },
           },
           {
@@ -272,6 +273,7 @@ describe("parseConfigFile: providers", () => {
       thinkingOff: "betweenTools",
       thinkingLevels: ["low", "medium", "high", "xhigh", "max"],
       refusalFallback: true,
+      systemMessages: true,
     });
     expect(parsed?.gw?.models?.[1]?.capabilities).toEqual({});
     expect(warnings).toContain('capabilities.thinkingOff" must be one of');

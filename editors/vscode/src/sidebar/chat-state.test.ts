@@ -166,6 +166,32 @@ describe("reduceChat — streamed assistant text", () => {
     expect(texts(state)).toEqual(["the answer"]);
     expect(state.blocks[0]).toMatchObject({ kind: "thinking", collapsed: true });
   });
+
+  it("shows no tool row for a provider's compaction or server-tool block", () => {
+    const state = run([
+      {
+        type: "messageEnd",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "compaction", summary: "earlier", encryptedContent: "e" },
+            {
+              type: "serverTool",
+              provider: "anthropic",
+              block: { type: "server_tool_use", id: "s", name: "tool_search_tool_bm25", input: {} },
+            },
+            { type: "text", text: "on we go" },
+          ],
+          model: "m",
+          usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 },
+          stopReason: "endTurn",
+          timestamp: 1,
+        },
+      },
+    ]);
+    expect(texts(state)).toEqual(["on we go"]);
+    expect(tools(state)).toEqual([]);
+  });
 });
 
 describe("reduceChat — tool calls", () => {

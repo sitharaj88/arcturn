@@ -10,11 +10,14 @@
 import type {
   AgentEvent,
   AssistantMessage,
+  ContextManagementRequest,
+  InputTransformation,
   LLMClient,
   LLMRequest,
   Message,
   ModelSpec,
   StreamEvent,
+  SystemMessage,
   ThinkingLevel,
   Tool,
   ToolCallContent,
@@ -30,9 +33,9 @@ import {
   emptyUsage,
   errorText,
   errorToolResult,
+  operatorMessage,
   toolCallsOf,
   toolResultMessage,
-  userMessage,
 } from "./util/content.js";
 
 /**
@@ -128,8 +131,12 @@ export interface LoopRuntime {
   maxTurns: number;
   /** Run tool calls from one turn concurrently instead of in order. */
   parallelTools: boolean;
-  /** Drain the steering queue; returns messages to inject. */
-  takeSteering(): UserMessage[];
+  /**
+   * Drain the steering queue; returns messages to inject. A user message is
+   * the person steering; a system message is the host speaking (see
+   * `SystemMessage`).
+   */
+  takeSteering(): Array<UserMessage | SystemMessage>;
   /** Runs before every LLM call; the agent uses it to auto-compact. */
   beforeTurn(): Promise<void>;
   /**
@@ -145,6 +152,11 @@ export interface LoopRuntime {
   progressCheck?: (progress: TurnProgress) => string | undefined;
   /** Shapes the outgoing message list (context editing). Must not mutate history. */
   prepareMessages(messages: readonly Message[]): Message[];
+  /**
+   * Server-side context management for the next request (compaction,
+   * tool-result clearing). Omitted or `undefined` sends none.
+   */
+  contextManagement?(): ContextManagementRequest | undefined;
 }
 
 /** Why the loop stopped. */
@@ -534,6 +546,14 @@ async function settleDanglingCalls(
  * out (see `large-content.ts`). That is not content — it is how to deliver
  * whatever content the model already chose.
  */
+/**
+ * Consecutive `pauseTurn` stops the loop answers by re-sending the
+ * conversation before it gives up. A server-side tool loop pauses at its own
+ * iteration limit, so one resume usually finishes the work; this only stops a
+ * provider that never finishes from spending the run's turns.
+ */
+export const MAX_CONSECUTIVE_PAUSES = 8;
+
 export const SILENT_TURN_NUDGE =
   "Your last turn ended without producing anything: no text and no tool call. " +
   "Nothing was recorded, so from the outside it looks like the step never ran. " +
@@ -559,6 +579,83 @@ export function producedNothingVisible(message: AssistantMessage): boolean {
   return !message.content.some((block) => block.type === "text" && block.text.trim().length > 0);
 }
 
+/** How many paths a transformation notice names before it says "and N more". */
+const MAX_NOTICE_PATHS = 3;
+
+function describePaths(paths: readonly string[]): string {
+  const named = paths.slice(0, MAX_NOTICE_PATHS).join(", ");
+  const rest = paths.length - MAX_NOTICE_PATHS;
+  return rest > 0 ? `${named} and ${rest} more` : named;
+}
+
+/**
+ * The notices a provider's `input_transformations` report deserves.
+ *
+ * - `thinking_dropped` / `prefix_binding_mismatch` (warn): the history
+ *   before the block changed after the block was produced. Arcturn keeps its
+ *   outgoing history append-only, so this is a bug in arcturn, and the notice
+ *   says so.
+ * - `thinking_mismatch_allowed` (warn): the same mismatch on an account the
+ *   check does not enforce — the request went through, but an enforced one
+ *   would have been refused.
+ * - `thinking_dropped` / `model_binding_mismatch` (info): the conversation
+ *   switched models (`/model`, a fallback), and the new model cannot read the
+ *   old model's thinking. Expected; nothing to fix.
+ *
+ * Entries with a type or reason this does not know are ignored, as the
+ * provider asks: later checks add values.
+ *
+ * @param transformations - From {@link AssistantMessage.inputTransformations}.
+ */
+export function inputTransformationNotices(
+  transformations: readonly InputTransformation[] | undefined,
+): Array<{ level: "info" | "warn"; text: string }> {
+  if (transformations === undefined || transformations.length === 0) return [];
+  const prefixDropped: string[] = [];
+  const prefixAllowed: string[] = [];
+  const modelDropped: string[] = [];
+  for (const entry of transformations) {
+    if (entry.type === "thinking_dropped" && entry.reason === "prefix_binding_mismatch") {
+      prefixDropped.push(entry.path);
+    } else if (entry.type === "thinking_mismatch_allowed") {
+      prefixAllowed.push(entry.path);
+    } else if (entry.type === "thinking_dropped" && entry.reason === "model_binding_mismatch") {
+      modelDropped.push(entry.path);
+    }
+  }
+  const notices: Array<{ level: "info" | "warn"; text: string }> = [];
+  if (prefixDropped.length > 0) {
+    notices.push({
+      level: "warn",
+      text:
+        `The provider dropped earlier thinking at ${describePaths(prefixDropped)} ` +
+        "(prefix_binding_mismatch): the conversation before it changed after it was " +
+        "produced. Arcturn keeps history append-only, so this is a bug in arcturn — " +
+        "please report it with this session.",
+    });
+  }
+  if (prefixAllowed.length > 0) {
+    notices.push({
+      level: "warn",
+      text:
+        `Earlier thinking at ${describePaths(prefixAllowed)} no longer matches the ` +
+        "conversation before it (prefix_binding_mismatch). This account is not enforced, " +
+        "so the request went through; an enforced one would refuse it. This is a bug " +
+        "in arcturn — please report it with this session.",
+    });
+  }
+  if (modelDropped.length > 0) {
+    notices.push({
+      level: "info",
+      text:
+        `Earlier thinking at ${describePaths(modelDropped)} was set aside ` +
+        "(model_binding_mismatch): the conversation switched models, and this model " +
+        "cannot read the previous one's reasoning. Expected after a model switch.",
+    });
+  }
+  return notices;
+}
+
 /**
  * Drive the agent until the model stops requesting tools, the run is aborted,
  * or something fails.
@@ -575,6 +672,8 @@ export async function runLoop(rt: LoopRuntime): Promise<LoopResult> {
   // is not glitching, it is finished (or stuck), and nudging it again would
   // spend turns to hear the same nothing.
   let justNudged = false;
+  let pauses = 0;
+  const reportedTransformations = new Set<string>();
   const warnAt = turnWarningThreshold(rt.maxTurns);
   // What the run has actually done, by tool name — the evidence
   // `progressCheck` judges on. Per run, not per turn.
@@ -616,7 +715,7 @@ export async function runLoop(rt: LoopRuntime): Promise<LoopResult> {
         `Turn budget: ${remaining} of ${rt.maxTurns} turns remain. Finish the work and ` +
         "emit your final deliverable now — an unfinished run at the ceiling fails with " +
         "its work uncommitted.";
-      await rt.appendMessage(userMessage(warning));
+      await rt.appendMessage(operatorMessage(warning));
       rt.emit({ type: "notice", level: "warn", text: warning });
     }
 
@@ -635,7 +734,7 @@ export async function runLoop(rt: LoopRuntime): Promise<LoopResult> {
       });
       if (notice !== undefined && notice.trim().length > 0 && !sentProgressWarnings.has(notice)) {
         sentProgressWarnings.add(notice);
-        await rt.appendMessage(userMessage(notice));
+        await rt.appendMessage(operatorMessage(notice));
         rt.emit({ type: "notice", level: "warn", text: notice });
         rt.emit({ type: "progressWarning", turnIndex, text: notice });
       }
@@ -649,6 +748,7 @@ export async function runLoop(rt: LoopRuntime): Promise<LoopResult> {
     const model = rt.getModel();
     const thinking = rt.getThinking();
     const tools = rt.getTools();
+    const contextManagement = rt.contextManagement?.();
     const request: LLMRequest = {
       model,
       system: rt.getSystemPrompt(),
@@ -656,6 +756,7 @@ export async function runLoop(rt: LoopRuntime): Promise<LoopResult> {
       ...(tools.length > 0 ? { tools: tools.map((tool) => tool.definition) } : {}),
       maxOutputTokens: model.maxOutputTokens,
       ...(thinking === "off" ? {} : { thinking }),
+      ...(contextManagement === undefined ? {} : { contextManagement }),
       signal: rt.signal,
     };
 
@@ -673,6 +774,16 @@ export async function runLoop(rt: LoopRuntime): Promise<LoopResult> {
     const hasContent = assistant.content.length > 0;
     if (hasContent) await rt.appendMessage(assistant);
     rt.emit({ type: "messageEnd", message: assistant });
+    // Reported, never retried: a drop already happened for this request, and
+    // the same body would be dropped (or refused) the same way again.
+    // The provider repeats a drop on every request that still carries the
+    // block (after /model the old model's thinking stays in the history), so
+    // each distinct report is said once per run.
+    for (const notice of inputTransformationNotices(assistant.inputTransformations)) {
+      if (reportedTransformations.has(notice.text)) continue;
+      reportedTransformations.add(notice.text);
+      rt.emit({ type: "notice", ...notice });
+    }
 
     const calls = toolCallsOf(assistant);
     const endTurn = () => rt.emit({ type: "turnEnd", turnIndex, usage: assistant.usage });
@@ -716,6 +827,7 @@ export async function runLoop(rt: LoopRuntime): Promise<LoopResult> {
     if (calls.length > 0) {
       const results = await runToolBatch(rt, calls, countCall);
       for (const result of results) await rt.appendMessage(result);
+      pauses = 0;
 
       const steering = rt.takeSteering();
       for (const message of steering) await rt.appendMessage(message);
@@ -726,6 +838,30 @@ export async function runLoop(rt: LoopRuntime): Promise<LoopResult> {
       turnIndex++;
       continue;
     }
+
+    // The provider stopped before it was done (a server-side tool loop hit its
+    // iteration limit). The paused message is already in the history; sending
+    // the conversation back unchanged — no nudge, no steering, no new turn
+    // wedged between a server tool and its continuation — lets the model
+    // resume, and keeps the history append-only.
+    if (assistant.stopReason === "pauseTurn") {
+      endTurn();
+      pauses++;
+      if (pauses > MAX_CONSECUTIVE_PAUSES) {
+        rt.emit({
+          type: "notice",
+          level: "warn",
+          text:
+            `The provider paused the turn ${String(pauses)} times in a row (a server-side ` +
+            "tool loop that does not finish); stopping with the work unfinished. Ask again " +
+            "to continue.",
+        });
+        return { reason: "completed" };
+      }
+      turnIndex++;
+      continue;
+    }
+    pauses = 0;
 
     const steering = rt.takeSteering();
     if (steering.length > 0) {
@@ -767,7 +903,7 @@ export async function runLoop(rt: LoopRuntime): Promise<LoopResult> {
     }
     if (!justNudged && turnIndex + 1 < rt.maxTurns && producedNothingVisible(assistant)) {
       justNudged = true;
-      await rt.appendMessage(userMessage(SILENT_TURN_NUDGE));
+      await rt.appendMessage(operatorMessage(SILENT_TURN_NUDGE));
       rt.emit({
         type: "notice",
         level: "warn",

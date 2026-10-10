@@ -355,6 +355,9 @@ export function formatBackgroundTranscript(messages: readonly Message[]): string
           lines.push(`  → ${block.name}(${oneLine(JSON.stringify(block.arguments), 200)})`);
         }
       }
+    } else if (message.role === "system") {
+      const value = contentText(message.content);
+      if (value.trim() !== "") lines.push(`[operator] ${oneLine(value, 400)}`);
     } else {
       const value = contentText(message.content);
       const mark = message.isError ? "✗" : "✓";

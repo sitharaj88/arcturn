@@ -4,6 +4,7 @@ import type {
   AssistantContent,
   AssistantMessage,
   Message,
+  SystemMessage,
   TextContent,
   ToolCallContent,
   ToolResultContent,
@@ -56,6 +57,37 @@ export function toUserContent(input: string | UserContent[]): UserContent[] {
  */
 export function userMessage(input: string | UserContent[], timestamp = Date.now()): UserMessage {
   return { role: "user", content: toUserContent(input), timestamp };
+}
+
+/**
+ * Create the {@link SystemMessage} the harness speaks through: the turn-budget
+ * warning, a progress check, the silent-turn nudge, a host's reminder.
+ *
+ * It is stored with the `system` role and rendered at send time — an appended
+ * `role: "system"` message on a model that takes one, a reminder folded into
+ * the user turn everywhere else — so a later model switch renders the same
+ * history correctly. Harness-authored text only: anything a tool, a file or
+ * another agent produced belongs in a user or tool-result message, because
+ * this channel carries operator authority.
+ *
+ * @param value - The operator text.
+ * @param timestamp - Creation time, defaults to now.
+ */
+export function operatorMessage(value: string, timestamp = Date.now()): SystemMessage {
+  return { role: "system", content: [text(value)], timestamp };
+}
+
+/**
+ * The assistant message without its thinking blocks, or the same object when
+ * it has none. Text, tool calls and server blocks stay, so a tool call keeps
+ * its result. For replaying a turn whose thinking is bound to a prefix that
+ * has since changed.
+ *
+ * @param message - Assistant message to strip.
+ */
+export function withoutThinking(message: AssistantMessage): AssistantMessage {
+  if (!message.content.some((block) => block.type === "thinking")) return message;
+  return { ...message, content: message.content.filter((block) => block.type !== "thinking") };
 }
 
 /** An all-zero {@link Usage} record. */

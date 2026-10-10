@@ -1,6 +1,6 @@
 ---
 title: Deferred tools
-description: Progressive tool disclosure — withhold most tool schemas until the model asks for them via tool_search.
+description: Progressive tool disclosure — withhold most tool schemas until the model asks for them, through its own tool_search or the provider's native tool search.
 section: Core concepts
 order: 6.2
 ---
@@ -42,11 +42,13 @@ name](/docs/tools#multiedit-reserved-and-currently-inert). And
 code index costs one `tool_search` round trip before the model can reach it — add it to your
 own `alwaysActive` if the work is search-heavy.
 
-Activation state is **per process**: each agent keeps its own disclosure set (one served
-session's `tool_search` never changes another session's tool list), an MCP reconnect
-carries the live agent's activations forward, and after `--resume` the model pays one
-`tool_search` round trip to re-discover what it needs — activations are deliberately not
-persisted into the session file. `tool_search` itself never prompts, but only because the
+Activation state is **per agent**: each keeps its own disclosure set (one served
+session's `tool_search` never changes another session's tool list), and an MCP reconnect
+carries the live agent's activations forward. After `--resume` the set is rebuilt by
+reading the transcript — arcturn's own `tool_search` results and the provider's native
+search results alike — so a resumed session sends the tool set it ended with instead of
+making the model re-discover it. (Activations are still not written to the session file as
+such; the transcript is the record.) `tool_search` itself never prompts, but only because the
 runtime that created it vouches for it by exact name; a third-party tool merely *named*
 `tool_search` is rejected as a reserved-name collision and gets no silent pass.
 
@@ -84,12 +86,41 @@ later, never *access* it wouldn't otherwise have. Never describe it to users as 
 boundary — it isn't one, and treating it as one is the wrong mental model for what it's
 doing.
 
+## Native tool search
+
+On first-party Anthropic (`anthropic`, not a gateway or a cloud endpoint) with Claude 4.5
+or later, arcturn does not use its own `tool_search` at all. Every tool is sent from the
+first request, the deferred ones flagged `defer_loading: true`, beside the provider's
+`tool_search_tool_bm25_20251119`. The model searches server-side, the provider loads what
+matches, and **the `tools` array never changes** — so the prompt cache survives every
+activation, and so does every replayed thinking block, whose signature covers the tool set.
+Arcturn's `tool_search` tool is not sent to those models, so `maxResults` and
+`searchToolName` have nothing to configure there; `alwaysActive` still decides which tools
+are loaded up front.
+
+What the server found is read back from its `tool_search_tool_result` blocks into the same
+activation record (`DeferredToolset.observe`), so a snapshot, a resume, or a later `/model`
+switch to a model on the other path knows about it. Those activations stay deferred on the
+native path; they exist only so the record is true. In the SDK, pass a toolset (or a
+function returning one) as [`AgentOptions.deferredTools`](/docs/sdk-agent-options#deferred-tools-and-per-model-tool-sets)
+and the agent asks it for `toolsFor(model)` each turn.
+
+A `pause_turn` from the server tool is continued: the loop re-sends the conversation
+unchanged — no steering, no nudge between the server tool and its continuation — up to
+eight consecutive pauses, then ends the turn with a warning. Not verified live: that
+`defer_loading` plus the BM25 tool actually discovers tools end to end.
+
 ## The prompt-cache tradeoff
 
-The tool list is part of the cached prefix. Every activation invalidates that cache and the
-next request re-reads the full prefix from scratch — so a chatty search pattern (the model
-searching once per tool it needs, across many small queries) can cost more in cache misses
-than the deferred schemas would have cost if just sent up front. Two knobs mitigate this:
+On every other model — OpenAI, Gemini, a gateway, Bedrock, Vertex, or Claude before 4.5 —
+the original mechanism runs, and the tool list is part of the cached prefix. Every
+activation grows it, which invalidates that cache and the next request re-reads the full
+prefix from scratch. On a Claude model with adaptive thinking it also invalidates the
+thinking produced under the old tool set: the agent says so once ("The system prompt or tool
+set changed between requests…"), and stops replaying that earlier thinking rather than send
+blocks the API would reject. A chatty search pattern (the model searching once per tool it
+needs, across many small queries) can therefore cost more than the deferred schemas would
+have cost if just sent up front. Two knobs mitigate this:
 
 - Keep `alwaysActive` generous — anything used on most tasks belongs there, not in the
   deferred tail, because a tool the model would have called immediately now costs one extra
@@ -100,14 +131,14 @@ than the deferred schemas would have cost if just sent up front. Two knobs mitig
 Turn deferral on when the tool count is large enough that the schema tax outweighs the
 occasional extra round-trip — a good rule of thumb is somewhere past ~25 tools, especially
 once MCP servers are in the mix, since MCP tools are the long tail that motivates this
-feature in the first place.
+feature in the first place. On native tool search the cache cost drops out of that sum.
 
 ## Related
 
 - [Code search](/docs/code-search) — `search_code`, the always-registered tool that is *not*
   in the `alwaysActive` default and so pays a discovery round trip under deferral.
 - [Context management](/docs/context-management) — the sibling levers for tool *results*
-  (offloading, context editing) rather than tool *schemas*.
+  (offloading, context editing) rather than tool *schemas*, and why history is append-only.
 - [Custom tools](/docs/sdk-tools) — the `Tool` interface deferred tools wraps; nothing
   about writing a tool changes under deferral.
 - [Permissions from the SDK](/docs/sdk-permissions) — the engine every activated tool still

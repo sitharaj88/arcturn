@@ -296,9 +296,10 @@ describe("a role's maxTurns, counted rather than trusted", () => {
     // maxTurns 3 → threshold max(2, floor(0.45)) = 2 remaining, so the warning
     // boards the second request — the model hears it with turns left to use —
     // and rides the final request exactly once, not per remaining turn.
+    // On the operator channel: the harness speaking, not the user.
     const budgetNotes = (request: LLMRequest) =>
       request.messages.filter(
-        (m) => m.role === "user" && contentText(m.content).startsWith("Turn budget:"),
+        (m) => m.role === "system" && contentText(m.content).startsWith("Turn budget:"),
       );
     expect(budgetNotes(llm.requests[0]!)).toHaveLength(0);
     expect(budgetNotes(llm.requests[1]!)).toHaveLength(1);

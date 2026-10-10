@@ -20,6 +20,10 @@ the features behave today, read the user documentation under
 
 ## Later notes
 
+- [`INTEGRATION-append-only.md`](INTEGRATION-append-only.md) — why the outgoing history
+  only grows: batched context-edit passes, the simple compaction shape, native tool
+  search, and operator messages, so the prompt cache and preserved thinking survive
+  (2026-10-10).
 - [`INTEGRATION-refusals.md`](INTEGRATION-refusals.md) — the `refusal` stop reason,
   how each provider maps onto it, why the loop ends the turn, and the opt-in
   server-side fallback (2026-10-10).

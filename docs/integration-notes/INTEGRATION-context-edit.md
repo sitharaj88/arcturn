@@ -4,6 +4,18 @@ Integration recipe for `packages/core/src/context-edit.ts` (new file, already
 in the tree with `context-edit.test.ts`). Per the task's rules no existing file
 was edited — everything below is an exact instruction for whoever wires it in.
 
+> **Superseded in part (2026-10-10).** The wiring below is as first built, and
+> section 1's cache-stability argument was wrong: the elision *decisions* are
+> monotonic, but the `keepRecentTurns` boundary moves every turn, so each request
+> stubbed out a result the previous request had sent in full — monotonic is not
+> append-only, and the cache missed. On Claude models that bind thinking to the
+> prefix it was worse than a miss. The agent now edits in recorded **passes**
+> (`planContextEditPass` + `ContextEditLedger`, `minCharsPerPass`, persisted as
+> `state` entries) or hands the job to the provider (`mode: "server"`). See
+> [`INTEGRATION-append-only.md`](INTEGRATION-append-only.md). `prepareMessages`
+> in sections 3 and 4 still exists; what it does is now "render the ledger", and
+> the `contextEdit` event fires once per pass rather than once per request.
+
 The idea in one line: before each LLM request, replace the *content* of old
 tool results with a one-line stub (`[context-edited: the "read" result (5000
 characters) was elided …]`) while leaving the messages themselves in place, so
@@ -78,13 +90,14 @@ Facts the wiring depends on:
   contract is purely structural, so wiring order between the two features does
   not matter.
 
-### The cache-stability guarantee (read before changing any default)
+### The cache-stability guarantee (as first written — now wrong, see the banner)
 
 The Anthropic provider stamps `cache_control` on the last message
 (`packages/ai/src/providers/anthropic.ts`), so the cached prefix only hits when
 every earlier message is byte-identical to the previous request. This module
-guarantees monotonic elision — *once a position is elided it is elided
-identically for ever after* — as long as the caller obeys one rule:
+guaranteed monotonic elision — *once a position is elided it is elided
+identically for ever after* — as long as the caller obeyed one rule, and that
+rule still holds (it is what keeps stored history lossless):
 
 > **Always pass the raw conversation, and use the returned array only for the
 > outgoing request. Never store it back as history.**
@@ -99,9 +112,9 @@ argument, `context-edit.test.ts` has the property tests):
 3. the trigger is measured on the raw history, whose tool-result total only
    grows, so it fires exactly once and never toggles back off.
 
-The cost you *do* pay: on the turn a message first crosses the boundary, the
-cached prefix is invalidated from that point on and re-written once. That is
-inherent to context editing. Raising `keepRecentTurns` or `minCharsToElide`
+The cost the original note said you pay "once" was in fact paid on nearly every
+turn once editing started, because the boundary advances with each assistant
+message. Batching the edits into passes is what makes it once per batch. Raising `keepRecentTurns` or `minCharsToElide`
 makes it rarer; setting `enabled: false` avoids it entirely.
 
 ---

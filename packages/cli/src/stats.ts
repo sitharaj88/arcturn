@@ -329,6 +329,10 @@ function summarizeSession(
       continue;
     }
 
+    // An operator message is the harness speaking: not a turn the user took,
+    // and nothing it costs is billed on its own.
+    if (message.role === "system") continue;
+
     if (message.role === "toolResult") {
       toolResults += 1;
       // A user interrupting a run is not the tool failing. Counting aborts as

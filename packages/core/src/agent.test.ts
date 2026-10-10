@@ -258,7 +258,7 @@ describe("the turn budget, announced before it runs out", () => {
   const budgetNotes = (request: LLMRequest): Message[] =>
     request.messages.filter(
       (message) =>
-        message.role === "user" && contentText(message.content).startsWith("Turn budget:"),
+        message.role === "system" && contentText(message.content).startsWith("Turn budget:"),
     );
 
   it("injects one wrap-up warning while there is still room to act on it", async () => {
@@ -292,8 +292,9 @@ describe("the turn budget, announced before it runs out", () => {
 
     // It is the *last* message of the request it boards: injected after the
     // previous turn's tool results, where the model reads it as current.
+    // On the operator channel: the harness speaking, not the user.
     const last = llm.requests[2]!.messages.at(-1);
-    expect(last?.role).toBe("user");
+    expect(last?.role).toBe("system");
     expect(contentText(last?.content ?? [])).toBe(
       "Turn budget: 2 of 4 turns remain. Finish the work and emit your final deliverable " +
         "now — an unfinished run at the ceiling fails with its work uncommitted.",
@@ -1239,7 +1240,7 @@ describe("stale todos", () => {
 
     const reminder = agent.messages.find(
       (message) =>
-        message.role === "user" &&
+        message.role === "system" &&
         contentText(message.content).includes("was left in progress when the previous run ended"),
     );
     expect(reminder).toBeDefined();
@@ -1284,7 +1285,7 @@ describe("stale todos", () => {
 
     const reminders = agent.messages.filter(
       (message) =>
-        message.role === "user" &&
+        message.role === "system" &&
         contentText(message.content).includes("was left in progress when the previous run ended"),
     );
     // One for the run that ended stale, and none afterwards.

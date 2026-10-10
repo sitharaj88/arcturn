@@ -131,6 +131,14 @@ export function projectSessionEvents(
           events.push({ type: "runStart", sessionId, prompt: message });
         } else if (message.role === "assistant") {
           events.push({ type: "messageEnd", message });
+        } else if (message.role === "system") {
+          // The harness's own words to the model (a turn-budget warning, a
+          // reminder). Live, the loop announced each one as a `notice`; that
+          // is the only live shape there is for it, so it replays as one,
+          // carrying the stored text verbatim. It opens no run: the person
+          // did not say it.
+          const text = message.content.map((part) => part.text).join("\n");
+          if (text !== "") events.push({ type: "notice", level: "info", text });
         } else {
           events.push({ type: "toolEnd", toolCallId: message.toolCallId, result: message });
         }

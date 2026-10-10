@@ -11,7 +11,10 @@ import type {
   AIError,
   AssistantContent,
   AssistantMessage,
+  CompactionContent,
+  InputTransformation,
   ModelSpec,
+  ServerToolContent,
   StopDetails,
   StopReason,
   StreamEvent,
@@ -50,7 +53,15 @@ export type ProviderStreamEvent =
    * reasoning and its unfinished tool calls stay out of the terminal message:
    * they belong to an attempt that was abandoned, and are not replayed.
    */
-  | { type: "fallbackBoundary" };
+  | { type: "fallbackBoundary" }
+  /**
+   * A block the provider wants back verbatim and arcturn never interprets: a
+   * server-side compaction marker, or a server tool's own call and result.
+   * Delivered whole, at the block's end.
+   */
+  | { type: "rawBlock"; blockIndex: number; content: CompactionContent | ServerToolContent }
+  /** What the provider changed in the request before the model read it. */
+  | { type: "inputTransformations"; transformations: InputTransformation[] };
 
 interface TextSlot {
   kind: "text";
@@ -70,7 +81,16 @@ interface ToolSlot {
   /** Provider signature over the call, carried verbatim — see {@link ToolCallContent.signature}. */
   signature?: string;
 }
-type Slot = TextSlot | ThinkingSlot | ToolSlot;
+interface RawSlot {
+  kind: "raw";
+  content: CompactionContent | ServerToolContent;
+}
+type Slot = TextSlot | ThinkingSlot | ToolSlot | RawSlot;
+
+/** A server tool's block from an attempt a fallback abandoned. */
+function isServerTool(slot: Slot | undefined): boolean {
+  return slot?.kind === "raw" && slot.content.type === "serverTool";
+}
 
 /**
  * Accumulates stream events into an `AssistantMessage`.
@@ -85,6 +105,7 @@ export class MessageAssembler {
   private stopReason: StopReason = "endTurn";
   private errorMessage: string | undefined;
   private stopDetails: StopDetails | undefined;
+  private inputTransformations: InputTransformation[] = [];
   /** The model that answered; differs from the requested one after a fallback. */
   private spec: ModelSpec;
 
@@ -183,10 +204,21 @@ export class MessageAssembler {
       case "servedBy":
         this.spec = event.spec;
         break;
+      case "rawBlock":
+        this.put(event.blockIndex, { kind: "raw", content: event.content });
+        break;
+      case "inputTransformations":
+        // The final message_delta repeats the list after a fallback; the
+        // later list is the whole answer, not an addition.
+        this.inputTransformations = [...event.transformations];
+        break;
       case "fallbackBoundary":
         for (const index of [...this.order]) {
           const kind = this.slots.get(index)?.kind;
-          if (kind === "thinking" || kind === "toolCall") {
+          // A compaction marker is the server's history operation and stays.
+          const abandoned =
+            kind === "thinking" || kind === "toolCall" || isServerTool(this.slots.get(index));
+          if (abandoned) {
             this.slots.delete(index);
             this.order.splice(this.order.indexOf(index), 1);
           }
@@ -221,6 +253,8 @@ export class MessageAssembler {
             ? { type: "thinking", thinking: slot.thinking, signature: slot.signature }
             : { type: "thinking", thinking: slot.thinking },
         );
+      } else if (slot.kind === "raw") {
+        out.push(slot.content);
       } else {
         out.push({
           type: "toolCall",
@@ -260,6 +294,9 @@ export class MessageAssembler {
     if (this.stopDetails !== undefined && stopReason === "refusal") {
       message.stopDetails = { ...this.stopDetails };
     }
+    if (this.inputTransformations.length > 0) {
+      message.inputTransformations = this.inputTransformations.map((entry) => ({ ...entry }));
+    }
     return message;
   }
 }
@@ -296,7 +333,9 @@ export async function* assembleStream(
         event.type === "stop" ||
         event.type === "thinkingSignature" ||
         event.type === "servedBy" ||
-        event.type === "fallbackBoundary"
+        event.type === "fallbackBoundary" ||
+        event.type === "rawBlock" ||
+        event.type === "inputTransformations"
       ) {
         continue;
       }

@@ -21,6 +21,13 @@ import {
   PROVIDER_PRESETS,
 } from "@arcturn/ai";
 import {
+  COMPACTION_SHAPES,
+  CONTEXT_EDIT_MODES,
+  type CompactionShape,
+  type ContextEditMode,
+  type ContextEditOptions,
+} from "@arcturn/core";
+import {
   type ModelCapabilities,
   type ModelCost,
   type PermissionMode,
@@ -211,6 +218,30 @@ export interface ArcturnConfig {
     minCharsToElide?: number;
     maxTotalToolResultChars?: number;
     protectToolNames?: string[];
+    /**
+     * Characters one local elision pass must save before it runs (default
+     * 50000). Each pass rewrites already-sent history once — a cache reset,
+     * and on adaptive Claude the thinking it invalidates — so passes batch.
+     */
+    minCharsPerPass?: number;
+    /**
+     * Where old tool results are cleared: `"local"` (arcturn's recorded
+     * passes, the default), `"server"` (the provider's
+     * `clear_tool_uses_20250919`; Anthropic Messages API only), or `"auto"`
+     * (server on adaptive Claude via the Messages API, local elsewhere — the
+     * default once `providers.anthropic.thinkingBinding` is set).
+     */
+    mode?: ContextEditMode;
+  };
+  /**
+   * How compaction rewrites history. `shape`: `"simple"` (one summary
+   * replaces everything — the default on Claude with adaptive thinking),
+   * `"keep-tail"` (summary plus recent turns — the default elsewhere; the
+   * tail's thinking is stripped on adaptive Claude), or `"server"` (the
+   * provider compacts; Anthropic Messages API only).
+   */
+  compaction?: {
+    shape?: CompactionShape;
   };
   /**
    * Progressive tool disclosure: most tool schemas are withheld until the
@@ -377,6 +408,18 @@ export interface ArcturnConfig {
    */
   anthropicFallbacks?: "default";
   /**
+   * Opt in to Anthropic's thinking-binding controls on the first-party
+   * `anthropic` provider: `{"providers": {"anthropic": {"thinkingBinding":
+   * "drop_block"}}}`. Every request with thinking on then carries
+   * `thinking.block_binding.prefix_mismatch_behavior` (beta
+   * `thinking-binding-controls-2026-08-01`), and each dropped or mismatched
+   * thinking block the API reports surfaces as a notice. `"error"` fails a
+   * request on any history edit (for CI); `"drop_block"` degrades instead.
+   * Setting it also makes `contextEditing.mode` default to `"auto"`. Off by
+   * default; the compatible, Bedrock and Vertex adapters ignore it.
+   */
+  anthropicThinkingBinding?: "error" | "drop_block";
+  /**
    * Directories whose own `.arcturn` code — hooks, `verify`, extensions, stdio
    * MCP servers — runs without a consent prompt. An entry is either an exact
    * directory or one ending in `/*`, which covers everything beneath it.
@@ -451,6 +494,7 @@ const KNOWN_KEYS = new Set([
   "offload",
   "offloadLimits",
   "contextEditing",
+  "compaction",
   "deferredTools",
   "brain",
   "skills",
@@ -532,6 +576,25 @@ function parseRule(
     scope: ruleScope,
     ...(typeof specifier === "string" ? { specifier } : {}),
   };
+}
+
+/**
+ * The `contextEditing` agent options a config asks for: the configured block,
+ * with `mode: "auto"` filled in when `providers.anthropic.thinkingBinding` is
+ * set and no mode was chosen.
+ *
+ * @param config - The merged config.
+ */
+export function contextEditingFor(
+  config: Pick<ArcturnConfig, "contextEditing" | "anthropicThinkingBinding">,
+): { contextEditing?: ContextEditOptions } {
+  const configured = config.contextEditing;
+  // Opting in to the binding controls is asking for an append-only history,
+  // so tool-result clearing moves server-side wherever that exists — unless
+  // the user chose a mode themselves.
+  const auto = config.anthropicThinkingBinding !== undefined && configured?.mode === undefined;
+  if (configured === undefined && !auto) return {};
+  return { contextEditing: { ...configured, ...(auto ? { mode: "auto" as const } : {}) } };
 }
 
 /**
@@ -653,7 +716,14 @@ function parseModelCost(raw: unknown): ModelCost | undefined {
 }
 
 /** Boolean capability flags, and the one enumerated field. */
-const CAPABILITY_FLAGS = ["tools", "vision", "thinking", "caching", "refusalFallback"] as const;
+const CAPABILITY_FLAGS = [
+  "tools",
+  "vision",
+  "thinking",
+  "caching",
+  "refusalFallback",
+  "systemMessages",
+] as const;
 const THINKING_STYLES = ["budget", "adaptive"] as const;
 const THINKING_OFF_STYLES = ["omit", "disabled", "betweenTools", "lowEffort"] as const;
 /** The levels a `thinkingLevels` list may name: every level but `off`. */
@@ -1128,13 +1198,20 @@ export function parseConfigFile(
       declared = rest;
       const settings = anthropic as Record<string, unknown>;
       for (const key of Object.keys(settings)) {
-        if (key !== "fallbacks") {
+        if (key !== "fallbacks" && key !== "thinkingBinding") {
           warnings.push(`${where}: unknown "providers.anthropic" key "${key}" (ignored)`);
         }
       }
       if (settings.fallbacks === "default") out.anthropicFallbacks = "default";
       else if ("fallbacks" in settings) {
         warnings.push(`${where}: "providers.anthropic.fallbacks" must be "default" (ignored)`);
+      }
+      if (settings.thinkingBinding === "error" || settings.thinkingBinding === "drop_block") {
+        out.anthropicThinkingBinding = settings.thinkingBinding;
+      } else if ("thinkingBinding" in settings) {
+        warnings.push(
+          `${where}: "providers.anthropic.thinkingBinding" must be "error" or "drop_block" (ignored)`,
+        );
       }
     }
     const onlyBuiltinSettings =
@@ -1219,10 +1296,20 @@ export function parseConfigFile(
         if (typeof editing.enabled === "boolean") parsed.enabled = editing.enabled;
         else warnings.push(`${where}: "contextEditing.enabled" must be a boolean`);
       }
+      if (editing.mode !== undefined) {
+        if ((CONTEXT_EDIT_MODES as readonly unknown[]).includes(editing.mode)) {
+          parsed.mode = editing.mode as ContextEditMode;
+        } else {
+          warnings.push(
+            `${where}: "contextEditing.mode" must be one of ${CONTEXT_EDIT_MODES.map((mode) => `"${mode}"`).join(", ")}`,
+          );
+        }
+      }
       for (const key of [
         "keepRecentTurns",
         "minCharsToElide",
         "maxTotalToolResultChars",
+        "minCharsPerPass",
       ] as const) {
         const value = editing[key];
         if (value === undefined) continue;
@@ -1242,6 +1329,27 @@ export function parseConfigFile(
         }
       }
       out.contextEditing = parsed;
+    }
+  }
+  if (raw.compaction !== undefined) {
+    if (!isRecord(raw.compaction)) {
+      warnings.push(`${where}: "compaction" must be an object`);
+    } else {
+      const parsed: NonNullable<ArcturnConfig["compaction"]> = {};
+      for (const key of Object.keys(raw.compaction)) {
+        if (key !== "shape") warnings.push(`${where}: unknown "compaction" key "${key}" (ignored)`);
+      }
+      const shape = raw.compaction.shape;
+      if (shape !== undefined) {
+        if ((COMPACTION_SHAPES as readonly unknown[]).includes(shape)) {
+          parsed.shape = shape as CompactionShape;
+        } else {
+          warnings.push(
+            `${where}: "compaction.shape" must be one of ${COMPACTION_SHAPES.map((value) => `"${value}"`).join(", ")}`,
+          );
+        }
+      }
+      out.compaction = parsed;
     }
   }
   if (raw.skills !== undefined) {
@@ -1525,9 +1633,14 @@ export function mergeConfig(
 ): ArcturnConfig {
   const providers = mergeProviders(base.providers, layer.providers, warnings);
   const anthropicFallbacks = layer.anthropicFallbacks ?? base.anthropicFallbacks;
+  const anthropicThinkingBinding = layer.anthropicThinkingBinding ?? base.anthropicThinkingBinding;
   return {
     ...(providers === undefined ? {} : { providers }),
     ...(anthropicFallbacks === undefined ? {} : { anthropicFallbacks }),
+    ...(anthropicThinkingBinding === undefined ? {} : { anthropicThinkingBinding }),
+    ...((layer.compaction ?? base.compaction) === undefined
+      ? {}
+      : { compaction: { ...base.compaction, ...layer.compaction } }),
     model: layer.model ?? base.model,
     permissionMode: layer.permissionMode ?? base.permissionMode,
     permissions: [...base.permissions, ...(layer.permissions ?? [])],

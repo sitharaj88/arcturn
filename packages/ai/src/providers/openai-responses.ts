@@ -256,6 +256,9 @@ function assistantItems(message: AssistantMessage, includeReasoning: boolean): R
       if (part.text.trim() !== "") out.push({ role: "assistant", content: part.text });
       continue;
     }
+    // Another provider's server-side blocks (compaction, native tool search)
+    // have no meaning here.
+    if (part.type !== "toolCall") continue;
     out.push({
       type: "function_call",
       call_id: part.id,
@@ -305,6 +308,16 @@ export function toResponsesInput(
     }
     if (message.role === "assistant") {
       out.push(...assistantItems(message, includeReasoning));
+      continue;
+    }
+    if (message.role === "system") {
+      // The Responses API's operator channel mid-conversation is a
+      // `developer` message item.
+      const text = message.content
+        .map((part) => part.text)
+        .filter((value) => value.trim() !== "")
+        .join("\n");
+      if (text !== "") out.push({ role: "developer", content: text });
       continue;
     }
     out.push({

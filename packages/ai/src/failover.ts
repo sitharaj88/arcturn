@@ -29,6 +29,7 @@
  */
 
 import type { AIError, LLMClient, LLMRequest, ModelSpec, StreamEvent } from "@arcturn/types";
+import { supportsServerContextManagement } from "./context-management.js";
 import { toAIError } from "./errors.js";
 import { completeFromStream, MessageAssembler } from "./internal/stream.js";
 
@@ -99,6 +100,22 @@ function isContentEvent(event: StreamEvent): boolean {
   }
 }
 
+/**
+ * The request as one link sees it: its model swapped in, and the server-side
+ * context management dropped where that link's provider cannot run it (a
+ * fallback on another provider would otherwise refuse the request and end the
+ * chain for a reason that has nothing to do with the outage being failed over).
+ * The history is the caller's own, so a link that lacks the feature simply
+ * receives it unedited.
+ */
+function forLink(request: LLMRequest, model: ModelSpec): LLMRequest {
+  const { contextManagement, ...rest } = request;
+  if (contextManagement === undefined || supportsServerContextManagement(model)) {
+    return { ...request, model };
+  }
+  return { ...rest, model };
+}
+
 /** Normalise a {@link FailoverLink} into an explicit `{ client, model? }`. */
 function normalizeLink(link: FailoverLink): { client: LLMClient; model?: ModelSpec } {
   return typeof (link as LLMClient).stream === "function"
@@ -130,7 +147,7 @@ export async function* streamFailover(
   for (let index = 0; index < links.length; index++) {
     const { client, model } = normalizeLink(links[index] as FailoverLink);
     const spec = model ?? request.model;
-    const attemptRequest = model ? { ...request, model } : request;
+    const attemptRequest = model ? forLink(request, model) : request;
 
     let produced = false;
     let pendingStart: Extract<StreamEvent, { type: "start" }> | undefined;

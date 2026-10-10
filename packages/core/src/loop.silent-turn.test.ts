@@ -103,7 +103,8 @@ function agentWith(script: StreamEvent[][], tools: Tool[] = []): Agent {
 function nudges(agent: Agent): number {
   return agent.messages.filter(
     (message) =>
-      message.role === "user" &&
+      // The harness speaking: the operator channel, not a user message.
+      message.role === "system" &&
       JSON.stringify(message.content).includes("ended without producing anything"),
   ).length;
 }

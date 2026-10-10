@@ -1,7 +1,8 @@
 /** Helpers for reading the tree structure encoded in a session's entries. */
 
 import type { Message, SessionEntry, TodoItem } from "@arcturn/types";
-import { text } from "../util/content.js";
+import { ContextEditLedger } from "../context-edit.js";
+import { text, withoutThinking } from "../util/content.js";
 
 /** One node of a materialized session tree. */
 export interface SessionNode {
@@ -105,6 +106,16 @@ export interface MaterializedBranch {
   todos: TodoItem[];
   plan: string | undefined;
   model: string | undefined;
+  /**
+   * What local context editing had done to the outgoing history by the end of
+   * the branch, so a resume sends the very request the live agent would:
+   * the tool-call ids sent as elision stubs, and the indices (into
+   * {@link MaterializedBranch.messages}) of assistant messages whose thinking
+   * is no longer replayed.
+   */
+  contextEdit: { elided: string[]; withheldThinking: number[] };
+  /** Fingerprint of the last recorded `system` + tool set, if the session recorded one. */
+  head: string | undefined;
   /** Id of the last entry on the branch, to continue appending from. */
   leafId: string | null;
 }
@@ -129,6 +140,10 @@ export function materializeBranch(entries: readonly SessionEntry[]): Materialize
   let todos: TodoItem[] = [];
   let plan: string | undefined;
   let model: string | undefined;
+  let head: string | undefined;
+  // Replayed through the same ledger the live agent uses, at the same points
+  // in the branch, so withheld thinking lands on exactly the same messages.
+  const ledger = new ContextEditLedger();
 
   for (const entry of entries) {
     switch (entry.kind) {
@@ -144,7 +159,16 @@ export function materializeBranch(entries: readonly SessionEntry[]): Materialize
         // already covers, which costs context, whereas the old behaviour
         // (fold everything) silently discarded every message the agent had
         // said since — including the ones it was holding live at the time.
-        const kept = cutIndex === -1 ? items : items.slice(cutIndex + 1);
+        let kept = cutIndex === -1 ? items : items.slice(cutIndex + 1);
+        if (entry.stripTailThinking === true) {
+          // The live agent replayed this tail without its thinking (it was
+          // produced over the history the summary replaced); so does a resume.
+          kept = kept.flatMap((item) => {
+            if (item.message.role !== "assistant") return [item];
+            const stripped = withoutThinking(item.message);
+            return stripped.content.length > 0 ? [{ id: item.id, message: stripped }] : [];
+          });
+        }
         items = [
           {
             id: entry.id,
@@ -162,18 +186,32 @@ export function materializeBranch(entries: readonly SessionEntry[]): Materialize
         if (entry.todos) todos = entry.todos;
         if (entry.plan !== undefined) plan = entry.plan;
         if (entry.model !== undefined) model = entry.model;
+        if (entry.head !== undefined) head = entry.head;
+        if (entry.contextEdit !== undefined) {
+          ledger.apply(
+            entry.contextEdit,
+            items.map((item) => item.message),
+          );
+        }
         break;
       case "label":
         break;
     }
   }
 
+  const messages = items.map((item) => item.message);
+  const withheldThinking: number[] = [];
+  for (const [index, message] of messages.entries()) {
+    if (ledger.isWithheld(message)) withheldThinking.push(index);
+  }
   return {
-    messages: items.map((item) => item.message),
+    messages,
     messageEntryIds: items.map((item) => item.id),
     todos,
     plan,
     model,
+    contextEdit: { elided: [...ledger.elided], withheldThinking },
+    head,
     leafId: entries.length === 0 ? null : entries[entries.length - 1]!.id,
   };
 }

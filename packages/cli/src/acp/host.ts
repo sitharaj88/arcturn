@@ -187,6 +187,9 @@ function replayUpdatesFor(messages: readonly Message[]): AcpSessionUpdate[] {
       }
       continue;
     }
+    // The harness's operator messages have no ACP counterpart — live, the
+    // loop's notices are not sent either — so a replay skips them too.
+    if (message.role === "system") continue;
     // message.role === "toolResult"
     const text = message.content
       .filter((block): block is { type: "text"; text: string } => block.type === "text")

@@ -13,6 +13,7 @@
 import type {
   AssistantContent,
   Message,
+  SystemMessage,
   ToolResultContent,
   ToolResultMessage,
   UserContent,
@@ -170,11 +171,38 @@ function renderAssistantContentMarkdown(
         "",
         "</details>",
       );
-    } else {
+    } else if (block.type === "toolCall") {
       lines.push(...renderToolCallMarkdown(block, resultsByCallId, consumed));
+    } else if (block.type === "compaction") {
+      lines.push("", "_The provider compacted the conversation here._");
+      if (block.summary) {
+        lines.push(
+          "",
+          "<details>",
+          "<summary>Summary</summary>",
+          "",
+          block.summary,
+          "",
+          "</details>",
+        );
+      }
+    } else {
+      lines.push("", `_Server tool: ${serverToolLabel(block.block)}_`);
     }
   }
   return lines;
+}
+
+/** A one-word name for a provider's server-tool block, for a transcript line. */
+function serverToolLabel(block: Readonly<Record<string, unknown>>): string {
+  const name = typeof block.name === "string" ? block.name : undefined;
+  const type = typeof block.type === "string" ? block.type : "block";
+  return name ?? type;
+}
+
+/** The text of an operator (`system`) message, for a transcript. */
+function operatorText(message: SystemMessage): string {
+  return message.content.map((block) => block.text).join("\n");
 }
 
 function renderOrphanToolResultMarkdown(message: ToolResultMessage): string[] {
@@ -232,6 +260,9 @@ export function exportMarkdown(
         "## Assistant",
         ...renderAssistantContentMarkdown(message.content, resultsByCallId, consumed, showThinking),
       );
+    } else if (message.role === "system") {
+      // The harness speaking to the model (a turn-budget warning, a reminder).
+      lines.push("", "## Operator", "", operatorText(message));
     } else if (!consumed.has(message)) {
       lines.push(...renderOrphanToolResultMarkdown(message));
     }
@@ -309,8 +340,19 @@ function renderAssistantContentHtml(
       parts.push(
         `<details class="thinking"><summary>🧠 Thinking</summary><pre>${escapeHtml(block.thinking)}</pre></details>`,
       );
-    } else {
+    } else if (block.type === "toolCall") {
       parts.push(renderToolCallHtml(block, resultsByCallId, consumed));
+    } else if (block.type === "compaction") {
+      parts.push(
+        '<p class="compaction"><em>The provider compacted the conversation here.</em></p>' +
+          (block.summary
+            ? `<details class="thinking"><summary>Summary</summary><pre>${escapeHtml(block.summary)}</pre></details>`
+            : ""),
+      );
+    } else {
+      parts.push(
+        `<p class="server-tool"><em>Server tool: ${escapeHtml(serverToolLabel(block.block))}</em></p>`,
+      );
     }
   }
   return parts.join("\n");
@@ -444,6 +486,10 @@ export function exportHtml(
             consumed,
             showThinking,
           )}</section>`,
+        );
+      } else if (message.role === "system") {
+        sections.push(
+          `<section class="turn operator"><h2>Operator</h2><p>${escapeHtmlMultiline(operatorText(message))}</p></section>`,
         );
       } else if (!consumed.has(message)) {
         sections.push(renderOrphanToolResultHtml(message));

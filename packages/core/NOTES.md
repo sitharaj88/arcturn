@@ -128,3 +128,51 @@ work-around or a documented choice.
   `test-helpers/` and be exported from `src/index.ts`.
 - `backgroundTask*` events exist in the contract but belong to the `tools`
   package; core neither emits nor interprets them.
+
+## Append-only history (preserved thinking)
+
+- **The outgoing prefix only grows.** On Claude Fable 5.1, Opus 5.5, Sonnet
+  5.5 and Haiku 5.5 a thinking block is bound to the exact prefix that
+  produced it, so every deliberate rewrite of already-sent history is
+  recorded and replayed: local context editing runs in rare *passes*
+  (`planContextEditPass` + `ContextEditLedger`, persisted as `state` entries
+  with `contextEdit`), and a pass stops replaying the thinking produced over
+  the results it rewrote. The old `editContext` claim of cache stability was
+  wrong — its boundary moved every turn — and is corrected in its comment.
+- **"Adaptive Anthropic" is the one predicate** (`isAdaptiveAnthropic`:
+  thinking-capable, `thinkingStyle: "adaptive"` declared or inferred from a
+  Claude 4.6+ id, on anthropic / anthropic-compatible / bedrock / vertex). It
+  picks simple compaction by default, strips a kept tail's thinking, and
+  withholds thinking at a pass. That is broader than the four enforced
+  models; dropping thinking once at a boundary costs little on the others.
+- **A changed `system`/`tools` head withholds every earlier thinking block**
+  (removing a leading run is valid) and says so once. This catches arcturn's
+  own deferred-tool path, MCP attach, and a system prompt that changed. The
+  head's fingerprint (system + non-deferred tools) is written to the session
+  as a `state` entry whenever it changes, so a resume compares against it: a
+  removed MCP server or a new day's system prompt withholds instead of
+  replaying thinking the API would refuse. A `defer_loading` tool that is
+  merely *added* is not a head change (the cached prefix and the binding both
+  ignore it); one that was there and is gone or edited is.
+- **State entries written from the synchronous request-shaping path** (a pass,
+  the head, `setModel`) are stamped at once and settled by the next awaited
+  append, so a failed write fails that append instead of leaving later entries
+  parented on an entry that never reached the file.
+- **`pauseTurn` is a stop, not an end.** The provider paused a server-side
+  tool loop; the loop re-sends the conversation unchanged (no steering, no
+  nudge between a server tool and its continuation), up to
+  `MAX_CONSECUTIVE_PAUSES`, then ends the run with a notice.
+- **Nothing model-authored rides the operator channel.** The stale-todo
+  reminder counts the unfinished items instead of quoting them: the todo text
+  is the model's, and may have been planted by a tool result.
+- **`steer()` stays the user's.** The brief suggested turning a string steer
+  into an operator message; the CLI's `/steer`, the protocol's `steer`, skill
+  steering and background-agent adoption all carry user-typed or untrusted
+  text, so the default is unchanged and `{ from: "operator" }` opts in.
+  Untrusted text (tool output, another agent's reply) must never ride the
+  operator channel.
+- **Native tool search keeps the set fixed.** `DeferredToolset.toolsFor` sends
+  every tool on first-party Anthropic 4.5+, the deferred ones `deferLoading`,
+  without arcturn's `tool_search`; server activations land on the record via
+  `observe` and stay deferred (`snapshot().native`), so the set never moves.
+  `replay` rebuilds activations from a transcript on resume.

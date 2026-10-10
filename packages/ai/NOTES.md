@@ -190,3 +190,55 @@ Worked around rather than fixed, each with the reason and the way out:
 - **A refused turn's partial output is not replayed.** `toAnthropicMessages`
   skips assistant messages whose `stopReason` is `refusal`; the core loop
   already strips their tool calls, so no `tool_result` is left dangling.
+
+## Append-only history (preserved thinking)
+
+- **`SystemMessage` placement is decided from the converted sequence.**
+  `toAnthropicMessages` stages every message (system ones merged when
+  adjacent), then sends a system message as `role: "system"` only where the
+  API allows it — after a user turn, and last or before an assistant turn,
+  never first — and folds the rest into the neighbouring user turn as a
+  `<system-reminder>` block. The same history always renders the same bytes.
+  The one unstable move is an aborted turn that left nothing, followed by a
+  user prompt: that request folds it (a cache miss, but no thinking was bound
+  to it).
+- **Mid-conversation system support is inferred, then learned.** Opus 4.8+,
+  Fable/Mythos 5+, Sonnet 5.5+ by id (`capabilities.systemMessages` wins). The
+  brief and the skill docs disagree on Haiku 5.5; it folds (safe either way).
+  A `400 role 'system' is not supported` is matched on its wording — the API
+  types it as a plain `invalid_request_error` — and marks the model for the
+  rest of the process, then the request is sent once more folded.
+- **Beta surface whenever any beta is needed.** Fallbacks, thinking binding,
+  compaction (requested, or a compaction block in the history) and tool-result
+  clearing each add their header to one `betas` list. A client without a beta
+  surface (Bedrock, Vertex) never gets `thinkingBinding`, and a request asking
+  for server-side context management there is refused before it is sent.
+- **Server blocks are carried, not interpreted.** `server_tool_use`, any
+  `*_tool_result` and `compaction` blocks are assembled whole (input JSON and
+  `compaction_delta`s accumulated) and handed to the assembler at
+  `content_block_stop` as a `rawBlock`; they replay verbatim. A fallback
+  boundary drops the abandoned attempt's server-tool blocks but keeps a
+  compaction block.
+- **`input_transformations` is read from `message_start` and from the final
+  `message_delta`** (event and delta both, since only the first home is
+  documented); the later list replaces the earlier one. Only non-empty lists
+  land on the message.
+- **A 400 "bound to a different conversation" is recovered once** when
+  `thinkingBinding` is unset: the request is re-sent with `drop_block` (and the
+  controls beta), which also reports what was dropped; on a client with no beta
+  surface the thinking is stripped from the history instead. The client
+  remembers and asks for `drop_block` up front from then on. An explicit
+  `thinkingBinding: "error"` is never second-guessed.
+- **Server-tool blocks are replayed only beside their tool.** A request with no
+  deferred tool (so no BM25 search tool) drops stored `server_tool_use` /
+  `tool_search_tool_result` blocks — the conversation moved off the native
+  path with `/model`.
+- **`contextManagement.protectTools`** becomes `exclude_tools` on
+  `clear_tool_uses_20250919`, so server-side clearing spares what local editing
+  spares (`todo`, `plan`). A failover link whose provider cannot run server
+  context management receives the request without it.
+- **Not verified against a live endpoint:** the exact streaming shape of
+  `compaction_delta`, of `server_tool_use` input deltas and of
+  `input_transformations` on `message_delta`; that Bedrock's InvokeModel path
+  accepts `role: "system"`; and how `pause_turn` interacts with native tool
+  search (it maps to `pauseTurn`, which the core loop answers by re-sending).

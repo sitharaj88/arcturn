@@ -74,6 +74,15 @@ export interface ModelCapabilities {
    * consulted when the host opted in; absent means no.
    */
   refusalFallback?: boolean;
+  /**
+   * The model accepts a `role: "system"` message appended mid-conversation
+   * (see `SystemMessage`). Absent means "infer from the model id": Claude
+   * Opus 4.8 / 5 / 5.5, Fable 5 / 5.1 (and Mythos) and Sonnet 5.5 say yes;
+   * Sonnet 5 and everything older say no, and the adapter folds the message
+   * into a user turn instead. An adapter that learns otherwise from a 400
+   * stops sending it for the rest of the process.
+   */
+  systemMessages?: boolean;
 }
 
 export interface ModelSpec {

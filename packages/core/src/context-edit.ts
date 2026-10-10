@@ -11,17 +11,42 @@
  * every `toolCall`/`toolResult` pair stays matched and the model can simply
  * re-run the tool (or read the offloaded file) when it needs the data back.
  *
- * ## Prompt-cache stability (the whole design constraint)
+ * ## Prefix stability (the whole design constraint)
  *
  * The Anthropic provider marks `cache_control` on the last message it sends,
  * so the cached prefix is only reused when every earlier message is byte
- * identical to the previous request. A naive "elide the biggest results"
- * policy would re-shuffle that prefix on every turn and burn the cache. This
- * module is therefore built so that elision is **monotonic**: once a message
- * at position `i` is elided, every subsequent call elides exactly that message
- * in exactly the same way. Three properties combine to guarantee it, given the
- * one caller-side rule that history is **append-only** between calls (which is
- * how the agent loop works — messages are only ever pushed onto the end):
+ * identical to the previous request — and on the preserved-thinking models
+ * (Fable 5.1, Opus 5.5, Sonnet 5.5, Haiku 5.5) every replayed thinking block
+ * is bound to that prefix too, so rewriting an already-sent message is a 400
+ * on an enforced account, not just a cache miss.
+ *
+ * {@link editContext} alone does not deliver that, despite what this comment
+ * used to claim. Its decisions are monotonic — once a position is elided it is
+ * elided identically for ever after — but the `keepRecentTurns` boundary moves
+ * forward every turn, so each request stubs out a result the previous request
+ * had sent in full. Monotonic is not append-only.
+ *
+ * The agent therefore edits in **passes** ({@link planContextEditPass} plus a
+ * {@link ContextEditLedger}). A pass is a deliberate, recorded prefix edit:
+ * it elides everything then eligible, in one go, and — where thinking is bound
+ * to the prefix — stops replaying the thinking of every assistant message
+ * after the first result it touched, since those blocks were produced over
+ * the unedited results. Between passes the outgoing history is append-only:
+ * the ledger re-sends the same stubs, byte for byte, and lets new results
+ * through untouched. A pass only fires once it would save `minCharsPerPass`,
+ * so it is a rare event — one cache reset per batch — rather than a rewrite
+ * per request. Each pass is written to the session as a `state` entry, so a
+ * resume replays exactly the request the live agent sent.
+ *
+ * Where the provider can do it server-side (Anthropic
+ * `clear_tool_uses_20250919`), `mode: "server"` sends the history unedited
+ * and lets the provider clear old results — which is not a history edit at
+ * all, because the provider checks the conversation as it was sent.
+ *
+ * The per-request rules below still decide *which* results a pass may touch.
+ * They hold given the one caller-side rule that history is **append-only**
+ * between calls (which is how the agent loop works — messages are only ever
+ * pushed onto the end):
  *
  * 1. **The boundary only advances.** Eligibility is `index <
  *    findElisionBoundary(messages, keepRecentTurns)`, and the boundary is the
@@ -48,8 +73,33 @@
  * rewrites history wholesale — the cache is already gone at that point.
  */
 
-import type { Message, ToolResultContent, ToolResultMessage } from "@arcturn/types";
-import { text } from "./util/content.js";
+import type {
+  ContextEditRecord,
+  Message,
+  ModelSpec,
+  ToolResultContent,
+  ToolResultMessage,
+} from "@arcturn/types";
+import { isAdaptiveAnthropic } from "./model-traits.js";
+import { text, withoutThinking } from "./util/content.js";
+
+/**
+ * Where old tool results are cleared.
+ *
+ * - `"local"` — arcturn stubs them out of the outgoing request, in recorded
+ *   passes (see the module comment).
+ * - `"server"` — the provider clears them (Anthropic `clear_tool_uses_20250919`)
+ *   and the request goes out unedited. Refused by providers that lack it.
+ * - `"auto"` — `"server"` on a Claude model with adaptive thinking reached
+ *   through the Anthropic Messages API, `"local"` everywhere else.
+ */
+export type ContextEditMode = "local" | "server" | "auto";
+
+/** Every {@link ContextEditMode}, for validators. */
+export const CONTEXT_EDIT_MODES: readonly ContextEditMode[] = ["local", "server", "auto"];
+
+/** Characters a pass must save before it is worth one cache reset. */
+export const DEFAULT_MIN_CHARS_PER_PASS = 50_000;
 
 /** Trailing assistant turns whose tool results are always kept in full. */
 export const DEFAULT_KEEP_RECENT_TURNS = 3;
@@ -95,6 +145,14 @@ export interface ContextEditOptions {
   protectToolNames?: readonly string[];
   /** Replace the stub text entirely. */
   renderStub?: (info: ElisionInfo) => string;
+  /**
+   * Characters a local elision pass must save before it runs. Each pass is a
+   * deliberate prefix edit — one cache reset, and on adaptive Claude the loss
+   * of the thinking it invalidates — so passes are batched. Defaults to 50000.
+   */
+  minCharsPerPass?: number;
+  /** Where results are cleared; see {@link ContextEditMode}. Defaults to `"local"`. */
+  mode?: ContextEditMode;
 }
 
 /** Resolved context-editing settings. */
@@ -105,6 +163,8 @@ export interface ResolvedContextEditOptions {
   maxTotalToolResultChars: number;
   protectToolNames: readonly string[];
   renderStub: (info: ElisionInfo) => string;
+  minCharsPerPass: number;
+  mode: ContextEditMode;
 }
 
 /**
@@ -125,7 +185,55 @@ export function resolveContextEditOptions(
     maxTotalToolResultChars: options.maxTotalToolResultChars ?? DEFAULT_MAX_TOTAL_TOOL_RESULT_CHARS,
     protectToolNames: options.protectToolNames ?? DEFAULT_PROTECTED_TOOL_NAMES,
     renderStub: options.renderStub ?? renderElisionStub,
+    minCharsPerPass: options.minCharsPerPass ?? DEFAULT_MIN_CHARS_PER_PASS,
+    mode: options.mode ?? "local",
   };
+}
+
+/**
+ * Where old tool results are cleared for `model`, and why — for `arcturn doctor`.
+ *
+ * @param options - Context-editing options; only `enabled` and `mode` matter.
+ * @param model - The model the session talks to.
+ */
+export function explainContextEditMode(
+  options: Pick<ContextEditOptions, "enabled" | "mode">,
+  model: ModelSpec,
+): { mode: "local" | "server" | "off"; reason: string } {
+  if (options.enabled === false) return { mode: "off", reason: "contextEditing.enabled is false" };
+  const mode = options.mode ?? "local";
+  if (mode === "server") return { mode: "server", reason: "set by contextEditing.mode" };
+  if (mode === "local") {
+    return {
+      mode: "local",
+      reason: options.mode === undefined ? "default" : "set by contextEditing.mode",
+    };
+  }
+  const firstParty = model.provider === "anthropic" || model.provider === "anthropic-compatible";
+  if (firstParty && isAdaptiveAnthropic(model)) {
+    return {
+      mode: "server",
+      reason: "contextEditing.mode auto: Claude with adaptive thinking on the Messages API",
+    };
+  }
+  return {
+    mode: "local",
+    reason: "contextEditing.mode auto: this model has no server-side tool-result clearing",
+  };
+}
+
+/**
+ * Resolve {@link ContextEditMode} `"auto"` against a model.
+ *
+ * @param options - Context-editing options; only `mode` matters.
+ * @param model - The model the next request goes to.
+ */
+export function resolveContextEditMode(
+  options: Pick<ContextEditOptions, "mode">,
+  model: ModelSpec,
+): "local" | "server" {
+  const explained = explainContextEditMode({ mode: options.mode ?? "local" }, model);
+  return explained.mode === "server" ? "server" : "local";
 }
 
 /**
@@ -328,4 +436,140 @@ export function editContext(
   }
 
   return { messages: out, elidedCount, charsSaved };
+}
+
+/**
+ * What local context editing has done to the outgoing history so far: the
+ * results it sends as stubs and the assistant messages whose thinking it no
+ * longer replays. It only ever grows, and every request is rendered from it,
+ * so between passes consecutive requests share their whole prefix.
+ */
+export class ContextEditLedger {
+  readonly #elided = new Set<string>();
+  readonly #withheld = new WeakSet<Message>();
+
+  /** Tool-call ids whose results are sent as elision stubs. */
+  get elided(): ReadonlySet<string> {
+    return this.#elided;
+  }
+
+  /**
+   * Whether `message`'s thinking is withheld from requests.
+   *
+   * @param message - A message from the conversation (identity, not equality).
+   */
+  isWithheld(message: Message): boolean {
+    return this.#withheld.has(message);
+  }
+
+  /**
+   * Fold one recorded pass in, against the history as it stood when the pass
+   * was made (the live conversation, or a replay up to the pass's entry).
+   *
+   * @param record - The pass.
+   * @param messages - History at the moment of the pass.
+   */
+  apply(record: ContextEditRecord, messages: readonly Message[]): void {
+    const ids = new Set(record.elided);
+    for (const id of ids) this.#elided.add(id);
+    if (record.withholdThinking === undefined) return;
+    let from = 0;
+    if (record.withholdThinking === "afterFirstElided") {
+      from = messages.findIndex(
+        (message) => message.role === "toolResult" && ids.has(message.toolCallId),
+      );
+      if (from === -1) return;
+    }
+    for (let index = from; index < messages.length; index++) {
+      const message = messages[index]!;
+      if (message.role === "assistant") this.#withheld.add(message);
+    }
+  }
+
+  /**
+   * Stop replaying `message`'s thinking — for a resume, where the replay has
+   * already worked out which messages a pass withheld.
+   *
+   * @param message - A message from the conversation.
+   */
+  withhold(message: Message): void {
+    this.#withheld.add(message);
+  }
+
+  /**
+   * The outgoing copy of `messages`: recorded stubs in place, withheld
+   * thinking removed, everything else the very same object.
+   *
+   * @param messages - The raw conversation.
+   * @param options - Resolved options (the stub renderer and size floor).
+   */
+  render(messages: readonly Message[], options: ResolvedContextEditOptions): Message[] {
+    const out: Message[] = [];
+    for (const message of messages) {
+      if (message.role === "toolResult" && this.#elided.has(message.toolCallId)) {
+        out.push(isElided(message) ? message : (elide(message, options)?.message ?? message));
+      } else if (message.role === "assistant" && this.#withheld.has(message)) {
+        const stripped = withoutThinking(message);
+        if (stripped.content.length > 0) out.push(stripped);
+      } else {
+        out.push(message);
+      }
+    }
+    return out;
+  }
+}
+
+/** A pass {@link planContextEditPass} says is due. */
+export interface ContextEditPassPlan {
+  /** The record to apply and persist. */
+  record: ContextEditRecord;
+  /** Results this pass elides. */
+  elidedCount: number;
+  /** Characters it removes from the request (stub text already deducted). */
+  charsSaved: number;
+}
+
+/**
+ * Decide whether a local elision pass is due before the next request.
+ *
+ * Same eligibility as {@link editContext} — before the `keepRecentTurns`
+ * boundary, not protected, not already elided, big enough, and smaller as a
+ * stub — measured against what the ledger has not yet elided. A pass is due
+ * once the raw-history trigger has fired **and** the eligible results would
+ * save at least `minCharsPerPass`.
+ *
+ * @param messages - The raw conversation.
+ * @param ledger - What earlier passes already did.
+ * @param options - Resolved options.
+ * @param withholdThinking - Also stop replaying the thinking produced over the
+ *   results this pass rewrites (adaptive Claude, where it is bound to them).
+ * @returns The pass, or `undefined` when none is due.
+ */
+export function planContextEditPass(
+  messages: readonly Message[],
+  ledger: ContextEditLedger,
+  options: ResolvedContextEditOptions,
+  withholdThinking: boolean,
+): ContextEditPassPlan | undefined {
+  if (!options.enabled || !shouldEditContext(messages, options)) return undefined;
+  const boundary = findElisionBoundary(messages, options.keepRecentTurns);
+  const protectedTools = new Set(options.protectToolNames);
+  const elided: string[] = [];
+  let charsSaved = 0;
+  for (let i = 0; i < boundary; i++) {
+    const message = messages[i]!;
+    if (message.role !== "toolResult") continue;
+    if (protectedTools.has(message.toolName) || isElided(message)) continue;
+    if (ledger.elided.has(message.toolCallId)) continue;
+    const edited = elide(message, options);
+    if (!edited) continue;
+    elided.push(message.toolCallId);
+    charsSaved += edited.saved;
+  }
+  if (elided.length === 0 || charsSaved < options.minCharsPerPass) return undefined;
+  return {
+    record: { elided, ...(withholdThinking ? { withholdThinking: "afterFirstElided" } : {}) },
+    elidedCount: elided.length,
+    charsSaved,
+  };
 }

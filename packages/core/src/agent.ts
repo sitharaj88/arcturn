@@ -6,9 +6,12 @@
  * {@link AgentEvent} stream.
  */
 
+import { createHash } from "node:crypto";
 import type {
   AgentEvent,
   AgentEventListener,
+  ContextEditRecord,
+  ContextManagementRequest,
   LLMClient,
   Message,
   ModelSpec,
@@ -17,6 +20,7 @@ import type {
   PermissionRule,
   SessionEntry,
   SessionStore,
+  SystemMessage,
   ThinkingLevel,
   TodoItem,
   Tool,
@@ -27,25 +31,65 @@ import {
   type CompactionOptions,
   compactMessages,
   estimateTokens,
-  findCutPoint,
+  findCompactionCut,
+  hasPendingToolRound,
   type ResolvedCompactionOptions,
   resolveCompactionOptions,
+  resolveCompactionShape,
   shouldCompact,
 } from "./compaction.js";
 import {
+  ContextEditLedger,
   type ContextEditOptions,
-  editContext,
+  planContextEditPass,
   type ResolvedContextEditOptions,
+  resolveContextEditMode,
   resolveContextEditOptions,
 } from "./context-edit.js";
+import type { DeferredToolset } from "./deferred-tools.js";
 import type { AgentHooks } from "./hooks.js";
 import { type LoopResult, type LoopRuntime, runLoop, type TurnProgress } from "./loop.js";
+import { isAdaptiveAnthropic } from "./model-traits.js";
 import { PermissionEngine, type PermissionEngineOptions } from "./permissions.js";
 import { JsonlSessionStore, SessionStoreError } from "./session/jsonl-store.js";
 import { latestEntryId, materializeBranch, pathToLeaf } from "./session/tree.js";
 import { type AgentStateController, isBindableTool, type PlanApproval } from "./state.js";
-import { errorText, lastAssistantText, userMessage } from "./util/content.js";
+import { errorText, lastAssistantText, operatorMessage, userMessage } from "./util/content.js";
 import { createId, createSessionId } from "./util/ids.js";
+
+/**
+ * Who a steering message is from — see {@link Agent.steer}.
+ *
+ * `"user"` (the default) is the person: what they typed while the run was in
+ * flight, an @-mention, an image, a skill they invoked. `"operator"` is the
+ * host itself — a reminder, a status change, a policy nudge it authored — and
+ * travels on the operator channel (`SystemMessage`), which a prompt injection
+ * cannot forge. Never mark text from a tool, a file or another agent as
+ * operator: that would hand it operator authority.
+ */
+export interface SteerOptions {
+  from?: "user" | "operator";
+}
+
+/** One local context-editing pass the agent made; see `planContextEditPass`. */
+export interface ContextEditPass {
+  /** Zero-based index of the request (since construction) the pass went out with. */
+  requestIndex: number;
+  /** Tool-call ids whose results it elided. */
+  elided: string[];
+  /** Characters it removed from the request. */
+  charsSaved: number;
+}
+
+/** A `state` session entry before its id, parent and time are fixed. */
+interface StateEntryDraft {
+  kind: "state";
+  todos?: TodoItem[];
+  plan?: string;
+  model?: string;
+  contextEdit?: ContextEditRecord;
+  head?: string;
+}
 
 /** Construction options for {@link Agent}. */
 export interface AgentOptions {
@@ -58,12 +102,24 @@ export interface AgentOptions {
   /** Tools offered to the model. Bindable tools are wired automatically. */
   tools?: Tool[];
   /**
-   * Overrides {@link AgentOptions.tools} per turn, e.g. a
-   * {@link DeferredToolset.activeTools} bound method for progressive tool
-   * disclosure. Tools returned here must already be bound (pass the full set
+   * Overrides {@link AgentOptions.tools} per turn, given the model the turn
+   * goes to — e.g. `(model) => toolset.toolsFor(model)` for progressive tool
+   * disclosure, which takes the provider's native tool search where the model
+   * has it. Tools returned here must already be bound (pass the full set
    * through `tools` as well).
    */
-  getTools?: () => Tool[];
+  getTools?: (model: ModelSpec) => Tool[];
+  /**
+   * Progressive tool disclosure, wired end to end: unless `getTools` says
+   * otherwise, each turn's tools are `toolset.toolsFor(model)` (native tool
+   * search where the model has it); every assistant message is
+   * {@link DeferredToolset.observe | observed} so the provider's own search
+   * results land on the toolset's record; and {@link Agent.resume} replays the
+   * transcript into it, so a resumed session sends the tool set it ended with.
+   * A function form is re-read every time, for a host that swaps the toolset
+   * (an MCP reconnect rebuilds it).
+   */
+  deferredTools?: DeferredToolset | (() => DeferredToolset);
   /** Permission rules, mode and allow lists. */
   permissions?: PermissionEngineOptions;
   /** Where to persist the session tree. Omit for an unpersisted agent. */
@@ -167,17 +223,31 @@ export class Agent {
   readonly #compactionOptions: CompactionOptions;
   readonly #contextEdit: ResolvedContextEditOptions;
   readonly #listeners = new Set<AgentEventListener>();
-  #getTools: (() => Tool[]) | undefined;
+  #getTools: ((model: ModelSpec) => Tool[]) | undefined;
+  readonly #deferred: (() => DeferredToolset) | undefined;
   readonly #messages: Message[];
   readonly #entryIds = new WeakMap<Message, string>();
-  readonly #steering: UserMessage[] = [];
+  readonly #steering: Array<UserMessage | SystemMessage> = [];
+  /** What local context editing has done to the outgoing history. */
+  readonly #ledger = new ContextEditLedger();
+  readonly #passes: ContextEditPass[] = [];
+  #requestCount = 0;
+  /** Fingerprint of `system` + `tools` of the last request, to notice when they change. */
+  #lastHead: string | undefined;
+  /** The deferred tools (name -> definition) the last request carried. */
+  #lastDeferred: ReadonlyMap<string, string> = new Map();
+  /** The fingerprint last written to the session, so only a change is persisted. */
+  #persistedHead: string | undefined;
+  /** State-entry writes not yet settled; the next awaited append waits for them. */
+  #stateWrites: Array<Promise<unknown>> = [];
+  #warnedOfHeadChange = false;
 
   #tools: Tool[];
   #model: ModelSpec;
   #thinking: ThinkingLevel;
   #todos: TodoItem[];
   /** Set when a run ended with a todo still `inProgress`; consumed next turn. */
-  #staleTodoReminder: string | undefined;
+  #staleTodoReminder: number | undefined;
   #plan: string | undefined;
   #running = false;
   #abort: AbortController | undefined;
@@ -214,7 +284,12 @@ export class Agent {
 
     this.#tools = [];
     this.setTools(options.tools ?? []);
-    this.#getTools = options.getTools;
+    const deferred = options.deferredTools;
+    this.#deferred = typeof deferred === "function" ? deferred : deferred && (() => deferred);
+    const fromToolset = this.#deferred;
+    this.#getTools =
+      options.getTools ??
+      (fromToolset === undefined ? undefined : (model) => fromToolset().toolsFor(model));
   }
 
   /**
@@ -252,6 +327,18 @@ export class Agent {
     for (const [index, message] of state.messages.entries()) {
       const entryId = state.messageEntryIds[index];
       if (entryId !== undefined) agent.#entryIds.set(message, entryId);
+    }
+    // The constructor copies the array but not the messages, so the indices
+    // the replay computed still name these objects.
+    agent.#deferred?.().replay(state.messages);
+    // What the earlier thinking was produced under; the first request after
+    // this resume compares its own head against it.
+    agent.#lastHead = state.head;
+    agent.#persistedHead = state.head;
+    agent.#ledger.apply({ elided: state.contextEdit.elided }, state.messages);
+    for (const index of state.contextEdit.withheldThinking) {
+      const message = agent.#messages[index];
+      if (message !== undefined) agent.#ledger.withhold(message);
     }
     return agent;
   }
@@ -323,6 +410,15 @@ export class Agent {
     return estimateTokens(this.#messages);
   }
 
+  /**
+   * The local context-editing passes this agent made since construction, in
+   * order. Between two passes every request it sent extended the previous one;
+   * each pass is the one deliberate rewrite of already-sent history.
+   */
+  get contextEditPasses(): readonly ContextEditPass[] {
+    return this.#passes.map((pass) => ({ ...pass, elided: [...pass.elided] }));
+  }
+
   // ------------------------------------------------------------------ mutators
 
   /**
@@ -332,7 +428,7 @@ export class Agent {
    */
   setModel(model: ModelSpec): void {
     this.#model = model;
-    void this.#appendEntry({ kind: "state", model: model.id }).catch(() => undefined);
+    this.#recordState({ kind: "state", model: model.id });
   }
 
   /**
@@ -456,10 +552,15 @@ export class Agent {
       const reminder = this.#staleTodoReminder;
       this.#staleTodoReminder = undefined;
       if (reminder !== undefined) {
+        // The harness speaking, not the user: the operator channel. Only the
+        // harness's own words go on it — the todo text is the model's, and may
+        // have been planted by a tool result or a web page the model read, so
+        // it is counted here, never quoted (the user's notice names the items).
         await this.#appendMessage(
-          userMessage(
-            `Reminder: ${reminder} was left in progress when the previous run ended. ` +
-              "Update the todo list to reflect what actually finished before continuing.",
+          operatorMessage(
+            `Reminder: ${reminder === 1 ? "a todo item was" : `${String(reminder)} todo items were`} ` +
+              "left in progress when the previous run ended. Update the todo list to " +
+              "reflect what actually finished before continuing.",
           ),
         );
       }
@@ -504,7 +605,7 @@ export class Agent {
           ? `${names} is still marked in progress. Mark it done if the work finished.`
           : `${names} are still marked in progress. Update them if the work finished.`,
     });
-    this.#staleTodoReminder = names;
+    this.#staleTodoReminder = stale.length;
   }
 
   /**
@@ -512,9 +613,26 @@ export class Agent {
    *
    * When the agent is idle the message is queued for the next run instead.
    *
-   * @param input - Steering text or content blocks.
+   * By default the message is the user's — what they typed into the run, with
+   * any images or @-mentions — and is sent as a user message, exactly as it
+   * always was. A host that is itself speaking (a reminder or status it
+   * authored) passes `{ from: "operator" }` with plain text, and the message
+   * rides the operator channel: an appended `role: "system"` message where the
+   * model takes one, a reminder folded into the user turn elsewhere. See
+   * {@link SteerOptions} for what must never be sent that way.
+   *
+   * @param input - Steering text or content blocks (user steering only).
+   * @param options - Who is speaking; defaults to the user.
+   * @throws TypeError for operator steering given anything but a string.
    */
-  steer(input: string | UserContent[]): void {
+  steer(input: string | UserContent[], options: SteerOptions = {}): void {
+    if (options.from === "operator") {
+      if (typeof input !== "string") {
+        throw new TypeError("Operator steering is text only; pass a string.");
+      }
+      this.#steering.push(operatorMessage(input));
+      return;
+    }
     this.#steering.push(userMessage(input));
   }
 
@@ -549,7 +667,7 @@ export class Agent {
       getModel: () => this.#model,
       getSystemPrompt: () =>
         typeof this.#systemPrompt === "function" ? this.#systemPrompt() : this.#systemPrompt,
-      getTools: () => this.#getTools?.() ?? this.#tools,
+      getTools: () => this.#currentTools(),
       getThinking: () => this.#thinking,
       appendMessage: (message) => this.#appendMessage(message),
       emit: (event) => this.#emit(event),
@@ -564,22 +682,153 @@ export class Agent {
       takeSteering: () => this.#steering.splice(0, this.#steering.length),
       beforeTurn: async () => {
         if (!this.#compaction.enabled) return;
+        // The provider compacts a "server" session itself.
+        if (resolveCompactionShape(this.#compaction, this.#model) === "server") return;
         const tokens = estimateTokens(this.#messages);
         if (!shouldCompact(tokens, this.#model.contextWindow, this.#compactionOptions)) return;
         await this.#compact(signal);
       },
-      prepareMessages: (messages) => {
-        const result = editContext(messages, this.#contextEdit);
-        if (result.elidedCount > 0) {
-          this.#emit({
-            type: "contextEdit",
-            elidedCount: result.elidedCount,
-            charsSaved: result.charsSaved,
-          });
-        }
-        return result.messages;
-      },
+      prepareMessages: (messages) => this.#prepareMessages(messages),
+      contextManagement: () => this.#contextManagement(),
     };
+  }
+
+  #currentTools(): Tool[] {
+    return this.#getTools?.(this.#model) ?? this.#tools;
+  }
+
+  /** Server-side context management the next request asks for. */
+  #contextManagement(): ContextManagementRequest | undefined {
+    const compact =
+      this.#compaction.enabled &&
+      resolveCompactionShape(this.#compaction, this.#model) === "server";
+    const clearToolUses =
+      this.#contextEdit.enabled &&
+      resolveContextEditMode(this.#contextEdit, this.#model) === "server";
+    if (!compact && !clearToolUses) return undefined;
+    return {
+      ...(compact ? { compact: true } : {}),
+      ...(clearToolUses
+        ? { clearToolUses: true, protectTools: [...this.#contextEdit.protectToolNames] }
+        : {}),
+    };
+  }
+
+  /**
+   * Shape the outgoing history: notice a changed `system`/`tools` head, run a
+   * local context-editing pass when one is due, and render the ledger. Never
+   * touches the stored conversation.
+   */
+  #prepareMessages(messages: readonly Message[]): Message[] {
+    const requestIndex = this.#requestCount++;
+    const bound = isAdaptiveAnthropic(this.#model);
+    this.#noticeHeadChange(messages, bound);
+    if (resolveContextEditMode(this.#contextEdit, this.#model) === "local") {
+      const pass = planContextEditPass(messages, this.#ledger, this.#contextEdit, bound);
+      if (pass !== undefined) {
+        this.#recordEdit(pass.record, messages);
+        this.#passes.push({
+          requestIndex,
+          elided: [...pass.record.elided],
+          charsSaved: pass.charsSaved,
+        });
+        this.#emit({
+          type: "contextEdit",
+          elidedCount: pass.elidedCount,
+          charsSaved: pass.charsSaved,
+        });
+      }
+    }
+    return this.#ledger.render(messages, this.#contextEdit);
+  }
+
+  /** Apply a context-edit record live and persist it, so a resume replays it. */
+  #recordEdit(record: ContextEditRecord, messages: readonly Message[]): void {
+    this.#ledger.apply(record, messages);
+    this.#recordState({ kind: "state", contextEdit: record });
+  }
+
+  /**
+   * Write a state entry from the synchronous request-shaping path. Its id and
+   * parent are fixed now, so it stays ordered with the message entries, and the
+   * next awaited append settles it first: a failed write then fails that
+   * append instead of leaving later entries parented on an entry that never
+   * reached the file (which a resume would read as a branch starting there).
+   */
+  #recordState(draft: StateEntryDraft): void {
+    const entry = this.#stamp(draft);
+    const write = this.#write(entry, [...this.#stateWrites]);
+    this.#stateWrites.push(write);
+    // Settled by the next awaited append; this only keeps a rejection from
+    // being reported as unhandled in the meantime.
+    write.catch(() => undefined);
+  }
+
+  /**
+   * Notice when this request's `system` prompt or tool set differs from the
+   * previous request's — a deferred tool activated on arcturn's own path, an
+   * MCP server attached, a system prompt that changed.
+   *
+   * Either is a prefix edit at the very top of the conversation: the prompt
+   * cache starts over, and on adaptive Claude every earlier thinking block was
+   * produced under the old head, so none of it is replayed again (withholding
+   * them all is a removal from the front, which the API accepts). Said once
+   * per agent, on adaptive Claude, where it costs the most.
+   *
+   * A resume compares against the head the session last recorded, so the same
+   * holds across processes.
+   */
+  #noticeHeadChange(messages: readonly Message[], bound: boolean): void {
+    const byName = (a: { name: string }, b: { name: string }) =>
+      a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+    const definitions = this.#currentTools()
+      .map((tool) => tool.definition)
+      .sort(byName);
+    // A deferred (`defer_loading`) tool sits outside the cached prefix and the
+    // thinking binding until something references it, so one that is merely
+    // added — an MCP server that connected after the first request — is no
+    // edit. One that was already there and is gone or changed is.
+    const loaded = definitions.filter((definition) => definition.deferLoading !== true);
+    const deferred = new Map(
+      definitions
+        .filter((definition) => definition.deferLoading === true)
+        .map((definition) => [definition.name, JSON.stringify(definition)] as const),
+    );
+    const system =
+      typeof this.#systemPrompt === "function" ? this.#systemPrompt() : this.#systemPrompt;
+    const head = createHash("sha256")
+      .update(JSON.stringify({ system, tools: loaded }))
+      .digest("hex");
+    const previous = this.#lastHead;
+    const previousDeferred = this.#lastDeferred;
+    this.#lastHead = head;
+    this.#lastDeferred = deferred;
+    const deferredChanged = [...previousDeferred].some(
+      ([name, json]) => deferred.get(name) !== json,
+    );
+    // Recorded with the session, so a resume can tell that the head it comes
+    // back with differs from the one the stored thinking was produced under —
+    // an MCP server that failed to start, a skill that no longer loads.
+    // Only where thinking is bound to the head: elsewhere nothing would read it.
+    if (bound && head !== this.#persistedHead) {
+      this.#persistedHead = head;
+      this.#recordState({ kind: "state", head });
+    }
+    if (previous === undefined || (previous === head && !deferredChanged) || !bound) return;
+    if (messages.some((message) => message.role === "assistant")) {
+      this.#recordEdit({ elided: [], withholdThinking: "all" }, messages);
+    }
+    if (this.#warnedOfHeadChange) return;
+    this.#warnedOfHeadChange = true;
+    this.#emit({
+      type: "notice",
+      level: "info",
+      text:
+        `The system prompt or tool set changed between requests on ${this.#model.displayName}, ` +
+        "so the prompt cache restarts from the top of the conversation and earlier thinking " +
+        "is no longer replayed. On first-party Anthropic, deferred tools avoid this through " +
+        "native tool search.",
+    });
   }
 
   #controller(): AgentStateController {
@@ -648,6 +897,7 @@ export class Agent {
 
   async #appendMessage(message: Message): Promise<void> {
     this.#messages.push(message);
+    if (message.role === "assistant") this.#deferred?.().observe(message);
     const id = await this.#appendEntry({ kind: "message", message });
     this.#entryIds.set(message, id);
   }
@@ -655,7 +905,7 @@ export class Agent {
   async #appendEntry(
     partial:
       | { kind: "message"; message: Message }
-      | { kind: "state"; todos?: TodoItem[]; plan?: string; model?: string }
+      | StateEntryDraft
       | { kind: "label"; label: string }
       | {
           kind: "compaction";
@@ -663,8 +913,16 @@ export class Agent {
           upToId: string;
           tokensBefore: number;
           tokensAfter: number;
+          stripTailThinking?: boolean;
         },
   ): Promise<string> {
+    const entry = this.#stamp(partial);
+    await this.#write(entry, this.#stateWrites);
+    return entry.id;
+  }
+
+  /** Fix an entry's id, parent and time now, so entries stay ordered however their writes finish. */
+  #stamp(partial: object): SessionEntry {
     const id = createId("e");
     const entry = {
       ...partial,
@@ -673,22 +931,47 @@ export class Agent {
       timestamp: Date.now(),
     } as SessionEntry;
     this.#lastEntryId = id;
+    return entry;
+  }
+
+  /**
+   * Persist a stamped entry after the state writes it must follow. A failed
+   * one stays in {@link Agent.#stateWrites}, so every later append fails with
+   * it rather than writing entries parented on one that never reached the file.
+   */
+  async #write(entry: SessionEntry, after: readonly Promise<unknown>[]): Promise<void> {
     const store = this.#store;
-    if (store) {
-      await this.#ensureSession();
-      await store.append(this.#sessionId, entry);
+    if (!store) return;
+    await this.#ensureSession();
+    if (after.length > 0) {
+      const waited = [...after];
+      await Promise.all(waited);
+      this.#stateWrites = this.#stateWrites.filter((write) => !waited.includes(write));
     }
-    return id;
+    await store.append(this.#sessionId, entry);
   }
 
   async #compact(signal: AbortSignal | undefined): Promise<boolean> {
     const messages = this.#messages;
-    const cutIndex = findCutPoint(messages, this.#compaction.keepRecentTokens);
+    const shape = resolveCompactionShape(this.#compaction, this.#model);
+    if (shape === "server") {
+      this.#emit({
+        type: "notice",
+        level: "info",
+        text:
+          'compaction.shape is "server": the provider compacts this conversation itself ' +
+          "when it grows past its trigger, so there is nothing to summarize locally.",
+      });
+      return false;
+    }
+    const cutIndex = findCompactionCut(messages, shape, this.#compaction.keepRecentTokens);
     if (cutIndex <= 0) {
       this.#emit({
         type: "notice",
         level: "info",
-        text: "Nothing to compact: no turn boundary old enough to summarize.",
+        text: hasPendingToolRound(messages)
+          ? "Not compacting now: a tool call is still waiting on its result."
+          : "Nothing to compact: no turn boundary old enough to summarize.",
       });
       return false;
     }
@@ -715,9 +998,18 @@ export class Agent {
         upToId,
         tokensBefore: result.tokensBefore,
         tokensAfter: result.tokensAfter,
+        ...(result.stripTailThinking ? { stripTailThinking: true } : {}),
       });
       const summaryMessage = result.messages[0];
       if (summaryMessage) this.#entryIds.set(summaryMessage, entryId);
+      // A kept message stripped of its thinking is a new object; it still came
+      // from the same entry, which a later compaction's `upToId` must name.
+      for (const [offset, kept] of result.keptIndices.entries()) {
+        const original = messages[kept];
+        const replacement = result.messages[offset + 1];
+        const id = original === undefined ? undefined : this.#entryIds.get(original);
+        if (replacement !== undefined && id !== undefined) this.#entryIds.set(replacement, id);
+      }
       messages.splice(0, messages.length, ...result.messages);
       this.#emit({
         type: "compactionEnd",

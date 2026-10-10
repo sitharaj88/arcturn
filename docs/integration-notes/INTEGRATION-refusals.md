@@ -16,7 +16,7 @@ has this shape.
 
 ```ts
 // @arcturn/types
-export type StopReason = "endTurn" | "toolCalls" | "maxTokens" | "refusal" | "aborted" | "error";
+export type StopReason = "endTurn" | "toolCalls" | "maxTokens" | "pauseTurn" | "refusal" | "aborted" | "error";
 
 export interface StopDetails {
   category: string | null; // the provider's word: "cyber", "bio", "content_filter", "safety", …

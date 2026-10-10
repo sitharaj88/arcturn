@@ -5,9 +5,11 @@
 
 import type { LLMClient, LLMRequest, ModelSpec, ProviderId, StreamEvent } from "@arcturn/types";
 import { DEFAULT_API_KEY_ENV, FALLBACK_API_KEY_ENV } from "./catalog.js";
+import { supportsServerContextManagement } from "./context-management.js";
 import { AIErrorException, toAIError } from "./errors.js";
 import { withIdleTimeout } from "./idle-timeout.js";
 import { completeFromStream, MessageAssembler } from "./internal/stream.js";
+import type { AnthropicThinkingBinding } from "./providers/anthropic.js";
 import { registerBuiltinProviders } from "./providers/builtins.js";
 import {
   getProviderFactory,
@@ -57,7 +59,14 @@ export interface CreateClientOptions {
    * default; see {@link AnthropicProviderOptions.fallbacks}.
    */
   fallbacks?: "default";
+  /**
+   * Opt in to Anthropic's thinking-binding controls for the first-party
+   * `anthropic` provider; see {@link AnthropicProviderOptions.thinkingBinding}.
+   */
+  thinkingBinding?: AnthropicThinkingBinding;
 }
+
+export { supportsServerContextManagement } from "./context-management.js";
 
 function processEnv(): EnvSource {
   const globalProcess = (globalThis as { process?: { env?: EnvSource } }).process;
@@ -149,6 +158,9 @@ export function createClient(options: CreateClientOptions = {}): LLMClient {
       headers: options.headers,
       ...(options.getAccessToken ? { getAccessToken: options.getAccessToken } : {}),
       ...(options.fallbacks === undefined ? {} : { fallbacks: options.fallbacks }),
+      ...(options.thinkingBinding === undefined
+        ? {}
+        : { thinkingBinding: options.thinkingBinding }),
     });
     cache.set(cacheKey, created);
     return created;
@@ -162,6 +174,19 @@ export function createClient(options: CreateClientOptions = {}): LLMClient {
     const request = downgradeImages(input);
     let provider: LLMClient;
     try {
+      const managed = request.contextManagement;
+      if (
+        (managed?.compact || managed?.clearToolUses) &&
+        !supportsServerContextManagement(request.model)
+      ) {
+        throw new AIErrorException({
+          kind: "invalidRequest",
+          message:
+            `${request.model.id} has no server-side ${managed.compact ? "compaction" : "tool-result clearing"}: ` +
+            "only the Anthropic Messages API offers it. Use a local compaction.shape " +
+            '("simple" or "keep-tail") and contextEditing.mode "local" with this model.',
+        });
+      }
       provider = resolve(request.model);
     } catch (err) {
       const error = toAIError(err, request.signal);

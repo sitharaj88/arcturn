@@ -37,6 +37,13 @@ async function runtimeWith(scratch: Scratch, turns: ScriptedTurn[], config: Arct
 const toolNames = (req: { tools?: { name: string }[] }): string[] =>
   (req.tools ?? []).map((t) => t.name);
 
+/**
+ * A model on arcturn's own deferral path. The default model (Claude Sonnet
+ * 5.5 on first-party Anthropic) takes the native tool-search path instead,
+ * where every tool is sent from the first request and `tool_search` is not.
+ */
+const ARCTURN_PATH_MODEL = "anthropic/claude-sonnet-4";
+
 describe("deferred toolset is shared across every agent the runtime builds", () => {
   it("one session's tool_search activation must not appear in another session's tool list", async () => {
     const scratch = await makeScratch();
@@ -47,7 +54,7 @@ describe("deferred toolset is shared across every agent the runtime builds", () 
         { text: "A done" },
         { text: "B done" },
       ],
-      configWith({ deferredTools: { enabled: true } }),
+      configWith({ model: ARCTURN_PATH_MODEL, deferredTools: { enabled: true } }),
     );
 
     const agentA = runtime.buildSessionAgent({ sessionId: "sess-a" });
@@ -69,12 +76,9 @@ describe("deferred toolset is shared across every agent the runtime builds", () 
   });
 });
 
-describe("deferred activation is per-process by design", () => {
-  // Persistence of activations onto session state entries was considered and
-  // deliberately NOT shipped: the `activatedTools` session field was removed
-  // rather than left half-wired (see the adversarial-review notes). After a
-  // --resume the model re-discovers tools with one tool_search round trip;
-  // within a process, activation must stick across turns.
+describe("deferred activation sticks", () => {
+  // Within a process, activation must stick across turns. (Across a resume it
+  // is rebuilt from the transcript — see deferred-tools-session.test.ts.)
   it("keeps an activation for the rest of the run within one process", async () => {
     const scratch = await makeScratch();
     const { runtime, llm } = await runtimeWith(
@@ -84,7 +88,7 @@ describe("deferred activation is per-process by design", () => {
         { text: "done" },
         { text: "again" },
       ],
-      configWith({ deferredTools: { enabled: true } }),
+      configWith({ model: ARCTURN_PATH_MODEL, deferredTools: { enabled: true } }),
     );
 
     await runtime.agent.prompt("find me a fetch tool");

@@ -12,6 +12,71 @@ CLI, the SDK, or the wire protocol.
 
 ### Changed
 
+- **Long sessions are append-only, because on the newest Claude models a
+  rewrite is a 400.** On Claude Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5 a
+  thinking block's signature is bound to the exact prefix that produced it —
+  the system prompt, the tool set and every earlier message — and an account
+  created on or after 2026-08-31 gets a 400 when a replayed block's prefix has
+  changed. Arcturn rewrote that prefix in four places: per-request tool-result
+  elision, keep-tail compaction, `tool_search` activation growing the `tools`
+  array, and operator text injected as user turns. All four now only append,
+  which is also what keeps the prompt cache warm. The entries below say what
+  each one does instead.
+
+- **Compaction defaults to one summary that replaces everything on Claude with
+  adaptive thinking.** `compaction.shape` is `simple` on Claude 4.6 and later
+  (every 5.x model included) reached through `anthropic`,
+  `anthropic-compatible`, `bedrock` or `vertex`, and `keep-tail` — summary plus
+  recent turns, as before — everywhere else. Under `simple` only a trailing run
+  of user and operator messages (the new request, which has no thinking)
+  survives the cut, and a compaction never lands inside an open tool round.
+  `keep-tail` on adaptive Claude now strips thinking from the kept tail, since
+  it was produced over history the summary replaces. The summarizer prompt
+  gained a "Reasoning to carry forward" section: the transcript it reads omits
+  the assistant's thinking, and none of it survives the summary otherwise. Set
+  `compaction.shape` to choose; `server` hands compaction to the provider
+  (Claude API only).
+
+- **The harness's own messages are operator messages, not fake user turns.**
+  The turn-budget warning, `progressCheck` notices, the silent-turn nudge and
+  the stale-todo reminder are stored with the new `system` role and rendered at
+  send time: as a native mid-conversation `role: "system"` message on models
+  that take one (Opus 4.8 / 5 / 5.5, Fable 5 / 5.1, Sonnet 5.5; OpenAI and
+  Azure Chat; a `developer` item on Responses), folded into the neighbouring
+  user turn as a `<system-reminder>` block on the rest (Sonnet 5, Haiku 5.5,
+  Bedrock, OpenAI-compatible gateways), or behind an `[operator]` prefix on
+  Gemini. The stored form is model-neutral, so a `/model` switch renders the
+  same history correctly. Text a person typed is unchanged: `agent.steer("...")`
+  is still a user message, and only `agent.steer(text, { from: "operator" })`
+  speaks with operator authority. If an API answers 400 that the `system` role
+  is not supported, the model is marked for the rest of the process and the
+  request is retried once, folded.
+
+- **Local tool-result elision runs in batched passes, not a rewrite per
+  request.** A pass fires only when it would save at least
+  `contextEditing.minCharsPerPass` (default 50,000) characters, elides
+  everything then eligible, and is recorded in the session as a `state` entry
+  (`contextEdit: { elided, withholdThinking? }`) so a resume re-sends the same
+  stubs. Between passes the outgoing history is byte-for-byte what was sent
+  before. On adaptive Claude a pass also stops replaying the thinking of every
+  assistant message after the first result it touched, since that thinking was
+  produced over the unedited result. The `contextEdit` event now fires once per
+  pass, not once per request.
+
+- **On first-party Anthropic with Claude 4.5 or later, deferred tools use the
+  provider's own tool search.** Every tool goes out from the first request —
+  the deferred ones with `defer_loading: true` — beside
+  `tool_search_tool_bm25_20251119`, and arcturn's own `tool_search` tool is not
+  sent to those models. Activation happens server-side and never changes the
+  `tools` array. Every other model keeps the original mechanism, where an
+  activation grows the tool set; on adaptive Claude the agent now says so once
+  and withholds the thinking that change invalidated. A resume rebuilds
+  activations from the transcript (it used to forget them).
+
+- **Setting `providers.anthropic.thinkingBinding` also defaults
+  `contextEditing.mode` to `auto`**, since opting in to the binding controls is
+  asking for an append-only history.
+
 - **The default model is now `anthropic/claude-sonnet-5-5`** (was
   `claude-sonnet-4-5`). Nothing is migrated: a config, a `--model` flag or a
   session that names a model keeps it. Only an install that never chose one
@@ -50,6 +115,65 @@ CLI, the SDK, or the wire protocol.
   still unpriced, so its cost reads as unknown, never $0.
 
 ### Added
+
+- **Preserved-thinking controls.** `providers.anthropic.thinkingBinding:
+  "error" | "drop_block"` (`AnthropicProviderOptions.thinkingBinding`, and
+  `CreateClientOptions.thinkingBinding`) sends the
+  `thinking-binding-controls-2026-08-01` beta and
+  `thinking.block_binding.prefix_mismatch_behavior` on first-party Anthropic.
+  `error` fails a request on any history edit, which is what you want in CI;
+  `drop_block` lets the API drop the unusable block and carry on. What the API
+  reports in `input_transformations` surfaces as a notice: a
+  `prefix_binding_mismatch` is a bug in arcturn and says so, and a
+  `model_binding_mismatch` after a `/model` switch is expected and reads as
+  info. `AssistantMessage.inputTransformations` keeps the non-empty lists.
+
+- **Server-side compaction and tool-result clearing, opt in.**
+  `compaction.shape: "server"` sends `compact_20260112` (beta
+  `compact-2026-01-12`) and `contextEditing.mode: "server"` sends
+  `clear_tool_uses_20250919` (beta `context-management-2025-06-27`); `auto`
+  picks server on adaptive Claude through the Messages API and local elsewhere.
+  Claude API only: Bedrock and Vertex refuse with a clear error before the
+  request is sent. `compaction` blocks and server-tool blocks stream in and are
+  replayed verbatim.
+
+- **`arcturn doctor` names the history shape.** The config section prints the
+  compaction shape, the context-editing mode and the thinking binding, each
+  with the reason it was chosen, and warns where a configured server-side
+  shape cannot run on the session model.
+
+- **`arcturn export` and `arcturn serve` know the new blocks.** Markdown and
+  HTML exports render an Operator section for each system message, a "the
+  provider compacted the conversation here" note with the summary folded away,
+  and a one-line server-tool note. A served session replays a system message
+  as an info notice, which is what the live loop emitted for it.
+
+- **New `@arcturn/types` exports:** `SystemMessage` (in the `Message` union;
+  `clearAt` is reserved and never sent), `CompactionContent` and
+  `ServerToolContent` (in `AssistantContent`), `InputTransformation`,
+  `ContextManagementRequest` and `LLMRequest.contextManagement`,
+  `ContextEditRecord`, `ModelCapabilities.systemMessages`,
+  `ToolDefinition.deferLoading`, and `stripTailThinking` on a session
+  compaction entry. **`@arcturn/ai`:** `ANTHROPIC_THINKING_BINDING_BETA`,
+  `ANTHROPIC_COMPACTION_BETA`, `ANTHROPIC_CONTEXT_MANAGEMENT_BETA`,
+  `ANTHROPIC_TOOL_SEARCH_TOOL`, `GOOGLE_OPERATOR_PREFIX`,
+  `anthropicSystemMessages`, `markSystemMessagesUnsupported`,
+  `resetSystemMessageSupport`, `isSystemRoleUnsupportedError`,
+  `anthropicToolSearch`, `foldedSystemText`, `toInputTransformations`,
+  `openAISystemMessages` and `supportsServerContextManagement`;
+  `toAnthropicMessages`, `buildAnthropicRequest` and `toOpenAIMessages` take an
+  optional options argument. **`@arcturn/core`:** `agent.steer(input, { from })`,
+  `AgentOptions.deferredTools` (a toolset or a function returning one),
+  `AgentOptions.getTools`, `agent.contextEditPasses`, `CompactionOptions.shape`,
+  `COMPACTION_SHAPES`, `explainCompactionShape`, `resolveCompactionShape`,
+  `findCompactionCut`, `findSimpleCutPoint`, `hasPendingToolRound`,
+  `ContextEditOptions.mode` / `.minCharsPerPass`, `ContextEditLedger`,
+  `planContextEditPass`, `explainContextEditMode`, `resolveContextEditMode`,
+  `CONTEXT_EDIT_MODES`, `DEFAULT_MIN_CHARS_PER_PASS`,
+  `DeferredToolset.toolsFor` / `.observe` / `.replay`,
+  `nativeToolSearchMatches`, `operatorMessage`, `withoutThinking`,
+  `isAdaptiveAnthropic`, `hasNativeToolSearch`, `inputTransformationNotices`,
+  and `MaterializedBranch.contextEdit`.
 
 - **The 5.5 generation and the 4.6 – 4.8 Opus/Sonnet line are in the catalog.**
   `claude-fable-5-1` ($10 / $50, cache read $0.25), `claude-opus-5-5` ($4 /
@@ -103,7 +227,46 @@ CLI, the SDK, or the wire protocol.
   `AnthropicStreamOptions` types, and `DiscoveredModel.maxInputTokens?` /
   `.maxOutputTokens?`.
 
+- **A paused turn is continued, not ended.** `StopReason` gains `"pauseTurn"`:
+  when a server-side tool (native tool search) pauses the turn, the loop
+  re-sends the conversation unchanged — no steering taken, no nudge inserted
+  between the server tool and its continuation — up to eight consecutive
+  pauses, then ends with a warning. Before, the run ended with the work half
+  done.
+
+- **The head is remembered across a resume.** On adaptive Claude a fingerprint
+  of the system prompt and the non-deferred tool set rides a session `state`
+  entry (`head`) whenever it changes, so a resume after an MCP server failed to
+  start, or after a config edit, withholds the thinking bound to the old head
+  instead of replaying it into a 400. A `defer_loading` tool that merely joins
+  mid-session (an MCP server connecting late on the native path) is not a head
+  change; one that disappears or changes is.
+
+- **Binding recovery.** With `thinkingBinding` unset, a request an enforced
+  account rejects with "bound to a different conversation" is retried once
+  with `drop_block` and the controls beta — which also fills
+  `input_transformations`, so the notice that arcturn edited its own prefix
+  fires. Where there is no beta surface (Bedrock, Vertex) the thinking is
+  stripped instead. The recovery is sticky per client; an explicit
+  `thinkingBinding: "error"` is never second-guessed. Each distinct
+  transformation notice is emitted once per run, not once per turn.
+
+- **Server-side tool-result clearing honours `protectToolNames`**
+  (`ContextManagementRequest.protectTools` → `exclude_tools`), so `todo` and
+  `plan` results survive a server clear as they do a local one. A failover link
+  on a provider without server context management receives the request without
+  it rather than refusing the whole chain. `ModelCapabilities.systemMessages`
+  is declarable on a `providers.<name>.models[].capabilities` config entry.
+
 ### Fixed
+
+- **The context-edit module claimed cache stability it did not have.** Its doc
+  comment said elision was monotonic and therefore left the cached prefix
+  alone. Monotonic is not append-only: the `keepRecentTurns` boundary moves
+  forward every turn, so each request stubbed out a result the previous request
+  had sent in full, and the cache missed from that point on. The claim is
+  corrected, and the behaviour now matches the corrected claim — see the
+  batched passes under Changed.
 
 - **A model that declined used to be nudged to answer anyway.** An `endTurn`
   with no text read as a delivery glitch, so the loop sent the declined request
@@ -111,6 +274,29 @@ CLI, the SDK, or the wire protocol.
 
 ### Known gaps
 
+- **Bedrock and Vertex get none of the server-side features.** No
+  `thinkingBinding`, no server compaction, no server tool-result clearing;
+  asking for the last two there is refused before the request is sent. Their
+  local, append-only paths work.
+- **A resumed session's system prompt embeds the date**, so a resume across
+  midnight reads as a head change and earlier thinking is withheld once, with
+  an info notice. Freezing the prompt on resume would avoid it.
+- **Elision stubs are re-rendered on resume** from the ledger with the current
+  stub text, so a release that rewords the stub shifts the bytes of a resumed
+  session's prefix once.
+- **`input_transformations` notices are not audited**; the audit log covers
+  tool and permission events only.
+- **Haiku 5.5 and Sonnet 5 fold system messages** into the user turn rather
+  than sending a native `system` role. The brief and the skill docs disagree on
+  Haiku 5.5; folding is safe either way.
+- **Not verified against a live endpoint:** the streaming shape of
+  `compaction_delta`, of `server_tool_use` input deltas and of
+  `input_transformations` on `message_delta`; the exact wording of the 400 for
+  an unsupported system role (matched by phrase, then learned per process);
+  Bedrock accepting `role: "system"`; `defer_loading` plus BM25 search actually
+  discovering tools; and `block_binding` sent alongside the `lowEffort`
+  adaptive spelling. The tests exercise these against the documented shapes,
+  not the API.
 - **Bedrock has no catalog entries for this generation.** The 5.x and Opus 4.7+
   models are served by Bedrock's Mantle endpoint; the adapter still speaks
   `bedrock-runtime`, and listing a model it cannot serve would advertise a path

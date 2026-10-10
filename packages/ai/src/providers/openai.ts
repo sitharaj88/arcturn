@@ -141,15 +141,37 @@ function toolResultText(message: ToolResultMessage): string {
 }
 
 /**
+ * Whether a `SystemMessage` goes to `spec` as a mid-conversation
+ * `role: "system"` message. OpenAI's own Chat Completions (and Azure's) take
+ * one anywhere; a compatible gateway's chat template often insists the system
+ * message come first, so those fold it into a user turn unless the spec
+ * declares `capabilities.systemMessages`.
+ */
+export function openAISystemMessages(spec: ModelSpec): boolean {
+  const declared = spec.capabilities.systemMessages;
+  if (declared !== undefined) return declared;
+  return spec.provider === "openai" || spec.provider === "azure";
+}
+
+/** Options for {@link toOpenAIMessages}. */
+export interface OpenAIMessageOptions {
+  /** Send `SystemMessage`s as `role: "system"`; otherwise fold them into a user turn. */
+  systemMessages?: boolean;
+}
+
+/**
  * Convert Arcturn messages to Chat Completions messages.
  *
  * Thinking blocks are dropped (the API has no slot for them), and images
  * carried by a tool result are hoisted into a following user message because
- * `role: "tool"` accepts text only.
+ * `role: "tool"` accepts text only. A `SystemMessage` is sent as a
+ * `role: "system"` message where `options.systemMessages` allows it, and as a
+ * `<system-reminder>` user message otherwise.
  */
 export function toOpenAIMessages(
   messages: Message[],
   system?: string,
+  options: OpenAIMessageOptions = {},
 ): ChatCompletionMessageParam[] {
   const out: ChatCompletionMessageParam[] = [];
   if (system !== undefined && system !== "") out.push({ role: "system", content: system });
@@ -165,6 +187,19 @@ export function toOpenAIMessages(
     if (message.role === "assistant") {
       const param = assistantParam(message);
       if (param) out.push(param);
+      continue;
+    }
+    if (message.role === "system") {
+      const text = message.content
+        .map((part) => part.text)
+        .filter((value) => value.trim() !== "")
+        .join("\n");
+      if (text === "") continue;
+      out.push(
+        options.systemMessages === true
+          ? { role: "system", content: text }
+          : { role: "user", content: `<system-reminder>\n${text}\n</system-reminder>` },
+      );
       continue;
     }
     out.push({
@@ -206,7 +241,9 @@ export function buildOpenAIRequest(
   const maxTokens = Math.min(request.maxOutputTokens ?? spec.maxOutputTokens, spec.maxOutputTokens);
   const params: ChatCompletionCreateParamsStreaming = {
     model: spec.model,
-    messages: toOpenAIMessages(request.messages, request.system),
+    messages: toOpenAIMessages(request.messages, request.system, {
+      systemMessages: openAISystemMessages(spec),
+    }),
     stream: true,
   };
 

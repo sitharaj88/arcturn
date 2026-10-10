@@ -39,13 +39,42 @@ describe("skill tool under deferred disclosure", () => {
       llm,
       extensions: false,
       skipRepoLookup: true,
-      config: configWith({ deferredTools: { enabled: true } }),
+      // arcturn's own deferral path; the default model takes the native one.
+      config: configWith({ model: "anthropic/claude-sonnet-4", deferredTools: { enabled: true } }),
     });
 
     await runtime.agent.prompt("hello");
     const names = (llm.requests[0]?.tools ?? []).map((t) => t.name);
     expect(names).toContain("tool_search"); // sanity: deferral is on
     expect(names).toContain("skill");
+
+    await runtime.dispose();
+  });
+
+  it("stays loaded on the native tool-search path too, while the rest are deferred", async () => {
+    const scratch = await makeScratch();
+    await writeFileAt(
+      join(scratch.home, "skills", "deploy", "SKILL.md"),
+      "---\nname: deploy\ndescription: Deploy the app\n---\n\nRun the deploy.\n",
+    );
+    const llm = fakeLLM([{ text: "ok" }]);
+    const runtime = await buildRuntime({
+      cwd: scratch.cwd,
+      home: scratch.home,
+      env: scratch.env,
+      llm,
+      extensions: false,
+      skipRepoLookup: true,
+      // The default model, Claude Sonnet 5.5 on first-party Anthropic.
+      config: configWith({ deferredTools: { enabled: true } }),
+    });
+
+    await runtime.agent.prompt("hello");
+    const tools = llm.requests[0]?.tools ?? [];
+    expect(tools.map((t) => t.name)).not.toContain("tool_search");
+    expect(tools.find((t) => t.name === "skill")?.deferLoading).toBeUndefined();
+    expect(tools.find((t) => t.name === "read")?.deferLoading).toBeUndefined();
+    expect(tools.some((t) => t.deferLoading === true)).toBe(true);
 
     await runtime.dispose();
   });

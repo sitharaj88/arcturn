@@ -83,6 +83,33 @@ describe("projectSessionEvents", () => {
     expect(events.at(-1)).toEqual({ type: "runEnd", reason: "completed" });
   });
 
+  it("replays an operator message as the notice it was live, inside the run, opening none", () => {
+    const operator = {
+      kind: "message" as const,
+      message: {
+        role: "system" as const,
+        content: [{ type: "text" as const, text: "Turn budget: 2 of 10 turns remain." }],
+        timestamp: 4,
+      },
+    } satisfies Omit<SessionEntry, "id" | "parentId" | "timestamp">;
+    const events = projectSessionEvents(
+      "s1",
+      chain(userEntry("go"), toolResultEntry("tc1", "out"), operator, assistantEntry("done")),
+    );
+    expect(events.map((event) => event.type)).toEqual([
+      "runStart",
+      "toolEnd",
+      "notice",
+      "messageEnd",
+      "runEnd",
+    ]);
+    expect(events[2]).toEqual({
+      type: "notice",
+      level: "info",
+      text: "Turn budget: 2 of 10 turns remain.",
+    });
+  });
+
   it("opens a new run per user message and closes the previous one", () => {
     const events = projectSessionEvents(
       "s1",

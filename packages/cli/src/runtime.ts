@@ -28,6 +28,7 @@ import {
   type AgentOptions,
   addUsage,
   type CompactionOptions,
+  type CompactionShape,
   createDeferredToolset,
   createId,
   createPlanTool,
@@ -99,6 +100,7 @@ import {
 } from "./checkpoints.js";
 import {
   type ArcturnConfig,
+  contextEditingFor,
   isLocalEndpoint,
   loadConfig,
   persistPermissionRule,
@@ -559,10 +561,17 @@ export function compactionOptionsFor(model: ModelSpec): CompactionOptions {
  *
  * @param seat - The model the agent itself runs; sizes the budget.
  * @param router - Supplies the `compaction` route, read at compact time.
+ * @param shape - `compaction.shape` from config; absent lets core pick per
+ *   model (`"simple"` on adaptive Claude, `"keep-tail"` elsewhere).
  */
-export function routedCompactionOptions(seat: ModelSpec, router: ModelRouter): CompactionOptions {
+export function routedCompactionOptions(
+  seat: ModelSpec,
+  router: ModelRouter,
+  shape?: CompactionShape,
+): CompactionOptions {
   return {
     ...compactionOptionsFor(seat),
+    ...(shape === undefined ? {} : { shape }),
     get model(): ModelSpec | undefined {
       return router.isRouted("compaction") ? router.specFor("compaction") : undefined;
     },
@@ -1488,10 +1497,8 @@ export class ArcturnRuntime {
         readOnlyTools: [...READ_ONLY_TOOLS_WITH_BRAIN],
         onPersistRule: (rule: PermissionRule) => this.#persistRule(rule),
       },
-      compaction: routedCompactionOptions(model, this.router),
-      ...(this.config.contextEditing === undefined
-        ? {}
-        : { contextEditing: this.config.contextEditing }),
+      compaction: routedCompactionOptions(model, this.router, this.config.compaction?.shape),
+      ...contextEditingFor(this.config),
       onPermissionAsk: (request) => this.#ask(attributeRequest(request, options?.origin)),
     });
     // Delegated work belongs in the trail: a sub-agent's own stream is
@@ -1878,7 +1885,11 @@ export class ArcturnRuntime {
         ? {}
         : {
             model: options.model,
-            compaction: routedCompactionOptions(options.model, this.router),
+            compaction: routedCompactionOptions(
+              options.model,
+              this.router,
+              this.config.compaction?.shape,
+            ),
           }),
       // The same one helper the read lane's `createSubagent` uses: two clamp
       // sites for one rule, and a run-scoped grant that lifted only one of
@@ -1984,10 +1995,8 @@ export class ArcturnRuntime {
       cwd: this.cwd,
       thinking: this.config.thinking,
       sessionStore: this.store,
-      compaction: routedCompactionOptions(this.model, this.router),
-      ...(this.config.contextEditing === undefined
-        ? {}
-        : { contextEditing: this.config.contextEditing }),
+      compaction: routedCompactionOptions(this.model, this.router, this.config.compaction?.shape),
+      ...contextEditingFor(this.config),
       sessionId,
       ...(this.#maxTurns === undefined ? {} : { maxTurns: this.#maxTurns }),
       permissions: {
@@ -2019,8 +2028,9 @@ export class ArcturnRuntime {
    * over the fully wrapped list (previous activations survive via snapshot,
    * so an MCP re-wrap or session swap never "forgets" what the model found),
    * the full list still reaches the agent for bindable-tool wiring, and the
-   * loop reads `activeTools()` each turn. Disclosure only — every activated
-   * tool still passes the permission engine per call.
+   * loop reads `toolsFor(model)` each turn — the provider's native tool search
+   * on first-party Anthropic, arcturn's `tool_search` elsewhere. Disclosure
+   * only — every activated tool still passes the permission engine per call.
    */
   /** The name of the deferred-disclosure search tool for this config. */
   #searchToolName(): string {
@@ -2081,7 +2091,7 @@ export class ArcturnRuntime {
     tools: Tool[],
     track: boolean,
     fixedToolset = false,
-  ): { tools: Tool[]; getTools?: () => Tool[] } {
+  ): { tools: Tool[]; deferredTools?: () => DeferredToolset } {
     if (!this.#defersTools(fixedToolset)) {
       if (track) this.#liveDeferred = undefined;
       return { tools };
@@ -2089,11 +2099,16 @@ export class ArcturnRuntime {
     // Fresh activations per agent: a new agent means a new session, so it must
     // not inherit a prior agent's disclosure state. (MCP reconnect preserves
     // activations by mutating the live holder in attachMcpTools, not here.)
+    // Through the holder, never the toolset itself: the agent re-reads it every
+    // turn, so a rebuilt toolset is picked up. The agent asks it per model —
+    // native tool search on first-party Anthropic, arcturn's own elsewhere —
+    // observes the server's search results into it, and replays a resumed
+    // transcript into it, so a resume sends the tool set the session ended with.
     const holder = { toolset: this.#buildDeferredToolset(tools) };
     if (track) this.#liveDeferred = holder;
     return {
       tools: [...holder.toolset.allTools(), holder.toolset.searchTool()],
-      getTools: () => holder.toolset.activeTools(),
+      deferredTools: () => holder.toolset,
     };
   }
 
@@ -2568,6 +2583,10 @@ export async function buildRuntime(options: BuildRuntimeOptions = {}): Promise<A
         : { requestStallTimeoutMs: config.requestStallTimeoutMs }),
       // `providers.anthropic.fallbacks`: opt-in, first-party Anthropic only.
       ...(config.anthropicFallbacks === undefined ? {} : { fallbacks: config.anthropicFallbacks }),
+      // `providers.anthropic.thinkingBinding`: opt-in, first-party Anthropic only.
+      ...(config.anthropicThinkingBinding === undefined
+        ? {}
+        : { thinkingBinding: config.anthropicThinkingBinding }),
     });
   // `wrapLlm` sits *inside* failover and consensus on purpose: `--record`'s
   // tee has to see whichever link actually answered, because a cassette is a

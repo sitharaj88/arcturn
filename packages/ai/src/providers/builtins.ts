@@ -84,6 +84,7 @@ export function registerBuiltinProviders(): void {
       createAnthropicProvider({
         ...shared(ctx),
         ...(ctx.fallbacks === undefined ? {} : { fallbacks: ctx.fallbacks }),
+        ...(ctx.thinkingBinding === undefined ? {} : { thinkingBinding: ctx.thinkingBinding }),
       }),
     checkCredentials: requireApiKey,
   });

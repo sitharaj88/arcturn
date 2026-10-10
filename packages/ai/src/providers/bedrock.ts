@@ -63,6 +63,7 @@ import {
   anthropicEventStream,
   anthropicThinkingParams,
   anthropicThinkingStyle,
+  foldedSystemText,
   REDACTED_THINKING_PREFIX,
 } from "./anthropic.js";
 import {
@@ -333,7 +334,7 @@ function assistantContentBlocks(message: AssistantMessage): ContentBlock[] {
       // signature it cannot verify.
     } else if (part.type === "text") {
       if (part.text.trim() !== "") blocks.push({ text: part.text });
-    } else {
+    } else if (part.type === "toolCall") {
       blocks.push({
         toolUse: {
           toolUseId: part.id,
@@ -398,6 +399,16 @@ export function toConverseMessages(messages: Message[]): ConverseMessage[] {
       appendBlocks(out, "user", userContentBlocks(message));
     } else if (message.role === "assistant") {
       appendBlocks(out, "assistant", assistantContentBlocks(message));
+    } else if (message.role === "system") {
+      // Converse has no mid-conversation system role: the operator text rides
+      // the user turn as a reminder block.
+      appendBlocks(
+        out,
+        "user",
+        message.content
+          .filter((part) => part.text.trim() !== "")
+          .map((part) => ({ text: foldedSystemText(part.text) })),
+      );
     } else {
       appendBlocks(
         out,

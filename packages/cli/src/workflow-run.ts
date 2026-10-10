@@ -925,17 +925,23 @@ function deliveredSomething(message: AssistantMessage): boolean {
  * @param message - The turn, as the agent loop delivered it.
  */
 export function turnShapeOf(message: AssistantMessage): LastTurnShape {
-  const blocks: TurnBlockShape[] = message.content.map((block) => {
+  const blocks: TurnBlockShape[] = [];
+  for (const block of message.content) {
     // Trimmed: a whitespace-only text block is size, not substance, and every
     // reader of this shape asks "did it say anything", not "how many bytes".
-    if (block.type === "text") return { type: "text", chars: block.text.trim().length };
-    if (block.type === "thinking") return { type: "thinking", chars: block.thinking.length };
-    return {
-      type: "toolCall",
-      chars: JSON.stringify(block.arguments ?? {}).length,
-      name: block.name,
-    };
-  });
+    if (block.type === "text") blocks.push({ type: "text", chars: block.text.trim().length });
+    else if (block.type === "thinking") {
+      blocks.push({ type: "thinking", chars: block.thinking.length });
+    } else if (block.type === "toolCall") {
+      blocks.push({
+        type: "toolCall",
+        chars: JSON.stringify(block.arguments ?? {}).length,
+        name: block.name,
+      });
+    }
+    // A provider's compaction or server-tool block is neither speech nor a
+    // call this run made; the shape leaves it out.
+  }
   let reasoningTail: string | undefined;
   if (!deliveredSomething(message)) {
     const reasoning = message.content

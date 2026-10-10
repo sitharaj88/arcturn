@@ -546,6 +546,117 @@ server-side fallback. Billing follows the answering model — see
 [Audit trail & cost accounting](/docs/audit-cost). From code, the same switch is
 `AnthropicProviderOptions.fallbacks`.
 
+## Preserved thinking
+
+On Claude Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5 a thinking block's signature is
+bound to the exact prefix that produced it — the system prompt, the tool set and every
+earlier message. Replay the block after any of those changed and the API treats it as
+invalid:
+
+- **Enforced accounts** — those created on or after 2026-08-31 — get a **400**.
+- **Other accounts** go through. With the controls below on, the API still reports that an
+  enforced account would have been refused (`thinking_mismatch_allowed`), which arcturn
+  shows as a warning.
+
+Arcturn's answer is not to catch the 400 but to never send a changed prefix: tool-result
+elision, compaction, tool-search activation and operator messages all append now. See
+[Why history is append-only](/docs/context-management#why-history-is-append-only). The
+same property keeps the prompt cache warm on every model, which is why the machinery runs
+for all Claude models on adaptive thinking (4.6 and later) and not only the four enforced
+ones.
+
+### `thinkingBinding`
+
+```jsonc
+{ "providers": { "anthropic": { "thinkingBinding": "drop_block" } } }
+```
+
+From code: `AnthropicProviderOptions.thinkingBinding` /
+`CreateClientOptions.thinkingBinding`. First-party `anthropic` only — the compatible,
+Bedrock and Vertex adapters ignore it. It sends the `thinking-binding-controls-2026-08-01`
+beta and, on every request with thinking on,
+`thinking.block_binding.prefix_mismatch_behavior`:
+
+| Value | A mismatched block |
+|---|---|
+| `"error"` | The request fails. Use it in CI, where a history edit is a bug to find. |
+| `"drop_block"` | The API drops the unusable block and the request continues. |
+
+Setting it also makes `contextEditing.mode` default to `auto`, since asking for the
+controls is asking for an append-only history. `arcturn doctor` lists the setting.
+
+### What you will see
+
+What the API reports in `input_transformations` becomes a notice (`inputTransformationNotices`
+in `@arcturn/core`), and `AssistantMessage.inputTransformations` keeps the non-empty list:
+
+| Notice | Level | Meaning |
+|---|---|---|
+| `prefix_binding_mismatch` (`thinking_dropped`) | warn | The conversation before a thinking block changed after the block was produced. Arcturn keeps history append-only, so **this is a bug in arcturn** — the notice says so. Report it with the session. |
+| `thinking_mismatch_allowed` | warn | The same mismatch on an account that is not enforced. The request went through; an enforced account would have been refused. |
+| `model_binding_mismatch` (`thinking_dropped`) | info | You switched models (`/model`, a fallback) and the new model cannot read the old model's thinking. Expected. |
+
+Separately, if the `system` prompt or tool set differs between two requests in one run —
+an MCP server attached, a deferred-tool activation on a model without native tool search —
+the agent says so once, and stops replaying the earlier thinking it just invalidated.
+
+Not verified live: the streaming shape of `input_transformations` on `message_delta`, and
+`block_binding` sent alongside the `lowEffort` adaptive spelling.
+
+## Mid-conversation system messages
+
+The harness occasionally needs to say something to the model that is not you: a turn-budget
+warning, a progress check, a nudge after a silent turn, a stale-todo reminder. These are
+stored as `role: "system"` messages (`SystemMessage`) and **rendered per provider at send
+time**, so a `/model` switch re-renders the same history correctly:
+
+| Provider / model | Rendered as |
+|---|---|
+| Anthropic — Opus 4.8, 5, 5.5; Fable 5, 5.1; Sonnet 5.5 | A native `role: "system"` message. |
+| Anthropic — Sonnet 5, Haiku 5.5 | Folded into the neighbouring user turn as a `<system-reminder>` block. |
+| OpenAI and Azure — Chat Completions | Native `system` message. |
+| OpenAI — Responses | A `developer` item. |
+| Google | Folded into the user turn, text prefixed `[operator]`. |
+| Bedrock | Folded, as for Sonnet 5. |
+| OpenAI-compatible gateways | Folded: a `<system-reminder>`-shaped user message. |
+
+Where a model takes the native role, Anthropic still only allows it after a user turn and
+last or before an assistant turn — never first — so a message that would land elsewhere is
+folded instead. The same history always renders the same bytes.
+
+Support is inferred from the model id. From code, a `ModelSpec` whose
+`capabilities.systemMessages` is set overrides that inference; it is not a
+`.arcturn/config.json` capability key today, so a gateway serving one of these models
+under a string arcturn does not recognise gets the folded form.
+
+If an API refuses the role anyway, arcturn recognises the 400 by its wording, marks that
+model unsupported for the rest of the process, and retries the request once folded.
+
+This channel carries operator authority, so it is for harness-authored text only. Anything
+a tool, a file or another agent produced is data and goes in a tool result or user message.
+In the SDK, `agent.steer("text")` stays a **user** message; `agent.steer(text, { from:
+"operator" })` is the opt-in. See [Agent options](/docs/sdk-agent-options#steering-from-the-host).
+
+Not verified live: the exact wording of the 400 for an unsupported role, and Bedrock
+accepting `role: "system"` (it is folded today, so nothing depends on it).
+
+## Server-side context management
+
+`compaction.shape: "server"` and `contextEditing.mode: "server"` hand compaction and
+tool-result clearing to the Claude API itself (`compact_20260112` and
+`clear_tool_uses_20250919`), so arcturn sends the history as it is and the provider shapes
+its own view of it. `compaction` blocks the provider returns, and server-tool blocks such as
+native tool search, stream in and are replayed verbatim. The adapter turns on whichever
+beta headers a request needs (`compact-2026-01-12`, `context-management-2025-06-27`,
+`thinking-binding-controls-2026-08-01`).
+
+Bedrock and Vertex have no beta surface here: a request asking for server-side context
+management is refused with a clear error before it is sent, and `thinkingBinding` is never
+sent to them. Their local, append-only paths work as everywhere else. `anthropic-compatible`
+gateways are sent the request but whether a given gateway forwards the beta is up to it.
+
+Not verified live: the streaming shapes of `compaction_delta` and `server_tool_use` deltas.
+
 ## Subscription sign-in is not supported
 
 You cannot point Arcturn at a Claude, ChatGPT or GitHub Copilot subscription. Signing in

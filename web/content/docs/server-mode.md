@@ -298,6 +298,12 @@ stream also emits are used — a stored `label`, or a state entry's `model`, is 
 than given a shape no client has ever seen. So the replay can never put a class of data on
 the wire that watching the session live would not already have shown the same client.
 
+A stored `system` message (an operator message — a turn-budget warning, a reminder) replays as
+an `info` `notice` carrying its text verbatim: live, the loop announced each one that way, and
+it opens no run because the person did not say it. A state entry's `contextEdit` record is
+dropped like any other state-only entry; the stubs it implies are not part of what a client
+renders.
+
 Only the **active branch** is replayed — the path from the root to the newest entry, exactly
 what `Agent.resume` materializes. A session that was rewound has abandoned branches in its
 file, and replaying those would show a conversation the agent itself will never continue.

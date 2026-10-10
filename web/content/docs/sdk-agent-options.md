@@ -37,6 +37,8 @@ const agent = createAgent({
 | `onPermissionAsk` | `PermissionPrompt` | none | Called for any check rules don't settle. Passed through into `permissions.requester`, so setting both is redundant — `onPermissionAsk` wins. |
 | `hooks` | `AgentHooks` | none | `beforeToolCall`/`afterToolCall` interceptors — see [Custom tools](/docs/sdk-tools#hooks-vs-permissions) and [Advanced](/docs/sdk-advanced#hooks). |
 | `parallelTools` | `boolean` | `false` | Run one turn's tool calls concurrently instead of sequentially, one after another. |
+| `getTools` | `(model: ModelSpec) => Tool[]` | none | Overrides `tools` per turn, given the model that turn goes to. Tools it returns must already be bound, so pass the full set through `tools` as well. |
+| `deferredTools` | `DeferredToolset \| (() => DeferredToolset)` | none | Progressive tool disclosure wired end to end — see [below](#deferred-tools-and-per-model-tool-sets). |
 
 ## Session persistence
 
@@ -60,7 +62,8 @@ const agent = createAgent({ ...base, sessionStore: store, sessionId: "release-no
 |---|---|---|---|
 | `maxTurns` | `number` | `200` | Ceiling on tool-call turns within one `prompt()` call. This is a runaway-loop backstop, not a budget — it's set high on purpose so a genuinely long task finishes. Lower it per run for a tight leash (e.g. in a sandboxed eval). Exhaustion ends the run as `runEnd { reason: "error" }`; `isTurnCeilingError(errorMessage)` from `@arcturn/core` tells that ending apart from a real failure. The ceiling is announced before it bites — see [The wrap-up warning](#the-wrap-up-warning). |
 | `thinking` | `ThinkingLevel` (`"off" \| "low" \| "medium" \| "high"`) | `"off"` | Extended-thinking level, changeable at runtime with `agent.setThinking(level)`. |
-| `compaction` | `CompactionOptions` | see below | Automatic-compaction tuning — full table in [Sessions & persistence](/docs/sdk-sessions#forcing-compaction). |
+| `compaction` | `CompactionOptions` | see below | Automatic-compaction tuning, including `shape` (`"simple"`, `"keep-tail"`, `"server"`) — full table in [Sessions & persistence](/docs/sdk-sessions#forcing-compaction). |
+| `contextEditing` | `ContextEditOptions` | on | Tool-result clearing: `mode` (`"local"`, `"server"`, `"auto"`), `minCharsPerPass`, `keepRecentTurns` and the rest — see [Context management](/docs/context-management#layer-2-context-editing). `agent.contextEditPasses` counts the local passes made. |
 | `signal` | `AbortSignal` | none | An external signal; aborting it aborts the agent's current run the same way `agent.abort()` does. Useful when the host already has one abort controller per request. |
 
 ```ts
@@ -74,7 +77,7 @@ setTimeout(() => controller.abort(), 30_000); // hard 30s ceiling on one prompt(
 The turn ceiling is invisible from inside a run, so the loop announces it. When a run's
 remaining turns first drop to `turnWarningThreshold(maxTurns)` — exported from
 `@arcturn/core`, so you can compute the trip point rather than restate the formula — the
-loop appends one engine-authored user message telling the model to finish and emit its
+loop appends one engine-authored operator message telling the model to finish and emit its
 final deliverable now, and emits a matching `warn` notice for the host. It fires at most
 once per run, rides the next request without spending a turn of its own, and a run that
 finishes well under its ceiling never sees it at all.
@@ -87,10 +90,44 @@ one-shot classifier to wrap up before it has even read the prompt. So `maxTurns`
 The warning only ever fires once at least one turn has been spent, which is what makes
 "remaining turns first drop to" a true description of it.
 
-The injected note is a real `user` message on the same append path as anything you pass
-to `prompt()`, so it is persisted to the `SessionStore` and replayed on resume. A host
-that renders stored history will therefore show a `user` message the user never typed;
-its text always begins `Turn budget:` if you want to style or filter it.
+The injected note is a `system`-role message (a `SystemMessage`, built by `operatorMessage()`)
+on the same append path as anything you pass to `prompt()`, so it is persisted to the
+`SessionStore` and replayed on resume. It used to be stored as a `user` message the user never
+typed; now a host that renders stored history sees `role: "system"`, and its text always
+begins `Turn budget:` if you want to style or filter it. The provider adapter renders it
+natively or folds it into the next user turn depending on the model — see
+[Providers](/docs/providers#mid-conversation-system-messages). The progress-check notices,
+the silent-turn nudge and the stale-todo reminder travel the same way.
+
+### Steering from the host
+
+```ts
+agent.steer("also update the changelog");                       // a user message, as typed
+agent.steer("Deploy window closes in 5 minutes.", { from: "operator" });
+```
+
+`steer(input, options?)` queues a message that lands after the current tool batch. By
+default it is the **user's**: a plain string is still a user message, because the CLI's
+`/steer`, the protocol's `steer`, skill steering and background-agent hand-offs all carry
+text a person typed or something untrusted. `{ from: "operator" }` is for a host that is
+itself speaking — a status line it authored. It takes a string only (anything else throws
+a `TypeError`) and the text rides the operator channel, so **never** pass text a tool, a
+file or another agent produced; that channel carries the host's authority.
+
+### Deferred tools and per-model tool sets
+
+```ts
+const toolset = createDeferredToolset({ tools, alwaysActive: ["read", "bash"] });
+const agent = createAgent({ ...base, tools, deferredTools: toolset });
+```
+
+With `deferredTools` set, each turn's tools are `toolset.toolsFor(model)` unless `getTools`
+says otherwise: every tool for a model with native tool search (first-party Anthropic,
+Claude 4.5+), the active set for any other. Every assistant message is `observe`d so the
+provider's own search results reach the toolset's record, and `Agent.resume` replays the
+transcript into it so a resumed session sends the tool set it ended with. The function form
+is re-read each time, for a host that swaps the toolset (an MCP reconnect rebuilds it). See
+[Deferred tools](/docs/deferred-tools#native-tool-search).
 
 ## What isn't here
 

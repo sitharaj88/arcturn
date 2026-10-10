@@ -268,6 +268,65 @@ a refusal as text; **OpenAI refusal text deltas** are not surfaced, only the
 above 100K tokens) is not modelled, so such estimates are a floor. No live-endpoint run of
 this wave is recorded here, so the ✅ column in the provider table is unchanged.
 
+**Append-only history (2026-10-10).** Wave 2, and the reason Wave 1's Claude 5.5
+catalog is safe to run long sessions on. On Fable 5.1, Opus 5.5, Sonnet 5.5 and
+Haiku 5.5 a thinking block's signature is bound to the exact prefix that produced
+it, and an account created on or after 2026-08-31 gets a 400 when a replayed
+block's prefix changed. Arcturn rewrote that prefix in four places; all four now
+only append, which also keeps the prompt cache warm. *Context editing:* local
+elision runs in recorded passes (`minCharsPerPass`, default 50,000) over a
+`ContextEditLedger`, persisted as `state` entries so a resume sends the same
+stubs; `mode: "server"` / `auto` hand it to `clear_tool_uses_20250919`. The old
+module comment claimed cache stability it did not have — the boundary moved every
+turn — and is corrected. *Compaction:* `compaction.shape` is `simple` by default
+on adaptive Claude (one summary, nothing earlier replayed), `keep-tail` elsewhere
+with the tail's thinking stripped on adaptive Claude, `server` opt-in; the
+summarizer gained "Reasoning to carry forward". *Deferred tools:* first-party
+Anthropic 4.5+ uses native tool search (`defer_loading` plus BM25), so the `tools`
+array never changes; a resume now rebuilds activations from the transcript.
+*Operator messages:* `SystemMessage` joins the `Message` union and the
+turn-budget warning, progress checks, silent-turn nudge and stale-todo reminder
+use it, rendered natively, as a `developer` item, or folded per provider;
+`agent.steer` stays a user message unless `{ from: "operator" }`, so user-typed
+or untrusted text cannot gain operator authority. `providers.anthropic.thinkingBinding`
+opts in to `thinking.block_binding`, and `input_transformations` surface as
+notices. `doctor`, `export` and `serve` know the new shapes. Note:
+`docs/integration-notes/INTEGRATION-append-only.md`; the context-edit and
+deferred-tools notes carry superseded banners.
+
+The adversarial pass on this wave (one reviewer, nine defects, each fixed with a
+test watched to fail first) found the operator channel itself was the sharpest
+seam: the stale-todo reminder quoted model-written todo text into a
+`role: "system"` message, which is exactly the laundering the channel exists to
+prevent — it now counts items and names none. The rest: head-change detection
+was in-process, so a resume after an MCP server failed to start replayed thinking
+bound to the old head (a `head` fingerprint now rides a `state` entry and seeds
+the detector on resume); a failed `state` write left a later entry parented on
+nothing and swallowed the error; `pause_turn` from a server tool ended the run
+half done (`StopReason` gains `pauseTurn`, the loop re-sends unchanged up to
+eight times); an enforced account with `thinkingBinding` unset wedged on
+"bound to a different conversation" with no recovery (one retry with
+`drop_block`, or stripped thinking where there is no beta surface); server-tool
+blocks were replayed to a request without the server tool; server-side clearing
+ignored `protectToolNames` (`exclude_tools` is now sent); a failover link on
+another provider inherited `contextManagement` and refused for an unrelated
+reason; and the `model_binding_mismatch` notice repeated every turn after
+`/model`.
+
+*Not done, on purpose or for lack of a way to verify:* **Bedrock and Vertex** get
+no `thinkingBinding`, server compaction or server tool-result clearing (no beta
+surface in the adapters; asking is refused up front); **Haiku 5.5 and Sonnet 5
+fold** system messages (the sources disagree on Haiku 5.5; folding is safe either
+way); a resume across midnight reads as a head change because the system prompt
+embeds the date; elision stubs are re-rendered from the ledger rather than stored
+byte for byte; `input_transformations` notices are not audited. **Not
+verified against a live endpoint:** the streaming shapes of `compaction_delta`,
+`server_tool_use` deltas and `input_transformations` on `message_delta`; the exact
+400 wording for an unsupported system role; Bedrock accepting `role: "system"`;
+`defer_loading` plus BM25 actually discovering tools; `block_binding` beside the
+`lowEffort` adaptive spelling. Unit tests cover all of it against documented
+shapes, so the ✅ column in the provider table is still unchanged.
+
 ## Remaining follow-ups
 
 **Closed (2026-08-26): the read side of the symlink door.** `loop.ts` no longer

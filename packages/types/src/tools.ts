@@ -10,6 +10,15 @@ export interface ToolDefinition {
   name: string;
   description: string;
   parameters: JsonSchema;
+  /**
+   * Sent, but withheld from the model until its provider's native tool search
+   * finds it (Anthropic's `defer_loading: true`). Only set on a request whose
+   * model has native tool search; the set of tools — deferred or not — then
+   * never changes between requests, which is what keeps the prompt cache and
+   * every replayed thinking block valid. Adapters without native tool search
+   * never receive it.
+   */
+  deferLoading?: boolean;
 }
 
 export interface ToolUpdate {

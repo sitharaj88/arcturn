@@ -133,7 +133,7 @@ function assistantParts(message: AssistantMessage, withIds: boolean): Part[] {
       if (block.thinking !== "" || block.signature) parts.push(part);
     } else if (block.type === "text") {
       if (block.text !== "") parts.push({ text: block.text });
-    } else {
+    } else if (block.type === "toolCall") {
       const call: NonNullable<Part["functionCall"]> = {
         name: block.name,
         args: block.arguments ?? {},
@@ -148,9 +148,17 @@ function assistantParts(message: AssistantMessage, withIds: boolean): Part[] {
       if (block.signature) callPart.thoughtSignature = block.signature;
       parts.push(callPart);
     }
+    // Another provider's compaction and server-tool blocks have no meaning here.
   }
   return parts;
 }
+
+/**
+ * The prefix a `SystemMessage` carries into Gemini, which has no
+ * mid-conversation system role: it becomes a user text part, marked so the
+ * model reads it as the harness speaking.
+ */
+export const GOOGLE_OPERATOR_PREFIX = "[operator] ";
 
 function toolResultPart(message: ToolResultMessage, withIds: boolean): Part {
   const text = message.content
@@ -196,6 +204,15 @@ export function toGoogleContents(messages: Message[], model: string): Content[] 
     if (message.role === "assistant") {
       const parts = assistantParts(message, withIds);
       if (parts.length > 0) contents.push({ role: "model", parts });
+      continue;
+    }
+    if (message.role === "system") {
+      const parts: Part[] = message.content
+        .filter((entry) => entry.text.trim() !== "")
+        .map((entry) => ({ text: `${GOOGLE_OPERATOR_PREFIX}${entry.text}` }));
+      // A turn of its own, like a tool result's hoisted images: never merged
+      // into a function-response turn.
+      if (parts.length > 0) contents.push({ role: "user", parts });
       continue;
     }
 

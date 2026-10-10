@@ -31,6 +31,11 @@ export interface ProviderFactoryContext {
    * Claude API feature a third-party endpoint cannot be assumed to implement.
    */
   fallbacks?: "default";
+  /**
+   * Opt-in to Anthropic's thinking-binding controls. Like `fallbacks`,
+   * honoured by the first-party `anthropic` adapter only.
+   */
+  thinkingBinding?: "error" | "drop_block";
 }
 
 /** Why a provider cannot be dispatched, reported before any request is sent. */

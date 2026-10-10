@@ -56,9 +56,10 @@ run. Both forms return the same kind of unsubscribe function.
 | `backgroundTaskEnd` | `taskId`, `exitCode` (`number \| null`) | A background task exits. |
 | `compactionStart` | — | Compaction begins, automatic or via `agent.compact()`. |
 | `compactionEnd` | `summary`, `tokensBefore`, `tokensAfter` | Compaction finishes — `summary` is `""` when nothing was folded. |
+| `contextEdit` | `elidedCount`, `charsSaved` | A local context-editing **pass** ran (once per pass, not once per request). Never fires in `server` mode, where the provider clears results. |
 | `turnEnd` | `turnIndex`, `usage` (`Usage`) | After each turn's tool calls (if any) are done and before the next turn starts, or before `runEnd`. |
 | `runEnd` | `reason` (`"completed" \| "aborted" \| "error"`), `errorMessage?` | Exactly once per `prompt()` call, always — see below. |
-| `notice` | `level` (`"info" \| "warn" \| "error"`), `text` | Non-fatal diagnostics: a stale todo reminder, "nothing to compact", a compaction failure. |
+| `notice` | `level` (`"info" \| "warn" \| "error"`), `text` | Non-fatal diagnostics: a stale todo reminder, "nothing to compact", a compaction failure, a changed system prompt or tool set, and what the provider reported in `input_transformations` (see below). |
 
 ## Refusals
 
@@ -75,6 +76,32 @@ agent.on("messageEnd", (event) => {
   }
 });
 ```
+
+## Operator messages, compaction and server-tool blocks
+
+Three additions to the message model show up in `runStart`, `messageEnd` and stored history:
+
+- **`SystemMessage`** — `{ role: "system"; content: TextContent[]; timestamp; clearAt? }`, a
+  member of the `Message` union. The loop's own turn-budget warning, progress checks,
+  silent-turn nudge and stale-todo reminder are appended as these (`operatorMessage()` builds
+  one), alongside the matching `notice` event. A `switch (message.role)` over `Message` now
+  needs a `"system"` arm. `clearAt` is reserved for a future "drop at the next user message"
+  behaviour and is never sent today.
+- **`CompactionContent`** — `{ type: "compaction"; summary: string | null; encryptedContent:
+  string | null }` in an `AssistantMessage`'s content, when the provider compacted the
+  conversation (`compaction.shape: "server"`). Replayed to the provider verbatim.
+- **`ServerToolContent`** — `{ type: "serverTool"; provider: string; block: Readonly<Record<string,
+  unknown>> }`, a block the provider ran itself (native tool search is the case today). Kept as
+  it arrived and replayed verbatim; do not interpret `block` beyond what you recognise.
+
+`AssistantMessage.inputTransformations?: InputTransformation[]` (`{ type; path; reason }`) is
+present only when the provider reported changing the request before running it. The loop turns
+each into a `notice` — `warn` for a `prefix_binding_mismatch` (a bug in arcturn: the history
+before a thinking block changed after it was produced), `info` for a `model_binding_mismatch`
+after a model switch — and does **not** retry, since the same body would be changed the same
+way again. `inputTransformationNotices(transformations)` from `@arcturn/core` is the function
+behind this, if your host renders messages from a store. See
+[Preserved thinking](/docs/providers#preserved-thinking).
 
 ## `runEnd` and the never-rejects guarantee
 

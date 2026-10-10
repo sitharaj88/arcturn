@@ -4,6 +4,34 @@ import type { AssistantMessage, Message, Usage } from "./messages.js";
 import type { ModelSpec, ThinkingLevel } from "./models.js";
 import type { ToolDefinition } from "./tools.js";
 
+/**
+ * Server-side context management for one request. Neither counts as a history
+ * edit: the provider compares the conversation as it was sent, not its own
+ * edited copy, so the outgoing prefix stays append-only.
+ *
+ * An adapter whose provider lacks one refuses the request with an
+ * `invalidRequest` error rather than silently sending the full history.
+ */
+export interface ContextManagementRequest {
+  /**
+   * Server-side compaction (Anthropic `compact_20260112`, beta
+   * `compact-2026-01-12`). A response may then carry a `CompactionContent`
+   * block, which is replayed verbatim from then on.
+   */
+  compact?: boolean;
+  /**
+   * Server-side clearing of old tool results (Anthropic
+   * `clear_tool_uses_20250919`, beta `context-management-2025-06-27`).
+   */
+  clearToolUses?: boolean;
+  /**
+   * Tools whose results the provider must never clear (`exclude_tools`):
+   * the ones whose output *is* the state the model reasons over. Honoured with
+   * `clearToolUses`; the local editor protects the same names.
+   */
+  protectTools?: readonly string[];
+}
+
 export interface LLMRequest {
   model: ModelSpec;
   system?: string;
@@ -13,6 +41,8 @@ export interface LLMRequest {
   temperature?: number;
   thinking?: ThinkingLevel;
   signal?: AbortSignal;
+  /** Server-side compaction / tool-result clearing; see {@link ContextManagementRequest}. */
+  contextManagement?: ContextManagementRequest;
   /** Escape hatch for provider-specific parameters. */
   providerOptions?: Record<string, unknown>;
 }

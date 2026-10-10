@@ -11,6 +11,25 @@ export interface SessionHeader {
   title?: string;
 }
 
+/**
+ * One deliberate prefix edit by local context editing, recorded so a resume
+ * replays exactly the request the live agent sent.
+ *
+ * Elision is decided in rare *passes*, never per request: between passes the
+ * outgoing history is append-only. A pass stubs out the `elided` results
+ * (keyed by tool-call id) from this entry on and — where thinking is bound to
+ * the prefix — withholds the thinking of every assistant message between the
+ * first of them and this entry, since those blocks were produced over the
+ * unedited results. `withholdThinking: "all"` withholds every earlier
+ * assistant message's thinking (the tool set changed under all of them).
+ */
+export interface ContextEditRecord {
+  /** Tool-call ids whose results are sent as elision stubs from here on. */
+  elided: string[];
+  /** Which earlier thinking stops being replayed at this entry. */
+  withholdThinking?: "afterFirstElided" | "all";
+}
+
 /** One node in the session tree. Entries form a tree via parentId; branching = new child of an older node. */
 export type SessionEntry =
   | { kind: "message"; id: string; parentId: string | null; timestamp: number; message: Message }
@@ -24,6 +43,13 @@ export type SessionEntry =
       upToId: string;
       tokensBefore: number;
       tokensAfter: number;
+      /**
+       * The kept tail's assistant messages replay without their thinking: it
+       * was produced over the history the summary replaced, so it is bound to
+       * a prefix that no longer exists. Absent on older files and on shapes
+       * that keep no tail.
+       */
+      stripTailThinking?: boolean;
     }
   | { kind: "label"; id: string; parentId: string | null; timestamp: number; label: string }
   | {
@@ -34,6 +60,15 @@ export type SessionEntry =
       todos?: TodoItem[];
       plan?: string;
       model?: string;
+      /** A local context-editing pass; see {@link ContextEditRecord}. */
+      contextEdit?: ContextEditRecord;
+      /**
+       * Fingerprint of the `system` prompt and tool set the next requests go
+       * out with. Written whenever it changes (and on a session's first
+       * request), so a resume can tell that the head differs from the one
+       * every earlier thinking block was produced under.
+       */
+      head?: string;
     };
 
 export interface SessionStore {
