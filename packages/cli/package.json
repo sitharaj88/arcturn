@@ -1,6 +1,6 @@
 {
   "name": "arcturn",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Arcturn (✦) — the interactive coding agent where every turn counts",
   "license": "Apache-2.0",
   "publishConfig": {

@@ -10,6 +10,8 @@ CLI, the SDK, or the wire protocol.
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-10-17
+
 ### Changed
 
 - **Long sessions are append-only, because on the newest Claude models a
