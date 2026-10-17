@@ -2,7 +2,7 @@
   "name": "arcturn-vscode",
   "displayName": "Arcturn",
   "description": "The Arcturn coding agent in VS Code \u2014 terminal integration, native sidebar, and honest cost accounting, all driven by the same engine as the CLI.",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "private": true,
   "publisher": "arcturn",
   "license": "Apache-2.0",

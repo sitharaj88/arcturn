@@ -29,6 +29,7 @@ import {
   normalizeCliPathSetting,
   parseVersionOutput,
 } from "./cli-resolve.js";
+import { resolveCliSpawn } from "./cli-spawn.js";
 import { resolveUserEnvironment, type UserEnvironment } from "./user-env.js";
 
 /**
@@ -111,19 +112,32 @@ const VERSION_TIMEOUT_MS = 5000;
  * editor `node` is not on the inherited `PATH`. Without the resolved
  * environment this probe answers `undefined` for a perfectly good install and
  * the user gets no version at all.
+ *
+ * On Windows that shim is `arcturn.cmd`, which `execFile` cannot run without a
+ * shell — it failed with EINVAL, and this probe turned the failure into a
+ * silent `undefined`. It takes the same `cli-spawn.ts` route as `serve` now.
+ *
+ * @param platform - Whose rules the spawn plan follows; the provisioner's.
  */
 function probeVersionByExec(
   command: string,
-  env?: Record<string, string | undefined>,
+  env: Record<string, string | undefined> | undefined,
+  platform: NodeJS.Platform = process.platform,
 ): Promise<string | undefined> {
+  const plan = resolveCliSpawn(command, ["--version"], {
+    platform,
+    env: env ?? process.env,
+    isFile: isRegularFile,
+  });
   return new Promise((resolve) => {
     execFile(
-      command,
-      ["--version"],
+      plan.executable,
+      plan.args,
       {
         timeout: VERSION_TIMEOUT_MS,
         windowsHide: true,
         ...(env === undefined ? {} : { env }),
+        ...plan.spawnOptions,
       },
       (error, stdout, stderr) => {
         if (error) {
@@ -134,6 +148,15 @@ function probeVersionByExec(
       },
     );
   });
+}
+
+/** `statSync(...).isFile()`, with "cannot stat" meaning "no". */
+function isRegularFile(candidate: string): boolean {
+  try {
+    return statSync(candidate).isFile();
+  } catch {
+    return false;
+  }
 }
 
 /** A file we could actually run. A directory named `arcturn` is not one. */
@@ -192,7 +215,10 @@ export function createCliProvisioner(options: CliProvisionerOptions = {}): CliPr
   const platform = options.platform ?? process.platform;
   const home = options.home ?? homedir();
   const isExecutable = options.isExecutable ?? isExecutableFile;
-  const probeVersion = options.probeVersion ?? probeVersionByExec;
+  const probeVersion =
+    options.probeVersion ??
+    ((command: string, env?: Record<string, string | undefined>) =>
+      probeVersionByExec(command, env, platform));
   /**
    * Resolving the environment means running the user's login shell. Supplying
    * `pathVar` is how a test says "I have already decided what to search", and

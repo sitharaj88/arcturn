@@ -6,6 +6,42 @@ format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 The extension and the `arcturn` CLI version separately: the CLI is the engine,
 this is one of two front-ends onto it. Each release names the engine it needs.
 
+## [0.4.2] — 2026-10-18
+
+**No engine change; any `arcturn` the extension already accepted works.** A
+Windows-only fix.
+
+### The engine starts on Windows
+
+- **The sidebar could not start `arcturn serve` on Windows at all.** Every
+  start, and every restart after it, ended in *The Arcturn engine stopped* and
+  `Could not start arcturn serve: spawn EINVAL` in the log. `npm install -g
+  arcturn` on Windows writes `arcturn.cmd`, the extension finds that shim on
+  purpose (it is the one a shell can run), and then handed it straight to
+  `spawn` — which Node has refused to do for a `.cmd` or `.bat` without a
+  shell since 20.12, the CVE-2024-27980 fix. VS Code ships a Node well past
+  that.
+- **The shim's own entry now runs under node directly.** npm's `arcturn.cmd`
+  does exactly one thing: run `node_modules\arcturn\dist\main.js` beside it
+  with the `node.exe` npm put there, or `node` from `PATH`. When that layout is
+  present the extension runs the same command itself, so the process it holds
+  *is* the engine — a reconnect or closing the window ends the server and
+  frees its port, rather than ending a `cmd.exe` in front of it.
+- **Anything else ending in `.cmd` goes through `%ComSpec% /d /s /c`.** A
+  hand-rolled wrapper set via `arcturn.cliPath` — one that is not npm's layout
+  — now runs instead of failing, quoted so a path with spaces survives. The
+  honest caveat: there the extension holds the shell, and on Windows killing
+  `cmd.exe` does not kill what it started, so a reconnect can leave the old
+  engine running until it exits on its own. An argument that carries a `"` or
+  a `%` (a model id from a workspace setting, a folder named `%TEMP%`) cannot
+  be quoted safely for `cmd.exe`, so there the start is refused with a message
+  rather than risk running part of it as a command. Point `arcturn.cliPath` at an
+  `.exe`, or at npm's `arcturn.cmd`, to avoid it.
+- **The version check took the same route.** `arcturn --version` hit the same
+  EINVAL and the failure became silence: on Windows the extension never knew
+  which engine was installed, so it could neither warn about an old one nor
+  offer the daily update. It is read again now.
+
 ## [0.4.1] — 2026-10-17
 
 **Requires `arcturn` 0.7.0 or newer for the first item; the second is harmless on

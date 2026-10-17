@@ -4,6 +4,25 @@ import { fake, resetFake } from "./test-vscode.js";
 
 vi.mock("vscode", async () => (await import("./test-vscode.js")).createFakeVscode());
 
+/**
+ * Every test but one injects `probeVersion`; the one that does not is pinning
+ * what the real probe hands `execFile`, so `execFile` answers from here.
+ */
+const execFileCalls = vi.hoisted(
+  () => [] as { file: string; args: readonly string[]; options: Record<string, unknown> }[],
+);
+vi.mock("node:child_process", () => ({
+  execFile: (
+    file: string,
+    args: readonly string[],
+    options: Record<string, unknown>,
+    callback: (error: Error | null, stdout: string, stderr: string) => void,
+  ) => {
+    execFileCalls.push({ file, args, options });
+    callback(null, "0.7.0\n", "");
+  },
+}));
+
 beforeEach(() => {
   resetFake();
 });
@@ -517,6 +536,42 @@ describe("createCliProvisioner: the environment it looks in", () => {
     fake.config["arcturn.cliPath"] = "/opt/homebrew/bin/arcturn";
     await provisioner.resolveCli();
     expect(seen[0]?.PATH).toBe("/opt/homebrew/bin:/usr/bin");
+    provisioner.dispose();
+  });
+
+  // The same EINVAL that stopped `serve` stopped this probe, silently: Node
+  // will not execFile a .cmd without a shell, the error became `undefined`, and
+  // a Windows user with a perfectly good 0.7.0 was simply never told a version.
+  it("probes a Windows .cmd through the same spawn plan serve uses, not execFile on the shim", async () => {
+    execFileCalls.length = 0;
+    // Not the npm layout (no node_modules\arcturn beside it on any disk this
+    // runs on), so the plan is the %ComSpec% wrapper — deterministic anywhere.
+    fake.config["arcturn.cliPath"] = "C:\\tools\\arcturn.cmd";
+    const provisioner = createCliProvisioner({
+      platform: "win32",
+      home: "C:\\Users\\me",
+      environment: async () => ({
+        env: { PATH: "C:\\Windows", ComSpec: "C:\\Windows\\System32\\cmd.exe" },
+        source: "process",
+        diagnostic: "",
+        secrets: [],
+        retryable: false,
+      }),
+      isExecutable: (candidate) => candidate === "C:\\tools\\arcturn.cmd",
+    });
+
+    const cli = await provisioner.resolveCli();
+
+    expect(cli?.version).toBe("0.7.0");
+    expect(execFileCalls).toHaveLength(1);
+    expect(execFileCalls[0]?.file).toBe("C:\\Windows\\System32\\cmd.exe");
+    expect(execFileCalls[0]?.args).toEqual([
+      "/d",
+      "/s",
+      "/c",
+      '"C:\\tools\\arcturn.cmd --version"',
+    ]);
+    expect(execFileCalls[0]?.options.windowsVerbatimArguments).toBe(true);
     provisioner.dispose();
   });
 });

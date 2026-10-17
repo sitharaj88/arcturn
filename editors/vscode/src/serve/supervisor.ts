@@ -25,6 +25,8 @@
  * with no real process — see `supervisor.test.ts`.
  */
 
+import { statSync } from "node:fs";
+import { resolveCliSpawn } from "../cli-spawn.js";
 import { formatConnectUrl, isLoopbackSocketUrl, parseServeAnnouncement } from "./address.js";
 import { createLineSplitter } from "./lines.js";
 import { createRedactor } from "./redact.js";
@@ -43,7 +45,13 @@ export interface ChildLike {
 export type SpawnLike = (
   command: string,
   args: readonly string[],
-  options: { cwd: string; env?: Record<string, string | undefined>; stdio: readonly string[] },
+  options: {
+    cwd: string;
+    env?: Record<string, string | undefined>;
+    stdio: readonly string[];
+    windowsVerbatimArguments?: boolean;
+    windowsHide?: boolean;
+  },
 ) => ChildLike;
 
 /**
@@ -124,6 +132,22 @@ export interface ServeProcessOptions {
   log?: (line: string) => void;
   /** Called once if the child exits after a successful start. */
   onExit?: (info: ServeExitInfo) => void;
+  /**
+   * Host platform, for `cli-spawn.ts`'s decision. Defaults to
+   * `process.platform`; injected so the Windows `.cmd` path is testable here.
+   */
+  platform?: NodeJS.Platform;
+  /** Whether a path is a regular file. Defaults to a `statSync` that answers false on error. */
+  isFile?: (candidate: string) => boolean;
+}
+
+/** `statSync(...).isFile()`, with "cannot stat" meaning "no". */
+function isRegularFile(candidate: string): boolean {
+  try {
+    return statSync(candidate).isFile();
+  } catch {
+    return false;
+  }
 }
 
 /** A running `arcturn serve`. */
@@ -166,12 +190,47 @@ export function startServeProcess(options: ServeProcessOptions): Promise<ServePr
     /** The redacted stderr tail, as one block. */
     const capturedStderr = (): string => stderrTail.join("\n").trim();
 
+    // On Windows the resolved CLI is usually npm's `arcturn.cmd`, which Node
+    // will not spawn without a shell (EINVAL). `cli-spawn.ts` turns it into
+    // the shim's own `node main.js`, so the child held here is the server.
+    let plan: ReturnType<typeof resolveCliSpawn>;
+    try {
+      plan = resolveCliSpawn(options.command, options.args, {
+        platform: options.platform ?? process.platform,
+        env: options.env ?? process.env,
+        isFile: options.isFile ?? isRegularFile,
+      });
+    } catch (error) {
+      reject(
+        new ServeStartError(`Could not start arcturn serve: ${redactor.message(error)}`, {
+          reason: "spawn",
+          code: null,
+          signal: null,
+          stderr: "",
+        }),
+      );
+      return;
+    }
+    if (plan.executable !== options.command) {
+      // Only the part of the invocation the plan added: the CLI's own argv
+      // (token included) stays out of the line, and `log` redacts regardless.
+      const via =
+        plan.spawnOptions.windowsVerbatimArguments === true
+          ? `${plan.executable} /d /s /c`
+          : [plan.executable, ...plan.args.slice(0, plan.args.length - options.args.length)].join(
+              " ",
+            );
+      log(`serve: ${options.command} cannot be spawned directly; running it as ${via}`);
+    }
+
     let child: ChildLike;
     try {
-      child = options.spawn(options.command, options.args, {
+      child = options.spawn(plan.executable, plan.args, {
         cwd: options.cwd,
         ...(options.env === undefined ? {} : { env: options.env }),
         stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true,
+        ...plan.spawnOptions,
       });
     } catch (error) {
       reject(

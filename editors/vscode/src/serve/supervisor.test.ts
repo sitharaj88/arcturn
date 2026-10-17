@@ -75,6 +75,62 @@ function options(h: Harness, extra: Record<string, unknown> = {}) {
   };
 }
 
+describe("startServeProcess on Windows", () => {
+  const NPM_DIR = "C:\\Users\\me\\AppData\\Roaming\\npm";
+  const SHIM = `${NPM_DIR}\\arcturn.cmd`;
+  const MAIN = `${NPM_DIR}\\node_modules\\arcturn\\dist\\main.js`;
+
+  // The sidebar found `arcturn.cmd`, handed it to spawn, and Node answered
+  // `spawn EINVAL` on every restart: a .cmd cannot be spawned without a shell.
+  // The shim's own job is `node <main.js> %*`, so that is what gets spawned.
+  it("never hands the npm .cmd shim to spawn; it runs the shim's entry under node", async () => {
+    const h = harness();
+    const starting = startServeProcess(
+      options(h, {
+        command: SHIM,
+        platform: "win32",
+        isFile: (candidate: string) => candidate === MAIN,
+      }),
+    );
+    h.child.stdout.emit("arcturn serving on ws://127.0.0.1:53145\n");
+    await starting;
+    expect(h.calls[0]?.command).toBe("node");
+    expect(h.calls[0]?.args).toEqual([MAIN, "serve", "--token", TOKEN]);
+  });
+
+  it("wraps a .cmd that is not the npm layout in %ComSpec% rather than failing", async () => {
+    const h = harness();
+    const starting = startServeProcess(
+      options(h, {
+        command: "C:\\tools\\arcturn.cmd",
+        platform: "win32",
+        env: { ComSpec: "C:\\Windows\\System32\\cmd.exe" },
+        isFile: () => false,
+      }),
+    );
+    h.child.stdout.emit("arcturn serving on ws://127.0.0.1:53145\n");
+    await starting;
+    expect(h.calls[0]?.command).toBe("C:\\Windows\\System32\\cmd.exe");
+    expect(h.calls[0]?.args.slice(0, 3)).toEqual(["/d", "/s", "/c"]);
+    expect(h.calls[0]?.args[3]).toContain("C:\\tools\\arcturn.cmd");
+  });
+
+  it("rejects, without spawning, when the cmd.exe fallback cannot quote an argument", async () => {
+    const h = harness();
+    await expect(
+      startServeProcess(
+        options(h, {
+          command: "C:\\tools\\arcturn.cmd",
+          args: ["serve", "--model", 'x"&calc&"'],
+          platform: "win32",
+          isFile: () => false,
+        }),
+      ),
+    ).rejects.toMatchObject({ failure: { reason: "spawn" } });
+    expect(h.calls).toHaveLength(0);
+  });
+});
+
 describe("startServeProcess", () => {
   it("resolves with the announced address once serve prints it", async () => {
     const h = harness();
