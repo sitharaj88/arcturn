@@ -6,6 +6,29 @@ format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 The extension and the `arcturn` CLI version separately: the CLI is the engine,
 this is one of two front-ends onto it. Each release names the engine it needs.
 
+## [0.4.1] — 2026-10-17
+
+**Requires `arcturn` 0.7.0 or newer for the first item; the second is harmless on
+any engine.** Nothing else changed: every feature 0.7.0 added — the Claude 5.5
+catalog, typed contracts going native, task budgets, MCP elicitation and
+sampling, native web tools — reaches the sidebar through the protocol it
+already speaks.
+
+### A refused turn is said, not swallowed
+
+- **The sidebar used to end a declined run in silence.** The engine's 0.7.0
+  `refusal` stop reason finishes a run as `completed`, usually with no text,
+  and the panel only ever looked at `runEnd.reason` — so a safety decline
+  looked like the model had simply stopped. `messageEnd` with
+  `stopReason: "refusal"` now appends a warning notice worded like the
+  terminal's: *The model declined this request (cyber): …*. The category and
+  explanation come off the wire, so control characters are flattened and the
+  line is bounded before it is rendered.
+- **Compaction and server-tool blocks get no tool row.** Server-side
+  compaction (`compaction`) and the provider's own tool bookkeeping
+  (`serverTool`) are new assistant content shapes in 0.7.0; the chat reducer
+  shows nothing for them rather than an empty tool card.
+
 ## [0.4.0] — 2026-09-02
 
 **Requires `arcturn` 0.4.0 or newer; 0.5.9 unlocks ceiling raise and the
