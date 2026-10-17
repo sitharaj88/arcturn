@@ -979,10 +979,29 @@ describe("/workflow forecast, wired through the real registry", () => {
         "",
       ].join("\n"),
     );
+    // This path goes through the real command, which reads the real clock, so
+    // the ledger is stamped at test time: the pinned `NOW` the pure tests use
+    // aged out of the 30-day window a month after it was written, and the
+    // first CI run after that is what caught it.
+    const ts = Date.now();
     await writeLedger(scratch, [
-      stepEnd({ workflow: "review", stepId: "1", model: "m1", role: "reviewer", durationMs: 4000 }),
-      stepEnd({ workflow: "review", stepId: "1", model: "m1", role: "reviewer", durationMs: 6000 }),
-      runEnd({ workflow: "review", runId: "r1", durationMs: 10_000 }),
+      stepEnd({
+        workflow: "review",
+        stepId: "1",
+        model: "m1",
+        role: "reviewer",
+        durationMs: 4000,
+        ts,
+      }),
+      stepEnd({
+        workflow: "review",
+        stepId: "1",
+        model: "m1",
+        role: "reviewer",
+        durationMs: 6000,
+        ts,
+      }),
+      runEnd({ workflow: "review", runId: "r1", durationMs: 10_000, ts }),
     ]);
 
     const runtime = await buildTestRuntime(scratch);

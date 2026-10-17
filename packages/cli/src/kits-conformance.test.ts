@@ -624,11 +624,14 @@ describe("rag-blueprint/rag-setup: the architect goes silent, as it did for real
       // quiet: one request.
       expect(llm.requests.length).toBe(quiet.requests.length + 1);
       // And the silence really landed on the architect's session, not elsewhere.
+      // The nudge is the harness speaking, so it rides the operator channel
+      // (`role: "system"`), never a user turn the model could mistake for the
+      // person — CI caught this assertion still expecting the old role.
       const silent = llm.requests.findIndex((request) =>
         isRoleSession(request, RAG_ARCHITECT_MARKER),
       );
       expect(silent).toBeGreaterThan(-1);
-      expect(llm.requests[silent + 1]?.messages.at(-1)?.role).toBe("user");
+      expect(llm.requests[silent + 1]?.messages.at(-1)?.role).toBe("system");
     },
     DYNAMIC_TIMEOUT_MS * 2,
   );
